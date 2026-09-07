@@ -2,172 +2,6 @@
 
 # model_execution
 
-## ModelCallCredentialReference
-
-```rust
-pub struct ModelCallCredentialReference(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelCallCredentialReference {
-    pub fn new(value: impl convert::Into<string::String>) -> Self;
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## ModelUserContentPart
-
-```rust
-pub enum ModelUserContentPart {
-    Text(signalbox_domain::NonEmptyUnicodeText),
-    AttachmentStub(ModelAttachmentStub),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelUserContentPart {
-    pub fn as_str(&self) -> &str;
-}
-```
-
-## ModelUserContent
-
-```rust
-pub struct ModelUserContent {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ModelUserContent {
-    pub fn parts(&self) -> &[ModelUserContentPart];
-    pub fn single_text(&self) -> option::Option<&signalbox_domain::NonEmptyUnicodeText>;
-}
-impl cmp::PartialEq<signalbox_domain::UserContent> for ModelUserContent {
-    fn eq(&self, other: &signalbox_domain::UserContent) -> bool;
-}
-```
-
-## ModelAttachmentStub
-
-```rust
-pub struct ModelAttachmentStub {/* private */}
-// derives: clone::Clone, cmp::Eq, cmp::PartialEq
-impl ModelAttachmentStub {
-    pub fn as_str(&self) -> &str;
-}
-impl fmt::Debug for ModelAttachmentStub {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-```
-
-## ProviderReasoningProvenance
-
-```rust
-pub struct ProviderReasoningProvenance {
-    pub source: signalbox_domain::SemanticTranscriptEntryRef,
-    pub producing_call: signalbox_domain::ModelCallId,
-    pub producing_target: signalbox_domain::ResolvedProviderTarget,
-    pub producing_credential: ModelCallCredentialReference,
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ModelConversationMessage
-
-```rust
-pub enum ModelConversationMessage {
-    RunnerPlacementChanged {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        placement_revision: signalbox_domain::RunnerGeneration,
-        sandbox: signalbox_domain::RunnerSandboxProfile,
-    },
-    ModelIdentityChanged {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
-        selected: signalbox_domain::DirectModelSelection,
-    },
-    ContextSummary {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        producing_call: signalbox_domain::ModelCallId,
-        summarized: signalbox_domain::ContextCompactionRange,
-        content: signalbox_domain::AssistantText,
-    },
-    User {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        accepted_input: signalbox_domain::AcceptedInputId,
-        content: ModelUserContent,
-    },
-    DelegatedTask {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        spawning_request: signalbox_domain::ToolRequestId,
-        parent_session: signalbox_domain::SessionId,
-        parent_turn: signalbox_domain::TurnId,
-        content: signalbox_domain::DelegationContent,
-    },
-    DelegationMessage {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        spawning_request: signalbox_domain::ToolRequestId,
-        message: signalbox_domain::DelegationMessageId,
-        sender: signalbox_domain::SessionId,
-        recipient: signalbox_domain::SessionId,
-        delivery_sequence: nonzero::NonZeroU64,
-        content: signalbox_domain::DelegationContent,
-    },
-    BackgroundDelegationResult {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        awaiting_request: signalbox_domain::ToolRequestId,
-        spawning_request: signalbox_domain::ToolRequestId,
-        child: signalbox_domain::SessionId,
-        delivery_sequence: nonzero::NonZeroU64,
-        outcome: signalbox_domain::DelegationOutcome,
-    },
-    Assistant {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        producing_call: signalbox_domain::ModelCallId,
-        content: signalbox_domain::AssistantText,
-    },
-    ProviderReasoning {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        producing_call: signalbox_domain::ModelCallId,
-        item: signalbox_domain::ProviderReasoningItem,
-    },
-    ProviderCompaction {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        producing_call: signalbox_domain::ModelCallId,
-        block: signalbox_domain::ProviderCompactionBlock,
-    },
-    AssistantToolUse {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        producing_call: signalbox_domain::ModelCallId,
-        request: signalbox_domain::ToolRequest,
-    },
-    ToolResult {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        request: signalbox_domain::ToolRequestId,
-        content: ModelToolResultContent,
-    },
-    ImportedUser {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        imported_entry: signalbox_domain::ImportedTranscriptEntryId,
-        content: signalbox_domain::ImportedText,
-    },
-    ImportedAssistant {
-        source: signalbox_domain::SemanticTranscriptEntryRef,
-        imported_entry: signalbox_domain::ImportedTranscriptEntryId,
-        content: signalbox_domain::ImportedText,
-    },
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ModelToolResultContent
-
-```rust
-pub enum ModelToolResultContent {
-    Success(signalbox_domain::ToolResultContent),
-    ExecutionError(signalbox_domain::ToolExecutionError),
-    Denied {
-        reason: option::Option<signalbox_domain::ToolDenialReason>,
-    },
-    ClosedByTurnEnd,
-    Delegation(signalbox_domain::DelegationOutcome),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
 ## render_model_user_content
 
 ```rust
@@ -547,206 +381,6 @@ pub trait ModelCallInputTokenCounter {
 }
 ```
 
-## ModelCallProvider
-
-```rust
-pub trait ModelCallProvider {
-    type Capability;
-    type Error: ClassifyOperatorFailure;
-    fn prepare_capability<Cancellation>(
-        &mut self,
-        operation: PreparedModelOperation,
-        cancellation: Cancellation,
-    ) -> impl future::Future<
-        Output = result::Result<
-            ModelCallCapabilityPreparation<<Self as ModelCallProvider>::Capability>,
-            <Self as ModelCallProvider>::Error,
-        >,
-    > + marker::Send
-    where
-        Cancellation: future::Future<Output = ()> + marker::Send + 'static;
-    fn invoke<AcceptancePossible, Cancellation>(
-        &mut self,
-        authorized: signalbox_domain::AuthorizedModelCall,
-        capability: <Self as ModelCallProvider>::Capability,
-        acceptance_possible: AcceptancePossible,
-        cancellation: Cancellation,
-    ) -> impl future::Future<
-        Output = result::Result<
-            signalbox_domain::CorrelatedModelCallTerminalObservation,
-            <Self as ModelCallProvider>::Error,
-        >,
-    > + marker::Send
-    where
-        AcceptancePossible: function::FnOnce() + marker::Send,
-        Cancellation: future::Future<Output = ()> + marker::Send + 'static;
-}
-```
-
-## ModelCallExecutionIdGenerator
-
-```rust
-pub trait ModelCallExecutionIdGenerator {
-    fn next_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
-    fn next_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
-    fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId;
-    fn next_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
-    fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
-}
-```
-
-## UuidV7ModelCallExecutionIdGenerator
-
-```rust
-pub struct UuidV7ModelCallExecutionIdGenerator;
-// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
-impl ModelCallExecutionIdGenerator for UuidV7ModelCallExecutionIdGenerator {
-    fn next_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
-    fn next_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
-    fn next_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
-    fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId;
-    fn next_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
-    fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
-}
-```
-
-## AttemptDispatchGate
-
-```rust
-pub trait AttemptDispatchGate {
-    type Permit: marker::Send;
-    fn acquire(
-        &self,
-        attempt: signalbox_domain::TurnAttemptId,
-    ) -> impl future::Future<Output = <Self as AttemptDispatchGate>::Permit> + marker::Send;
-}
-```
-
-## InProcessAttemptDispatchGate
-
-```rust
-pub struct InProcessAttemptDispatchGate {/* private */}
-// derives: clone::Clone, fmt::Debug, default::Default
-impl AttemptDispatchGate for InProcessAttemptDispatchGate {
-    type Permit = InProcessAttemptDispatchPermit;
-    fn acquire(
-        &self,
-        attempt: signalbox_domain::TurnAttemptId,
-    ) -> impl future::Future<Output = <Self as AttemptDispatchGate>::Permit> + marker::Send;
-}
-```
-
-## InProcessAttemptDispatchPermit
-
-```rust
-pub struct InProcessAttemptDispatchPermit {/* private */}
-```
-
-## ModelCallExecutionOutcome
-
-```rust
-pub enum ModelCallExecutionOutcome {
-    NoWork,
-    RetryBackoff(time::Duration),
-    PoolExhausted(boxed::Box<CredentialPoolExhaustedOutcome>),
-    Checkpointed(signalbox_domain::ModelCallId),
-    TargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),
-    CapabilityKnownFailure(boxed::Box<signalbox_domain::FailedModelCallTurn>),
-    AttachmentUnavailable,
-    CapabilityFailureAlreadyCommitted(signalbox_domain::ModelCallId),
-    ToolRoundLimitReached(boxed::Box<signalbox_domain::FailedModelCallTurn>),
-    ToolRoundLimitAlreadyCommitted(signalbox_domain::ModelCallId),
-    ObservationCommitted(boxed::Box<signalbox_domain::ModelCallTerminalOutcome>),
-    AvailabilitySuccessor(boxed::Box<AvailabilitySuccessorOutcome>),
-    ObservationAlreadyCommitted(signalbox_domain::ModelCallId),
-}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ModelCallExecutionError
-
-```rust
-pub enum ModelCallExecutionError<
-    PrepareError,
-    FailureError,
-    AuthorizationError,
-    ProviderError,
-    ObservationError,
-> {
-    Prepare(PrepareError),
-    Render(ModelFrontierRenderingError),
-    CapabilityPreparation(ProviderError),
-    PreparedFailureCommit(FailureError),
-    PreparedFailureReread(FailureError),
-    Authorization(AuthorizationError),
-    AuthorizationReread {
-        authorization_error: AuthorizationError,
-        reread_error: AuthorizationError,
-    },
-    AuthorizationReconciliation(AuthorizationError),
-    Provider(ProviderError),
-    ObservationCommit {
-        error: ObservationError,
-        retained_observation: signalbox_domain::CorrelatedModelCallTerminalObservation,
-    },
-}
-// derives: fmt::Debug
-impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> fmt::Display
-    for ModelCallExecutionError<
-        PrepareError,
-        FailureError,
-        AuthorizationError,
-        ProviderError,
-        ObservationError,
-    >
-where
-    PrepareError: fmt::Display,
-    ProviderError: fmt::Display,
-    FailureError: fmt::Display,
-    AuthorizationError: fmt::Display,
-    ObservationError: fmt::Display,
-{
-    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> error::Error
-    for ModelCallExecutionError<
-        PrepareError,
-        FailureError,
-        AuthorizationError,
-        ProviderError,
-        ObservationError,
-    >
-where
-    PrepareError: error::Error + 'static + fmt::Display,
-    FailureError: error::Error + 'static + fmt::Display,
-    AuthorizationError: error::Error + 'static + fmt::Display,
-    ProviderError: error::Error + 'static + fmt::Display,
-    ObservationError: error::Error + 'static + fmt::Display,
-{
-    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
-}
-impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError>
-    ClassifyOperatorFailure
-    for ModelCallExecutionError<
-        PrepareError,
-        FailureError,
-        AuthorizationError,
-        ProviderError,
-        ObservationError,
-    >
-where
-    PrepareError: ClassifyOperatorFailure,
-    FailureError: ClassifyOperatorFailure,
-    AuthorizationError: ClassifyOperatorFailure,
-    ProviderError: ClassifyOperatorFailure,
-    ObservationError: ClassifyOperatorFailure,
-{
-    fn operator_failure_class(&self) -> OperatorFailureClass;
-    fn operator_failure_cause_code(&self) -> &'static str;
-}
-```
-
 ## ModelCallExecutionService
 
 ```rust
@@ -868,6 +502,372 @@ impl AvailabilitySuccessorOutcome {
     pub const fn successor(&self) -> &signalbox_domain::AvailabilitySuccessorModelCallTurn;
     pub const fn backoff(&self) -> time::Duration;
 }
+```
+
+## ModelCallCredentialReference
+
+```rust
+pub struct ModelCallCredentialReference(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallCredentialReference {
+    pub fn new(value: impl convert::Into<string::String>) -> Self;
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## ModelUserContentPart
+
+```rust
+pub enum ModelUserContentPart {
+    Text(signalbox_domain::NonEmptyUnicodeText),
+    AttachmentStub(ModelAttachmentStub),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelUserContentPart {
+    pub fn as_str(&self) -> &str;
+}
+```
+
+## ModelUserContent
+
+```rust
+pub struct ModelUserContent {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelUserContent {
+    pub fn parts(&self) -> &[ModelUserContentPart];
+    pub fn single_text(&self) -> option::Option<&signalbox_domain::NonEmptyUnicodeText>;
+}
+impl cmp::PartialEq<signalbox_domain::UserContent> for ModelUserContent {
+    fn eq(&self, other: &signalbox_domain::UserContent) -> bool;
+}
+```
+
+## ModelAttachmentStub
+
+```rust
+pub struct ModelAttachmentStub {/* private */}
+// derives: clone::Clone, cmp::Eq, cmp::PartialEq
+impl ModelAttachmentStub {
+    pub fn as_str(&self) -> &str;
+}
+impl fmt::Debug for ModelAttachmentStub {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+```
+
+## ProviderReasoningProvenance
+
+```rust
+pub struct ProviderReasoningProvenance {
+    pub source: signalbox_domain::SemanticTranscriptEntryRef,
+    pub producing_call: signalbox_domain::ModelCallId,
+    pub producing_target: signalbox_domain::ResolvedProviderTarget,
+    pub producing_credential: ModelCallCredentialReference,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelConversationMessage
+
+```rust
+pub enum ModelConversationMessage {
+    RunnerPlacementChanged {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        placement_revision: signalbox_domain::RunnerGeneration,
+        sandbox: signalbox_domain::RunnerSandboxProfile,
+    },
+    ModelIdentityChanged {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+        selected: signalbox_domain::DirectModelSelection,
+    },
+    ContextSummary {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        producing_call: signalbox_domain::ModelCallId,
+        summarized: signalbox_domain::ContextCompactionRange,
+        content: signalbox_domain::AssistantText,
+    },
+    User {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        accepted_input: signalbox_domain::AcceptedInputId,
+        content: ModelUserContent,
+    },
+    DelegatedTask {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        spawning_request: signalbox_domain::ToolRequestId,
+        parent_session: signalbox_domain::SessionId,
+        parent_turn: signalbox_domain::TurnId,
+        content: signalbox_domain::DelegationContent,
+    },
+    DelegationMessage {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        spawning_request: signalbox_domain::ToolRequestId,
+        message: signalbox_domain::DelegationMessageId,
+        sender: signalbox_domain::SessionId,
+        recipient: signalbox_domain::SessionId,
+        delivery_sequence: nonzero::NonZeroU64,
+        content: signalbox_domain::DelegationContent,
+    },
+    BackgroundDelegationResult {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        awaiting_request: signalbox_domain::ToolRequestId,
+        spawning_request: signalbox_domain::ToolRequestId,
+        child: signalbox_domain::SessionId,
+        delivery_sequence: nonzero::NonZeroU64,
+        outcome: signalbox_domain::DelegationOutcome,
+    },
+    Assistant {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        producing_call: signalbox_domain::ModelCallId,
+        content: signalbox_domain::AssistantText,
+    },
+    ProviderReasoning {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        producing_call: signalbox_domain::ModelCallId,
+        item: signalbox_domain::ProviderReasoningItem,
+    },
+    ProviderCompaction {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        producing_call: signalbox_domain::ModelCallId,
+        block: signalbox_domain::ProviderCompactionBlock,
+    },
+    AssistantToolUse {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        producing_call: signalbox_domain::ModelCallId,
+        request: signalbox_domain::ToolRequest,
+    },
+    ToolResult {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        request: signalbox_domain::ToolRequestId,
+        content: ModelToolResultContent,
+    },
+    ImportedUser {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        imported_entry: signalbox_domain::ImportedTranscriptEntryId,
+        content: signalbox_domain::ImportedText,
+    },
+    ImportedAssistant {
+        source: signalbox_domain::SemanticTranscriptEntryRef,
+        imported_entry: signalbox_domain::ImportedTranscriptEntryId,
+        content: signalbox_domain::ImportedText,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelToolResultContent
+
+```rust
+pub enum ModelToolResultContent {
+    Success(signalbox_domain::ToolResultContent),
+    ExecutionError(signalbox_domain::ToolExecutionError),
+    Denied {
+        reason: option::Option<signalbox_domain::ToolDenialReason>,
+    },
+    ClosedByTurnEnd,
+    Delegation(signalbox_domain::DelegationOutcome),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallExecutionOutcome
+
+```rust
+pub enum ModelCallExecutionOutcome {
+    NoWork,
+    RetryBackoff(time::Duration),
+    PoolExhausted(boxed::Box<CredentialPoolExhaustedOutcome>),
+    Checkpointed(signalbox_domain::ModelCallId),
+    TargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),
+    CapabilityKnownFailure(boxed::Box<signalbox_domain::FailedModelCallTurn>),
+    AttachmentUnavailable,
+    CapabilityFailureAlreadyCommitted(signalbox_domain::ModelCallId),
+    ToolRoundLimitReached(boxed::Box<signalbox_domain::FailedModelCallTurn>),
+    ToolRoundLimitAlreadyCommitted(signalbox_domain::ModelCallId),
+    ObservationCommitted(boxed::Box<signalbox_domain::ModelCallTerminalOutcome>),
+    AvailabilitySuccessor(boxed::Box<AvailabilitySuccessorOutcome>),
+    ObservationAlreadyCommitted(signalbox_domain::ModelCallId),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ModelCallExecutionError
+
+```rust
+pub enum ModelCallExecutionError<
+    PrepareError,
+    FailureError,
+    AuthorizationError,
+    ProviderError,
+    ObservationError,
+> {
+    Prepare(PrepareError),
+    Render(ModelFrontierRenderingError),
+    CapabilityPreparation(ProviderError),
+    PreparedFailureCommit(FailureError),
+    PreparedFailureReread(FailureError),
+    Authorization(AuthorizationError),
+    AuthorizationReread {
+        authorization_error: AuthorizationError,
+        reread_error: AuthorizationError,
+    },
+    AuthorizationReconciliation(AuthorizationError),
+    Provider(ProviderError),
+    ObservationCommit {
+        error: ObservationError,
+        retained_observation: signalbox_domain::CorrelatedModelCallTerminalObservation,
+    },
+}
+// derives: fmt::Debug
+impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> fmt::Display
+    for ModelCallExecutionError<
+        PrepareError,
+        FailureError,
+        AuthorizationError,
+        ProviderError,
+        ObservationError,
+    >
+where
+    PrepareError: fmt::Display,
+    ProviderError: fmt::Display,
+    FailureError: fmt::Display,
+    AuthorizationError: fmt::Display,
+    ObservationError: fmt::Display,
+{
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError> error::Error
+    for ModelCallExecutionError<
+        PrepareError,
+        FailureError,
+        AuthorizationError,
+        ProviderError,
+        ObservationError,
+    >
+where
+    PrepareError: error::Error + 'static + fmt::Display,
+    FailureError: error::Error + 'static + fmt::Display,
+    AuthorizationError: error::Error + 'static + fmt::Display,
+    ProviderError: error::Error + 'static + fmt::Display,
+    ObservationError: error::Error + 'static + fmt::Display,
+{
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl<PrepareError, FailureError, AuthorizationError, ProviderError, ObservationError>
+    ClassifyOperatorFailure
+    for ModelCallExecutionError<
+        PrepareError,
+        FailureError,
+        AuthorizationError,
+        ProviderError,
+        ObservationError,
+    >
+where
+    PrepareError: ClassifyOperatorFailure,
+    FailureError: ClassifyOperatorFailure,
+    AuthorizationError: ClassifyOperatorFailure,
+    ProviderError: ClassifyOperatorFailure,
+    ObservationError: ClassifyOperatorFailure,
+{
+    fn operator_failure_class(&self) -> OperatorFailureClass;
+    fn operator_failure_cause_code(&self) -> &'static str;
+}
+```
+
+## ModelCallProvider
+
+```rust
+pub trait ModelCallProvider {
+    type Capability;
+    type Error: ClassifyOperatorFailure;
+    fn prepare_capability<Cancellation>(
+        &mut self,
+        operation: PreparedModelOperation,
+        cancellation: Cancellation,
+    ) -> impl future::Future<
+        Output = result::Result<
+            ModelCallCapabilityPreparation<<Self as ModelCallProvider>::Capability>,
+            <Self as ModelCallProvider>::Error,
+        >,
+    > + marker::Send
+    where
+        Cancellation: future::Future<Output = ()> + marker::Send + 'static;
+    fn invoke<AcceptancePossible, Cancellation>(
+        &mut self,
+        authorized: signalbox_domain::AuthorizedModelCall,
+        capability: <Self as ModelCallProvider>::Capability,
+        acceptance_possible: AcceptancePossible,
+        cancellation: Cancellation,
+    ) -> impl future::Future<
+        Output = result::Result<
+            signalbox_domain::CorrelatedModelCallTerminalObservation,
+            <Self as ModelCallProvider>::Error,
+        >,
+    > + marker::Send
+    where
+        AcceptancePossible: function::FnOnce() + marker::Send,
+        Cancellation: future::Future<Output = ()> + marker::Send + 'static;
+}
+```
+
+## ModelCallExecutionIdGenerator
+
+```rust
+pub trait ModelCallExecutionIdGenerator {
+    fn next_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
+    fn next_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
+    fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId;
+    fn next_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
+}
+```
+
+## UuidV7ModelCallExecutionIdGenerator
+
+```rust
+pub struct UuidV7ModelCallExecutionIdGenerator;
+// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default
+impl ModelCallExecutionIdGenerator for UuidV7ModelCallExecutionIdGenerator {
+    fn next_model_call_id(&mut self) -> signalbox_domain::ModelCallId;
+    fn next_semantic_entry_id(&mut self) -> signalbox_domain::SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> signalbox_domain::ContextFrontierId;
+    fn next_tool_request_id(&mut self) -> signalbox_domain::ToolRequestId;
+    fn next_turn_attempt_id(&mut self) -> signalbox_domain::TurnAttemptId;
+    fn next_turn_id(&mut self) -> signalbox_domain::TurnId;
+}
+```
+
+## AttemptDispatchGate
+
+```rust
+pub trait AttemptDispatchGate {
+    type Permit: marker::Send;
+    fn acquire(
+        &self,
+        attempt: signalbox_domain::TurnAttemptId,
+    ) -> impl future::Future<Output = <Self as AttemptDispatchGate>::Permit> + marker::Send;
+}
+```
+
+## InProcessAttemptDispatchGate
+
+```rust
+pub struct InProcessAttemptDispatchGate {/* private */}
+// derives: clone::Clone, fmt::Debug, default::Default
+impl AttemptDispatchGate for InProcessAttemptDispatchGate {
+    type Permit = InProcessAttemptDispatchPermit;
+    fn acquire(
+        &self,
+        attempt: signalbox_domain::TurnAttemptId,
+    ) -> impl future::Future<Output = <Self as AttemptDispatchGate>::Permit> + marker::Send;
+}
+```
+
+## InProcessAttemptDispatchPermit
+
+```rust
+pub struct InProcessAttemptDispatchPermit {/* private */}
 ```
 
 ## ScriptedModelCallStep

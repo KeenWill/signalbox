@@ -18,10 +18,19 @@ results to `validate` under its change-scope gate. File-media format and
 registry conformance tests use native Bazel targets; process-isolation tests run
 in a GitHub-hosted Bazel job with Bubblewrap and a delegated cgroup.
 
+Coverage runs through Bazel for the workspace and the persistence, daemon, and
+terminal-client PostgreSQL selections. It is report-only, with no threshold.
+
+The web client's lint, typecheck, unit tests, production build, and
+three-browser Playwright checks run as Bazel targets. Packages resolve from the
+npm lockfile; browser runtimes and fonts are checksum-pinned test inputs. These
+results are cacheable without changing the screenshot goldens or their
+tolerances.
+
 ## Design decisions
 
-The checker job runs its eight Python suites through Bazel with declared Python
-and Rustfmt toolchains. Suites using host Git or shell utilities always execute.
+The checker job runs its Python suites through Bazel with declared Python and
+Rustfmt toolchains. Suites using host Git or shell utilities always execute.
 Markdown formatting uses a Bazel test with declared files, formatter packages,
 and configuration. Web-contract and model-projection generation run as native
 Bazel actions with declared output trees and snapshot-comparison tests. The

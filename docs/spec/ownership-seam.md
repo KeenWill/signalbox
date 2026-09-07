@@ -28,6 +28,9 @@ import edges, module SQL that names `public` relations, and core SQL that names
 `mod_` relations. PostgreSQL grants independently deny direct core-table reads,
 core-function execution, and cross-schema references.
 
-## Planned
-
-- Reload-intent input: [design](../design/ownership-seam.md).
+The reload-intent input carries the command identity, checked per-repository
+rule sets, and rule-set digest. The module activates the set atomically and
+idempotently by identity and digest, retaining each repository's event tail in
+the activation transaction. Delivery grants neither role access to the other's
+tables; [process protocol](process-protocol.md) owns intent persistence and
+recovery.

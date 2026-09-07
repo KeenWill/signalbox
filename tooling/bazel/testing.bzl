@@ -87,6 +87,7 @@ def _test_selection_impl(ctx):
             executable = executable,
             runfiles = ctx.attr.test[0][DefaultInfo].default_runfiles,
         ),
+        coverage_common.instrumented_files_info(ctx, dependency_attributes = ["test"]),
         RunEnvironmentInfo(
             environment = dict(ctx.attr.test[0][RunEnvironmentInfo].environment, **ctx.attr.env),
             inherited_environment = ctx.attr.test[0][RunEnvironmentInfo].inherited_environment,
@@ -117,6 +118,11 @@ rust_selection_test = rule(
         "test": attr.label(executable = True, cfg = _cargo_json_transition, mandatory = True),
         "json_preserve_order": attr.bool(default = True),
         "_allowlist_function_transition": attr.label(default = "@bazel_tools//tools/allowlists/function_transition_allowlist"),
+        "_lcov_merger": attr.label(
+            default = configuration_field(fragment = "coverage", name = "output_generator"),
+            executable = True,
+            cfg = "exec",
+        ),
         "env": attr.string_dict(),
     },
     doc = "Run another selection of a compiled libtest binary using the target's args.",
@@ -206,3 +212,27 @@ def rust_quality_tests(documented_crates):
             rustdoc_flags = ["-D", "warnings"],
             visibility = ["//:__pkg__"],
         )
+
+def rust_coverage_suite(name, binaries, skip = [], json_preserve_order = True):
+    """Select the report-only ignored tests from existing native binaries.
+
+    Args:
+        name: Coverage suite name.
+        binaries: Existing native test labels.
+        skip: Test-name substrings excluded by the coverage measurement.
+        json_preserve_order: Cargo package JSON feature selection.
+    """
+    selected = []
+    for binary in binaries:
+        target = name + "_" + binary.split(":")[-1]
+        rust_selection_test(
+            name = target,
+            test = binary,
+            args = ["--ignored", "--test-threads=4"] + [arg for item in skip for arg in ["--skip", item]],
+            json_preserve_order = json_preserve_order,
+            env = {"RUST_MIN_STACK": "8388608"},
+            tags = ["manual", "external", "no-sandbox", "requires-network"],
+            size = "enormous",
+        )
+        selected.append(":" + target)
+    native.test_suite(name = name, tests = selected, tags = ["manual"])

@@ -206,7 +206,6 @@ impl SessionTemplateConfiguration {
     }
 
     /// Reconstitutes retained templates without consulting prompt files.
-    #[cfg(test)]
     pub(crate) fn parse_snapshot(
         content: &str,
         models: &HubModelConfiguration,
