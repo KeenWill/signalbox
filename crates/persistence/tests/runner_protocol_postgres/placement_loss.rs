@@ -725,3 +725,119 @@ async fn append_pending_runner_suffix(
     transaction.commit().await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn placement_loss_closes_pre_pin_requests_from_the_lost_registration_after_reconnect()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = parked_batch(&pool).await?;
+    fixture
+        .store
+        .transition_connection(
+            enrollment().enrollment(),
+            fixture.connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = fixture
+        .store
+        .load_current_connection_loss(enrollment().enrollment())
+        .await?
+        .expect("the original connection loss is retained");
+    fixture
+        .store
+        .open_connection(enrollment().enrollment())
+        .await?;
+    let reconnected_enrollment = fixture
+        .store
+        .load_enrollment(enrollment().enrollment())
+        .await?
+        .expect("the reconnected enrollment retains its registration revision");
+    fixture
+        .store
+        .register(&reconnected_enrollment, narrowed_advertisement())
+        .await?;
+    let exposed_now: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_current_registration AS current JOIN runner_registration_tool AS declared USING (enrollment_id, registration_revision) WHERE current.enrollment_id = $1 AND declared.tool_name = 'inspect'")
+        .bind(enrollment().enrollment().into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(exposed_now, 0);
+    fixture
+        .store
+        .propagate_connection_loss_session(loss, fixture.session)
+        .await?;
+    let batch = model_repository(&pool)
+        .tool_loop_repository()
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the lost batch remains evaluable");
+    assert!(batch.awaiting_approval().is_none());
+    assert_eq!(
+        batch.requests()[0].inadmissible_reason(),
+        Some(signalbox_domain::ToolInadmissibleReason::PlacementLost)
+    );
+    let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_connection_loss_epoch AS loss JOIN runner_registration_tool AS declared USING (enrollment_id, registration_revision) WHERE loss.enrollment_id = $1 AND loss.loss_epoch = $2 AND declared.tool_name = 'inspect')")
+        .bind(loss.enrollment().into_uuid()).bind(Decimal::from(loss.loss_epoch().get())).fetch_one(&pool).await?;
+    assert!(retained);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn placement_loss_accepts_preparation_failure_after_retiring_the_prepared_judge()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::approval_judge::{
+        FailedApprovalJudgeDisposition, PrepareApprovalJudgeOutcome,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = parked_batch(&pool).await?;
+    sqlx::raw_sql("ALTER TABLE tool_request DISABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE tool_request SET approval_posture = 'delegated' WHERE request_id = $1")
+        .bind(fixture.request.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql("ALTER TABLE tool_request ENABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
+    let repository = model_repository(&pool).approval_judge_repository();
+    let PrepareApprovalJudgeOutcome::Ready(prepared) = repository
+        .prepare(
+            fixture.session,
+            fixture.turn,
+            ModelCallId::from_uuid(Uuid::now_v7()),
+            None,
+        )
+        .await?
+    else {
+        panic!("the judge is prepared before model preparation finishes");
+    };
+    lose_batch(&fixture).await?;
+    repository
+        .fail(
+            &prepared,
+            FailedApprovalJudgeDisposition::KnownFailed,
+            signalbox_domain::ProviderReportedTokenUsage::unreported(),
+        )
+        .await?;
+    repository
+        .fail(
+            &prepared,
+            FailedApprovalJudgeDisposition::KnownFailed,
+            signalbox_domain::ProviderReportedTokenUsage::unreported(),
+        )
+        .await?;
+    let batch = model_repository(&pool)
+        .tool_loop_repository()
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("preparation failure leaves the reopened batch evaluable");
+    assert!(batch.awaiting_approval().is_none());
+    assert_eq!(
+        batch.requests()[0].inadmissible_reason(),
+        Some(signalbox_domain::ToolInadmissibleReason::PlacementLost)
+    );
+    let disposition: String = sqlx::query_scalar("SELECT terminal_disposition_kind FROM tool_approval_judge_model_call WHERE request_id = $1").bind(fixture.request.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(disposition, "cancelled");
+    Ok(())
+}

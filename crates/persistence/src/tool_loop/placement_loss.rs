@@ -30,9 +30,10 @@ async fn close_lost_runner_requests_after_observation(
                           AND declared.tool_name = request.tool_name AND declared.runner_required)
                 OR (placement.state_kind = 'runner_lost_before_pin' AND EXISTS (
                     SELECT 1 FROM runner_enrollment AS enrollment
-                    JOIN runner_current_registration AS current ON current.enrollment_id = enrollment.enrollment_id
-                    JOIN runner_registration_tool AS declared ON declared.enrollment_id = current.enrollment_id
-                        AND declared.registration_revision = current.registration_revision
+                    JOIN runner_connection_loss_epoch AS loss ON loss.enrollment_id = enrollment.enrollment_id
+                        AND loss.loss_epoch = COALESCE(placement.observed_runner_loss_epoch, 0) + 1
+                    JOIN runner_registration_tool AS declared ON declared.enrollment_id = loss.enrollment_id
+                        AND declared.registration_revision = loss.registration_revision
                     WHERE enrollment.runner_id = placement.lost_runner_id
                       AND declared.tool_name = request.tool_name AND declared.loci_kind = 'runner_only')))
            AND NOT EXISTS (SELECT 1 FROM runner_tool_request_lease_binding AS lease WHERE lease.request_id = request.request_id)

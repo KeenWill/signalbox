@@ -117,28 +117,7 @@ pub(super) async fn handle_runner_recovery<Writer: AsyncWrite + Unpin>(
                 session: SessionId::from_uuid(session_id.into_uuid()),
                 revision,
             };
-            let mut listener = match sqlx::postgres::PgListener::connect_with(&services.pool).await
-            {
-                Ok(listener) => listener,
-                Err(error) => {
-                    return write_recovery_error(
-                        writer,
-                        version,
-                        request_id,
-                        RunnerRecoveryError::from(error),
-                    )
-                    .await;
-                }
-            };
-            if let Err(error) = listener.listen("runner_recovery").await {
-                return write_recovery_error(
-                    writer,
-                    version,
-                    request_id,
-                    RunnerRecoveryError::from(error),
-                )
-                .await;
-            }
+            let mut notifications = services.fanouts.runner_recovery.subscribe();
             loop {
                 let outcome = match store.replace_lost_runner(command.clone()).await {
                     Ok(RunnerRecoveryOutcome::Pending) => {
@@ -175,8 +154,8 @@ pub(super) async fn handle_runner_recovery<Writer: AsyncWrite + Unpin>(
                     Err(error) => break Err(error),
                     Ok(RunnerRecoveryOutcome::Pending) => {
                         tokio::select! {
-                            notification = listener.recv() => {
-                                if let Err(error) = notification { break Err(RunnerRecoveryError::from(error)); }
+                            notification = notifications.changed() => {
+                                if notification.is_err() { return Ok(()); }
                             }
                             _ = shutdown.changed() => return Ok(()),
                         }

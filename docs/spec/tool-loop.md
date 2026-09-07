@@ -80,7 +80,8 @@ An approval wait is a stored active-turn phase that names the earliest undecided
 request and survives restart.
 
 A runner-locus request whose placement is lost before a lease offer or executor
-dispatch records `closed_inadmissible` with reason `placement_lost`. The loss
+dispatch records `closed_inadmissible` with reason `placement_lost`. Pre-pin
+closure uses the registration retained by the connection loss. The loss
 transaction closes every such unresolved request in the batch, including earlier
 approved requests in a parked batch, retires existing approvals, and resumes
 batch evaluation without creating an attempt or result entry. An existing
