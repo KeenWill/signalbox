@@ -3,6 +3,7 @@ SET search_path = mod_repo_watch, pg_catalog;
 
 ALTER TABLE dispatch_ledger
     ADD COLUMN checkout_removed boolean NOT NULL DEFAULT false,
+    ADD COLUMN checkout_created boolean NOT NULL DEFAULT false,
     ADD COLUMN checkout_workspace_root bytea,
     ADD COLUMN checkout_session_id uuid,
     ADD COLUMN checkout_device numeric(20, 0),

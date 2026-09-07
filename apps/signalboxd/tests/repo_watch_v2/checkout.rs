@@ -1021,6 +1021,10 @@ async fn startup_removes_a_prepared_directory_before_identity_retention()
         .await?;
     let root = fixture.root(session);
     std::fs::create_dir_all(&root)?;
+    sqlx::query("UPDATE dispatch_ledger SET checkout_created = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
     let restarted = RepoWatchStore::new(fixture.module.clone());
     scavenge_checkouts(&restarted, &fixture.core)
         .await
@@ -1205,6 +1209,79 @@ async fn cleanup_uses_the_provisioning_root_after_configuration_changes()
         "new workspace contents"
     );
     assert!(restarted.checkout_removal_candidates().await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatch_never_adopts_or_removes_a_preexisting_directory() -> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    let pending = fixture
+        .store
+        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+        .await?;
+    let result = fixture
+        .sink
+        .submit(pending[0].command().clone())
+        .await
+        .expect("held creation");
+    let CommandSubmission::Creation(CreateSessionOutcome::Applied(applied)) = result else {
+        panic!("core creation must be applied");
+    };
+    let root = fixture.root(applied.session());
+    git2::Repository::init(&root)?;
+    std::fs::write(root.join("keep"), "preexisting contents")?;
+    fixture.dispatch().await;
+    scavenge_checkouts(&fixture.store, &fixture.core)
+        .await
+        .expect("unowned cleanup settles without deletion");
+    assert_eq!(
+        std::fs::read_to_string(root.join("keep"))?,
+        "preexisting contents"
+    );
+    assert!(root.join(".git").is_dir());
+    assert!(fixture.runner.steps.lock().expect("Git steps").is_empty());
+    let flags: (bool, bool, bool) = sqlx::query_as(
+        "SELECT checkout_created, checkout_removed, checkout_device IS NULL AND checkout_inode IS NULL
+         FROM dispatch_ledger WHERE command_id = $1",
+    ).bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert_eq!(flags, (false, true, true));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_finds_a_renamed_checkout_among_its_siblings() -> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    let renamed = root.with_file_name("renamed-checkout");
+    let unrelated = root.with_file_name("unrelated");
+    std::fs::create_dir(&unrelated)?;
+    std::fs::write(unrelated.join("keep"), "unrelated directory")?;
+    std::fs::rename(&root, &renamed)?;
+    fixture.stop(session).await;
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("renamed checkout removed by identity");
+    assert!(!renamed.exists());
+    assert!(!root.exists());
+    assert!(root.parent().expect("derived parent").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(unrelated.join("keep"))?,
+        "unrelated directory"
+    );
+    assert!(restarted.checkout_removal_candidates().await?.is_empty());
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("repeated cleanup is idempotent");
     Ok(())
 }
 

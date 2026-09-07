@@ -71,8 +71,20 @@ impl CheckoutProvisioningFailed {
 
 pub(crate) struct CheckoutDirectory {
     path: PathBuf,
+    parent: OwnedFd,
+    staged_name: Option<OsString>,
     directory: OwnedFd,
     pub(crate) identity: CheckoutDirectoryIdentity,
+    pub(crate) created: bool,
+}
+
+impl Drop for CheckoutDirectory {
+    fn drop(&mut self) {
+        if let Some(name) = &self.staged_name {
+            // Unpublished directories have no Git contents; only remove the empty entry.
+            let _ = remove_directory_entry(&self.parent, name, &self.directory);
+        }
+    }
 }
 
 pub(crate) fn prepare(
@@ -80,12 +92,30 @@ pub(crate) fn prepare(
     session: SessionId,
 ) -> Result<CheckoutDirectory, CheckoutProvisioningFailed> {
     let path = roots.derived_path(session);
-    let directory = provision_directory(&path)
+    let parent = provision_parent(&path)
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    let name = path
+        .file_name()
+        .ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    let (directory, staged_name) = match openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()) {
+        Ok(directory) => (directory, None),
+        Err(rustix::io::Errno::NOENT) => {
+            let name = OsString::from(format!(".checkout-{}", uuid::Uuid::now_v7()));
+            mkdirat(&parent, &name, Mode::RWXU)
+                .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+            let directory = openat(&parent, &name, DIRECTORY_FLAGS, Mode::empty())
+                .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+            (directory, Some(name))
+        }
+        Err(_) => return Err(CheckoutProvisioningFailed::at(CheckoutStep::Workspace)),
+    };
     let stat = rustix::fs::fstat(&directory)
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
     Ok(CheckoutDirectory {
         path,
+        parent,
+        created: staged_name.is_some(),
+        staged_name,
         directory,
         identity: CheckoutDirectoryIdentity {
             device: stat.st_dev,
@@ -96,11 +126,25 @@ pub(crate) fn prepare(
 
 pub(crate) async fn provision<Runner: ProcessRunner>(
     runner: &mut Runner,
-    checkout: &CheckoutDirectory,
+    checkout: &mut CheckoutDirectory,
     repository: &RepositorySlug,
     pull_request: &PullRequestEventContext,
     credentials: &RepositoryWatchClientLoader,
 ) -> Result<(), CheckoutProvisioningFailed> {
+    if let Some(name) = &checkout.staged_name {
+        rustix::fs::renameat_with(
+            &checkout.parent,
+            name,
+            &checkout.parent,
+            checkout
+                .path
+                .file_name()
+                .ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+        checkout.staged_name = None;
+    }
     let authorization = credentials
         .git_authorization()
         .await
@@ -242,15 +286,14 @@ fn open_directory(path: &Path) -> Result<OwnedFd, rustix::io::Errno> {
     Ok(directory)
 }
 
-fn provision_directory(path: &Path) -> Result<OwnedFd, rustix::io::Errno> {
+fn provision_parent(path: &Path) -> Result<OwnedFd, rustix::io::Errno> {
     let parent = path.parent().ok_or(rustix::io::Errno::INVAL)?;
     let ancestor = parent.parent().ok_or(rustix::io::Errno::INVAL)?;
     let directory = open_directory(ancestor)?;
-    let parent = create_directory(
+    create_directory(
         &directory,
         parent.file_name().ok_or(rustix::io::Errno::INVAL)?,
-    )?;
-    create_directory(&parent, path.file_name().ok_or(rustix::io::Errno::INVAL)?)
+    )
 }
 
 fn create_directory(
@@ -276,9 +319,17 @@ pub(crate) fn remove(
         Err(error) => return Err(error),
     };
     let name = path.file_name().ok_or(rustix::io::Errno::INVAL)?;
-    let directory = match pin_removal_directory(&parent, name) {
-        Ok(directory) => directory,
-        Err(rustix::io::Errno::NOENT) => return Ok(()),
+    let (name, directory) = match pin_removal_directory(&parent, name) {
+        Ok(directory) => (name.to_owned(), directory),
+        Err(rustix::io::Errno::NOENT) => {
+            let Some(identity) = identity else {
+                return Ok(());
+            };
+            let Some(found) = find_renamed_directory(&parent, identity)? else {
+                return Ok(());
+            };
+            found
+        }
         Err(error) => return Err(error),
     };
     let stat = rustix::fs::fstat(&directory)?;
@@ -289,7 +340,35 @@ pub(crate) fn remove(
     }
     let directory = read_removal_directory(&directory)?;
     remove_contents(&directory)?;
-    remove_directory_entry(&parent, name, &directory)
+    remove_directory_entry(&parent, &name, &directory)
+}
+
+fn find_renamed_directory(
+    parent: &OwnedFd,
+    identity: CheckoutDirectoryIdentity,
+) -> Result<Option<(OsString, OwnedFd)>, rustix::io::Errno> {
+    use rustix::fs::{AtFlags, Dir, FileType, statat};
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut entries = Dir::new(rustix::io::dup(parent)?)?;
+    while let Some(entry) = entries.read() {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let stat = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        if FileType::from_raw_mode(stat.st_mode) == FileType::Directory
+            && (stat.st_dev, stat.st_ino) == (identity.device, identity.inode)
+        {
+            let name = std::ffi::OsStr::from_bytes(name.to_bytes());
+            return Ok(Some((
+                name.to_owned(),
+                pin_removal_directory(parent, name)?,
+            )));
+        }
+    }
+    Ok(None)
 }
 
 fn pin_removal_directory(

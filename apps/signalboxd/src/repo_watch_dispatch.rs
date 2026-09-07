@@ -112,6 +112,13 @@ pub async fn scavenge_checkouts(
         if checkout.retired_reason.is_none() && !terminal.contains(&session.into_uuid()) {
             continue;
         }
+        if !checkout.created {
+            store
+                .settle_checkout_removal(checkout.command)
+                .await
+                .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+            continue;
+        }
         let workspace_root = PathBuf::from(OsString::from_vec(checkout.location.workspace_root));
         let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(&workspace_root)
             .map_err(|_| RepositoryWatchCommandError::CheckoutRemovalFailed)?;
@@ -210,18 +217,18 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 crate::repo_watch_checkout::prepare(&roots, location.session)
             })();
             let provisioned = match prepared {
-                Ok(directory) => {
+                Ok(mut directory) => {
                     let retained = self
                         .store
-                        .retain_checkout_identity(id, directory.identity)
+                        .retain_checkout_identity(id, directory.identity, directory.created)
                         .await
                         .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
-                    if retained != directory.identity {
+                    if retained != Some(directory.identity) {
                         Err(CheckoutProvisioningFailed::at(CheckoutStep::Workspace))
                     } else if let Some(runner) = self.runner.as_mut() {
                         crate::repo_watch_checkout::provision(
                             runner,
-                            &directory,
+                            &mut directory,
                             checkout.event.repository(),
                             context,
                             &crate::repo_watch_credentials::RepositoryWatchClientLoader::new(

@@ -214,13 +214,17 @@ no repository-watch configuration. The ledger retains the provisioning workspace
 root and core session identity before filesystem work; cleanup uses them without
 waiting for `SessionCreated` settlement or consulting current configuration.
 Cleanup includes locations retained before checkout recording. Settled cleanup
-prevents repeated provisioning. The ledger retains the directory device and
-inode before Git runs; removal verifies retained identities before changing
-permissions or traversing contents. An identity mismatch leaves removal pending;
-an unrecorded identity permits removal at the retained location. The removal
-migration settles existing provisioned rows without a retained location. Removal
-restores owner directory permissions and refuses mount crossings. Pending
-submission follow-ups remain retryable after core command settlement, including
+prevents repeated provisioning. The ledger records creation ownership and the
+directory device/inode before publishing a new directory at the session path.
+Directories not created by the dispatch are neither adopted nor removed. Removal
+verifies retained identities before changing permissions or traversing contents.
+An identity mismatch leaves removal pending; an unrecorded identity permits
+removal at the retained location. If that pathname is absent, cleanup searches
+its direct siblings under the derived session parent for the retained
+device/inode before settling. The parent is retained. The removal migration
+settles existing provisioned rows without a retained location. Removal restores
+owner directory permissions and refuses mount crossings. Pending submission
+follow-ups remain retryable after core command settlement, including
 interruption of a live turn whose session is closing. Synchronous
 command-identity conflicts settle as rejected before submission continues to the
 next action.

@@ -49,6 +49,7 @@ pub struct CheckoutDirectoryIdentity {
 #[derive(sqlx::FromRow)]
 struct CheckoutRemovalRow {
     command_id: Uuid,
+    checkout_created: bool,
     checkout_session_id: Uuid,
     checkout_workspace_root: Vec<u8>,
     checkout_retired_reason: Option<String>,
@@ -71,6 +72,7 @@ struct CheckoutRow {
 /// A checkout whose filesystem removal has not yet settled.
 pub struct CheckoutRemovalCandidate {
     pub command: DurableCommandId,
+    pub created: bool,
     pub location: CheckoutLocation,
     pub retired_reason: Option<String>,
     pub identity: Option<CheckoutDirectoryIdentity>,
@@ -82,7 +84,7 @@ impl RepoWatchStore {
         &self,
     ) -> Result<Vec<CheckoutRemovalCandidate>, StoreError> {
         let rows: Vec<CheckoutRemovalRow> = sqlx::query_as(
-            "SELECT command_id, checkout_session_id, checkout_workspace_root, checkout_retired_reason, checkout_device, checkout_inode FROM dispatch_ledger
+            "SELECT command_id, checkout_created, checkout_session_id, checkout_workspace_root, checkout_retired_reason, checkout_device, checkout_inode FROM dispatch_ledger
              WHERE checkout_session_id IS NOT NULL AND NOT checkout_removed",
         )
         .fetch_all(&self.pool)
@@ -91,6 +93,7 @@ impl RepoWatchStore {
             .map(|row| {
                 Ok(CheckoutRemovalCandidate {
                     command: DurableCommandId::from_uuid(row.command_id),
+                    created: row.checkout_created,
                     location: CheckoutLocation {
                         session: SessionId::from_uuid(row.checkout_session_id),
                         workspace_root: row.checkout_workspace_root,
@@ -106,7 +109,7 @@ impl RepoWatchStore {
             .collect()
     }
 
-    /// Marks removal only after the derived checkout is absent.
+    /// Settles cleanup after removal or when the dispatch does not own the directory.
     pub async fn settle_checkout_removal(
         &self,
         command: DurableCommandId,
@@ -191,23 +194,30 @@ impl RepoWatchStore {
         })
     }
 
-    /// Pins the directory identity once, preserving it across provisioning retries.
+    /// Records ownership only for a created directory, preserving it across retries.
     pub async fn retain_checkout_identity(
         &self,
         command: DurableCommandId,
         identity: CheckoutDirectoryIdentity,
-    ) -> Result<CheckoutDirectoryIdentity, StoreError> {
-        let (device, inode): (Decimal, Decimal) = sqlx::query_as(
-            "UPDATE dispatch_ledger SET checkout_device = COALESCE(checkout_device, $2),
-                checkout_inode = COALESCE(checkout_inode, $3)
+        created: bool,
+    ) -> Result<Option<CheckoutDirectoryIdentity>, StoreError> {
+        let (device, inode): (Option<Decimal>, Option<Decimal>) = sqlx::query_as(
+            "UPDATE dispatch_ledger SET checkout_created = checkout_created OR $4,
+                checkout_device = CASE WHEN $4 THEN COALESCE(checkout_device, $2) ELSE checkout_device END,
+                checkout_inode = CASE WHEN $4 THEN COALESCE(checkout_inode, $3) ELSE checkout_inode END
              WHERE command_id = $1 RETURNING checkout_device, checkout_inode",
         )
         .bind(command.into_uuid())
         .bind(Decimal::from(identity.device))
         .bind(Decimal::from(identity.inode))
+        .bind(created)
         .fetch_one(&self.pool)
         .await?;
-        decode_identity(device, inode)
+        match (device, inode) {
+            (Some(device), Some(inode)) => Ok(Some(decode_identity(device, inode)?)),
+            (None, None) => Ok(None),
+            _ => Err(StoreError::InvalidRetainedCommand),
+        }
     }
 
     /// Records the checkout at the derived root after Git has checked out its head.
