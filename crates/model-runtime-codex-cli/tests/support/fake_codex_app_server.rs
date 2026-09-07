@@ -940,6 +940,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed_without_cache();
         }
+        "usage_sparse_updates" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            notify(
+                "thread/tokenUsage/updated",
+                json!({"tokenUsage":{"total":{"inputTokens":11,"outputTokens":3,"cacheWriteInputTokens":7,"cachedInputTokens":5}}}),
+            );
+            notify(
+                "thread/tokenUsage/updated",
+                json!({"tokenUsage":{"total":{"outputTokens":9}}}),
+            );
+            usage_and_complete(r#"{"inputTokens":13,"totalTokens":22}"#);
+        }
         "usage_partial_axes" => {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,

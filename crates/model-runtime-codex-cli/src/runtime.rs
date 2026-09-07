@@ -351,7 +351,7 @@ pub struct CodexCliPreparedRequest<C> {
     executable: PathBuf,
     working_directory: PathBuf,
     prompt: Vec<u8>,
-    operation_home: TempDir,
+    operation_home: OperationHome,
     correlation: C,
     resolved_target: String,
     delivery: DeliveryMode,
@@ -770,11 +770,26 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
     }
 }
 
+enum OperationHome {
+    Ready(TempDir),
+    UnresolvableCredentialHome,
+}
+
 async fn execute_process<C: Clone + Send + Sync>(
     prepared: CodexCliPreparedRequest<C>,
     sink: &mut (dyn ObservationSink<C> + Send),
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
+    let operation_home = match prepared.operation_home {
+        OperationHome::Ready(home) => home,
+        OperationHome::UnresolvableCredentialHome => {
+            return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(signalbox_model_runtime::TransportFacts::new(
+                    "Codex credential home cannot be resolved to an absolute directory; exchange refused before spawn",
+                )),
+            });
+        }
+    };
     let mut command = std::process::Command::new(&prepared.executable);
     for feature in DISABLED_CODEX_CLI_CAPABILITY_FEATURES {
         command.arg("--disable").arg(feature);
@@ -832,7 +847,7 @@ async fn execute_process<C: Clone + Send + Sync>(
     );
     let environment_overrides = vec![CliEnvironmentOverride::replacing_inherited(
         CODEX_CREDENTIAL_HOME,
-        prepared.operation_home.path().as_os_str().to_owned(),
+        operation_home.path().as_os_str().to_owned(),
     )];
     let request = CliProcessRequest {
         command,
@@ -846,11 +861,11 @@ async fn execute_process<C: Clone + Send + Sync>(
         environment: CODEX_ENVIRONMENT,
         environment_overrides,
     };
-    let _operation_home = prepared.operation_home;
+    let _operation_home = operation_home;
     execute_cli_process(request, sink, cancellation).await
 }
 
-fn operation_home(selected: Option<PathBuf>) -> std::io::Result<TempDir> {
+fn operation_home(selected: Option<PathBuf>) -> std::io::Result<OperationHome> {
     let directory = std::path::absolute(std::env::temp_dir())?;
     let home = tempfile::Builder::new()
         .prefix("signalbox-codex-")
@@ -861,13 +876,14 @@ fn operation_home(selected: Option<PathBuf>) -> std::io::Result<TempDir> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")));
     #[cfg(unix)]
     if let Some(source) = source {
+        let source = match std::path::absolute(source) {
+            Ok(source) if source.is_absolute() => source,
+            _ => return Ok(OperationHome::UnresolvableCredentialHome),
+        };
         // Only the CLI opens the login store; auxiliary state stays private.
-        std::os::unix::fs::symlink(
-            std::path::absolute(source)?.join("auth.json"),
-            home.path().join("auth.json"),
-        )?;
+        std::os::unix::fs::symlink(source.join("auth.json"), home.path().join("auth.json"))?;
     }
-    Ok(home)
+    Ok(OperationHome::Ready(home))
 }
 
 #[cfg(test)]

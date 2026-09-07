@@ -125,7 +125,7 @@ impl<C: Clone> EventDecoder<C> {
             }
             Event::Usage(event) => {
                 fold_uninterpreted(sink, &value, &[&["method"]]);
-                self.usage = usage(event.token_usage.total)?;
+                self.usage.absorb(usage(event.token_usage.total)?);
             }
             Event::Error(event) => {
                 self.fold_retained_agent_message(sink);
@@ -804,19 +804,16 @@ fn next_redacted_call_id(cursor: &mut usize, clean_ids: &HashSet<String>) -> Str
 }
 
 fn usage(usage: UsageBreakdown) -> Result<TokenUsage, DecodeFailure> {
-    optional_usage(Some(usage.reasoning_output_tokens), "reasoningOutputTokens")?;
-    optional_usage(Some(usage.total_tokens), "totalTokens")?;
+    optional_usage(usage.reasoning_output_tokens, "reasoningOutputTokens")?;
+    optional_usage(usage.total_tokens, "totalTokens")?;
     Ok(TokenUsage {
-        input_tokens: optional_usage(Some(usage.input_tokens), "inputTokens")?,
-        output_tokens: optional_usage(Some(usage.output_tokens), "outputTokens")?,
+        input_tokens: optional_usage(usage.input_tokens, "inputTokens")?,
+        output_tokens: optional_usage(usage.output_tokens, "outputTokens")?,
         cache_creation_input_tokens: optional_usage(
             usage.cache_write_input_tokens,
             "cacheWriteInputTokens",
         )?,
-        cache_read_input_tokens: optional_usage(
-            Some(usage.cached_input_tokens),
-            "cachedInputTokens",
-        )?,
+        cache_read_input_tokens: optional_usage(usage.cached_input_tokens, "cachedInputTokens")?,
     })
 }
 
