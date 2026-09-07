@@ -250,8 +250,8 @@ actors outside the configured signal-reviewer set. Before every poller
 composition, including startup and re-enablement, the runtime compares the
 persisted reviewer set with configured signal reviewers and invalidates both
 validators and snapshots when they differ. After restart with an unchanged set,
-the first complete poll sends conditional requests for every resource with a
-persisted validator.
+the first complete poll sends conditional requests for every traversed resource
+with a persisted validator.
 
 ## Planned
 
