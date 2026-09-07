@@ -274,14 +274,16 @@ including its absolute working directory. Installation consumes that receipt,
 promotes the pending candidate, installs the placement and grant, appends the
 reference-only placement boundary, and records the terminal result atomically
 when no turn is active. Provisioning refusal or candidate loss records a typed
-terminal rejection and leaves the candidate pending. Replacement rejects a
-candidate lacking the requested sandbox or repository workspace capability
-before staging provisioning. Ambient default-directory replacement requires the
-successor registration's reported directory. A rejected command's ready
-workspace, including a correlated receipt arriving after abandonment, is
+terminal rejection and leaves the candidate pending. A terminal delegated
+runtime does not count as an active turn for recovery commands. Replacement
+rejects a candidate lacking the requested sandbox or repository workspace
+capability before staging provisioning. Ambient default-directory replacement
+requires the successor registration's reported directory. A rejected command's
+ready workspace, including a correlated receipt arriving after abandonment, is
 released only through its exact manifest correlation on the candidate's retained
 connection epoch. Suspicion retains that cleanup authority; loss does not
-transfer it.
+transfer it. Release acknowledgement uses the same current-epoch fence as
+release dispatch.
 
 ## Planned
 

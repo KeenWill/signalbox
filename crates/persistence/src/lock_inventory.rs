@@ -100,6 +100,9 @@
 //!   UPDATE`.
 //!
 //! `runners`:
+//! - `RunnerProtocolStore::record_replacement_workspace_released`: `session_lifecycle FOR NO
+//!   KEY UPDATE` -> `session_scheduler FOR UPDATE` -> `runner_enrollment FOR UPDATE` ->
+//!   `runner_connection_authority_head FOR SHARE`.
 //! - `guard_runner_claimed_retry_attempt_authority`: source `runner_current_lease_event FOR
 //!   UPDATE`.
 //! - `guard_runner_connection_event_insert`: active `runner_enrollment FOR UPDATE`.
