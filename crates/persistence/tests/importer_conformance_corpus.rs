@@ -34,23 +34,16 @@ use signalbox_domain::{
 };
 use sqlx::types::Uuid;
 
-/// Absolute path to one golden under this crate's fixture directory.
-///
-/// A relative `expect_file!` path is joined onto a workspace root expect-test
-/// derives at run time, which follows Cargo's configuration discovery and so
-/// depends on the directory the run was launched from rather than on the tree
-/// that was compiled. `CARGO_MANIFEST_DIR` is substituted at compile time by
-/// the checkout doing the compiling, so an absolute path built from it names
-/// that checkout's goldens under every launch, and expect-test takes an
-/// absolute path verbatim for both the comparison and the `UPDATE_EXPECT=1`
-/// rewrite.
+/// Cargo supplies an absolute crate path; Bazel supplies a runfiles-relative
+/// path. Anchor either before passing it to expect-test's workspace discovery.
 macro_rules! golden {
     ($name:literal) => {
-        concat!(
+        std::path::absolute(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/importer-conformance/golden/",
             $name
-        )
+        ))
+        .expect("the golden path is absolute or relative to the test working directory")
     };
 }
 

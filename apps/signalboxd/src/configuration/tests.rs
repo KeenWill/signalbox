@@ -128,6 +128,7 @@ pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
+repository_watch_webhook_retention = "604800s"
 fenced_pool_min_connections = 48
 fenced_pool_floor_reconciliation_interval = "5s"
 fenced_pool_floor_reconciliation_attempt_bound = "30s"
@@ -330,7 +331,7 @@ fn configuration_lists_every_missing_required_numeric_bound() {
 }
 
 #[test]
-fn configuration_admits_none_for_each_numeric_bound_kind() {
+fn configuration_admits_none_for_optional_integer_and_duration_bounds() {
     let unbounded = CONFIGURATION
         .replace(
             "max_message_utf8_bytes = 1048576",
@@ -342,7 +343,7 @@ fn configuration_admits_none_for_each_numeric_bound_kind() {
         );
 
     let configuration = HubModelConfiguration::parse(&unbounded)
-        .expect("the exact none spelling is admitted for every bound kind");
+        .expect("the exact none spelling is admitted for optional bounds");
 
     assert_eq!(
         configuration
@@ -355,6 +356,33 @@ fn configuration_admits_none_for_each_numeric_bound_kind() {
             .numeric_bounds()
             .duration("turn_liveness_scan_interval"),
         Some(None)
+    );
+}
+
+#[test]
+fn repository_watch_webhook_retention_is_required_and_must_be_positive_and_finite() {
+    const FIELD: &str = "repository_watch_webhook_retention";
+    const ENTRY: &str = "repository_watch_webhook_retention = \"604800s\"";
+    let missing = CONFIGURATION.replace(ENTRY, "");
+    assert_eq!(
+        HubModelConfiguration::parse(&missing).expect_err("required retention"),
+        HubModelConfigurationError::MissingNumericBounds {
+            fields: vec![FIELD]
+        }
+    );
+    for invalid in ["none", "0s"] {
+        let configuration = CONFIGURATION.replace(ENTRY, &format!("{FIELD} = {invalid:?}"));
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).expect_err("finite positive expiry"),
+            HubModelConfigurationError::InvalidNumericBound { field: FIELD }
+        );
+    }
+    assert_eq!(
+        HubModelConfiguration::parse(CONFIGURATION)
+            .expect("seven-day retention")
+            .numeric_bounds()
+            .duration(FIELD),
+        Some(Some(Duration::from_secs(7 * 24 * 60 * 60)))
     );
 }
 

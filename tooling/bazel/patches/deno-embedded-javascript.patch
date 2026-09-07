@@ -1,0 +1,11 @@
+--- a/extensions.rs
++++ b/extensions.rs
+@@ -1035,7 +1035,7 @@
+   };
+   // loaded, file
+   (@item mode=loaded, dir=$dir:expr_2021, specifier=$specifier:expr_2021, file=$file:literal) => {
+-    $crate::ExtensionFileSource::loaded_during_snapshot($specifier, concat!($dir, "/", $file))
++    $crate::ExtensionFileSource::loaded_from_memory_during_snapshot($specifier, $crate::ascii_str_include!(concat!($dir, "/", $file)))
+   };
+   // included, source
+   (@item mode=included, specifier=$specifier:expr_2021, source=$source:expr_2021) => {

@@ -1,14 +1,420 @@
+load("@python_deps//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_test")
+load("//tooling/bazel:native_generation.bzl", "native_generation")
+load("//tooling/bazel:source_manifest.bzl", "source_manifest")
+
 exports_files([
+    ".cargo/config.toml",
     "Cargo.lock",
     "Cargo.toml",
+    "__subpackages__",
+    "config/session-templates.example.toml",
+    "config/signalbox-runner.example.toml",
+    "tooling/codex-cli/release.json",
+    "tooling/postgres_test_image.rs",
+    "tooling/requirements-mdformat.txt",
     "config/signalboxd.example.toml",
 ])
+
+filegroup(
+    name = "postgres_workflow_fixtures",
+    srcs = [
+        ".github/postgres-integration-suites.toml",
+        ".github/workflows/rust.yml",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
+py_test(
+    name = "test_supervise_lifecycle",
+    size = "small",
+    srcs = ["tooling/test_supervise_lifecycle.py"],
+    data = ["tooling/supervise-lifecycle.sh"],
+    main = "tooling/test_supervise_lifecycle.py",
+    tags = ["external"],
+)
+
+py_test(
+    name = "test_sweep_test_containers",
+    size = "medium",
+    srcs = ["tooling/test_sweep_test_containers.py"],
+    data = [
+        "tooling/sweep-test-containers.sh",
+        ":rust_source_manifest",
+    ],
+    env = {"SIGNALBOX_RUST_SOURCE_MANIFEST": "$(rootpath :rust_source_manifest)"},
+    main = "tooling/test_sweep_test_containers.py",
+    tags = ["external"],
+)
+
+test_suite(
+    name = "python_checker_tests",
+    tests = [
+        ":test_supervise_lifecycle",
+        ":test_sweep_test_containers",
+        "//scripts:checker_tests",
+    ],
+)
+
+MARKDOWN_FILES = glob(
+    [
+        "*.md",
+        "docs/**/*.md",
+    ],
+    exclude = ["docs/api/**"],
+)
+
+py_test(
+    name = "markdown_format",
+    size = "small",
+    srcs = ["//tooling/bazel:check_markdown.py"],
+    args = ["--check"] + MARKDOWN_FILES,
+    data = MARKDOWN_FILES + [".mdformat.toml"],
+    main = "//tooling/bazel:check_markdown.py",
+    deps = [
+        requirement("mdformat"),
+        requirement("mdformat-gfm"),
+    ],
+)
+
+filegroup(
+    name = "web_contract_fixtures",
+    srcs = glob(["clients/web/src/generated/web-contract*"]),
+    visibility = ["//crates/web-contract:__pkg__"],
+)
 
 test_suite(
     name = "bazel_tests",
     tests = [
+        ":media_integration_tests",
+        ":rust_integration_tests",
+        ":rust_unit_tests",
+    ],
+)
+
+filegroup(
+    name = "rust_build",
+    srcs = [
+        "//apps/client:signalbox",
+        "//apps/client:signalbox_client",
+        "//apps/signalbox-runner",
+        "//apps/signalbox-runner:signalbox_runner",
+        "//apps/signalboxd",
+        "//apps/signalboxd:approval-judge-eval",
+        "//apps/signalboxd:signalbox-debug",
+        "//apps/signalboxd:signalboxd_lib",
+        "//crates/application:signalbox_application",
+        "//crates/approval-judge-eval:signalbox-approval-judge-eval",
+        "//crates/approval-judge-eval:signalbox_approval_judge_eval",
+        "//crates/blob-store:signalbox_blob_store",
+        "//crates/blob-store-filesystem:signalbox_blob_store_filesystem",
+        "//crates/blob-store-s3:signalbox_blob_store_s3",
+        "//crates/cargo-bin-resolver:signalbox-cargo-bin-resolver",
+        "//crates/convergence:signalbox-converge",
+        "//crates/convergence:signalbox_convergence",
+        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
+        "//crates/conversation-import-json:signalbox_conversation_import_json",
+        "//crates/derive:signalbox_derive",
+        "//crates/domain:signalbox_domain",
+        "//crates/egress-transport:signalbox_egress_transport",
+        "//crates/file-media-adapter-archives:signalbox-file-media-archives-worker",
+        "//crates/file-media-adapter-archives:signalbox_file_media_adapter_archives",
+        "//crates/file-media-adapter-office:signalbox-file-media-office-worker",
+        "//crates/file-media-adapter-office:signalbox_file_media_adapter_office",
+        "//crates/file-media-adapter-pdf:signalbox-file-media-pdf-worker",
+        "//crates/file-media-adapter-pdf:signalbox_file_media_adapter_pdf",
+        "//crates/file-media-adapter-svg:signalbox-file-media-svg-worker",
+        "//crates/file-media-adapter-svg:signalbox_file_media_adapter_svg",
+        "//crates/file-media-adapter-video:signalbox-file-media-video-worker",
+        "//crates/file-media-adapter-video:signalbox_file_media_adapter_video",
+        "//crates/file-media-adapters-audio:signalbox-file-media-audio-worker",
+        "//crates/file-media-adapters-audio:signalbox_file_media_adapters_audio",
+        "//crates/file-media-adapters-image:signalbox-file-media-image-worker",
+        "//crates/file-media-adapters-image:signalbox_file_media_adapters_image",
+        "//crates/file-media-adapters-text:signalbox-file-media-text-worker",
+        "//crates/file-media-adapters-text:signalbox_file_media_adapters_text",
+        "//crates/file-media-linux-sandbox:signalbox_file_media_linux_sandbox",
+        "//crates/file-media-processor-runtime:signalbox-file-media-synthetic-worker",
+        "//crates/file-media-processor-runtime:signalbox_file_media_processor_runtime",
+        "//crates/file-media-provider-runtime:signalbox_file_media_provider_runtime",
+        "//crates/file-media-runtime:signalbox_file_media_runtime",
+        "//crates/model-provider-runtime:signalbox_model_provider_runtime",
+        "//crates/model-reference-catalog:generate-reference-projections",
+        "//crates/model-reference-catalog:signalbox_model_reference_catalog",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
+        "//crates/model-runtime-claude-cli:signalbox-claude-mcp-bridge",
+        "//crates/model-runtime-claude-cli:signalbox-fake-claude-cli",
+        "//crates/model-runtime-claude-cli:signalbox_model_runtime_claude_cli",
+        "//crates/model-runtime-codex-cli:signalbox-fake-codex-cli",
+        "//crates/model-runtime-codex-cli:signalbox_model_runtime_codex_cli",
+        "//crates/model-runtime-openai:signalbox_model_runtime_openai",
+        "//crates/modules/repo-watch-v2:signalbox_module_repo_watch_v2",
+        "//crates/newtype:signalbox_newtype",
+        "//crates/ownership-seam:signalbox_ownership_seam",
+        "//crates/persistence:signalbox_persistence",
+        "//crates/process-protocol:signalbox_process_protocol",
+        "//crates/program-runtime:signalbox_program_runtime",
+        "//crates/runner-wire:signalbox_runner_wire",
+        "//crates/test-bin:signalbox_test_bin",
+        "//crates/tool-contract:signalbox_tool_contract",
+        "//crates/tool-schema-derive:signalbox_tool_schema_derive",
+        "//crates/tools-basic:signalbox_tools_basic",
+        "//crates/tools-code-host:signalbox_tools_code_host",
+        "//crates/tools-conversations:signalbox_tools_conversations",
+        "//crates/tools-exec:signalbox-exec-supervisor",
+        "//crates/tools-exec:signalbox_tools_exec",
+        "//crates/tools-file-media:signalbox_tools_file_media",
+        "//crates/tools-git:signalbox_tools_git",
+        "//crates/tools-github:signalbox_tools_github",
+        "//crates/tools-plan:signalbox_tools_plan",
+        "//crates/tools-sessions:signalbox_tools_sessions",
+        "//crates/tools-web:signalbox_tools_web",
+        "//crates/tools-workspace:signalbox_tools_workspace",
+        "//crates/web-contract:generate-web-contract",
+        "//crates/web-contract:signalbox_web_contract",
+    ],
+)
+
+test_suite(
+    name = "rust_unit_tests",
+    tests = [
+        "//apps/client:signalbox_unit_tests",
+        "//apps/client:unit_tests",
+        "//apps/signalbox-runner:signalbox_runner_unit_tests",
+        "//apps/signalbox-runner:unit_tests",
+        "//apps/signalboxd:approval_judge_eval_unit_tests",
+        "//apps/signalboxd:signalbox_debug_unit_tests",
+        "//apps/signalboxd:signalboxd_unit_tests",
+        "//apps/signalboxd:unit_tests",
+        "//crates/application:unit_tests",
+        "//crates/approval-judge-eval:signalbox_approval_judge_eval_unit_tests",
+        "//crates/approval-judge-eval:unit_tests",
         "//crates/blob-store:unit_tests",
+        "//crates/blob-store-filesystem:unit_tests",
+        "//crates/blob-store-s3:unit_tests",
+        "//crates/cargo-bin-resolver:signalbox_cargo_bin_resolver_unit_tests",
+        "//crates/convergence:signalbox_converge_unit_tests",
+        "//crates/convergence:unit_tests",
+        "//crates/conversation-import-claude-code:unit_tests",
+        "//crates/conversation-import-codex:unit_tests",
+        "//crates/conversation-import-json:unit_tests",
+        "//crates/derive:unit_tests",
         "//crates/domain:unit_tests",
+        "//crates/egress-transport:unit_tests",
+        "//crates/file-media-adapter-archives:signalbox_file_media_archives_worker_unit_tests",
+        "//crates/file-media-adapter-archives:unit_tests",
+        "//crates/file-media-adapter-office:signalbox_file_media_office_worker_unit_tests",
+        "//crates/file-media-adapter-office:unit_tests",
+        "//crates/file-media-adapter-pdf:signalbox_file_media_pdf_worker_unit_tests",
+        "//crates/file-media-adapter-pdf:unit_tests",
+        "//crates/file-media-adapter-svg:signalbox_file_media_svg_worker_unit_tests",
+        "//crates/file-media-adapter-svg:unit_tests",
+        "//crates/file-media-adapter-video:signalbox_file_media_video_worker_unit_tests",
+        "//crates/file-media-adapter-video:unit_tests",
+        "//crates/file-media-adapters-audio:signalbox_file_media_audio_worker_unit_tests",
+        "//crates/file-media-adapters-audio:unit_tests",
+        "//crates/file-media-adapters-image:signalbox_file_media_image_worker_unit_tests",
+        "//crates/file-media-adapters-image:unit_tests",
+        "//crates/file-media-adapters-text:signalbox_file_media_text_worker_unit_tests",
+        "//crates/file-media-adapters-text:unit_tests",
+        "//crates/file-media-linux-sandbox:unit_tests",
+        "//crates/file-media-processor-runtime:signalbox_file_media_synthetic_worker_unit_tests",
+        "//crates/file-media-processor-runtime:unit_tests",
+        "//crates/file-media-provider-runtime:unit_tests",
+        "//crates/file-media-runtime:unit_tests",
+        "//crates/model-provider-runtime:unit_tests",
+        "//crates/model-reference-catalog:generate_reference_projections_unit_tests",
+        "//crates/model-reference-catalog:unit_tests",
+        "//crates/model-runtime:unit_tests",
+        "//crates/model-runtime-anthropic:unit_tests",
+        "//crates/model-runtime-claude-cli:unit_tests",
+        "//crates/model-runtime-codex-cli:unit_tests",
+        "//crates/model-runtime-openai:unit_tests",
+        "//crates/modules/repo-watch-v2:unit_tests",
         "//crates/newtype:unit_tests",
+        "//crates/ownership-seam:unit_tests",
+        "//crates/persistence:unit_tests",
+        "//crates/process-protocol:unit_tests",
+        "//crates/program-runtime:unit_tests",
+        "//crates/runner-wire:unit_tests",
+        "//crates/test-bin:unit_tests",
+        "//crates/tool-contract:unit_tests",
+        "//crates/tool-schema-derive:unit_tests",
+        "//crates/tools-basic:unit_tests",
+        "//crates/tools-code-host:unit_tests",
+        "//crates/tools-conversations:unit_tests",
+        "//crates/tools-exec:signalbox_exec_supervisor_unit_tests",
+        "//crates/tools-exec:unit_tests",
+        "//crates/tools-file-media:unit_tests",
+        "//crates/tools-git:unit_tests",
+        "//crates/tools-github:unit_tests",
+        "//crates/tools-plan:unit_tests",
+        "//crates/tools-sessions:unit_tests",
+        "//crates/tools-web:unit_tests",
+        "//crates/tools-workspace:unit_tests",
+        "//crates/web-contract:generate_web_contract_unit_tests",
+        "//crates/web-contract:unit_tests",
+    ],
+)
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["tooling/**/*.rs"]) + [
+        "//apps/client:rust_sources",
+        "//apps/signalbox-runner:rust_sources",
+        "//apps/signalboxd:rust_sources",
+        "//crates/application:rust_sources",
+        "//crates/approval-judge-eval:rust_sources",
+        "//crates/blob-store:rust_sources",
+        "//crates/blob-store-filesystem:rust_sources",
+        "//crates/blob-store-s3:rust_sources",
+        "//crates/cargo-bin-resolver:rust_sources",
+        "//crates/convergence:rust_sources",
+        "//crates/conversation-import-claude-code:rust_sources",
+        "//crates/conversation-import-codex:rust_sources",
+        "//crates/conversation-import-json:rust_sources",
+        "//crates/derive:rust_sources",
+        "//crates/domain:rust_sources",
+        "//crates/egress-transport:rust_sources",
+        "//crates/file-media-adapter-archives:rust_sources",
+        "//crates/file-media-adapter-office:rust_sources",
+        "//crates/file-media-adapter-pdf:rust_sources",
+        "//crates/file-media-adapter-svg:rust_sources",
+        "//crates/file-media-adapter-video:rust_sources",
+        "//crates/file-media-adapters-audio:rust_sources",
+        "//crates/file-media-adapters-image:rust_sources",
+        "//crates/file-media-adapters-text:rust_sources",
+        "//crates/file-media-linux-sandbox:rust_sources",
+        "//crates/file-media-processor-runtime:rust_sources",
+        "//crates/file-media-provider-runtime:rust_sources",
+        "//crates/file-media-runtime:rust_sources",
+        "//crates/model-provider-runtime:rust_sources",
+        "//crates/model-reference-catalog:rust_sources",
+        "//crates/model-runtime:rust_sources",
+        "//crates/model-runtime-anthropic:rust_sources",
+        "//crates/model-runtime-claude-cli:rust_sources",
+        "//crates/model-runtime-codex-cli:rust_sources",
+        "//crates/model-runtime-openai:rust_sources",
+        "//crates/modules/repo-watch-v2:rust_sources",
+        "//crates/newtype:rust_sources",
+        "//crates/ownership-seam:rust_sources",
+        "//crates/persistence:rust_sources",
+        "//crates/process-protocol:rust_sources",
+        "//crates/program-runtime:rust_sources",
+        "//crates/runner-wire:rust_sources",
+        "//crates/test-bin:rust_sources",
+        "//crates/tool-contract:rust_sources",
+        "//crates/tool-schema-derive:rust_sources",
+        "//crates/tools-basic:rust_sources",
+        "//crates/tools-code-host:rust_sources",
+        "//crates/tools-conversations:rust_sources",
+        "//crates/tools-exec:rust_sources",
+        "//crates/tools-file-media:rust_sources",
+        "//crates/tools-git:rust_sources",
+        "//crates/tools-github:rust_sources",
+        "//crates/tools-plan:rust_sources",
+        "//crates/tools-sessions:rust_sources",
+        "//crates/tools-web:rust_sources",
+        "//crates/tools-workspace:rust_sources",
+        "//crates/web-contract:rust_sources",
+    ],
+)
+
+source_manifest(
+    name = "rust_source_manifest",
+    srcs = [":rust_sources"],
+)
+
+test_suite(
+    name = "rust_integration_tests",
+    tests = [
+        "//crates/blob-store-filesystem:conformance",
+        "//crates/derive:accessors",
+        "//crates/derive:operator_error",
+        "//crates/model-runtime-anthropic:loopback",
+        "//crates/model-runtime-openai:loopback",
+        "//crates/ownership-seam:lifecycle_vocabulary",
+        "//crates/persistence:importer_conformance_corpus",
+        "//crates/tool-schema-derive:derive",
+    ],
+)
+
+test_suite(
+    name = "media_integration_tests",
+    tests = [
+        "//crates/file-media-adapter-archives:archive_adapter",
+        "//crates/file-media-adapter-office:office_adapter",
+        "//crates/file-media-adapter-pdf:pdf_adapter",
+        "//crates/file-media-adapter-svg:svg_adapter",
+        "//crates/file-media-adapter-video:video_adapter",
+        "//crates/file-media-adapters-image:adapters",
+        "//crates/file-media-adapters-text:adapters",
+        "//crates/file-media-runtime:registry_conformance",
+    ],
+)
+
+native_generation(
+    name = "web_contract_output",
+    generator = "//crates/web-contract:generate-web-contract",
+)
+
+source_manifest(
+    name = "web_contract_snapshots",
+    srcs = [
+        ":web_contract_fixtures",
+        "//crates/web-contract:tests/fixtures/example.json",
+    ],
+)
+
+py_test(
+    name = "web_contract_generated",
+    size = "small",
+    srcs = ["//tooling/bazel:check_generated.py"],
+    args = [
+        "$(rootpath :web_contract_snapshots)",
+        "$(rootpath :web_contract_output)",
+    ],
+    data = [
+        ":web_contract_output",
+        ":web_contract_snapshots",
+    ],
+    main = "//tooling/bazel:check_generated.py",
+)
+
+native_generation(
+    name = "model_projection_output",
+    arguments = ["--write"],
+    generator = "//crates/model-reference-catalog:generate-reference-projections",
+)
+
+source_manifest(
+    name = "model_projection_snapshots",
+    srcs = ["//crates/model-reference-catalog:projections"],
+)
+
+py_test(
+    name = "model_projections_generated",
+    size = "small",
+    srcs = ["//tooling/bazel:check_generated.py"],
+    args = [
+        "$(rootpath :model_projection_snapshots)",
+        "$(rootpath :model_projection_output)",
+        "--source-prefix",
+        "crates/model-reference-catalog/projections",
+    ],
+    data = [
+        ":model_projection_output",
+        ":model_projection_snapshots",
+    ],
+    main = "//tooling/bazel:check_generated.py",
+)
+
+test_suite(
+    name = "generated_artifact_tests",
+    tests = [
+        ":model_projections_generated",
+        ":web_contract_generated",
     ],
 )

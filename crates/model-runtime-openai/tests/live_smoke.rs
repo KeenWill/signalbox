@@ -6,8 +6,7 @@
 use signalbox_model_runtime::{
     CancellationSignal, CompletionFinish, ConversationMessage, CredentialAccess,
     CredentialAccessError, CredentialAccessFailure, CredentialReference, CredentialValue,
-    DeliveryMode, FinishReason, ModelOperation, ModelRuntime, ModelSettings, NativeErrorFacts,
-    Observation, ObservationFact, PreparationOutcome, ProviderErrorKind, RequestedTarget,
+    DeliveryMode, ModelOperation, ModelRuntime, ModelSettings, PreparationOutcome, RequestedTarget,
     ResolvedTarget, TerminalEvidence,
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
@@ -64,13 +63,13 @@ async fn the_openai_api_completes_one_exchange() {
         .execute(prepared, &mut observations, CancellationSignal::never())
         .await;
     assert!(
-        decoded_response(&report.evidence, &observations),
+        decoded_response(&report.evidence),
         "Responses compatibility failed: {:?}",
         report.evidence
     );
 }
 
-fn decoded_response(evidence: &TerminalEvidence, _observations: &[Observation<String>]) -> bool {
+fn decoded_response(evidence: &TerminalEvidence) -> bool {
     let (exchange, model, usage) = match evidence {
         TerminalEvidence::Completed(completion)
             if matches!(
@@ -99,8 +98,8 @@ fn decoded_response(evidence: &TerminalEvidence, _observations: &[Observation<St
 mod tests {
     use super::*;
     use signalbox_model_runtime::{
-        CompletionEvidence, ExchangeFacts, ProviderErrorEvidence, ProviderMessageId,
-        ProviderReportedModel, TokenUsage,
+        CompletionEvidence, ExchangeFacts, NativeErrorFacts, ProviderErrorEvidence,
+        ProviderErrorKind, ProviderMessageId, ProviderReportedModel, RefusalEvidence, TokenUsage,
     };
 
     fn completion() -> CompletionEvidence {
@@ -127,7 +126,7 @@ mod tests {
             finish: CompletionFinish::MaxOutputTokens,
             ..completion()
         });
-        assert!(decoded_response(&evidence, &[]));
+        assert!(decoded_response(&evidence));
     }
     #[test]
     fn a_typed_refusal_with_usage_passes_compatibility() {
@@ -142,7 +141,7 @@ mod tests {
             retained_input_tokens: None,
             retained_output_tokens: None,
         });
-        assert!(decoded_response(&evidence, &[]));
+        assert!(decoded_response(&evidence));
     }
 
     #[test]
@@ -151,8 +150,24 @@ mod tests {
             usage: TokenUsage::unreported(),
             ..completion()
         });
-        assert!(!decoded_response(&evidence, &[]));
+        assert!(!decoded_response(&evidence));
     }
+    #[test]
+    fn refusal_with_reported_zero_output_passes_compatibility() {
+        let fixture = completion();
+        let evidence = TerminalEvidence::Refused(RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::Unspecified,
+            exchange: fixture.exchange,
+            message_id: fixture.message_id,
+            reported_model: fixture.reported_model,
+            content: Vec::new(),
+            usage: fixture.usage,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+        assert!(decoded_response(&evidence));
+    }
+
     #[test]
     fn native_error_is_not_mistaken_for_a_decoded_refusal() {
         let fixture = completion();
@@ -167,10 +182,6 @@ mod tests {
                 ..NativeErrorFacts::default()
             },
         });
-        let observations = vec![Observation {
-            correlation: "smoke".to_string(),
-            fact: ObservationFact::FinishReported(FinishReason::Refusal),
-        }];
-        assert!(!decoded_response(&evidence, &observations));
+        assert!(!decoded_response(&evidence));
     }
 }

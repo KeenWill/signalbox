@@ -1,8 +1,14 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("@rules_rust//cargo:defs.bzl", "extract_cargo_lints")
+load("@rules_rust//cargo:defs.bzl", "cargo_toml_env_vars", "extract_cargo_lints")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 exports_files(["Cargo.toml"])
+
+cargo_toml_env_vars(
+    name = "cargo_environment",
+    src = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
 
 extract_cargo_lints(
     name = "cargo_lints",
@@ -22,6 +28,7 @@ rust_library(
     edition = crate_edition(),
     lint_config = ":cargo_lints",
     proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -48,6 +55,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -59,6 +67,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -94,6 +103,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -105,6 +115,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -140,6 +151,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -151,6 +163,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -186,6 +199,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -197,6 +211,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -232,6 +247,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -243,6 +259,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -278,6 +295,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -289,6 +307,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -324,6 +343,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -335,6 +355,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -370,6 +391,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -381,6 +403,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -416,6 +439,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -427,6 +451,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -462,6 +487,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -473,6 +499,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -508,6 +535,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -519,6 +547,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -557,6 +586,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -568,6 +598,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -594,7 +625,10 @@ rust_test(
 rust_test(
     name = "runner_protocol_postgres",
     size = "large",
-    srcs = ["tests/runner_protocol_postgres.rs"] + glob(["tests/support/**/*.rs"]),
+    srcs = glob([
+        "tests/runner_protocol_postgres/**/*.rs",
+        "tests/support/**/*.rs",
+    ]),
     aliases = aliases(
         normal_dev = True,
         proc_macro_dev = True,
@@ -603,17 +637,19 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
     ],
-    crate_root = "tests/runner_protocol_postgres.rs",
+    crate_root = "tests/runner_protocol_postgres/main.rs",
     edition = crate_edition(),
     lint_config = ":cargo_lints",
     proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -652,6 +688,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -663,6 +700,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -698,6 +736,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -709,6 +748,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -744,6 +784,7 @@ rust_test(
         "--ignored",
         "--test-threads=16",
     ],
+    compile_data = ["//:tooling/postgres_test_image.rs"],
     crate_features = [
         "postgres-integration",
         "test-support",
@@ -755,6 +796,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
+    rustc_env_files = [":cargo_environment"],
     rustc_flags = [
         "--forbid=unsafe_code",
         "--deny=warnings",
@@ -798,4 +840,82 @@ test_suite(
         ":session_metadata_postgres",
         ":session_placement_postgres",
     ],
+)
+
+rust_test(
+    name = "unit_tests",
+    size = "large",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--test-threads=16"],
+    crate = ":signalbox_persistence",
+    crate_features = [
+        "default",
+        "postgres-integration",
+        "test-support",
+    ],
+    lint_config = ":cargo_lints",
+    proc_macro_deps = [] + all_crate_deps(proc_macro_dev = True),
+    rustc_flags = [
+        "--deny=warnings",
+        "--forbid=unsafe_code",
+    ],
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
+    ] + all_crate_deps(normal_dev = True),
+)
+
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]),
+    visibility = ["//:__pkg__"],
+)
+
+rust_test(
+    name = "importer_conformance_corpus",
+    size = "small",
+    srcs = ["tests/importer_conformance_corpus.rs"],
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = [
+        "--test-threads=16",
+    ],
+    compile_data = glob(["tests/fixtures/importer-conformance/*.jsonl"]),
+    crate_features = [
+        "postgres-integration",
+        "test-support",
+    ],
+    crate_root = "tests/importer_conformance_corpus.rs",
+    data = glob(["tests/fixtures/importer-conformance/golden/**"]) + ["//:.cargo/config.toml"],
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/persistence"},
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    deps = [
+        ":signalbox_persistence",
+        "//crates/application:signalbox_application",
+        "//crates/blob-store:signalbox_blob_store",
+        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
+        "//crates/domain:signalbox_domain",
+        "//crates/newtype:signalbox_newtype",
+        "//crates/tools-plan:signalbox_tools_plan",
+    ] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
 )
