@@ -36,7 +36,11 @@ The loss transaction resolves every unresolved runner-locus request in the batch
 that has neither an offered lease nor executor dispatch, including earlier
 approved requests when a later request parks the batch. It retires any existing
 approval and records the same retryable `closed_inadmissible` resolution and
-projection without creating an attempt row, then resumes batch evaluation.
+projection without creating an attempt row, then resumes batch evaluation. Any
+existing `Prepared` tool attempt is terminalized as `KnownFailed` with
+`placement_lost` in that transaction before the request closes, without lease
+offer or executor dispatch; its retained evidence adds no second result
+projection.
 
 A `Prepared` dedicated approval-judge call is retired without authorization in
 the same loss transaction that closes the request. If the call is in flight, the
@@ -163,20 +167,23 @@ A runner-locus request that loses placement before any lease offer or executor
 dispatch records a retryable failure without creating an attempt row; its
 retained `closed_inadmissible` resolution projects `ToolInadmissible` and counts
 toward batch completion. Loss retires existing approvals and records that
-resolution for every unresolved runner-locus request before dispatch, including
-earlier approved requests in a parked batch, then resumes batch evaluation. A
-prepared judge call is retired without authorization atomically with request
-closure; an in-flight judge call reaches its observation boundary first.
-Side-effecting offered attempts receive effect-class crash classification. A
-pure or idempotent offered attempt lost with its placement retains that attempt;
-after every other request resolves, a distinct pre-continuation takeover
-transaction installs the successor and consumes the staged replacement before a
-fresh physical attempt is offered there, without requiring the old and new
-runner ids to match. It projects no result and prepares no continuation. The
-request remains recovery-pending until that retry resolves; only then does the
-ordinary continuation transaction project the complete batch in proposal order.
-Executor-dispatched attempts otherwise complete or receive effect-class crash
-classification; placement loss never rewrites or cancels them.
+resolution only after terminalizing any existing `Prepared` tool attempt as
+`KnownFailed` with `placement_lost` in the same transaction, without dispatch or
+a second result projection. It records that resolution for every unresolved
+runner-locus request before dispatch, including earlier approved requests in a
+parked batch, then resumes batch evaluation. A prepared judge call is retired
+without authorization atomically with request closure; an in-flight judge call
+reaches its observation boundary first. Side-effecting offered attempts receive
+effect-class crash classification. A pure or idempotent offered attempt lost
+with its placement retains that attempt; after every other request resolves, a
+distinct pre-continuation takeover transaction installs the successor and
+consumes the staged replacement before a fresh physical attempt is offered
+there, without requiring the old and new runner ids to match. It projects no
+result and prepares no continuation. The request remains recovery-pending until
+that retry resolves; only then does the ordinary continuation transaction
+project the complete batch in proposal order. Executor-dispatched attempts
+otherwise complete or receive effect-class crash classification; placement loss
+never rewrites or cancels them.
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects
