@@ -91,6 +91,7 @@ pub(crate) struct WireOutputItem {
     #[serde(rename = "type")]
     pub kind: String,
     pub id: Option<String>,
+    pub status: Option<String>,
     pub role: Option<String>,
     pub content: Option<Vec<WireContent>>,
     pub call_id: Option<String>,

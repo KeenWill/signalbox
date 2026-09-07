@@ -21,7 +21,7 @@ pub(crate) fn classify_error(status: u16, code: Option<&str>) -> ProviderErrorKi
     }
     match code {
         Some("invalid_api_key") => ProviderErrorKind::CredentialRejected,
-        Some("invalid_request_error") => ProviderErrorKind::InvalidRequest,
+        Some("invalid_request_error" | "invalid_prompt") => ProviderErrorKind::InvalidRequest,
         Some("model_not_found") => ProviderErrorKind::TargetNotFound,
         Some("insufficient_quota") => ProviderErrorKind::QuotaExhausted,
         Some("context_length_exceeded") => ProviderErrorKind::RequestTooLarge,
@@ -180,6 +180,7 @@ mod tests {
         let rows = classification_rows(&[
             (401, "invalid_api_key"),
             (0, "invalid_request_error"),
+            (0, "invalid_prompt"),
             (404, "model_not_found"),
             (429, "insufficient_quota"),
             (400, "context_length_exceeded"),
@@ -205,6 +206,7 @@ mod tests {
             ├────────┼─────────────────────────┼────────────────────┤
             │    401 │ invalid_api_key         │ CredentialRejected │
             │      0 │ invalid_request_error   │ InvalidRequest     │
+            │      0 │ invalid_prompt          │ InvalidRequest     │
             │    404 │ model_not_found         │ TargetNotFound     │
             │    429 │ insufficient_quota      │ QuotaExhausted     │
             │    400 │ context_length_exceeded │ RequestTooLarge    │

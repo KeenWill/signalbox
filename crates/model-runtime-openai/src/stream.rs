@@ -335,7 +335,10 @@ impl StreamDecoder {
                 }
                 StreamStep::Continue
             }
-            other => self.violation(format!("unrecognized Responses event type {other:?}")),
+            other => {
+                self.discarded_unexamined_bytes = true;
+                self.violation(format!("unrecognized Responses event type {other:?}"))
+            }
         };
         if matches!(step, StreamStep::Continue) {
             self.flush_deltas(correlation, sink);
@@ -396,6 +399,9 @@ impl StreamDecoder {
     ) -> Result<(), String> {
         if response.id.as_deref().is_none_or(str::is_empty) {
             return Err("response event lacks its response id".to_string());
+        }
+        if response.model.as_deref().is_none_or(str::is_empty) {
+            return Err("response event lacks its reported model".to_string());
         }
         if let Some(id) = &response.id {
             if self
@@ -717,7 +723,7 @@ mod tests {
             {"type":"output_text","text":""},{"type":"output_text","text":"first"},
             {"type":"output_text","text":""},{"type":"output_text","text":"second"}
         ]});
-        let call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+        let call = json!({"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"});
         let refusal = json!({"type":"message","id":"msg_refusal","role":"assistant","content":[{"type":"refusal","refusal":"declined"}]});
         apply(
             &mut decoder,
@@ -1140,6 +1146,145 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn unknown_events_withhold_no_tool_evidence_without_erasing_opened_calls() {
+        for opened in [false, true] {
+            let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+            let mut sink = Vec::new();
+            if opened {
+                assert!(matches!(
+                    apply(
+                        &mut decoder,
+                        json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_fixture","delta":"{}"}),
+                        &mut sink
+                    ),
+                    StreamStep::Continue
+                ));
+            }
+            let StreamStep::Terminal(evidence) = apply(
+                &mut decoder,
+                json!({"type":"response.future_tool_event","future_tool":{"id":"tool_fixture"}}),
+                &mut sink,
+            ) else {
+                panic!("unknown event must fail closed");
+            };
+            let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+                panic!("unknown event is protocol loss");
+            };
+            assert!(matches!(
+                loss.cause,
+                LossCause::StreamProtocolViolation { .. }
+            ));
+            assert_eq!(
+                loss.tool_calls,
+                if opened {
+                    ToolCallsAtLoss::Opened
+                } else {
+                    ToolCallsAtLoss::Unobserved
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_events_require_nonempty_models_even_after_a_valid_snapshot() {
+        for kind in [
+            "response.created",
+            "response.in_progress",
+            "response.queued",
+        ] {
+            for prior_snapshot in [false, true] {
+                for model in [None, Some(Value::Null), Some(json!(""))] {
+                    let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                    let mut sink = Vec::new();
+                    if prior_snapshot {
+                        assert!(matches!(
+                            apply(
+                                &mut decoder,
+                                json!({"type":"response.created","response":{"id":"resp_fixture","model":"model-fixture","output":[]}}),
+                                &mut sink
+                            ),
+                            StreamStep::Continue
+                        ));
+                    }
+                    let mut event =
+                        json!({"type":kind,"response":{"id":"resp_fixture","output":[]}});
+                    if let Some(model) = model {
+                        event["response"]["model"] = model;
+                    }
+                    assert!(
+                        matches!(apply(&mut decoder, event, &mut sink), StreamStep::Terminal(evidence)
+                        if matches!(*evidence, TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            cause: LossCause::StreamProtocolViolation {..}, ..
+                        })))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_invalid_prompt_event_is_an_invalid_request_without_proof() {
+        let mut event = terminal();
+        event["type"] = json!("response.failed");
+        event["response"]["status"] = json!("failed");
+        event["response"]["error"] = json!({"code":"invalid_prompt","message":"prompt rejected"});
+        let TerminalEvidence::ProviderError(error) = decode(event) else {
+            panic!("accepted failure must retain definitive provider-error evidence");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::InvalidRequest);
+        assert_eq!(error.native.error_code.as_deref(), Some("invalid_prompt"));
+        assert!(!error.non_acceptance_proven);
+    }
+
+    #[test]
+    fn streamed_function_call_proposals_require_completed_item_status() {
+        for status in ["completed", "incomplete"] {
+            for item_status in [
+                None,
+                Some("in_progress"),
+                Some("incomplete"),
+                Some("future"),
+                Some("completed"),
+            ] {
+                let mut event = terminal();
+                event["type"] = json!(format!("response.{status}"));
+                event["response"]["status"] = json!(status);
+                event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                let mut call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+                if let Some(item_status) = item_status {
+                    call["status"] = json!(item_status);
+                }
+                event["response"]["output"] = json!([call]);
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                    panic!("terminal event must terminate");
+                };
+                if item_status == Some("completed") {
+                    assert!(matches!(*evidence, TerminalEvidence::Completed(_)));
+                    assert!(
+                        sink.iter()
+                            .any(|o| matches!(o.fact, ObservationFact::ToolCallProposed(_)))
+                    );
+                } else {
+                    assert!(matches!(
+                        *evidence,
+                        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            cause: LossCause::StreamProtocolViolation { .. },
+                            tool_calls: ToolCallsAtLoss::Opened,
+                            ..
+                        })
+                    ));
+                    assert!(!sink.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+            }
+        }
+    }
     #[test]
     fn terminal_response_requires_usage() {
         let mut event = terminal();
@@ -1428,7 +1573,7 @@ mod tests {
                     apply(
                         &mut decoder,
                         json!({"type":kind,"response":{
-                            "id":"resp_fixture","output":[{"type":item_kind,"id":"item_fixture"}]
+                            "id":"resp_fixture","model":"model-fixture","output":[{"type":item_kind,"id":"item_fixture"}]
                         }}),
                         &mut Vec::new()
                     ),
@@ -1465,7 +1610,7 @@ mod tests {
     #[test]
     fn malformed_snapshot_output_withholds_the_no_tool_claim() {
         let evidence = decode(json!({"type":"response.in_progress","response":{
-            "id":"resp_fixture","output":[{"type":"function_call","arguments":42}]
+            "id":"resp_fixture","model":"model-fixture","output":[{"type":"function_call","arguments":42}]
         }}));
         assert!(matches!(
             evidence,
@@ -1508,7 +1653,7 @@ mod tests {
         apply(
             &mut decoder,
             json!({"type":"response.output_item.added","output_index":0,
-            "item":{"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":""}}),
+            "item":{"type":"function_call","id":"fc_fixture","status":"in_progress","call_id":"call_fixture","name":"lookup","arguments":""}}),
             &mut sink,
         );
         assert!(

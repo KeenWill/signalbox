@@ -1169,13 +1169,13 @@ data: {"type":"response.completed","response":{"object":"response","id":"chatcmp
 async fn json_escaped_streamed_tool_arguments_are_redacted_before_observation() {
     let body: &[u8] = br#"data: {"type":"response.created","response":{"object":"response","id":"chatcmpl-tool","model":"model-exact-1","status":"in_progress","output":[]}}
 
-data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_fixture","call_id":"call_1","name":"lookup","arguments":""}}
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_fixture","status":"in_progress","call_id":"call_1","name":"lookup","arguments":""}}
 
 data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_fixture","delta":"{\"token\":\"key_\\u00"}
 
 data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_fixture","delta":"6coop\"}"}
 
-data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl-tool","model":"model-exact-1","status":"completed","output":[{"type":"function_call","id":"fc_fixture","call_id":"call_1","name":"lookup","arguments":"{\"token\":\"key_\\u006coop\"}"}],"usage":{"input_tokens":4,"output_tokens":2}}}
+data: {"type":"response.completed","response":{"object":"response","id":"chatcmpl-tool","model":"model-exact-1","status":"completed","output":[{"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_1","name":"lookup","arguments":"{\"token\":\"key_\\u006coop\"}"}],"usage":{"input_tokens":4,"output_tokens":2}}}
 
 "#;
     let server = CannedServer::serving(vec![http_response(

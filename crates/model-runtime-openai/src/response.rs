@@ -49,6 +49,9 @@ pub(crate) fn output_tool_calls(
 }
 
 pub(crate) fn convert_tool_call(item: &WireOutputItem) -> Result<ToolCallProposal, String> {
+    if item.status.as_deref() != Some("completed") {
+        return Err("function call item is not completed".to_string());
+    }
     let (Some(id), Some(name), Some(arguments)) = (&item.call_id, &item.name, &item.arguments)
     else {
         return Err("function call lacks call_id, name, or arguments".to_string());
@@ -366,7 +369,7 @@ mod tests {
             value["output"] = json!([{"type":"web_search_call","id":"ws_fixture"}]);
             if known_call {
                 value["output"].as_array_mut().unwrap().push(json!({
-                    "type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"
+                    "type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"
                 }));
             }
             let (TerminalEvidence::BoundaryLoss(loss), _) = decode(value) else {
@@ -471,6 +474,66 @@ mod tests {
     }
 
     #[test]
+    fn accepted_invalid_prompt_failure_is_an_invalid_request_without_proof() {
+        let mut value = response();
+        value["status"] = json!("failed");
+        value["error"] = json!({"code":"invalid_prompt","message":"prompt rejected"});
+        let (TerminalEvidence::ProviderError(error), _) = decode(value) else {
+            panic!("accepted failure must retain definitive provider-error evidence");
+        };
+        assert_eq!(
+            error.kind,
+            signalbox_model_runtime::ProviderErrorKind::InvalidRequest
+        );
+        assert_eq!(error.native.error_code.as_deref(), Some("invalid_prompt"));
+        assert_eq!(error.exchange.http_status, Some(200));
+        assert!(!error.non_acceptance_proven);
+    }
+
+    #[test]
+    fn buffered_function_call_proposals_require_completed_item_status() {
+        for status in ["completed", "incomplete"] {
+            for item_status in [
+                None,
+                Some("in_progress"),
+                Some("incomplete"),
+                Some("future"),
+                Some("completed"),
+            ] {
+                let mut value = response();
+                value["status"] = json!(status);
+                value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                let mut call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+                if let Some(item_status) = item_status {
+                    call["status"] = json!(item_status);
+                }
+                value["output"] = json!([call]);
+                let (evidence, observations) = decode(value);
+                if item_status == Some("completed") {
+                    assert!(matches!(evidence, TerminalEvidence::Completed(_)));
+                    assert!(
+                        observations
+                            .iter()
+                            .any(|o| matches!(o.fact, ObservationFact::ToolCallProposed(_)))
+                    );
+                } else {
+                    assert!(matches!(
+                        evidence,
+                        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            tool_calls: ToolCallsAtLoss::Opened,
+                            ..
+                        })
+                    ));
+                    assert!(!observations.iter().any(|o| matches!(
+                        o.fact,
+                        ObservationFact::FinishReported(_) | ObservationFact::ToolCallProposed(_)
+                    )));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn failed_envelope_keeps_provider_error_when_output_is_not_an_array() {
         for output in [json!({}), json!("invalid"), json!(42)] {
             let mut value = response();
@@ -546,7 +609,7 @@ mod tests {
             for item in [
                 json!({"type":"message","id":"msg_second","role":"assistant","content":[{"type":"output_text","text":"after"}]}),
                 json!({"type":"reasoning","id":"rs_fixture","summary":[]}),
-                json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"}),
+                json!({"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"}),
             ] {
                 let mut value = response();
                 value["status"] = json!(status);
@@ -592,7 +655,7 @@ mod tests {
     fn interleaved_text_and_function_calls_keep_provider_order() {
         let mut value = response();
         value["output"] = json!([
-            {"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"},
+            {"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"},
             {"type":"message","id":"msg_fixture","role":"assistant","content":[{"type":"output_text","text":"after"}]}]);
         let (TerminalEvidence::Completed(result), _) = decode(value) else {
             panic!("ordered response decodes");
@@ -607,7 +670,7 @@ mod tests {
     #[test]
     fn duplicate_function_call_ids_are_boundary_loss_with_opened_tools() {
         let mut value = response();
-        let call = json!({"type":"function_call","id":"fc_fixture","call_id":"same","name":"lookup","arguments":"{}"});
+        let call = json!({"type":"function_call","id":"fc_fixture","status":"completed","call_id":"same","name":"lookup","arguments":"{}"});
         value["output"] = json!([call, call]);
         let (TerminalEvidence::BoundaryLoss(loss), _) = decode(value) else {
             panic!("duplicate calls fail closed");
@@ -618,7 +681,7 @@ mod tests {
     #[test]
     fn malformed_tool_calls_are_not_fabricated_into_proposals() {
         for field in ["call_id", "name", "arguments"] {
-            let mut call = json!({"type":"function_call","id":"fc_fixture","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+            let mut call = json!({"type":"function_call","id":"fc_fixture","status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"});
             call.as_object_mut().unwrap().remove(field);
             let mut value = response();
             value["output"] = json!([call]);
