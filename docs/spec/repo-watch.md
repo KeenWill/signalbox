@@ -131,15 +131,16 @@ these tasks, the configured webhook listener, and one serialized command worker
 beside the convergence sweep, and drains them before closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
-repository before accepting a delivery. Primary hooks wake the repository task;
-shadow hooks acknowledge without waking it. The runtime's `reload_configuration`
-reconciles rule revisions and replaces listener settings inside the reload.
-Enabled rule templates must resolve before composition or reload. Stale or
-conflicting rule revisions fail reload without replacing the running
-configuration. Same-address changes swap the path and hook map atomically;
-address changes bind a replacement before retiring the running listener, and a
-bind failure preserves the running settings. In-flight deliveries retry against
-the replacement configuration.
+repository before accepting a delivery. An empty resolved webhook secret is
+unavailable. Primary hooks wake the repository task; shadow hooks acknowledge
+without waking it. The runtime's `reload_configuration` reconciles rule
+revisions and replaces listener settings inside the reload. Enabled rule
+templates must resolve before composition or reload. Stale or conflicting rule
+revisions fail reload without replacing the running configuration. Same-address
+changes swap the path and hook map atomically; address changes bind a
+replacement before retiring the running listener, and a bind failure preserves
+the running settings. In-flight deliveries retry against the replacement
+configuration.
 
 Lifecycle reactions accept only `session_terminal` or `goal_changed` inputs and
 only `release_start` or sticky-stop lifecycle commands. These are the command

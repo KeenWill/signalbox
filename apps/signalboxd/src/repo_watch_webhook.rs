@@ -220,6 +220,9 @@ async fn delivery(
         let Ok(credential) = credential else {
             return StatusCode::SERVICE_UNAVAILABLE;
         };
+        if credential.expose_bytes().is_empty() {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
         if hmac::verify(
             &hmac::Key::new(hmac::HMAC_SHA256, credential.expose_bytes()),
             &body,
@@ -244,5 +247,67 @@ async fn delivery(
             hook.wake.notify_one();
         }
         return StatusCode::ACCEPTED;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    #[tokio::test]
+    async fn empty_resolved_secrets_reject_signed_deliveries_without_waking_the_repository() {
+        const FIXTURE_HOOK_ID: u64 = 17;
+        const FIXTURE_PATH: &str = "/webhook";
+        const FIXTURE_BODY: &[u8] = br#"{"repository":{"full_name":"example/project"}}"#;
+        let directory = tempfile::tempdir().expect("credential directory");
+        let path = directory.path().join("hook-secret");
+        let reference = CredentialReference::new("repository-watch:example/project:webhook");
+        let wake = Arc::new(Notify::new());
+        let routing = Arc::new(RwLock::new(Arc::new(Routing {
+            path: FIXTURE_PATH.to_owned(),
+            hooks: BTreeMap::from([(
+                FIXTURE_HOOK_ID,
+                Hook {
+                    repository: RepositorySlug::try_new(String::from("example/project"))
+                        .expect("repository slug"),
+                    credentials: FileCredentialAccess::new(path.clone(), reference.clone()),
+                    reference,
+                    mode: RepositoryWatchWebhookMode::Primary,
+                    wake: wake.clone(),
+                },
+            )]),
+        })));
+        let empty_key_signature = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, b""), FIXTURE_BODY);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-github-hook-id",
+            FIXTURE_HOOK_ID.to_string().parse().expect("hook header"),
+        );
+        headers.insert(
+            "x-hub-signature-256",
+            format!("sha256={}", hex::encode(empty_key_signature.as_ref()))
+                .parse()
+                .expect("signature header"),
+        );
+        for file_bytes in [b"".as_slice(), b"\r\n".as_slice(), b"\n\r\n".as_slice()] {
+            std::fs::write(&path, file_bytes).expect("write empty resolved secret");
+            assert_eq!(
+                delivery(
+                    State(routing.clone()),
+                    Method::POST,
+                    FIXTURE_PATH.parse().expect("webhook URI"),
+                    headers.clone(),
+                    Bytes::from_static(FIXTURE_BODY),
+                )
+                .await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "secret file bytes: {file_bytes:?}"
+            );
+            assert!(
+                wake.notified().now_or_never().is_none(),
+                "rejected delivery must not wake the repository: {file_bytes:?}"
+            );
+        }
     }
 }
