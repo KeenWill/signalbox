@@ -199,7 +199,8 @@ input or repository credentials and stamps the module issuer on creation claims;
 pull-request dispatch provisions the watched repository at the session's derived
 workspace root, on the retained head branch and SHA, before completing held
 creation. The ledger records checkout path `.` and the provisioned SHA. Git uses
-the polling credential only in its invocation environment; provisioning failure
+the polling credential only in its invocation environment, scoped to the watched
+repository URL; fork heads are fetched unauthenticated. Provisioning failure
 retires the dispatch as `checkout_provisioning_failed` with the failing step and
 exit status and stops the session. Retired dispatches and terminal sessions lose
 their provisioned checkout; startup scavenges retained checkouts awaiting
