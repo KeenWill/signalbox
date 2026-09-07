@@ -124,6 +124,12 @@ pub trait CliSession<C>: marker::Sized {
     fn correlation(&self) -> &C;
     fn terminal_text_capture(&self) -> CliTerminalTextCapture;
     fn terminal_observed(&self) -> bool;
+    fn keeps_stdin_open(&self) -> bool {
+        /* provided */
+    }
+    fn take_stdin_frame(&mut self) -> option::Option<vec::Vec<u8>> {
+        /* provided */
+    }
     fn push(
         &mut self,
         line: &[u8],
