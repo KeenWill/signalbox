@@ -750,6 +750,10 @@ async fn terminal_session_removes_its_checkout_without_following_tracked_symlink
     std::fs::create_dir(&outside)?;
     std::fs::write(outside.join("keep.txt"), "outside the checkout")?;
     std::os::unix::fs::symlink(&outside, root.join("outside"))?;
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
     scavenge_checkouts(&fixture.store, &fixture.core, &fixture.sink.models)
         .await
         .expect("active checkout retained");
@@ -774,13 +778,37 @@ async fn terminal_session_removes_its_checkout_without_following_tracked_symlink
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn startup_scavenges_retired_checkouts_without_repository_watch_configuration()
+async fn startup_scavenges_interrupted_retirements_without_repository_watch_configuration()
 -> Result<(), Box<dyn Error>> {
+    assert_startup_scavenges_interrupted_checkout(true).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn startup_scavenges_interrupted_terminal_checkouts_without_repository_watch_configuration()
+-> Result<(), Box<dyn Error>> {
+    assert_startup_scavenges_interrupted_checkout(false).await
+}
+
+async fn assert_startup_scavenges_interrupted_checkout(
+    retired: bool,
+) -> Result<(), Box<dyn Error>> {
     use signalboxd::repo_watch_dispatch::scavenge_checkouts;
     let mut fixture = CheckoutFixture::new().await?;
-    fixture.runner.bare = fixture.runner.bare.with_file_name("missing.git");
+    if retired {
+        fixture.runner.bare = fixture.runner.bare.with_file_name("missing.git");
+    }
     fixture.dispatch().await;
-    let root = fixture.root(fixture.session().await);
+    let session = fixture.session().await;
+    if !retired {
+        fixture.stop(session).await;
+    }
+    // The checkout disposition survived; command follow-up completion did not.
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    let root = fixture.root(session);
     assert!(root.is_dir());
     let restarted = RepoWatchStore::new(fixture.module.clone());
     let configuration = HubModelConfiguration::parse(
@@ -806,6 +834,13 @@ async fn startup_scavenges_retired_checkouts_without_repository_watch_configurat
         .await
         .expect("startup scavenges retired checkout");
     assert!(!root.exists());
+    let flags: (bool, bool) = sqlx::query_as(
+        "SELECT submission_pending, checkout_removed FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert_eq!(flags, (true, true));
     scavenge_checkouts(&restarted, &fixture.core, &configuration)
         .await
         .expect("repeated startup is idempotent");
