@@ -209,7 +209,8 @@ pub(crate) fn decode_response<C: Clone>(
     sink: &mut (dyn ObservationSink<C> + Send),
 ) -> TerminalEvidence {
     let reported_model = response.model.clone().map(ProviderReportedModel::new);
-    if let Some(reported) = &response.usage {
+    let reported_usage = response.reported_usage();
+    if let Ok(Some(reported)) = &reported_usage {
         usage.absorb(convert_usage(reported));
     }
     if let Some(model) = &reported_model {
@@ -219,7 +220,7 @@ pub(crate) fn decode_response<C: Clone>(
             ObservationFact::ProviderModelReported(model.clone()),
         );
     }
-    if response.usage.is_some() || usage != TokenUsage::unreported() {
+    if reported_usage.as_ref().is_ok_and(Option::is_some) || usage != TokenUsage::unreported() {
         emit(correlation, sink, ObservationFact::UsageReported(usage));
     }
     if response.status.as_deref() == Some("failed")
@@ -252,6 +253,23 @@ pub(crate) fn decode_response<C: Clone>(
             "completed response carries incomplete details".to_string(),
             None,
         );
+    }
+    if let Err(error) = reported_usage {
+        let finish = response
+            .status
+            .as_deref()
+            .map(|status| {
+                map_terminal(
+                    status,
+                    response
+                        .incomplete_details
+                        .as_ref()
+                        .map(|details| details.reason.as_str()),
+                    tool_calls,
+                )
+            })
+            .filter(|finish| !matches!(finish, FinishReason::Unrecognized { .. }));
+        return loss(error.to_string(), finish);
     }
     if response.object.as_deref() != Some("response")
         || response.id.as_deref().is_none_or(str::is_empty)
@@ -935,6 +953,27 @@ mod tests {
             result.content,
             vec![AssistantPart::Text("declined".to_string())]
         );
+    }
+
+    #[test]
+    fn malformed_usage_preserves_buffered_terminal_facts() {
+        let mut value = response();
+        value["status"] = json!("incomplete");
+        value["incomplete_details"] = json!({"reason":"max_output_tokens"});
+        value["usage"] = json!([]);
+        let (TerminalEvidence::BoundaryLoss(loss), observations) = decode(value) else {
+            panic!("malformed usage must remain boundary loss");
+        };
+        assert_eq!(loss.finish_reported, Some(FinishReason::MaxOutputTokens));
+        assert_eq!(
+            loss.reported_model,
+            Some(ProviderReportedModel::new("model-fixture"))
+        );
+        assert_eq!(loss.usage, TokenUsage::unreported());
+        assert!(!observations.iter().any(|observation| matches!(
+            observation.fact,
+            ObservationFact::UsageReported(_) | ObservationFact::FinishReported(_)
+        )));
     }
 
     #[test]

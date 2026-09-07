@@ -32,6 +32,13 @@ struct ObservedContent {
     complete: bool,
 }
 
+#[derive(Eq, PartialEq)]
+struct CompletedFunctionCall {
+    call_id: Option<String>,
+    name: Option<String>,
+    status: Option<String>,
+}
+
 #[derive(Default)]
 struct ItemParts {
     kind: Option<String>,
@@ -39,6 +46,7 @@ struct ItemParts {
     content: BTreeMap<u32, ObservedContent>,
     complete: bool,
     item_done: bool,
+    completed_call: Option<CompletedFunctionCall>,
 }
 
 impl ItemParts {
@@ -494,8 +502,10 @@ impl StreamDecoder {
                 if matches!(
                     event.kind.as_str(),
                     "response.content_part.added" | "response.content_part.done"
-                ) && let Some(part) = event.part
-                {
+                ) {
+                    let Some(part) = event.part else {
+                        return self.violation("content part event lacks part");
+                    };
                     let Some(content_index) = event.content_index else {
                         return self.violation("content part lacks content index");
                     };
@@ -557,6 +567,9 @@ impl StreamDecoder {
         {
             self.finish_reported = Some(map_terminal("completed", None, self.tool_calls_at_loss()));
         }
+        response
+            .reported_usage()
+            .map_err(|error| error.to_string())?;
         if matches!(response.status.as_deref(), Some("completed" | "incomplete")) {
             let length = u32::try_from(output.as_ref().map_or(0, Vec::len))
                 .map_err(|error| error.to_string())?;
@@ -637,8 +650,8 @@ impl StreamDecoder {
             }
             self.reported_model = Some(model);
         }
-        if let Some(usage) = &response.usage {
-            self.usage.absorb(convert_usage(usage));
+        if let Ok(Some(usage)) = response.reported_usage() {
+            self.usage.absorb(convert_usage(&usage));
         }
     }
 
@@ -666,6 +679,23 @@ impl StreamDecoder {
         match item.kind.as_str() {
             "reasoning" => layout.finish(BTreeMap::new())?,
             "function_call" => {
+                let identity = CompletedFunctionCall {
+                    call_id: item.call_id.clone(),
+                    name: item.name.clone(),
+                    status: item.status.clone(),
+                };
+                if layout
+                    .completed_call
+                    .as_ref()
+                    .is_some_and(|previous| previous != &identity)
+                {
+                    return Err(
+                        "completed function call changed its call id, name, or status".to_string(),
+                    );
+                }
+                if complete {
+                    layout.completed_call = Some(identity);
+                }
                 if let Some(arguments) = item.arguments.as_deref() {
                     layout.observe_snapshot(0, "function_call_arguments", arguments, complete)?;
                 }
@@ -880,6 +910,130 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn completed_function_call_identity_must_survive_repeated_snapshots() {
+        for terminal_snapshot in [false, true] {
+            for replacement in [
+                None,
+                Some(("call_id", json!("call_changed"))),
+                Some(("name", json!("changed_tool"))),
+                Some(("status", json!("incomplete"))),
+                Some(("call_id", Value::Null)),
+                Some(("name", Value::Null)),
+                Some(("status", Value::Null)),
+            ] {
+                let mut item = json!({"type":"function_call","id":"fc_fixture",
+                    "status":"completed","call_id":"call_fixture","name":"lookup","arguments":"{}"});
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                assert!(matches!(
+                    apply(
+                        &mut decoder,
+                        json!({
+                            "type":"response.output_item.done","output_index":0,"item":item
+                        }),
+                        &mut sink
+                    ),
+                    StreamStep::Continue
+                ));
+                if let Some((field, value)) = &replacement {
+                    item[*field] = value.clone();
+                }
+                let event = if terminal_snapshot {
+                    let mut event = terminal();
+                    event["response"]["output"] = json!([item]);
+                    event
+                } else {
+                    json!({"type":"response.output_item.done","output_index":0,"item":item})
+                };
+                let step = apply(&mut decoder, event, &mut sink);
+                if replacement.is_some() {
+                    assert!(matches!(step, StreamStep::Terminal(evidence) if matches!(
+                        *evidence, TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            cause: LossCause::StreamProtocolViolation { .. },
+                            tool_calls: ToolCallsAtLoss::Opened, ..
+                        })
+                    )));
+                    assert!(!sink.iter().any(|observation| matches!(
+                        observation.fact,
+                        ObservationFact::ToolCallProposed(_) | ObservationFact::FinishReported(_)
+                    )));
+                } else if terminal_snapshot {
+                    assert!(matches!(step, StreamStep::Terminal(evidence)
+                        if matches!(*evidence, TerminalEvidence::Completed(_))));
+                } else {
+                    assert!(matches!(step, StreamStep::Continue));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn content_part_events_require_the_part_payload() {
+        for kind in ["response.content_part.added", "response.content_part.done"] {
+            for explicit_null in [false, true] {
+                let mut event = json!({"type":kind,"output_index":0,
+                    "content_index":0,"item_id":"msg_fixture"});
+                if explicit_null {
+                    event["part"] = Value::Null;
+                }
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                assert!(matches!(apply(&mut decoder, event, &mut sink),
+                    StreamStep::Terminal(evidence) if matches!(*evidence,
+                        TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            cause: LossCause::StreamProtocolViolation { .. }, ..
+                        })
+                    )
+                ));
+                assert!(sink.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_terminal_usage_retains_the_model_and_recognized_finish() {
+        for status in ["completed", "incomplete"] {
+            for usage in [json!([]), json!("invalid"), json!({"output_tokens":-1})] {
+                let mut event = terminal();
+                event["type"] = json!(format!("response.{status}"));
+                event["response"]["status"] = json!(status);
+                event["response"]["usage"] = usage;
+                let expected_finish = if status == "incomplete" {
+                    event["response"]["incomplete_details"] = json!({"reason":"max_output_tokens"});
+                    FinishReason::MaxOutputTokens
+                } else {
+                    FinishReason::EndTurn
+                };
+                let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+                let mut sink = Vec::new();
+                let StreamStep::Terminal(evidence) = apply(&mut decoder, event, &mut sink) else {
+                    panic!("malformed usage must terminate");
+                };
+                let TerminalEvidence::BoundaryLoss(loss) = *evidence else {
+                    panic!("malformed usage must remain boundary loss");
+                };
+                assert!(matches!(
+                    loss.cause,
+                    LossCause::StreamProtocolViolation { .. }
+                ));
+                assert_eq!(
+                    loss.reported_model,
+                    Some(ProviderReportedModel::new("model-fixture"))
+                );
+                assert_eq!(loss.finish_reported, Some(expected_finish));
+                assert_eq!(loss.usage, TokenUsage::unreported());
+                assert_eq!(sink.len(), 1);
+                assert_eq!(
+                    sink[0].fact,
+                    ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                        "model-fixture"
+                    ))
+                );
+            }
+        }
+    }
+
     #[test]
     fn content_done_values_reconcile_with_deltas_and_terminal_snapshots() {
         for (family, field) in [
@@ -2208,6 +2362,10 @@ mod tests {
                 );
                 let mut event = json!({"type":kind,"output_index":0,"item_id":id});
                 match kind {
+                    "response.content_part.added" | "response.content_part.done" => {
+                        event["content_index"] = json!(0);
+                        event["part"] = json!({"type":"output_text","text":"ready"});
+                    }
                     "response.output_text.done" => {
                         event["content_index"] = json!(0);
                         event["text"] = json!("ready");

@@ -69,7 +69,7 @@ pub(crate) struct Response {
     pub status: Option<String>,
     pub incomplete_details: Option<IncompleteDetails>,
     pub output: Option<Box<RawValue>>,
-    pub usage: Option<WireUsage>,
+    pub usage: Option<Box<RawValue>>,
     pub error: Option<ResponseError>,
 }
 
@@ -96,9 +96,7 @@ impl TryFrom<ResponseEnvelope> for Response {
                 model: envelope
                     .model
                     .and_then(|raw| serde_json::from_str(raw.get()).ok()),
-                usage: envelope
-                    .usage
-                    .and_then(|raw| serde_json::from_str(raw.get()).ok()),
+                usage: envelope.usage,
                 id: None,
                 object: None,
                 incomplete_details: None,
@@ -124,16 +122,20 @@ impl TryFrom<ResponseEnvelope> for Response {
                 .map(|raw| serde_json::from_str(raw.get()))
                 .transpose()?,
             output: envelope.output,
-            usage: envelope
-                .usage
-                .map(|raw| serde_json::from_str(raw.get()))
-                .transpose()?,
+            usage: envelope.usage,
             error: envelope.error,
         })
     }
 }
 
 impl Response {
+    pub(crate) fn reported_usage(&self) -> Result<Option<WireUsage>, serde_json::Error> {
+        self.usage
+            .as_ref()
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose()
+    }
+
     pub(crate) fn output_items(&self) -> Result<Option<Vec<Box<RawValue>>>, serde_json::Error> {
         self.output
             .as_ref()
