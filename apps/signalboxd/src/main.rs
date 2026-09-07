@@ -61,17 +61,16 @@ use signalboxd::runner_protocol_runtime::{
 use signalboxd::{
     AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs, BlobStoreRegistry, BlobTools,
     CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds, ConfiguredApprovalPostureError,
-    ContextGuardedTurnPass, ConvergenceSweepNumericBounds, DaemonToolCatalog,
-    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, ExpiredPassRecoveryPolicy,
-    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
-    FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
-    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError,
-    LifecycleDeadlineRuntime, LifecycleMetricsRuntime, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    ReportedUsageCompaction, SessionTemplateConfiguration, SessionTemplateConfigurationError,
-    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
-    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    ContextGuardedTurnPass, ConvergenceSweepNumericBounds, DaemonTools,
+    DaemonToolsConstructionError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation, FileCredentialAccess,
+    GitHubCodeHostTransport, GoalModeNumericBounds, HubModelConfiguration,
+    HubModelConfigurationError, LifecycleDeadlineRuntime, LifecycleMetricsRuntime,
+    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, OtlpRuntime,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
     reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
@@ -1425,20 +1424,6 @@ async fn run_hub(
         ));
     }
     let daemon_tool_configuration = model_configuration.daemon_tools();
-    let tool_composition = match daemon_tool_configuration {
-        Some(_) => DaemonToolComposition::WithMappedFamilies,
-        None => DaemonToolComposition::Base,
-    };
-    DaemonToolCatalog::validate_approval_postures_for_composition(
-        model_configuration.tool_approval_postures(),
-        tool_composition,
-    )
-    .map_err(|error| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
-        )
-    })?;
     let template_configuration = match retained_startup {
         Some(catalogs) => (*catalogs.templates).clone(),
         None => SessionTemplateConfiguration::read(
@@ -1908,12 +1893,34 @@ async fn run_hub(
         Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
         None => None,
     };
-    configuration_reload.recover().await.map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::StartupScan,
-            SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
-        )
-    })?;
+    let recovery_failure =
+        match await_while_guarded(&mut database, configuration_reload.recover()).await {
+            GuardedAwait::Completed(Ok(())) => None,
+            GuardedAwait::Completed(Err(_)) => Some(Err(erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
+            ))),
+            GuardedAwait::GuardLost => Some(Ok(ShutdownOutcome::GuardLost)),
+        };
+    if let Some(outcome) = recovery_failure {
+        if matches!(outcome, Ok(ShutdownOutcome::GuardLost)) {
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+        } else {
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+        }
+        let _ = repository_watch_shutdown.send(true);
+        if let Some(worker) = repository_watch_worker {
+            let _ = worker.await;
+        }
+        let _ = listener.cleanup();
+        let _ = runner_listener.cleanup();
+        drop(tool_executor);
+        drop(blob_store_registry);
+        let _ = database.close().await;
+        return outcome;
+    }
     let recovered_catalogs = configuration_reload.catalogs();
     let model_configuration = (*recovered_catalogs.models).clone();
     let template_configuration = (*recovered_catalogs.templates).clone();

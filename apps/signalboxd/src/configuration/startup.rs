@@ -144,6 +144,17 @@ pub(super) fn parse_startup(
         parse_credential_pools(document.get("credential_pools"), &credential_profiles)?;
     let tool_approval_postures =
         parse_tool_approval_postures(document.get("tool_approval_postures"))?;
+    let tool_composition = match daemon_tools {
+        Some(_) => crate::DaemonToolComposition::WithMappedFamilies,
+        None => crate::DaemonToolComposition::Base,
+    };
+    crate::DaemonToolCatalog::validate_approval_postures_for_composition(
+        tool_approval_postures
+            .iter()
+            .map(|(name, posture)| (name.clone(), *posture)),
+        tool_composition,
+    )
+    .map_err(|_| HubModelConfigurationError::InvalidToolApprovalPostures)?;
     let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
     #[derive(serde::Deserialize)]
     struct ConvergenceSection {
@@ -374,6 +385,24 @@ pub(super) fn parse_startup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_validation_rejects_mapped_tool_postures_without_mappings() {
+        let models = crate::configuration::checked_in_example_configuration().expect("models");
+        let mut document = models.source().parse::<DocumentMut>().expect("document");
+        let mut postures = toml_edit::Table::new();
+        postures.insert(
+            signalbox_tools_exec::SANDBOXED_EXEC_NAME,
+            toml_edit::value("delegated"),
+        );
+        document.insert("tool_approval_postures", toml_edit::Item::Table(postures));
+        assert!(HubModelConfiguration::startup_numeric_bounds(&document.to_string()).is_ok());
+        document.remove("tool_mappings");
+        assert_eq!(
+            HubModelConfiguration::startup_numeric_bounds(&document.to_string()).err(),
+            Some(HubModelConfigurationError::InvalidToolApprovalPostures)
+        );
+    }
 
     #[test]
     fn startup_validation_rejects_unknown_document_fields() {
