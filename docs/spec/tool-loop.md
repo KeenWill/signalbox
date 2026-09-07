@@ -79,6 +79,21 @@ continuation transaction projects the results and prepares the next model call.
 An approval wait is a stored active-turn phase that names the earliest undecided
 request and survives restart.
 
+A runner-locus request whose placement is lost before a lease offer or executor
+dispatch records `closed_inadmissible` with reason `placement_lost`. The loss
+transaction closes every such unresolved request in the batch, including earlier
+approved requests in a parked batch, retires existing approvals, and resumes
+batch evaluation without creating an attempt or result entry. An existing
+`Prepared` attempt first terminalizes `KnownFailed` with `execution_failed` and
+detail `placement_lost`; a `Prepared` approval judge retires without
+authorization. An in-flight judge reaches its observation boundary before its
+resulting approval retires and the request closes in that same transaction.
+Continuation projects one reference-only `ToolInadmissible { request }` in
+proposal order, rendered as `execution_failed` with detail `placement_lost`; it
+counts toward batch completion and survives interrupt, crash-loss, and
+reconciliation materialization. Placement loss never rewrites or cancels
+dispatched work.
+
 ## Design decisions
 
 A turn is the logical conversational outcome; a model call and a turn attempt
@@ -225,8 +240,8 @@ Approval visits requests in proposal order and the turn parks on the earliest
 undecided request. No request in a batch executes while any request in that
 batch is undecided. A turn has at most one live tool attempt, and approved
 requests execute in proposal order. The next model round does not begin until
-every request has one durable logical resolution: executed, denied, or closed by
-turn end.
+every request has one durable logical resolution: executed, denied,
+inadmissible, or closed by turn end.
 
 A declaration without an explicit posture follows one precedence: an
 `AlwaysConfirm` declaration is consulted before any blanket and stays undecided
@@ -245,14 +260,14 @@ prompt carries the session's commissioned goal, template, frozen system prompt,
 and optional dispatch authority, each separately delimited and quoted as
 untrusted evidence, and the prompt treats them as scope to compare with the
 request, never as instruction. Outside a turn judged under the commissioned
-generation's dispatch authority, an `EscalateToHuman` result stores the
-completed call but no decision and leaves the same request parked. A
-commissioned dispatch also keeps the request parked while its authority stands
-or when the turn has pending steering. Once that authority is withdrawn, an
-escalation with no pending steering terminalizes the unattended turn under the
-commissioned-dispatch audit. A `KnownFailed`, `Refused`, `Cancelled`, or
-`Ambiguous` terminal judge call retains the attended park while immediately
-admitting a user decision.
+generation's dispatch authority, an `EscalateToHuman` result for a request still
+admissible stores the completed call but no decision and leaves the same request
+parked. A commissioned dispatch also keeps the request parked while its
+authority stands or when the turn has pending steering. Once that authority is
+withdrawn, an escalation with no pending steering terminalizes the unattended
+turn under the commissioned-dispatch audit. A `KnownFailed`, `Refused`,
+`Cancelled`, or `Ambiguous` terminal judge call for an admissible request
+retains the attended park while immediately admitting a user decision.
 
 Deny-and-end composes the recorded denial with the applied-interrupt stop path,
 and the interrupt remains the proof-bearing authority for ending the turn. An
@@ -473,20 +488,34 @@ Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round
 trips under the scheduler lock.
 
+`spawn_session` declares a task plus a relationship, either background or bound
+with separately labeled actions for the parent stopping and the parent being
+cancelled. The creation transaction atomically creates one delegated no-ancestry
+child and its initial task work, closes the spawning physical attempt with its
+matching receipt, derives the child's placement default from its parent's
+directory, and returns the child session identity as a durable completion. The
+child's initial task is not accepted user input: the spawn transition records a
+`DelegatedTask` origin bound to the spawning request and its parent session and
+turn, and the child's first turn starts from that entry with no accepted-input
+row or user actor invented. Equal physical replay returns that child and reuses
+the same semantic entry and turn origin; a second child cannot attach to the
+request. There is no fixed active-child-count limit; admission checks the
+complete locked relationship inventory for request and child uniqueness.
+
+The daemon nudges the child for eligibility after its spawn commits, retaining
+the hint until a full nudge buffer has capacity.
+
 ## Planned
 
-- Lost-placement resolution: [tool-loop design](../design/tool-loop.md).
+- Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
-  any approval decision, resolved at request level with a fourth
-  `ToolInadmissible` result entry; see
-  [tool-loop design](../design/tool-loop.md).
+  any approval decision, resolved at request level with a `ToolInadmissible`
+  result entry; see [tool-loop design](../design/tool-loop.md).
 - Instruction admission: the commit-result and continuation transactions append
   an `InstructionAdmission` and a successor instruction manifest for a
   successful `instructions_read`; see
   [tool-loop design](../design/tool-loop.md).
-- Child creation by `spawn_session`, the child's `DelegatedTask` origin, and
-  delivery of its terminal result to the parent: no present surface creates the
-  child, and the daemon rejects execution until the placement-owned creation
-  transaction exists; see [tool-loop design](../design/tool-loop.md).
+- Delivery of a delegated child's terminal result to the parent: see
+  [tool-loop design](../design/tool-loop.md).
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).

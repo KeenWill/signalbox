@@ -37,6 +37,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+signalbox-test-bin = { path = "../test-bin" }
 tempfile = "3.27.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]

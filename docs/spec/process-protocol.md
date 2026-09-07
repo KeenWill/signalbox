@@ -371,6 +371,64 @@ provider delta or a metadata title or tag. A single explicit raw-output option
 is the only opt-in to unescaped text. A recorded review finding carries an
 opaque caller-supplied file-path key.
 
+`spawn_session` carries a bounded `task` and the closed relationship object and
+returns `session_spawned { tool_request_id, child_session_id, relationship }`.
+The placement-owned creation transaction that implements the parent-directory
+default creates the child; it preserves the exact-request and authority rules of
+the delegation contracts in
+[sessions-and-transcript](sessions-and-transcript.md), and the task string fits
+both the delegation-content ceiling and its complete normalized JSON argument
+envelope.
+
+Configuration reload is `reload_configuration { command_id }`, with a
+user-global command identity. Equal retries report busy while pending or replay
+the stored result without reading configuration again. Reloads serialize from
+file read through the terminal result. Before installation, core commits the
+complete checked replacement and prior reloadable snapshots and the checked
+rule-set digest as durable intent. Template snapshots contain accepted
+prompt-file contents.
+
+Startup reload replay shares the serial request-reload boundary. Reload pauses
+sweep admission and stops and joins active sweep attempts and affected ingestion
+tasks before rule activation and event-tail capture. Only after that activation
+commits does core reconcile convergence targets from the retained intent. On a
+stale or conflicting rule-revision rejection, recovery first validates the prior
+snapshot against the current startup-only sections. If invalid, it terminalizes
+the intent with `configuration_reload_failed` without resuming workers, and
+startup recovery fails. Otherwise it resumes ingestion and sweep admission under
+the prior snapshot before terminalizing the intent with
+`configuration_reload_failed`, without replacing the running configuration.
+Other failures after either stops leave the intent pending until recovery
+installs the replacement snapshot and resumes them before terminalizing the
+claim. The [reload-intent input](ownership-seam.md) delivers rule activation
+only, and the module activates the rules atomically and idempotently by command
+identity and digest. The activation transaction captures each repository's
+current event tail and retains it for idempotent replay. Before replay activates
+any retained effects, startup validates the retained reloadable snapshot
+together with the on-disk startup-only sections; incompatibility fails startup
+and leaves the intent pending. Startup replays any undelivered intent from its
+retained payload even if the configuration files changed, before terminalizing
+its claim.
+
+Success returns `configuration_reloaded { command_id, reloaded_sections }`, with
+exactly `model_catalog`, `session_templates`, and `repo_watch` in that order.
+Failure returns `configuration_reload_failed { command_id, phase, reason }`;
+`phase` is `read`, `validate`, `activate`, `reconcile`, or `install`, and
+`reason` is sanitized as startup logs are, with 1 through 1,024 UTF-8 bytes and
+no control characters. A pending reload returns `unavailable` with the message
+`configuration reload is busy`. The terminal client exposes
+`reload-configuration` with optional `--command-id` for retries and prints the
+installed sections or failure phase and reason.
+
+`replace_lost_runner` and `abandon_lost_runner` carry the command and session
+identities; replacement also carries a nullable complete checkout revision.
+`promote_pending_runner` carries the command identity and pending enrollment
+request identity. Each returns a correlated closed terminal receipt, and equal
+pending replacement replay waits on the same durable operation. The terminal
+client exposes `runner replace <session> [--revision <sha>]`,
+`runner abandon <session>`, and `runner promote <enrollment-request-id>`, with
+an optional `--command-id` for replay.
+
 OAuth administration has three requests, `provision_oauth_credential`,
 `reprovision_oauth_credential`, and `delete_oauth_credential`, each carrying
 `profile` and a user-global `command_id`. The terminal client exposes them as
@@ -380,26 +438,45 @@ OAuth administration has three requests, `provision_oauth_credential`,
 absolute HTTPS URI without user information or fragment, at most 4,096 UTF-8
 bytes. The terminal receipt is
 `oauth_credential_receipt { command_id, profile, outcome }`; its closed outcome
-and failure vocabulary live in `crates/process-protocol/src/response.rs`. An
-undeclared profile records `failed { reason: unknown_profile }`; a declared
-non-OAuth profile records `failed { reason: non_oauth_profile }`. Neither starts
-an exchange or mutates credential state. An equal command replays its stored
-receipt before current registration is evaluated, and conflicting reuse is
-rejected. The terminal client verifies the command and profile correlations and
-prints authorization details before the receipt.
+and failure vocabulary live in `crates/process-protocol/src/response.rs`. For
+provisioning and re-provisioning, an undeclared profile records
+`failed { reason: unknown_profile }`; a declared non-OAuth profile records
+`failed { reason: non_oauth_profile }`. Neither starts an exchange or mutates
+credential state. An equal command replays its stored receipt before current
+registration is evaluated, and conflicting reuse is rejected. The terminal
+client verifies the command and profile correlations and prints authorization
+details before the receipt.
+
+OAuth exchange claims retain validated authorization instructions before
+emission; invalid progress fields yield `device_endpoint_rejected`. Equal
+pending commands replay available instructions and report busy; startup records
+`abandoned` for pending exchanges; an ambiguous claim commit or failure to
+retain or send authorization progress or commit exchange completion raises the
+daemon's recovery signal. Authorization and its terminal receipt commit
+atomically after generation and current-registration checks; stale generations
+yield `superseded`, and changed registrations yield
+`failed { reason: registration_changed }`. Initial provisioning with stored
+authorization returns `already_provisioned` without an exchange; re-provisioning
+without authorization returns `not_provisioned`.
+
+Deletion uses OAuth registration or administration history even without a
+current declaration; a pool-lock row alone does not qualify. Without retained
+identity it records the same unknown-profile or non-OAuth failure. A new
+deletion holds the dispatch profile lock, advances the generation, removes
+authorization and cached access, and returns `deleted` or `already_deleted` when
+no authorization was stored; equal replay changes nothing. Current registration
+and referenced history remain, and a child already holding a copied token
+finishes. Successful re-provisioning replaces authorization and clears every
+OAuth delivery-origin quarantine and cached access; failed re-provisioning
+clears none.
 
 ## Planned
 
-- OAuth credential provisioning, re-provisioning after rejected refresh, and
-  deletion: [design](../design/process-protocol.md).
 - Credential-exclusion administration, a listing read and a clear mutation over
   active exclusions: [design](../design/process-protocol.md).
-- Configuration reload request: [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).
-- Runner creation, status, and recovery requests, and the status read's failure
-  evidence: [design](../design/process-protocol.md).
-- `spawn_session` creation of a delegated child:
+- Runner creation and status requests, and the status read's failure evidence:
   [design](../design/process-protocol.md).
 - Cascade metadata on stop receipts: [design](../design/process-protocol.md).
 - Typed projection of credential-pool exhaustion and of the

@@ -11,30 +11,141 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
 ) -> Result<(), ProcessConnectionError> {
     use signalbox_persistence::oauth_credential::{
         OauthCredentialCommand, OauthCredentialFailure, OauthCredentialHandlingOutcome,
-        OauthCredentialOutcome, OauthCredentialRepository, OauthCredentialRepositoryError,
+        OauthCredentialRepository,
     };
     let command = OauthCredentialCommand {
         command_id: DurableCommandId::from_uuid(command_id.into_uuid()),
         operation,
         profile: profile.clone(),
     };
-    let result = OauthCredentialRepository::new(services.pool.clone())
-        .record(&command, || {
-            let reason = match services.model_configuration.credential_profile(&profile) {
-                None => OauthCredentialFailure::UnknownProfile,
-                Some(profile) => match profile.delivery() {
-                    crate::credential_pools::CredentialDelivery::Ambient
-                    | crate::credential_pools::CredentialDelivery::File { .. }
-                    | crate::credential_pools::CredentialDelivery::CodexHome { .. } => {
-                        OauthCredentialFailure::NonOauthProfile
+    let repository = OauthCredentialRepository::new(services.pool.clone());
+    let registration = services
+        .model_configuration
+        .credential_profile(&profile)
+        .ok_or(OauthCredentialFailure::UnknownProfile)
+        .and_then(|profile| match profile.delivery() {
+            crate::credential_pools::CredentialDelivery::Oauth(delivery) => {
+                Ok(delivery.registration())
+            }
+            _ => Err(OauthCredentialFailure::NonOauthProfile),
+        });
+    let result = if operation
+        == signalbox_persistence::oauth_credential::OauthCredentialOperation::Delete
+    {
+        let failure = registration
+            .err()
+            .unwrap_or(OauthCredentialFailure::UnknownProfile);
+        if let Some(service) = &services.oauth_service {
+            service.delete(&command, failure).await
+        } else {
+            repository.delete(&command, failure, || {}).await
+        }
+    } else {
+        match repository
+            .begin_exchange(&command, registration.as_ref().map_err(|reason| *reason))
+            .await
+        {
+            Ok(signalbox_persistence::oauth_credential::OauthStartOutcome::Started(exchange)) => {
+                let registration =
+                    registration.map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+                let authorization = match crate::oauth::OauthClient::new() {
+                    Err(reason) => Err(reason),
+                    Ok(client) => match client.authorize(&registration).await {
+                        Err(reason) => Err(reason),
+                        Ok(device) => {
+                            let message = ServerMessage::OauthCredentialAuthorization {
+                                command_id,
+                                profile: profile.clone(),
+                                user_code: device.progress.user_code.clone(),
+                                verification_uri: device.progress.verification_uri.clone(),
+                            };
+                            if ServerFrame::try_new_for_version(
+                                version,
+                                request_id,
+                                message.clone(),
+                            )
+                            .is_err()
+                            {
+                                Err(OauthCredentialFailure::DeviceEndpointRejected)
+                            } else {
+                                match recover_failed_oauth_exchange(
+                                    repository
+                                        .retain_progress(&exchange, &device.progress)
+                                        .await,
+                                    services.recovery_reporter.as_ref(),
+                                ) {
+                                    Err(error) => {
+                                        return write_error(
+                                            writer,
+                                            version,
+                                            request_id,
+                                            oauth_repository_error(error),
+                                        )
+                                        .await;
+                                    }
+                                    Ok(()) => {
+                                        write_oauth_authorization(
+                                            writer,
+                                            version,
+                                            request_id,
+                                            message,
+                                            services.recovery_reporter.as_ref(),
+                                        )
+                                        .await?;
+                                        client.poll(&registration, device).await
+                                    }
+                                }
+                            }
+                        }
+                    },
+                };
+                let authorization = authorization.as_ref().map_err(|reason| *reason);
+                let outcome = if let Some(service) = &services.oauth_service {
+                    service.complete_exchange(&exchange, authorization).await
+                } else {
+                    repository.complete_exchange(&exchange, authorization).await
+                };
+                recover_failed_oauth_exchange(outcome, services.recovery_reporter.as_ref())
+                    .map(OauthCredentialHandlingOutcome::Recorded)
+            }
+            Ok(signalbox_persistence::oauth_credential::OauthStartOutcome::Existing(outcome)) => {
+                if outcome == OauthCredentialHandlingOutcome::Pending {
+                    match repository.progress(command.command_id).await {
+                        Ok(Some(progress)) => {
+                            write_message(
+                                writer,
+                                version,
+                                request_id,
+                                ServerMessage::OauthCredentialAuthorization {
+                                    command_id,
+                                    profile: profile.clone(),
+                                    user_code: progress.user_code,
+                                    verification_uri: progress.verification_uri,
+                                },
+                            )
+                            .await?
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return write_error(
+                                writer,
+                                version,
+                                request_id,
+                                oauth_repository_error(error),
+                            )
+                            .await;
+                        }
                     }
-                },
-            };
-
-            OauthCredentialOutcome::Failed(reason)
-        })
-        .await;
-    let code = match result {
+                }
+                Ok(outcome)
+            }
+            Err(error @ signalbox_persistence::oauth_credential::OauthCredentialRepositoryError::CommitAmbiguous) => {
+                recover_failed_oauth_exchange(Err(error), services.recovery_reporter.as_ref())
+            }
+            Err(error) => Err(error),
+        }
+    };
+    let error = match result {
         Ok(OauthCredentialHandlingOutcome::Recorded(outcome)) => {
             return write_message(
                 writer,
@@ -48,28 +159,63 @@ async fn handle_oauth_credential<Writer: AsyncWrite + Unpin>(
             )
             .await;
         }
-        Ok(OauthCredentialHandlingOutcome::ConflictingReuse) => ErrorCode::ConflictingReuse,
-        Ok(OauthCredentialHandlingOutcome::Pending) => ErrorCode::Unavailable,
-        Err(OauthCredentialRepositoryError::Database(_)) => ErrorCode::Unavailable,
-        Err(OauthCredentialRepositoryError::CommitAmbiguous(_)) => ErrorCode::CommitAmbiguous,
-        Err(OauthCredentialRepositoryError::Corruption) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                internal_protocol_error(None, InternalDiagnostic::OauthCredentialCorruption),
-            )
-            .await;
+        Ok(OauthCredentialHandlingOutcome::ConflictingReuse) => {
+            ProtocolError::without_detail(ErrorCode::ConflictingReuse)
         }
-        Err(OauthCredentialRepositoryError::InvalidProfile) => ErrorCode::InvalidRequest,
+        Ok(OauthCredentialHandlingOutcome::Pending) => {
+            ProtocolError::without_detail(ErrorCode::Unavailable)
+        }
+        Err(error) => oauth_repository_error(error),
     };
-    write_error(
-        writer,
-        version,
-        request_id,
-        ProtocolError::without_detail(code),
-    )
-    .await
+    write_error(writer, version, request_id, error).await
+}
+
+pub(super) fn recover_failed_oauth_exchange<T>(
+    result: Result<T, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError>,
+    recovery_reporter: Option<&FatalRecoveryReporter>,
+) -> Result<T, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError> {
+    if result.is_err()
+        && let Some(reporter) = recovery_reporter
+    {
+        reporter.report_recovery_required();
+    }
+    result
+}
+
+fn oauth_repository_error(
+    error: signalbox_persistence::oauth_credential::OauthCredentialRepositoryError,
+) -> ProtocolError {
+    use signalbox_persistence::oauth_credential::OauthCredentialRepositoryError;
+    match error {
+        OauthCredentialRepositoryError::Database => {
+            ProtocolError::without_detail(ErrorCode::Unavailable)
+        }
+        OauthCredentialRepositoryError::CommitAmbiguous => {
+            ProtocolError::without_detail(ErrorCode::CommitAmbiguous)
+        }
+        OauthCredentialRepositoryError::Corruption => {
+            internal_protocol_error(None, InternalDiagnostic::OauthCredentialCorruption)
+        }
+        OauthCredentialRepositoryError::InvalidProfile => {
+            ProtocolError::without_detail(ErrorCode::InvalidRequest)
+        }
+    }
+}
+
+pub(super) async fn write_oauth_authorization<Writer: AsyncWrite + Unpin>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    message: ServerMessage,
+    recovery_reporter: Option<&FatalRecoveryReporter>,
+) -> Result<(), ProcessConnectionError> {
+    let result = write_message(writer, version, request_id, message).await;
+    if result.is_err()
+        && let Some(reporter) = recovery_reporter
+    {
+        reporter.report_recovery_required();
+    }
+    result
 }
 
 fn wire_oauth_outcome(
@@ -126,6 +272,16 @@ pub(super) async fn handle_request<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let mut services = services.clone();
+    if let Some(reload) = &services.configuration_reload {
+        let catalogs = reload.catalogs();
+        if let Some(model) = reload.compaction_model(catalogs.models.clone()) {
+            services.context_compaction_model = model;
+        }
+        services.model_configuration = catalogs.models;
+        services.template_configuration = catalogs.templates;
+    }
+    let services = &services;
     let review_request = is_review_mutation(&request);
     let ConnectionRequestResources {
         import_permit,
@@ -155,6 +311,17 @@ where
         return write_bulk_ingest_rejection(writer, version, request_id, active_kind).await;
     }
     match request {
+        ClientRequest::ReloadConfiguration { command_id } => {
+            super::reload::handle_reload(writer, version, request_id, command_id, services).await
+        }
+        request @ (ClientRequest::ReplaceLostRunner { .. }
+        | ClientRequest::AbandonLostRunner { .. }
+        | ClientRequest::PromotePendingRunner { .. }) => {
+            runner_recovery::handle_runner_recovery(
+                reader, writer, version, request_id, request, services, shutdown,
+            )
+            .await
+        }
         ClientRequest::ProvisionOauthCredential {
             command_id,
             profile,
@@ -1369,8 +1536,25 @@ where
             )
             .await
         }
-        ClientRequest::SpawnSession { .. } => {
-            reject_uncomposed_spawn(writer, version, request_id).await
+        ClientRequest::SpawnSession {
+            session_id,
+            turn_id,
+            tool_request_id,
+            task,
+            relationship,
+        } => {
+            handle_spawn_session(
+                writer,
+                version,
+                request_id,
+                session_id,
+                turn_id,
+                tool_request_id,
+                task,
+                relationship,
+                services,
+            )
+            .await
         }
         ClientRequest::AwaitSession {
             session_id,

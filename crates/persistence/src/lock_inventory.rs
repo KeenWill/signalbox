@@ -28,6 +28,8 @@
 //! row first.
 //!
 //! Additional row-lock protocols:
+//! - `tool_loop::placement_loss::close_lost_runner_requests_after_observation`: after the
+//!   session scheduler, `tool_request FOR UPDATE` in proposal order.
 //! - `review_workflow::append_finding_event`: ordinary events lock every `review_finding` for the
 //!   target `FOR NO KEY UPDATE`, by `finding_id`; publication reconciliation takes the external
 //!   link before its finding.
@@ -100,6 +102,12 @@
 //!   UPDATE`.
 //!
 //! `runners`:
+//! - `lock_replacement_enrollments`: loss identity locks in runner order -> the lost, candidate,
+//!   and candidate predecessor `runner_enrollment FOR UPDATE` in enrollment order -> their
+//!   `runner_connection_authority_head FOR SHARE` in enrollment order.
+//! - `RunnerProtocolStore::record_replacement_workspace_released`: `session_lifecycle FOR NO
+//!   KEY UPDATE` -> `session_scheduler FOR UPDATE` -> `runner_enrollment FOR UPDATE` ->
+//!   `runner_connection_authority_head FOR SHARE`.
 //! - `guard_runner_claimed_retry_attempt_authority`: source `runner_current_lease_event FOR
 //!   UPDATE`.
 //! - `guard_runner_connection_event_insert`: active `runner_enrollment FOR UPDATE`.
@@ -635,7 +643,14 @@ pub(crate) const REPLACE_SESSION_METADATA: &str =
 pub(crate) const UPDATE_SESSION_PLACEMENT_HEAD: &str = "SELECT session_row.ancestry_kind,
             event.version, event.prior_version, event.event_kind,
             event.placement_path, event.root_global_read_intent,
-            native_registry.command_id AS native_creation_command_id,
+            CASE WHEN event.provenance_command_id IS NULL AND spawn_parent.session_id IS NOT NULL
+                AND event.placement_path IS NOT DISTINCT FROM
+                    CASE WHEN spawn_parent.placement_path IS NULL THEN NULL
+                         WHEN position('.' in spawn_parent.placement_path) = 0 THEN spawn_parent.placement_path
+                         ELSE regexp_replace(spawn_parent.placement_path, '[^.]+$', '') || replace(event.session_id::text, '-', '') END
+                AND event.root_global_read_intent = spawn_parent.root_global_read_intent
+                THEN spawned.spawning_tool_request_id END AS delegated_creation_request_id,
+                native_registry.command_id AS native_creation_command_id,
             imported_registry.command_id AS imported_creation_command_id,
             placement_update_registry.command_id AS placement_update_command_id
        FROM session_current_placement AS head
@@ -644,7 +659,13 @@ pub(crate) const UPDATE_SESSION_PLACEMENT_HEAD: &str = "SELECT session_row.ances
        JOIN session_placement_event AS event
          ON event.session_id = head.session_id
         AND event.version = head.current_version
-       LEFT JOIN create_session_command AS native_creation
+       LEFT JOIN session_delegation AS spawned
+             ON spawned.child_session_id = event.session_id
+            AND spawned.spawning_tool_request_id = event.provenance_tool_request_id
+           LEFT JOIN session_placement_event AS spawn_parent
+             ON spawn_parent.session_id = spawned.parent_session_id
+            AND spawn_parent.version = event.parent_placement_version
+           LEFT JOIN create_session_command AS native_creation
          ON native_creation.command_id = event.provenance_command_id
         AND native_creation.created_session_id = event.session_id
         AND native_creation.command_kind = 'create_session'
@@ -811,6 +832,11 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
                 AND record.event_ordinal = current_placement.event_ordinal
               WHERE current_placement.session_id = $1
               FOR UPDATE OF current_placement";
+
+pub(crate) const RUNNER_RECOVERY_ENROLLMENTS: &str = "SELECT enrollment_id
+    FROM runner_enrollment WHERE enrollment_id = ANY($1) ORDER BY enrollment_id FOR UPDATE";
+
+pub(crate) const RUNNER_RECOVERY_LOSS_IDENTITY: &str = "SELECT lock_runner_loss_identity($1)";
 
 pub(crate) const RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER: &str = "SELECT enrollment_id
                FROM runner_enrollment

@@ -105,6 +105,7 @@ pub struct ReviewLibrarySelection {
 /// Validated process-lifetime session templates ordered by name.
 #[derive(Clone, Debug, Default)]
 pub struct SessionTemplateConfiguration {
+    source: Option<String>,
     templates: BTreeMap<SessionTemplateName, ResolvedSessionTemplate>,
     review_library: Option<ResolvedReviewLibrary>,
 }
@@ -175,10 +176,41 @@ impl SessionTemplateConfiguration {
                     .and_then(|table| parse_review_library(table, models, &mut templates))
             })
             .transpose()?;
+        let mut retained = document.clone();
+        if let Some(tables) = retained
+            .get_mut("templates")
+            .and_then(|v| v.as_array_of_tables_mut())
+        {
+            for table in tables.iter_mut() {
+                let name = SessionTemplateName::try_new(required_string(table, "name")?.to_owned())
+                    .map_err(|_| SessionTemplateConfigurationError::InvalidName)?;
+                if table.remove("system_prompt_file").is_some() {
+                    let prompt = templates
+                        .get(&name)
+                        .and_then(|t| t.defaults().system_prompt())
+                        .ok_or(SessionTemplateConfigurationError::MissingPrompt)?;
+                    table.insert("system_prompt", toml_edit::value(prompt.as_str()));
+                }
+            }
+        }
         Ok(Self {
+            source: Some(retained.to_string()),
             templates,
             review_library,
         })
+    }
+
+    /// Returns source with every external prompt replaced by its accepted content.
+    pub(crate) fn source(&self) -> &str {
+        self.source.as_deref().unwrap_or("version = 1\n")
+    }
+
+    /// Reconstitutes retained templates without consulting prompt files.
+    pub(crate) fn parse_snapshot(
+        content: &str,
+        models: &HubModelConfiguration,
+    ) -> Result<Self, SessionTemplateConfigurationError> {
+        Self::parse_at_with_home(content, Path::new("/"), &|| None, models)
     }
 
     /// Resolves one validated name from this immutable process snapshot.

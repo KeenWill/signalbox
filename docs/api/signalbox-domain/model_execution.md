@@ -22,6 +22,7 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         correlations: vec::Vec<ToolResultAttemptCorrelation>,
     ) -> Self;
+    pub fn with_tool_inadmissible_correlations(self, requests: vec::Vec<ToolRequest>) -> Self;
     pub fn with_tool_denial_correlations(
         self,
         correlations: vec::Vec<ToolApprovalResolution>,
@@ -285,6 +286,17 @@ impl PreparedSteeringConsumption {
 pub struct PreparedModelCallRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl PreparedModelCallRequest {
+    pub fn resolve_runner_placement(
+        &mut self,
+        source: SemanticTranscriptEntryRef,
+        revision: RunnerGeneration,
+        sandbox: RunnerSandboxProfile,
+    ) -> result::Result<(), RunnerDomainError>;
+    pub fn runner_placement_sandbox(
+        &self,
+        source: SemanticTranscriptEntryRef,
+        revision: RunnerGeneration,
+    ) -> option::Option<RunnerSandboxProfile>;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn attempt(&self) -> TurnAttemptId;

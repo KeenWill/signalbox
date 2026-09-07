@@ -5,13 +5,11 @@ This document holds committed design that is not built; it extends
 
 ## Goal
 
-Three capabilities extend the runtime boundary. The operation gains a typed
+Two capabilities extend the runtime boundary. The operation gains a typed
 workspace-instruction region so daemon-authored instructions reach a provider's
 instruction transport without being mixed into ordinary system text. The Codex
 CLI adapter gains file credential delivery, so a deployment can run it with a
-daemon-held API key instead of the CLI's ambient login, and OAuth delivery, with
-exact-value redaction of every delivered token installed before the child
-starts.
+daemon-held API key instead of the CLI's ambient login.
 
 ## Design
 
@@ -35,21 +33,6 @@ environment is cleared. It is absent from argv, logs, debug output, retained
 evidence and every later spawn, and it seeds the adapter's exact-value redaction
 before any provider-controlled output leaves the crate. The override does not
 weaken ambient mode's credential exclusion.
-
-Codex OAuth delivery. OAuth delivery gives the adapter a daemon-minted access
-token, the identity token issued with it, and account metadata in a scratch
-credential home rather than through the child environment. Which values the
-redactor is seeded with is
-[configuration-and-credentials.md](../spec/configuration-and-credentials.md)'s
-design; this document owns how the adapter installs and applies the scrub.
-Before anything is written or the child starts, the adapter seeds exact-value
-redaction with every such value, as the raw token and as the JSON string forms
-whose escapes decode to it. Possible token prefixes are retained across stdout
-and stderr chunks, and all child-controlled text passes through the scrub before
-JSON decoding, truncation, debug rendering, observations or durable evidence.
-Ambient-mode shape redaction remains defense in depth and cannot replace
-exact-value redaction when preparation knows the token. Failure to install the
-scrub is a typed pre-spawn delivery failure.
 
 ## Compatibility constraints
 
@@ -78,8 +61,3 @@ A Codex file profile whose env_key is `OPENAI_API_KEY` resolves during
 preparation; any other env_key is rejected as invalid configuration. The value
 reaches the child's environment only, never argv, logs, evidence or a later
 spawn, and provider-controlled output reflecting it is redacted by exact value.
-
-Every token OAuth delivery hands the Codex adapter is redacted in raw and
-JSON-escaped forms across chunk boundaries on stdout and stderr, before
-decoding, truncation, observations and evidence. A failure to install the scrub
-fails before spawn as a typed delivery failure.

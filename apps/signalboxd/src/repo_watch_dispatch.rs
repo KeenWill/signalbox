@@ -27,6 +27,200 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Submits retained commands with checkout provisioning inside the held creation.
+pub async fn submit_pending(
+    store: &signalbox_module_repo_watch_v2::RepoWatchStore,
+    configuration: &crate::RepositoryWatchConfiguration,
+    sink: &mut RepositoryWatchCommandSink,
+) -> Result<
+    (),
+    signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
+> {
+    let runner = sink.models.daemon_tools().and_then(|tools| {
+        signalbox_tools_exec::TokioProcessRunner::try_new(tools.exec_supervisor_executable()).ok()
+    });
+    submit_with_checkout(store, configuration, sink, runner).await
+}
+
+/// Injects the process boundary for deterministic local-repository integration tests.
+#[cfg(feature = "test-support")]
+pub async fn submit_pending_with_runner<Runner: signalbox_tools_exec::ProcessRunner>(
+    store: &signalbox_module_repo_watch_v2::RepoWatchStore,
+    configuration: &crate::RepositoryWatchConfiguration,
+    sink: &mut RepositoryWatchCommandSink,
+    runner: Runner,
+) -> Result<
+    (),
+    signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
+> {
+    submit_with_checkout(store, configuration, sink, Some(runner)).await
+}
+
+async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
+    store: &signalbox_module_repo_watch_v2::RepoWatchStore,
+    configuration: &crate::RepositoryWatchConfiguration,
+    sink: &mut RepositoryWatchCommandSink,
+    runner: Option<Runner>,
+) -> Result<
+    (),
+    signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
+> {
+    let source = signalbox_ownership_seam::LifecycleEventSource::new(sink.pool.clone());
+    store
+        .submit_pending(
+            &mut RepositoryWatchCommandCodec,
+            &mut CheckoutCommandSink {
+                store,
+                configuration,
+                core: sink,
+                runner,
+            },
+            &source,
+        )
+        .await
+}
+
+struct CheckoutCommandSink<'a, Runner> {
+    store: &'a signalbox_module_repo_watch_v2::RepoWatchStore,
+    configuration: &'a crate::RepositoryWatchConfiguration,
+    core: &'a mut RepositoryWatchCommandSink,
+    runner: Option<Runner>,
+}
+
+impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
+    for CheckoutCommandSink<'_, Runner>
+{
+    type Error = RepositoryWatchCommandError;
+
+    async fn submit(&mut self, command: SessionCommand) -> Result<CommandSubmission, Self::Error> {
+        use crate::repo_watch_checkout::{CheckoutProvisioningFailed, CheckoutStep};
+        use signalbox_application::CreateSessionOutcome;
+        use signalbox_domain::{DescendantTerminationScope, RepoWatchEventTarget, StopStickiness};
+        use signalbox_module_repo_watch_v2::checkout::CheckoutRetirementReason;
+
+        let id = command.command_id();
+        let result = self.core.submit(command).await?;
+        let CommandSubmission::Creation(CreateSessionOutcome::Applied(applied)) = &result else {
+            return Ok(result);
+        };
+        let Some(checkout) = self
+            .store
+            .dispatch_checkout(id)
+            .await
+            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+        else {
+            return Ok(result);
+        };
+        let RepoWatchEventTarget::PullRequest(context) = checkout.event.target() else {
+            return Ok(result);
+        };
+        let session = applied.session();
+        let stop = if let Some(stop) = checkout.stop_command {
+            let sticky = match checkout.retired_reason {
+                Some(CheckoutRetirementReason::RepositoryUnconfigured) => {
+                    StopStickiness::Redispatchable
+                }
+                _ => StopStickiness::Sticky,
+            };
+            Some((stop, sticky))
+        } else if checkout.head.as_ref() == Some(context.head_sha()) {
+            None
+        } else if let Some(repository) = self
+            .configuration
+            .repositories()
+            .iter()
+            .find(|repository| repository.repository() == checkout.event.repository())
+        {
+            let provisioned = async {
+                let tools = self
+                    .core
+                    .models
+                    .daemon_tools()
+                    .ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Configuration))?;
+                let roots =
+                    crate::daemon_tools::SessionWorkspaceRoots::try_new(tools.workspace_root())
+                        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+                let runner = self
+                    .runner
+                    .as_mut()
+                    .ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Configuration))?;
+                crate::repo_watch_checkout::provision(
+                    runner,
+                    &roots,
+                    session,
+                    checkout.event.repository(),
+                    context,
+                    &crate::repo_watch_credentials::RepositoryWatchClientLoader::new(repository),
+                )
+                .await
+            }
+            .await;
+            match provisioned {
+                Ok(()) => {
+                    self.store
+                        .record_dispatch_checkout(id, context.head_sha())
+                        .await
+                        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+                    None
+                }
+                Err(failure) => {
+                    tracing::warn!(reason = "checkout_provisioning_failed", step = failure.step.as_str(), status = %failure.status(), ?session,
+                        "repository-watch checkout provisioning failed");
+                    Some((
+                        self.store
+                            .retire_dispatch_checkout(
+                                id,
+                                CheckoutRetirementReason::ProvisioningFailed,
+                                failure.step.as_str(),
+                                &failure.status(),
+                                DurableCommandId::from_uuid(Uuid::now_v7()),
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?,
+                        StopStickiness::Sticky,
+                    ))
+                }
+            }
+        } else {
+            tracing::warn!(
+                reason = "repository_unconfigured",
+                ?session,
+                "repository-watch dispatch retired"
+            );
+            Some((
+                self.store
+                    .retire_dispatch_checkout(
+                        id,
+                        CheckoutRetirementReason::RepositoryUnconfigured,
+                        CheckoutStep::Configuration.as_str(),
+                        "not_started",
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?,
+                StopStickiness::Redispatchable,
+            ))
+        };
+        if let Some((stop, sticky)) = stop {
+            let stop = SessionLifecycleCommand::new(
+                stop,
+                session,
+                SessionLifecycleOperation::Stop {
+                    sticky,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            );
+            if !matches!(
+                self.core.submit_lifecycle(stop).await?,
+                CommandSubmission::Accepted
+            ) {
+                return Err(RepositoryWatchCommandError::CoreCommandFailed);
+            }
+        }
+        Ok(result)
+    }
+}
+
 /// Reserves core command identities and copies the resolved template into each creation.
 #[derive(Clone)]
 pub struct RepositoryWatchCommandFactory(pub Arc<SessionTemplateConfiguration>);
@@ -139,51 +333,60 @@ impl SessionCommandSink for RepositoryWatchCommandSink {
                     .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
                 Ok(CommandSubmission::Creation(outcome))
             }
-            SessionCommandPayload::Lifecycle(command) => {
-                let outcome = SessionLifecycleCommandRepository::new(self.pool.clone())
-                    .handle(
-                        command.clone(),
-                        CommandPrincipal::Module {
-                            module: DispatchingModule::RepositoryWatch,
-                        },
-                    )
-                    .await
-                    .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
-                match outcome {
-                    SessionLifecycleCommandHandlingOutcome::ConflictingReuse { .. } => {
-                        Ok(CommandSubmission::ConflictingReuse)
-                    }
-                    SessionLifecycleCommandHandlingOutcome::Recorded(result) => {
-                        if let SessionLifecycleCommandResult::Applied(application) = result {
-                            match application {
-                                SessionLifecycleApplication::StartReleased => {
-                                    let _ = self.eligibility_nudge.nudge(command.session());
-                                }
-                                SessionLifecycleApplication::ClosurePending {
-                                    live_turn,
-                                    defaults_version,
-                                    ..
-                                } => {
-                                    crate::process_runtime::interrupt_for_committed_closure(
-                                        &self.pool,
-                                        &self.models,
-                                        &self.eligibility_nudge,
-                                        &self.tool_dispatch_gate,
-                                        &command,
-                                        live_turn,
-                                        defaults_version,
-                                    )
-                                    .await
-                                    .map_err(|_| RepositoryWatchCommandError::InterruptFailed)?;
-                                }
-                                _ => {}
-                            }
+            SessionCommandPayload::Lifecycle(command) => self.submit_lifecycle(command).await,
+            _ => Err(RepositoryWatchCommandError::UnsupportedCommand),
+        }
+    }
+}
+
+impl RepositoryWatchCommandSink {
+    // Daemon checkout disposition uses the normal lifecycle handler; module-issued
+    // commands still pass through the ownership seam's closed admission.
+    async fn submit_lifecycle(
+        &mut self,
+        command: SessionLifecycleCommand,
+    ) -> Result<CommandSubmission, RepositoryWatchCommandError> {
+        let outcome = SessionLifecycleCommandRepository::new(self.pool.clone())
+            .handle(
+                command.clone(),
+                CommandPrincipal::Module {
+                    module: DispatchingModule::RepositoryWatch,
+                },
+            )
+            .await
+            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+        match outcome {
+            SessionLifecycleCommandHandlingOutcome::ConflictingReuse { .. } => {
+                Ok(CommandSubmission::ConflictingReuse)
+            }
+            SessionLifecycleCommandHandlingOutcome::Recorded(result) => {
+                if let SessionLifecycleCommandResult::Applied(application) = result {
+                    match application {
+                        SessionLifecycleApplication::StartReleased => {
+                            let _ = self.eligibility_nudge.nudge(command.session());
                         }
-                        Ok(CommandSubmission::Accepted)
+                        SessionLifecycleApplication::ClosurePending {
+                            live_turn,
+                            defaults_version,
+                            ..
+                        } => {
+                            crate::process_runtime::interrupt_for_committed_closure(
+                                &self.pool,
+                                &self.models,
+                                &self.eligibility_nudge,
+                                &self.tool_dispatch_gate,
+                                &command,
+                                live_turn,
+                                defaults_version,
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchCommandError::InterruptFailed)?;
+                        }
+                        _ => {}
                     }
                 }
+                Ok(CommandSubmission::Accepted)
             }
-            _ => Err(RepositoryWatchCommandError::UnsupportedCommand),
         }
     }
 }

@@ -6,7 +6,7 @@ reaches a provider without being stored or logged.
 
 ## Overview
 
-Configuration is loaded once at startup from the process environment and two
+Configuration is loaded at startup from the process environment and two
 versioned TOML documents: the model catalog and the session-template catalog.
 The parser in `apps/signalboxd/src/configuration/mod.rs` and
 `apps/signalboxd/src/credential_pools.rs` admits a document fail-closed. The
@@ -94,7 +94,8 @@ names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 loader supplies no default for any member, while other tables carry their own
 configured limits. Numeric-bound duration policies use Jiff's friendly
 unsigned-duration syntax. `repository_watch_webhook_retention` must be positive
-and finite and governs authenticated webhook `expires_at` as described in
+and finite and governs authenticated webhook `expires_at` and
+merged-pull-request baseline retention as described in
 [repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
 credential-free startup probe of the configured Codex executable, and a missing,
 malformed, zero, unsuccessful, or mismatched probe fails configuration before
@@ -145,6 +146,14 @@ the Codex login directory; a configured home is admitted only as an existing,
 readable, nonempty directory, and startup fails otherwise. Delivery links the
 selected profile's `auth.json` into a private per-operation `CODEX_HOME` with an
 empty `config.toml`.
+
+A Codex home pool declares one `codex_cli` subscription profile with
+`delivery = "codex_home"` and a distinct `codex_home` directory per
+independently metered account, then lists those profile names as pool members.
+Equal member priorities let `least_used` compare their headroom under the pool's
+reserve and headroom action;
+[the configuration example](../../config/signalboxd.example.toml) provides a
+three-home pool that replaces its ambient profile and pool.
 
 A credential pool is the set of profiles that may substitute for one another for
 one model family. An `[[adapter_mappings]]` entry maps each family to exactly
@@ -342,9 +351,18 @@ than retained and inert: `round_robin` and a `switch_now` whose adapter cannot
 prove non-acceptance for that trigger's cause unless it is
 `on_credential_rejected`. Codex pools admit `least_used`, headroom reserves and
 non-`stay` `on_headroom_low`; the other adapters reject them. The Codex adapter
-emits no capacity snapshots, so members without retained evidence have unknown
-capacity: `least_used` falls back to configured order within equal priorities,
-reserves do not exclude them, and headroom actions do not fire.
+reads capacity with `account/rateLimits/read` after initialization and merges
+primary and secondary windows from `account/rateLimits/updated` into the current
+call's evidence. Remaining capacity rounds down to whole percentage points. A
+null or absent window preserves its previous value within that call; a
+notification with neither window emits no capacity evidence. Thread startup and
+turn execution do not wait for the capacity read; a rejected or unanswered read
+supplies no new evidence. A notification carrying a window supersedes an
+outstanding read, whose reply is consumed without emitting evidence. A read
+reply received after turn completion still supplies capacity evidence unless
+superseded. Members without retained evidence have unknown capacity:
+`least_used` falls back to configured order within equal priorities, reserves do
+not exclude them, and headroom actions do not fire.
 
 The pool name and member bounds keep the duplicated exhaustion evidence and the
 authoritative policy read below the process protocol's frame limit under
@@ -428,14 +446,16 @@ post-reservation ceiling enforced by the daemon, and the loader does not derive
 either value from the other.
 
 The daemon refers to a credential by its non-secret name everywhere except at
-the point of use. No credential value, credential file path, or database URL
-appears in a log, an error, or a durable record. For a profile whose credential
-value the daemon resolves, the daemon redacts that exact value from provider
-text before it truncates the text; a delivery that gives the daemon no value
-receives credential-shape redaction instead. A credential for one repository
-never authorizes a request to another. That isolation comes from how a
-credential is provisioned or from the repository entry a runner selects; the
-daemon's code-host tools use one fixed credential reference.
+the point of use. OAuth authorization tables hold the refresh and identity
+tokens the delivery needs; no credential value appears in a log, an error, or
+any other durable record. No credential file path or database URL appears in a
+log, an error, or a durable record. For a profile whose credential value the
+daemon resolves, the daemon redacts that exact value from provider text before
+it truncates the text; a delivery that gives the daemon no value receives
+credential-shape redaction instead. A credential for one repository never
+authorizes a request to another. That isolation comes from how a credential is
+provisioned or from the repository entry a runner selects; the daemon's
+code-host tools use one fixed credential reference.
 
 Errors, logs, and diagnostic evidence contain classes, counts, and canonical
 identifiers. They never contain source bytes, host or credential paths, raw or
@@ -450,22 +470,24 @@ absolute path when a template uses a `$HOME/` prompt reference. The
 database-channel refusal names the offending channel, never its contents, and
 happens before any database contact.
 
-A missing required value, an unreadable or invalid catalog, an invalid prompt
-file, or a failed provider transport construction fails startup at the
-Configuration phase before database contact. After the database connects, an
-invalid configured workspace root or a failed tool-suite construction fails at
-the same phase. A derived per-session root is composed on first use, so its
-failures are per-session tool failures. Startup and shutdown logs carry the
-phase, an operator failure class, and small typed fields. Every tool dependency
-is supplied by parsed configuration, the database pool, or explicit credential
-and transport values; no tool family discovers ambient authority.
+Missing required values, unreadable model catalogs, and invalid startup-only
+sections fail startup in the Configuration phase before database contact.
+Reloadable catalogs and prompt files are validated after the pending reload
+intent is read; failed provider transport construction also fails in
+Configuration. After the database connects, an invalid configured workspace root
+or a failed tool-suite construction fails at the same phase. A derived
+per-session root is composed on first use, so its failures are per-session tool
+failures. Startup and shutdown logs carry the phase, an operator failure class,
+and small typed fields. Every tool dependency is supplied by parsed
+configuration, the database pool, or explicit credential and transport values;
+no tool family discovers ambient authority.
 
-The deployment paths are accepted without I/O at environment parsing; both
-catalogs and every template prompt file are read during startup. Provider and
-integration credential files are never read at boot, so a missing or unsynced
-one cannot block startup or the recovery scan. The credential of a currently
-routed S3 blob store is the sole exception, read after the recovery scan and
-before socket admission, as [blob storage](blob-storage.md) requires.
+The deployment paths are accepted without I/O at environment parsing; the
+selected catalogs and template prompt contents are validated during startup.
+Provider and integration credential files are never read at boot, so a missing
+or unsynced one cannot block startup or the recovery scan. The credential of a
+currently routed S3 blob store is the sole exception, read after the recovery
+scan and before socket admission, as [blob storage](blob-storage.md) requires.
 
 Unauthenticated session, search, usage, attention, and blob reads require a
 loopback `Host` authority; another authority receives a 403
@@ -518,9 +540,13 @@ and runner wire never receive a runner credential path or value.
 A catalog parse error is a typed sanitized value and no file content appears in
 its text. An unknown or invalid field is rejected without its name, so
 `config/signalboxd.example.toml` is the operator's guide. A profile name is
-opaque to code: no build-provided constant is compared against it. Every catalog
-is read once at startup; a change takes effect at the next restart and never
-rewrites evidence already recorded.
+opaque to code: no build-provided constant is compared against it. Catalogs are
+read at startup. `reload_configuration` validates the complete replacement and
+atomically replaces the model and alias catalog, session-template catalog, and
+repository-watch configuration; every other section is startup-only. A
+replacement whose startup-only sections differ leaves the running configuration
+in place. Reload never rewrites evidence already recorded. File watching and
+polling are external callers of the verb.
 
 Every serving record states its family, and the adapter mapping rather than the
 selectable record pointing at it supplies its adapter and credential pool. Input
@@ -537,9 +563,8 @@ requests, and model arguments cannot widen either admission rule.
 
 Admission is not delivery: the daemon supplies a surface only for `anthropic`
 and `openai` `file`, `claude_cli` `ambient` and `file`, and `codex_cli`
-`ambient` and `codex_home`. The `codex_cli` spellings of `file` and `oauth` are
-validated and then rejected as `UndeliveredCredentialDelivery`, so such a
-document fails startup rather than running inert.
+`ambient`, `codex_home`, and `oauth`. The `codex_cli` spelling of `file` is
+validated and then rejected as `UndeliveredCredentialDelivery`.
 
 Two model entries naming one target must agree on their complete rates or on
 their complete absence of rates. Rates are never written to a model-call row;
@@ -553,7 +578,8 @@ authority is cloned into the workspace, Git, and execution suites. A
 nonexistent, non-directory, final-symlink, non-repository, linked, or externally
 administered configured root fails startup for the complete mapped composition.
 
-Provisioning a derived directory is deployment work. Only a reported absence at
+Repository-watch pull-request dispatch provisions its derived directory; other
+derived directories are provisioned by deployment. Only a reported absence at
 the derived path is unprovisioned, and such a session binds the configured root;
 a present non-directory, a symlink, or a path the daemon cannot classify is
 misprovisioned and fails closed. Which root a session bound is recorded on its
@@ -696,12 +722,85 @@ validation of nonempty reviewer identities after bot-suffix normalization.
 Convergence reads and the sweep require this policy; other code-host operations
 do not use it.
 
+Each request and execution pass uses one immutable catalog snapshot.
+
+A reload that adds, edits, or removes `repository_watch.rules` commits
+activations and deactivations in the [reconciliation transaction](repo-watch.md)
+that records each activation's repository event tail, inside the reload
+boundary. A reload pauses sweep admission and stops and joins active sweep
+attempts before re-running convergence configured-target reconciliation after
+rule activation and event-tail capture commit, inside the reload boundary, using
+an empty effective target set when repository watch is disabled; sweep admission
+resumes under the replacement snapshot on success or the prior snapshot on
+rule-revision rejection only if that snapshot validates against the current
+startup-only sections, as [reload recovery](process-protocol.md) requires.
+Enabling convergence while repository watch is enabled composes the sweep task;
+disabling either terminates the task. A running sweep reads the new targets,
+template, interval, and credential path at its next attempt.
+
+Startup installs the OAuth registration catalog after database migrations. OAuth
+provisioning runs the configured device exchange, retains refresh and identity
+tokens with the canonical configuration tuple and generation, and stores no
+authorization when the response lacks an identity token. Authorization commits
+and pool-policy membership insertion serialize account-independence checks
+against every retained co-membership.
+
+`oauth` is spelled `delivery = "oauth"` with exactly five required fields:
+`client_id`, `token_url`, `refresh_token_url`, `device_authorization_url`, and
+the string array `scopes`. These are configuration, never build-provided
+constants. `client_id` is 1 through 1,024 NUL-free UTF-8 bytes preserved
+exactly. `scopes` holds 1 through 64 strings of 1 through 256 bytes, each byte
+an RFC 6749 scope-token character, declared order is request order, exact
+duplicates are rejected, and no normalization occurs. All endpoints are absolute
+`https` URLs with no fragment and no user information; every other scheme is
+rejected with no plaintext or local-host exception. The tuple is compared by
+parsed canonical components, scheme, lowercased host, effective port, path, and
+query, never by configured bytes. The delivery admits only
+`billing_kind = "subscription"`.
+
+Refresh sends JSON `{ client_id, grant_type: "refresh_token", refresh_token }`
+to `refresh_token_url`; device polling uses `token_url`.
+
+Refresh and dispatch compare the stored tuple with the current registration
+under the profile row lock; mismatch quarantines the generation before any token
+is sent. One process-shared refresh per profile and generation marks refresh in
+progress before one POST, with redirects and automatic retries disabled.
+Cancellation while waiting for initial profile locks or before refresh is sent
+cancels preparation; an unsent refresh clears its marker. Definitive
+non-rotation clears the marker. Connection loss after possible request bytes,
+cancellation after send, redirects, indeterminate responses, and refresh tokens
+rejected as expired, reused, or revoked quarantine the generation. Refresh
+replaces returned refresh and identity tokens in one commit, retaining either
+token when omitted; differing account identity quarantines. An ambiguous
+replacement commit is reread: a committed replacement is adopted and an
+uncleared marker quarantines. Access tokens live only in memory and refresh
+lazily after restart. Cache expiry comes from the access-token JWT `exp` claim.
+Cached tokens with at most five minutes remaining refresh before installation to
+stay outside Codex's proactive-refresh window.
+
+Dispatch holds the profile row lock through copying access and identity tokens
+and account metadata into a scratch home, withholding the refresh token. The
+adapter seeds exact-value redaction before writing either token. Homes use
+`0700` directories and `0600` regular files beneath one daemon-owned `0700`
+root, with descriptor-relative creation and removal rejecting symlinks. The root
+appends `.oauth` to the process socket path and cannot overlap runner socket
+artifacts. Completion removes the home; startup validates all retained homes
+before scavenging and fails without removal on ownership, type, or containment
+mismatch. The Codex child uses the home's file backend and token-only
+authentication with ambient credentials, keyrings, helpers, and external stores
+disabled; inability to deliver the home is a typed pre-send failure. An
+access-token rejection during an invocation neither quarantines the profile nor
+permits automatic call retry. Delivery failure evidence and quarantine commit
+atomically and bypass pool trigger policy. OAuth quarantine reads lock only
+currently registered OAuth pool members. Successful re-provisioning clears OAuth
+delivery-origin quarantine and cached access; failure preserves both. Deletion
+holds the dispatch profile lock while removing authorization and cached access,
+advances the retained generation, and preserves registration and history.
+
 ## Planned
 
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).
-- Configuration reload after startup:
-  [design](../design/configuration-and-credentials.md).
 - Dated rate windows on a model entry; the present grammar admits one flat rate,
   which is one window across all time:
   [design](../design/configuration-and-credentials.md).
@@ -714,8 +813,7 @@ do not use it.
   [design](../design/configuration-and-credentials.md).
 - Pre-activation workspace binding and template instruction selectors:
   [design](../design/configuration-and-credentials.md).
-- Codex CLI `file` and `oauth` deliveries, with provisioning, refresh,
-  quarantine, and restore rules for a daemon-owned authorization:
+- Codex CLI `file` delivery and OAuth database-restore rules:
   [design](../design/configuration-and-credentials.md).
 - Bounded credential-home concurrency and round-robin selection:
   `max_concurrent_invocations` and `round_robin`:

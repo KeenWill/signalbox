@@ -2,7 +2,7 @@ load("@crates//:defs.bzl", "all_crate_deps", "crate_edition")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_binary", "rust_library")
-load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_unit_test")
+load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 CRATE_DEPS = [
     ":build_script",
@@ -24,6 +24,7 @@ cargo_build_script(
         "package.json",
     ],
     edition = crate_edition(),
+    lint_config = ":cargo_lints",
     rustc_env_files = [":cargo_environment"],
     deps = all_crate_deps(build = True),
 )
@@ -62,3 +63,109 @@ rust_api_json(
     name = "api_json",
     crate = ":signalbox_model_runtime_claude_cli",
 )
+
+rust_doc_test(
+    name = "doc_tests",
+    crate = ":signalbox_model_runtime_claude_cli",
+)
+
+rust_integration_test(
+    name = "live_smoke",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    compile_data = ["//:.github/workflows/claude-smoke.yml"],
+    crate_root = "tests/live_smoke.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":signalbox-claude-mcp-bridge",
+        ":signalbox-fake-claude-cli",
+    ],
+    env = {
+        "NEXTEST_BIN_EXE_signalbox_claude_mcp_bridge": "$(rootpath :signalbox-claude-mcp-bridge)",
+        "NEXTEST_BIN_EXE_signalbox_fake_claude_cli": "$(rootpath :signalbox-fake-claude-cli)",
+    },
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/model-runtime-claude-cli",
+        "CARGO_BIN_EXE_signalbox-claude-mcp-bridge": "$(rootpath :signalbox-claude-mcp-bridge)",
+        "CARGO_BIN_EXE_signalbox-fake-claude-cli": "$(rootpath :signalbox-fake-claude-cli)",
+    },
+    deps = [
+        ":build_script",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/model-runtime-claude-cli:signalbox_model_runtime_claude_cli",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
+)
+
+rust_integration_test(
+    name = "pin",
+    srcs = glob(["tests/**/*.rs"]) + ["version_pin.rs"],
+    args = ["--test-threads=4"],
+    compile_data = [
+        "package-lock.json",
+        "package.json",
+    ],
+    crate_root = "tests/pin.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":signalbox-claude-mcp-bridge",
+        ":signalbox-fake-claude-cli",
+    ],
+    env = {
+        "NEXTEST_BIN_EXE_signalbox_claude_mcp_bridge": "$(rootpath :signalbox-claude-mcp-bridge)",
+        "NEXTEST_BIN_EXE_signalbox_fake_claude_cli": "$(rootpath :signalbox-fake-claude-cli)",
+    },
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/model-runtime-claude-cli",
+        "CARGO_BIN_EXE_signalbox-claude-mcp-bridge": "$(rootpath :signalbox-claude-mcp-bridge)",
+        "CARGO_BIN_EXE_signalbox-fake-claude-cli": "$(rootpath :signalbox-fake-claude-cli)",
+    },
+    deps = [
+        ":build_script",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/model-runtime-claude-cli:signalbox_model_runtime_claude_cli",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
+)
+
+rust_integration_test(
+    name = "process",
+    srcs = glob(["tests/**/*.rs"]),
+    args = ["--test-threads=4"],
+    crate_root = "tests/process.rs",
+    data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/**/*.rs"],
+    ) + [
+        ":signalbox-claude-mcp-bridge",
+        ":signalbox-fake-claude-cli",
+    ],
+    env = {
+        "NEXTEST_BIN_EXE_signalbox_claude_mcp_bridge": "$(rootpath :signalbox-claude-mcp-bridge)",
+        "NEXTEST_BIN_EXE_signalbox_fake_claude_cli": "$(rootpath :signalbox-fake-claude-cli)",
+    },
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/model-runtime-claude-cli",
+        "CARGO_BIN_EXE_signalbox-claude-mcp-bridge": "$(rootpath :signalbox-claude-mcp-bridge)",
+        "CARGO_BIN_EXE_signalbox-fake-claude-cli": "$(rootpath :signalbox-fake-claude-cli)",
+    },
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    deps = [
+        ":build_script",
+        "//crates/model-runtime:signalbox_model_runtime",
+        "//crates/model-runtime-claude-cli:signalbox_model_runtime_claude_cli",
+        "//crates/test-bin:signalbox_test_bin",
+    ],
+)
+
+rust_quality_tests(documented_crates = [":signalbox_model_runtime_claude_cli"])

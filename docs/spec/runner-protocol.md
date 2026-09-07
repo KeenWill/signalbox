@@ -16,13 +16,13 @@ Every later connection sends `resume` under those identities. After the
 handshake the runner advertises its availability and answers heartbeat
 challenges. The daemon records each connection under a durable connection epoch,
 marks a runner suspect and then lost when heartbeats stop, and propagates the
-loss to the sessions pinned to that runner. This registration slice and the
-`signalbox-runner` binary are the whole of what is built. The runner advertises
-only the credential-profile names and repository entries its strict
-configuration carries, and no capability class, tool, workspace capability, or
-sandbox profile; the daemon catalog that would admit such claims is empty, and
-the runner sends an empty reconnect inventory and executes nothing. Leases,
-dispatch, workspaces, sandboxes, and recovery are listed under Planned.
+loss to the sessions pinned to that runner. The runner recovery commands also
+have durable request, receipt, and daemon handlers. The runner advertises only
+the credential-profile names and repository entries its strict configuration
+carries, and no capability class, tool, workspace capability, or sandbox
+profile; the daemon catalog that would admit such claims is empty, and the
+runner sends an empty reconnect inventory and executes nothing. Leases,
+dispatch, runner workspace execution, and sandboxes are listed under Planned.
 
 The domain lives in `crates/domain/src/runner/` and the wire vocabulary in
 `crates/runner-wire`. A `RunnerEnrollment` binds the daemon-issued runner,
@@ -32,13 +32,15 @@ advertisement checked against that enrollment and the daemon's `RunnerCatalog`,
 paired with the daemon's policy for every tool and profile it admits. The
 advertisement carries availability only: capability classes, tool names,
 credential-profile names with their repository entries, and workspace and
-sandbox-profile capabilities. Each tool a runner may advertise has one
-daemon-authoritative `RunnerToolDeclaration` giving its model-facing definition,
-its effect class, and its admissible loci. Every declaration has exactly one
-effect class, pure, idempotent, or side-effecting, with no default; the class
-decides what a lost or repeated execution may do. A tool's admissible loci are
-daemon only, runner only, or either, and a runner locus names one runner
-identity or one capability class.
+sandbox-profile capabilities, and an optional runner-reported absolute default
+directory retained with that registration. The advertisement digest includes the
+optional directory after the repository inventory. Each tool a runner may
+advertise has one daemon-authoritative `RunnerToolDeclaration` giving its
+model-facing definition, its effect class, and its admissible loci. Every
+declaration has exactly one effect class, pure, idempotent, or side-effecting,
+with no default; the class decides what a lost or repeated execution may do. A
+tool's admissible loci are daemon only, runner only, or either, and a runner
+locus names one runner identity or one capability class.
 
 A `SessionRunnerPlacement` is the session's placement aggregate: one
 `SessionRunnerPlacementRequest`, the placement revision, and the lifecycle
@@ -114,8 +116,11 @@ receives a new identity, and a runner reconnecting under an active enrollment
 keeps its existing one. The runner creates one random enrollment-request
 identity on first startup and journals it atomically below its private state
 root before it connects, so replaying `enroll` after a crash is safe. The daemon
-admits `enroll` only as a pristine enrollment while no other active enrollment
-exists.
+admits a pristine active enrollment while no other active enrollment exists, or
+one pending successor after that enrollment is durably lost. Equal enrollment
+replay retains the exact receipt. Pending enrollment permits heartbeat and a
+command-bound workspace operation, but cannot mutate registration or authorize
+grants, leases, claims, or dispatch.
 
 Durable revocation commits first and then flips the caller-held active fence
 that the enrollment shares; a failed durable revocation leaves that fence
@@ -250,16 +255,46 @@ transport threat narrative.
 [Sessions and transcript](sessions-and-transcript.md) owns the session's dotted
 placement path, which is not a runner placement fact.
 
+`promote_pending_runner` names the pending enrollment request and atomically
+revokes its lost predecessor and promotes its exact enrollment and registration;
+it changes no session placement. The daemon delivers the promoted `enrolled`
+receipt on the candidate connection; the runner fsyncs its exact promotion and
+equal replay changes nothing. `replace_lost_runner` names a lost session and an
+optional checkout revision, promotes a connected pending successor when needed,
+and installs the successor placement and grant lineage. Successor selection
+follows the enrollment chain to its current pending or active descendant.
+Pre-pin replacement provisions nothing and returns to unpinned at the next
+revision. A replacement requested with an active turn records
+`ExistingControlRequired` before staging. Registration-triggered loss permits
+replacement on the same runner after its current registration satisfies the
+retained request; other loss sources require a different runner.
+
+Pinned replacement requiring a repository or private root retains a single-use
+command authorization and an exactly correlated `workspace_ready` receipt,
+including its absolute working directory. The daemon acknowledges a durably
+retained receipt even while installation waits. Provisioning retains a
+repository key and checkout revision together or neither; a mismatched pair is
+rejected before staging. Installation consumes that receipt, promotes the
+pending candidate, installs the placement and grant, appends the reference-only
+placement boundary, and records the terminal result atomically when no turn is
+active. Provisioning refusal or candidate loss records a typed terminal
+rejection and leaves the candidate pending. A terminal delegated runtime does
+not count as an active turn for recovery commands. Replacement rejects a
+candidate lacking the requested sandbox or repository workspace capability
+before staging provisioning. Ambient default-directory replacement requires the
+successor registration's reported directory. A rejected command's ready
+workspace, including a correlated receipt arriving after abandonment, is
+released only through its exact manifest correlation on the candidate's retained
+connection epoch. Suspicion retains that cleanup authority; loss does not
+transfer it. Release acknowledgement uses the same current-epoch fence as
+release dispatch.
+
 ## Planned
 
 - Lease offer, claim, dispatch, result and failure spooling, and
   reconnect-inventory reconciliation over the wire, under one global execution
   permit per runner: [runner protocol design](../design/runner-protocol.md).
 - Several runners enrolled with one daemon at once:
-  [runner protocol design](../design/runner-protocol.md).
-- Pending successor enrollment, promotion, and the replacement command:
-  [runner protocol design](../design/runner-protocol.md).
-- Same-runner replacement after registration-triggered loss:
   [runner protocol design](../design/runner-protocol.md).
 - User-directed relocation of a healthy session, `move_healthy_session`:
   [runner protocol design](../design/runner-protocol.md).

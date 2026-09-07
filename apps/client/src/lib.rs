@@ -58,6 +58,7 @@ mod chat;
 mod connection;
 mod error;
 mod presentation;
+mod runner;
 mod transcript;
 
 const MAX_INPUT_CONTENT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
@@ -282,6 +283,7 @@ async fn execute(
         | Command::BlobRead { .. }
         | Command::Create { .. }
         | Command::Place { .. }
+        | Command::Runner(_)
         | Command::Continue { .. }
         | Command::Compact { .. }
         | Command::Session(_)
@@ -290,6 +292,7 @@ async fn execute(
         | Command::Imported { .. }
         | Command::Status
         | Command::List
+        | Command::ReloadConfiguration { .. }
         | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
@@ -309,6 +312,7 @@ async fn execute(
         Command::BlobUpload { source } => Some(open_blob_source(source)?),
         Command::Create { .. }
         | Command::Place { .. }
+        | Command::Runner(_)
         | Command::Continue { .. }
         | Command::Compact { .. }
         | Command::Session(_)
@@ -317,6 +321,7 @@ async fn execute(
         | Command::Imported { .. }
         | Command::Status
         | Command::List
+        | Command::ReloadConfiguration { .. }
         | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
@@ -346,12 +351,14 @@ async fn execute(
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
         | Command::Place { .. }
+        | Command::Runner(_)
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
         | Command::Credential(_)
         | Command::Status
         | Command::List
+        | Command::ReloadConfiguration { .. }
         | Command::Templates
         | Command::Search(_)
         | Command::Conversations(_)
@@ -396,6 +403,7 @@ async fn execute(
     }
 
     match arguments.command {
+        Command::Runner(command) => runner::run(&mut client, &mut output, command).await,
         Command::Create {
             selection,
             template,
@@ -480,6 +488,9 @@ async fn execute(
         Command::Goal(command) => goal(&mut client, &mut output, command).await,
         Command::Status => status(&mut client, &mut output).await,
         Command::List => list(&mut client, &mut output).await,
+        Command::ReloadConfiguration { command_id } => {
+            session::reload_configuration(&mut client, &mut output, command_id).await
+        }
         Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
         Command::Conversations(page) => conversations(&mut client, &mut output, page).await,

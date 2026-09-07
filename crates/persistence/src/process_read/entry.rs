@@ -27,6 +27,17 @@ pub(super) fn decode_transcript_entry(
     let source_session = session_id_from_uuid(required(row, "source_session_id")?);
     let entry = SemanticTranscriptEntryId::from_uuid(required(row, "semantic_entry_id")?);
     let payload_kind: String = required(row, "payload_kind")?;
+    if payload_kind != "runner_placement_changed"
+        && row
+            .try_get::<Option<Decimal>, _>("runner_placement_revision")?
+            .is_some()
+    {
+        return Err(
+            ProcessReadCorruption::Inconsistent("non-placement semantic entry fields").into(),
+        );
+    }
+    let assistant_response_part_ordinal: Option<Decimal> =
+        row.try_get("assistant_response_part_ordinal")?;
     let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
     let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
     let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;
@@ -99,7 +110,8 @@ pub(super) fn decode_transcript_entry(
     let delegation_result_content: Option<String> = row.try_get("delegation_result_content")?;
     let delegation_result_reason: Option<String> = row.try_get("delegation_result_reason_kind")?;
 
-    let legacy_payload_present = origin.is_some()
+    let legacy_payload_present = assistant_response_part_ordinal.is_some()
+        || origin.is_some()
         || steering_source_turn.is_some()
         || failed_turn.is_some()
         || assistant_text.is_some()
@@ -120,6 +132,33 @@ pub(super) fn decode_transcript_entry(
         || context_summary_through_source_session.is_some()
         || context_summary_through_entry.is_some();
 
+    if payload_kind == "runner_placement_changed" {
+        if legacy_payload_present
+            || tool_result_request.is_some()
+            || delegated_task_spawning_request.is_some()
+            || delegation_message.is_some()
+            || delegation_result_awaiting_request.is_some()
+            || delegation_result_spawning_request.is_some()
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("placement boundary entry shape").into(),
+            );
+        }
+        let revision: Decimal = required(row, "runner_placement_revision")?;
+        let placement_revision = signalbox_domain::RunnerGeneration::try_from_u64(decode_positive(
+            revision,
+            "placement boundary revision",
+        )?)
+        .ok_or(ProcessReadCorruption::Inconsistent(
+            "placement boundary revision",
+        ))?;
+        return Ok(ProcessTranscriptEntry::RunnerPlacementChanged {
+            entry_index,
+            source_session,
+            entry,
+            placement_revision,
+        });
+    }
     if payload_kind == "delegated_task" {
         let (Some(spawning_request), Some(parent_session), Some(parent_turn), Some(content)) = (
             delegated_task_spawning_request,
@@ -491,7 +530,7 @@ pub(super) fn decode_transcript_entry(
 
     if matches!(
         payload_kind.as_str(),
-        "tool_denied" | "tool_closed_by_turn_end"
+        "tool_inadmissible" | "tool_denied" | "tool_closed_by_turn_end"
     ) {
         let Some(request) = tool_result_request else {
             return Err(ProcessReadCorruption::Inconsistent("tool result entry shape").into());
@@ -528,6 +567,22 @@ pub(super) fn decode_transcript_entry(
                     }
                 })
                 .to_string(),
+            }
+        } else if payload_kind == "tool_inadmissible" {
+            let reason: Option<String> = row.try_get("transcript_inadmissible_reason")?;
+            if reason.as_deref() != Some("placement_lost") {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("tool inadmissibility reason").into(),
+                );
+            }
+            ProcessTranscriptEntry::ToolInadmissible {
+                entry_index,
+                source_session,
+                entry,
+                request: ToolRequestId::from_uuid(request),
+                content: String::from(
+                    r#"{"error":{"detail":"placement_lost","kind":"execution_failed"}}"#,
+                ),
             }
         } else {
             ProcessTranscriptEntry::ToolClosed {
@@ -780,6 +835,7 @@ pub(super) fn decode_transcript_entry(
             | "assistant_tool_use"
             | "tool_execution_result"
             | "tool_denied"
+            | "tool_inadmissible"
             | "tool_closed_by_turn_end"
             | "turn_failed"
             | "turn_completed"

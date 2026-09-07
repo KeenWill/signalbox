@@ -163,6 +163,11 @@ pub enum ModelCallCauseToken {
     CredentialUnmapped,
     CredentialUnavailable,
     CredentialUnreadable,
+    OauthTupleMismatch,
+    OauthRefreshAmbiguous,
+    OauthRefreshRejected,
+    OauthIdentityChanged,
+    OauthCredentialHome,
     CredentialUnusable,
     ProviderTargetSubstituted,
     UnrepresentableToolMaterial,
@@ -245,6 +250,11 @@ pub enum CredentialAccessCode {
     Unmapped,
     Unavailable,
     Unreadable,
+    OauthTupleMismatch,
+    OauthRefreshAmbiguous,
+    OauthRefreshRejected,
+    OauthIdentityChanged,
+    OauthCredentialHome,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl CredentialAccessCode {

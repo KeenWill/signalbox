@@ -47,9 +47,19 @@ pub enum SessionDeadlineRepositoryError {
     /// A configured duration cannot fit the storage arithmetic.
     BoundExceedsStorage,
     /// PostgreSQL rejected or could not run one statement.
-    Database(sqlx::Error),
+    Database {
+        /// Statement or transaction operation that failed.
+        query: &'static str,
+        /// Original PostgreSQL or pool failure.
+        source: sqlx::Error,
+    },
     /// The lifecycle transition failed beneath the pass.
-    Lifecycle(Box<SessionLifecycleRepositoryError>),
+    Lifecycle {
+        /// Lifecycle operation that failed.
+        query: &'static str,
+        /// Original lifecycle failure.
+        source: Box<SessionLifecycleRepositoryError>,
+    },
 }
 
 impl fmt::Display for SessionDeadlineRepositoryError {
@@ -58,8 +68,10 @@ impl fmt::Display for SessionDeadlineRepositoryError {
             Self::BoundExceedsStorage => {
                 formatter.write_str("session deadline bound exceeds storage")
             }
-            Self::Database(_) => formatter.write_str("session deadline database failure"),
-            Self::Lifecycle(error) => write!(formatter, "{error}"),
+            Self::Database { query, .. } => {
+                write!(formatter, "session deadline database failure in {query}")
+            }
+            Self::Lifecycle { query, source } => write!(formatter, "{query}: {source}"),
         }
     }
 }
@@ -67,22 +79,10 @@ impl fmt::Display for SessionDeadlineRepositoryError {
 impl Error for SessionDeadlineRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
-            Self::Lifecycle(error) => Some(error.as_ref()),
+            Self::Database { source, .. } => Some(source),
+            Self::Lifecycle { source, .. } => Some(source.as_ref()),
             Self::BoundExceedsStorage => None,
         }
-    }
-}
-
-impl From<sqlx::Error> for SessionDeadlineRepositoryError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
-}
-
-impl From<SessionLifecycleRepositoryError> for SessionDeadlineRepositoryError {
-    fn from(error: SessionLifecycleRepositoryError) -> Self {
-        Self::Lifecycle(Box::new(error))
     }
 }
 
@@ -105,7 +105,6 @@ impl PostgresSessionDeadlineRepository {
     ) -> Result<SessionDeadlinePassOutcome, SessionDeadlineRepositoryError> {
         let admission_millis = stored_millis(self.bounds.admission)?;
         let waiting_millis = stored_millis(self.bounds.waiting)?;
-        let mut transaction = self.pool.begin().await?;
         let candidate: Option<Uuid> = sqlx::query_scalar(
             "SELECT session_id
                FROM session_deadline
@@ -133,14 +132,17 @@ impl PostgresSessionDeadlineRepository {
         )
         .bind(admission_millis)
         .bind(waiting_millis)
-        .fetch_optional(&mut *transaction)
-        .await?;
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database_failure("select_deadline_candidate"))?;
         let Some(candidate) = candidate else {
-            transaction.rollback().await?;
             return Ok(SessionDeadlinePassOutcome::Idle);
         };
+        let mut transaction = self.pool.begin().await.map_err(database_failure("begin"))?;
         let session = session_id_from_uuid(candidate);
-        let held = session_lifecycle::load_locked(&mut transaction, session).await?;
+        let held = session_lifecycle::load_locked(&mut transaction, session)
+            .await
+            .map_err(lifecycle_failure("load_locked_lifecycle"))?;
         let deadline = sqlx::query(
             "UPDATE session_deadline
                 SET expires_at = CASE deadline_kind
@@ -155,15 +157,26 @@ impl PostgresSessionDeadlineRepository {
         .bind(admission_millis)
         .bind(waiting_millis)
         .fetch_optional(&mut *transaction)
-        .await?;
+        .await
+        .map_err(database_failure("materialize_deadline_expiry"))?;
         let Some(deadline) = deadline else {
-            transaction.rollback().await?;
+            transaction
+                .rollback()
+                .await
+                .map_err(database_failure("rollback_missing_deadline"))?;
             return Ok(SessionDeadlinePassOutcome::Idle);
         };
-        let kind: String = deadline.try_get("deadline_kind")?;
-        let due: Option<bool> = deadline.try_get("due")?;
+        let kind: String = deadline
+            .try_get("deadline_kind")
+            .map_err(database_failure("decode_deadline_kind"))?;
+        let due: Option<bool> = deadline
+            .try_get("due")
+            .map_err(database_failure("decode_deadline_due"))?;
         if due != Some(true) {
-            transaction.commit().await?;
+            transaction
+                .commit()
+                .await
+                .map_err(database_failure("commit_armed_deadline"))?;
             return Ok(SessionDeadlinePassOutcome::Armed { session });
         }
         let outcome = match (kind.as_str(), held.state()) {
@@ -171,8 +184,11 @@ impl PostgresSessionDeadlineRepository {
                 sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
                     .bind(candidate)
                     .fetch_one(&mut *transaction)
-                    .await?;
-                retire_queued_turns(&mut transaction, session).await?;
+                    .await
+                    .map_err(database_failure("lock_admission_scheduler"))?;
+                retire_queued_turns(&mut transaction, session)
+                    .await
+                    .map_err(database_failure("retire_queued_turns"))?;
                 session_lifecycle::close_in_transaction(
                     &mut transaction,
                     session,
@@ -181,7 +197,8 @@ impl PostgresSessionDeadlineRepository {
                     },
                     LifecycleActor::Watchdog,
                 )
-                .await?;
+                .await
+                .map_err(lifecycle_failure("close_expired_admission"))?;
                 SessionDeadlinePassOutcome::Retired { session }
             }
             ("waiting", SessionLifecycleState::Waiting { .. }) => {
@@ -193,24 +210,43 @@ impl PostgresSessionDeadlineRepository {
                     None,
                     LifecycleActor::Watchdog,
                 )
-                .await?;
+                .await
+                .map_err(lifecycle_failure("park_expired_waiting"))?;
                 SessionDeadlinePassOutcome::Parked { session }
             }
             _ => {
-                transaction.rollback().await?;
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(database_failure("rollback_inapplicable_deadline"))?;
                 return Ok(SessionDeadlinePassOutcome::Idle);
             }
         };
         transaction.commit().await.map_err(|error| {
             if crate::commit_failure_is_ambiguous(&error) {
-                SessionDeadlineRepositoryError::Lifecycle(Box::new(
+                lifecycle_failure("commit_expired_deadline")(
                     SessionLifecycleRepositoryError::CommitAmbiguous(error),
-                ))
+                )
             } else {
-                SessionDeadlineRepositoryError::Database(error)
+                database_failure("commit_expired_deadline")(error)
             }
         })?;
         Ok(outcome)
+    }
+}
+
+fn database_failure(
+    query: &'static str,
+) -> impl FnOnce(sqlx::Error) -> SessionDeadlineRepositoryError {
+    move |source| SessionDeadlineRepositoryError::Database { query, source }
+}
+
+fn lifecycle_failure(
+    query: &'static str,
+) -> impl FnOnce(SessionLifecycleRepositoryError) -> SessionDeadlineRepositoryError {
+    move |source| SessionDeadlineRepositoryError::Lifecycle {
+        query,
+        source: Box::new(source),
     }
 }
 

@@ -850,10 +850,12 @@ payload!(WorkspaceLeakRecorded {
     page_digest: Digest
 });
 payload!(WorkspaceProvision {
-    correlation: ProvisionCorrelation
+    correlation: ProvisionCorrelation,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::deserialize_present")] recovery: Option<crate::Recovery>
 });
 payload!(WorkspaceReady {
     correlation: ProvisionCorrelation,
+    working_directory: String,
     ready: ReadyManifest
 });
 payload!(WorkspaceRecorded {
@@ -974,9 +976,23 @@ impl Message {
                 Ok(())
             }
             Self::WorkspaceLeakPage(value) => value.page.validate(),
-            Self::WorkspaceProvision(value) => value.correlation.validate(),
+            Self::WorkspaceProvision(value) => {
+                value.correlation.validate()?;
+                if value.correlation.repository.is_some() != value.recovery.is_some() {
+                    return Err(ValueError::Correlation);
+                }
+                if let Some(recovery) = &value.recovery {
+                    recovery.validate()?;
+                }
+                Ok(())
+            }
             Self::WorkspaceReady(value) => {
                 value.correlation.validate()?;
+                if !value.working_directory.starts_with('/')
+                    || value.working_directory.contains('\0')
+                {
+                    return Err(ValueError::Correlation);
+                }
                 validate_ready_correlation(&value.correlation, &value.ready)
             }
             Self::WorkspaceRecorded(value) => value.correlation.validate(),

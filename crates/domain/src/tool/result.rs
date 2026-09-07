@@ -91,9 +91,21 @@ pub enum ToolRequestResolution {
         /// The denied logical request.
         request: ToolRequestId,
     },
+    /// The request could not be admitted before dispatch.
+    ClosedInadmissible {
+        /// The closed logical request.
+        request: ToolRequestId,
+    },
     /// The turn ended while the request remained undecided.
     ClosedByTurnEnd {
         /// The closed logical request.
         request: ToolRequestId,
     },
+}
+
+/// The closed reason for a request resolved before dispatch.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ToolInadmissibleReason {
+    /// The runner placement was lost before any lease offer or executor dispatch.
+    PlacementLost,
 }
