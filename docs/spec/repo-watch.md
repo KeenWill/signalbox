@@ -237,14 +237,14 @@ command behavior, and the module event/command/database boundary in the
 [ownership seam](ownership-seam.md).
 
 Reload stops and joins ingestion and active convergence attempts before rule
-activation; it reconciles convergence targets afterward, using an empty target
-set when disabled. Disabling repository watch stops and joins its pollers,
-listener, command worker, and sweep; enabling composes them from the retained
-configuration. The runtime replaces polling tasks when repositories, intervals,
-credential paths, or signal reviewers change. Listener removal stops and joins
-its server; same-address reload swaps routing atomically, and an address change
-binds the replacement before retiring the old listener. Bind refusal leaves the
-running listener intact.
+activation, then publishes the selected catalogs before reconciling convergence
+targets, using an empty target set when disabled. Disabling repository watch
+stops and joins its pollers, listener, command worker, and sweep; enabling
+composes them from the retained configuration. The runtime replaces polling
+tasks when repositories, intervals, credential paths, or signal reviewers
+change. Listener removal stops and joins its server; same-address reload swaps
+routing atomically, and an address change binds the replacement before retiring
+the old listener. Bind refusal leaves the running listener intact.
 
 Each bounded canonical poll resource or page key retains its HTTP validators and
 an accepted typed snapshot sufficient to reconstruct its normalized contribution
@@ -254,8 +254,8 @@ actors outside the configured signal-reviewer set. Before every poller
 composition, including startup and re-enablement, the runtime compares the
 persisted reviewer set with configured signal reviewers and invalidates both
 validators and snapshots when they differ. After restart with an unchanged set,
-the first complete poll sends conditional requests for every resource with a
-persisted validator.
+the first complete poll sends conditional requests for every traversed resource
+with a persisted validator.
 
 ## Planned
 

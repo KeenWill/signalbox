@@ -25,8 +25,10 @@ BEGIN
 
     SELECT pg_get_functiondef('require_durable_command_typed_record()'::regprocedure)
       INTO STRICT typed_record_function;
-    EXECUTE replace(typed_record_function, 'CASE NEW.command_kind',
+    IF position('WHEN ''reload_configuration'' THEN' IN typed_record_function) = 0 THEN
+        EXECUTE replace(typed_record_function, 'CASE NEW.command_kind',
         'CASE NEW.command_kind
         WHEN ''reload_configuration'' THEN SELECT count(*) INTO matching_records FROM reload_configuration_command WHERE command_id = NEW.command_id;');
+    END IF;
 END;
 $$;

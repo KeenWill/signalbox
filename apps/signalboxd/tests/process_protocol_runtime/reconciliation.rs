@@ -135,7 +135,8 @@ pub(crate) async fn park_turn_on_ambiguous_model_call(
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn reconcile_turn_releases_a_wedged_ambiguous_session() -> Result<(), Box<dyn Error>> {
-    let runtime = RunningRuntime::start().await?;
+    let configuration_text = reported_usage_preflight_configuration_text();
+    let runtime = RunningRuntime::start_with_model_configuration(&configuration_text).await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let (_, parked_turn_id) =
@@ -183,6 +184,24 @@ async fn reconcile_turn_releases_a_wedged_ambiguous_session() -> Result<(), Box<
         .await?;
     let successor_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
     assert_ne!(successor_turn_id, parked_turn_id);
+
+    let preview = reported_usage_compaction(
+        &runtime,
+        ScriptedModel::following(std::iter::empty::<Script>()),
+        reported_usage_preflight_configuration()?,
+    )?;
+    preview
+        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
+        .await?;
+    let compaction_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM context_compaction WHERE session_id = $1")
+            .bind(session_id.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(
+        compaction_count, 0,
+        "reported_usage_activation_preview must admit a queued successor whose predecessor call is terminal ambiguous"
+    );
 
     connection
         .request_version(

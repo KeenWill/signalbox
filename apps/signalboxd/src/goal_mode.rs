@@ -1161,13 +1161,18 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 AcceptedInputId::from_uuid(Uuid::now_v7()),
                 TurnId::from_uuid(Uuid::now_v7()),
             );
+            let models = adapter
+                .configuration_reload
+                .as_ref()
+                .map(|reload| reload.catalogs().models)
+                .unwrap_or_else(|| std::sync::Arc::new(adapter.model_configuration.clone()));
             let outcome = match adapter
                 .repository
                 .reconcile_current_after_execution(
                     session,
                     candidates,
                     resumption.need()?,
-                    |alias| adapter.model_configuration.resolve_alias(alias),
+                    |alias| models.resolve_alias(alias),
                 )
                 .await
             {
