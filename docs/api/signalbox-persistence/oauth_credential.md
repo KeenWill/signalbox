@@ -153,6 +153,15 @@ impl oauth_credential::OauthCredentialRepository {
         &self,
     ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
 }
+impl oauth_credential::OauthCredentialRepository {
+    pub async fn lock_dispatch(
+        &self,
+        profile: &str,
+    ) -> result::Result<
+        option::Option<oauth_credential::OauthDispatchLease>,
+        oauth_credential::OauthCredentialRepositoryError,
+    >;
+}
 ```
 
 ## OauthRegistration
@@ -161,6 +170,7 @@ impl oauth_credential::OauthCredentialRepository {
 pub struct OauthRegistration {
     pub client_id: string::String,
     pub token_url: string::String,
+    pub refresh_token_url: string::String,
     pub device_authorization_url: string::String,
     pub scopes: vec::Vec<string::String>,
 }
@@ -206,4 +216,56 @@ pub enum OauthStartOutcome {
     Existing(oauth_credential::OauthCredentialHandlingOutcome),
 }
 // derives: clone::Clone, fmt::Debug
+```
+
+## OauthQuarantineCause
+
+```rust
+pub enum OauthQuarantineCause {
+    TupleMismatch,
+    RefreshAmbiguous,
+    RefreshRejected,
+    IdentityChanged,
+    CredentialHome,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## OauthStoredAuthorization
+
+```rust
+pub struct OauthStoredAuthorization {
+    pub registration: oauth_credential::OauthRegistration,
+    pub authorization: oauth_credential::OauthAuthorization,
+    pub generation: i64,
+    pub refresh_in_progress: bool,
+    pub quarantine: option::Option<oauth_credential::OauthQuarantineCause>,
+}
+// derives: clone::Clone, fmt::Debug
+```
+
+## OauthDispatchLease
+
+```rust
+pub struct OauthDispatchLease {/* private */}
+impl oauth_credential::OauthDispatchLease {
+    pub fn authorization(&self) -> option::Option<&oauth_credential::OauthStoredAuthorization>;
+    pub async fn mark_refresh(
+        self,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn clear_refresh(
+        self,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn replace_refresh(
+        self,
+        authorization: &oauth_credential::OauthAuthorization,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn quarantine(
+        self,
+        cause: oauth_credential::OauthQuarantineCause,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+    pub async fn commit(
+        self,
+    ) -> result::Result<(), oauth_credential::OauthCredentialRepositoryError>;
+}
 ```

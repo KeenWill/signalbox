@@ -54,17 +54,15 @@ const PROFILE_COMMON_FIELDS: [&str; 4] = ["name", "adapter", "billing_kind", "de
 
 /// How one credential profile's secret reaches its provider.
 ///
-/// The variants below are the deliveries this build supplies. The grammar also
-/// recognizes `oauth`; parsing rejects it as undelivered so a deployment learns
-/// at startup that no surface honors it, rather than from
-/// a call that silently authenticated as some other account.
+/// The variants below are the deliveries this build supplies; OAuth uses
+/// daemon-owned authorization for Codex dispatch.
 #[derive(Clone, Eq, PartialEq)]
 pub enum CredentialDelivery {
     /// The adapter's own client resolves its login and the daemon supplies no
     /// credential material. The Codex CLI owns its external login this way.
     Ambient,
     /// Daemon-owned device authorization; configuration admission requires dispatch support.
-    Oauth(OauthDelivery),
+    Oauth(Box<OauthDelivery>),
     /// An absolute deployment-owned file read per preparation and never cached.
     File {
         /// Absolute path the deployment writes the credential value to.
@@ -88,6 +86,7 @@ pub enum CredentialDelivery {
 pub struct OauthDelivery {
     client_id: String,
     token_url: Url,
+    refresh_token_url: Url,
     device_authorization_url: Url,
     scopes: Vec<String>,
 }
@@ -99,6 +98,7 @@ impl OauthDelivery {
         signalbox_persistence::oauth_credential::OauthRegistration {
             client_id: self.client_id.clone(),
             token_url: self.token_url.to_string(),
+            refresh_token_url: self.refresh_token_url.to_string(),
             device_authorization_url: self.device_authorization_url.to_string(),
             scopes: self.scopes.clone(),
         }
@@ -244,12 +244,12 @@ impl CredentialDelivery {
                 allowed.extend_from_slice(&[
                     "client_id",
                     "token_url",
+                    "refresh_token_url",
                     "device_authorization_url",
                     "scopes",
                 ]);
                 reject_unknown_fields(profile, &allowed)?;
-                parse_oauth_delivery(profile)?;
-                Err(undelivered(key))
+                parse_oauth_delivery(profile).map(Box::new).map(Self::Oauth)
             }
             _ => Err(HubModelConfigurationError::InvalidCredentialDelivery),
         }
@@ -422,6 +422,7 @@ fn parse_oauth_delivery(profile: &Table) -> Result<OauthDelivery, HubModelConfig
         return Err(HubModelConfigurationError::InvalidCredentialDelivery);
     }
     validate_https_url(required_string(profile, "token_url")?)?;
+    validate_https_url(required_string(profile, "refresh_token_url")?)?;
     validate_https_url(required_string(profile, "device_authorization_url")?)?;
     let scopes = profile
         .get("scopes")
@@ -446,6 +447,8 @@ fn parse_oauth_delivery(profile: &Table) -> Result<OauthDelivery, HubModelConfig
     Ok(OauthDelivery {
         client_id: client_id.to_owned(),
         token_url: Url::parse(required_string(profile, "token_url")?)
+            .map_err(|_| HubModelConfigurationError::InvalidCredentialDelivery)?,
+        refresh_token_url: Url::parse(required_string(profile, "refresh_token_url")?)
             .map_err(|_| HubModelConfigurationError::InvalidCredentialDelivery)?,
         device_authorization_url: Url::parse(required_string(profile, "device_authorization_url")?)
             .map_err(|_| HubModelConfigurationError::InvalidCredentialDelivery)?,

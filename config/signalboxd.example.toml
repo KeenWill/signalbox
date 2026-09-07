@@ -291,20 +291,20 @@ credential_pool = "anthropic-main"
 # names for one login.
 #
 # delivery = "oauth" — the daemon owns a rotating authorization it provisioned
-# itself, and hands each invocation a scratch home holding only an access token.
+# itself, and hands each invocation a scratch home holding access and identity
+# tokens but no refresh token.
 # This is the delivery that supports several subscription accounts in one pool:
 # nothing is shared or written back, so concurrent invocations cannot collide.
 # The OAuth client and endpoints are yours to choose; nothing here is a
-# build-provided constant. This build has no provisioning command or runtime
-# delivery for this committed syntax, so uncommenting it remains a typed startup
-# error until the OAuth delivery slice lands.
+# build-provided constant. Provision with `signalbox credential provision <profile>`.
 # [[credential_profiles]]
 # name = "codex-subscription-primary"
 # adapter = "codex_cli"
 # billing_kind = "subscription"
 # delivery = "oauth"
 # client_id = "<the OAuth client this deployment presents>"
-# token_url = "https://<provider>/oauth/token"
+# token_url = "https://<provider>/deviceauth/token"
+# refresh_token_url = "https://<provider>/oauth/token"
 # device_authorization_url = "https://<provider>/deviceauth/usercode"
 # scopes = ["<scope>"]
 #

@@ -124,6 +124,17 @@ impl<A, O> Clone for ConfiguredModelRuntime<A, O> {
 }
 
 impl<A, O> ConfiguredModelRuntime<A, O> {
+    /// Shares daemon-owned OAuth refresh and scratch delivery across Codex preparations.
+    pub fn with_oauth_delivery(
+        mut self,
+        provider: Arc<dyn signalbox_model_runtime_codex_cli::OauthCredentialProvider>,
+        root: Arc<signalbox_model_runtime_codex_cli::OauthCredentialRoot>,
+    ) -> Self {
+        if let Some(runtime) = &mut self.codex_cli {
+            *runtime = Arc::new((**runtime).clone().with_oauth_delivery(provider, root));
+        }
+        self
+    }
     /// Constructs every configured adapter without provider interaction.
     pub fn new(
         anthropic: Option<A>,

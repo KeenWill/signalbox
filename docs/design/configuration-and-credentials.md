@@ -9,11 +9,10 @@ deleted when the work lands.
 The daemon reloads its catalogs without a restart, prices a call against dated
 rate windows, declares each model's input modalities and workspace-instruction
 capacity, records the workspace roots it derives, binds a session to its
-workspace before its first turn when a template asks for it, and holds a
-daemon-owned OAuth authorization for a Codex CLI child without handing the child
-the refresh token. Credential exclusions expire, coalesce, and clear; sessions
-carry the complete pool policy they were created under; and a runner reads,
-injects, and scrubs a granted credential for the work it dispatches.
+workspace before its first turn when a template asks for it. Credential
+exclusions expire, coalesce, and clear; sessions carry the complete pool policy
+they were created under; and a runner reads, injects, and scrubs a granted
+credential for the work it dispatches.
 
 ## Design
 
@@ -174,79 +173,8 @@ a nonempty NUL-free UTF-8 value of at most 65,536 bytes; empty, non-UTF-8,
 NUL-containing, or oversized content fails preparation as typed
 `CredentialUnusable` and spawns no child.
 
-`oauth` is spelled `delivery = "oauth"` with exactly four required fields:
-`client_id`, `token_url`, `device_authorization_url`, and the string array
-`scopes`. These are configuration, never build-provided constants. `client_id`
-is 1 through 1,024 NUL-free UTF-8 bytes preserved exactly. `scopes` holds 1
-through 64 strings of 1 through 256 bytes, each byte an RFC 6749 scope-token
-character, declared order is request order, exact duplicates are rejected, and
-no normalization occurs. Both endpoints are absolute `https` URLs with no
-fragment and no user information; every other scheme is rejected with no
-plaintext or local-host exception. The tuple is compared by parsed canonical
-components, scheme, lowercased host, effective port, path, and query, never by
-configured bytes. The delivery admits only `billing_kind = "subscription"`.
-
-Every refresh and every dispatch compares the stored authorization tuple with
-the current registration by canonical components, under the profile row lock and
-before any request is formed; a mismatch never sends the stored token, the
-generation quarantines, and recovery requires re-provisioning or deletion
-followed by provisioning. Dispatch holds the profile row lock from its
-authorization and generation check through copying the token into the child's
-scratch home; deletion acquires that lock before removing authorization and
-cached tokens.
-
-The daemon is the sole refresher. It locks the profile row, reads the stored
-token, and transactionally marks that generation's refresh in progress; the
-winner owns one process-shared single-flight keyed by profile and generation,
-and a concurrent preparation observing the marker joins it rather than starting
-another exchange. The limit is one POST per attempt, to the configured
-`token_url`'s exact canonical target, with redirects and automatic retries
-disabled at every layer. A failure that definitively did not rotate the token
-clears the marker and leaves the generation available to a later attempt. Replay
-after an ambiguous exchange is forbidden: once request bytes may have been
-written, a connection loss, redirect, or indeterminate response leaves the
-outcome unknown, the daemon never presents that token again, and the generation
-quarantines. A second transaction re-locks and matches the generation, compares
-the account identity the response carries with the stored one, persists the
-returned token, and clears the marker before the new access token is used; a
-differing identity quarantines instead. A committed replacement overwrites the
-previous refresh token. Every refresh that returns a new identity token replaces
-the stored one in the same commit; a refresh that returns none leaves it in
-place. When a replacement commit is ambiguous the daemon rereads the durable
-generation, whether it restarts or stays alive with the marker still present: a
-committed replacement is adopted and published to the joined single-flight, and
-an uncleared marker quarantines. Cancellation is definitely non-rotating before
-possible request bytes and ambiguous afterward. Access tokens are held in memory
-only; a clean restart discards them without contacting a provider, and the first
-later preparation that needs the profile refreshes lazily, so recovery stays
-configuration-independent. A refresh rejected as expired, reused, or revoked is
-permanent: the profile quarantines and recovery requires re-provisioning or
-deletion followed by provisioning. Delivery-layer quarantine that occurs before
-a provider request names its own typed refresh or credential-home failure,
-commits that evidence atomically with the quarantine, and bypasses pool trigger
-policy.
-
-Dispatch supplies each invocation a scratch credential home carrying the
-complete authentication state the CLI needs to form a request minus the refresh
-token: the daemon-minted access token, the identity token, and the harvested
-account metadata. Withholding the refresh token permits concurrency: processes
-holding none share no mutable authorization state, and the daemon refreshes once
-on behalf of all of them. Every token written into a scratch home seeds the
-adapter's exact-value redactor before it is written, and a path that cannot
-install the redactor fails preparation before writing the home or spawning the
-CLI; how the adapter applies the scrub is owned by
-[runtime substrate](../spec/runtime-substrate.md). Scratch homes live beneath a
-single daemon-owned `0700` root, are themselves `0700`, contain only `0600`
-regular files, are created and removed through descriptor-relative operations
-that reject symlinks, and are removed on normal completion. Before accepting
-work, startup scavenges every entry it can prove is an owned scratch home
-beneath that root; an ownership, type, or containment mismatch fails startup and
-removes nothing. Dispatch forces the CLI's file or ephemeral backend to that
-home and disables ambient, keyring, helper, and external stores; failure to
-enforce that selection is a typed pre-send delivery failure. An access token
-that expires while a long invocation is running is not an authorization failure:
-the profile stays eligible for a later call and the failed call is not retried
-automatically.
+Deletion acquires the profile row lock before removing authorization and cached
+tokens.
 
 Database restore transactionally quarantines every restored `oauth` profile
 before signalboxd may start against the restored state; an ordinary restart does
@@ -350,10 +278,9 @@ work.
 
 ## Compatibility constraints
 
-The configuration grammar already admits the `oauth` spelling, the `codex_cli`
-`file` spelling, `max_concurrent_invocations`, and `round_robin`, and rejects
-each at startup as unsupported. Supplying a surface for any of them changes no
-grammar.
+The configuration grammar already admits the `codex_cli` `file` spelling,
+`max_concurrent_invocations`, and `round_robin`, and rejects each at startup as
+unsupported. Supplying a surface for any of them changes no grammar.
 
 The session credential record and entry rows are append-only behind a guarded
 head. Any update appends one complete event and advances the head by one.
@@ -403,10 +330,6 @@ snapshot atomically without a reader observing two documents.
 - A template selector binds the workspace before first activation, and the
   install-and-activate transition commits atomically and fails closed after
   restart on a changed root.
-- An `oauth` profile is provisioned, refreshed under a single-flight with one
-  POST per attempt, never replayed after an ambiguous exchange, quarantined on
-  tuple mismatch or rejected refresh, and its scratch home never holds a refresh
-  token.
 - `max_concurrent_invocations` is admitted together with the reservation that
   gives it effect, and `round_robin` selects through its durable cursor.
 - An exclusion with a reported reset clears when it passes, an operator clear or
