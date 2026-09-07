@@ -1,5 +1,9 @@
 //! Review aggregate tests for `docs/spec/review-workflows.md`.
 
+use super::finding::finding_transition;
+
+use std::collections::BTreeSet;
+
 use super::test_support::{
     ARBITRARY_DEDUPE_PASS_SEED, ARBITRARY_JUDGMENT_PASS_SEED, ARBITRARY_LINK_SEED,
     AttachedTargetLinkFixture, CANONICAL_FINDING_SEED, CANONICAL_TARGET_SEED,
