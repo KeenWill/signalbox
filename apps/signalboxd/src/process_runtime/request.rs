@@ -159,7 +159,7 @@ where
         | ClientRequest::AbandonLostRunner { .. }
         | ClientRequest::PromotePendingRunner { .. }) => {
             runner_recovery::handle_runner_recovery(
-                writer, version, request_id, request, services, shutdown,
+                reader, writer, version, request_id, request, services, shutdown,
             )
             .await
         }
