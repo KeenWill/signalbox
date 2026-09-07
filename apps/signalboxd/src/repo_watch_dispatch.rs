@@ -41,9 +41,7 @@ pub async fn submit_pending(
     (),
     signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
 > {
-    let runner = sink.models.daemon_tools().and_then(|tools| {
-        signalbox_tools_exec::TokioProcessRunner::try_new(tools.exec_supervisor_executable()).ok()
-    });
+    let runner = sink.checkout_runner.clone();
     submit_with_checkout(store, configuration, sink, runner).await
 }
 
@@ -384,6 +382,7 @@ impl SessionCommandCodec for RepositoryWatchCommandCodec {
 
 /// Applies seam commands through the ordinary core handlers and interrupt machinery.
 pub struct RepositoryWatchCommandSink {
+    pub checkout_runner: Option<signalbox_tools_exec::TokioProcessRunner>,
     pub pool: PgPool,
     pub models: Arc<HubModelConfiguration>,
     pub eligibility_nudge: InProcessEligibilityNudge,

@@ -79,17 +79,6 @@ pub(crate) struct CheckoutDirectory {
     pub(crate) created: bool,
 }
 
-impl Drop for CheckoutDirectory {
-    fn drop(&mut self) {
-        if self.created
-            && let Some(name) = &self.staged_name
-        {
-            // Only discard an unpublished directory created by this preparation.
-            let _ = remove_directory_entry(&self.parent, name, &self.directory);
-        }
-    }
-}
-
 pub(crate) fn prepare(
     roots: &SessionWorkspaceRoots,
     session: SessionId,
@@ -139,6 +128,20 @@ pub(crate) fn prepare(
 }
 
 pub(crate) async fn provision<Runner: ProcessRunner>(
+    runner: &mut Runner,
+    checkout: &mut CheckoutDirectory,
+    repository: &RepositorySlug,
+    pull_request: &PullRequestEventContext,
+    credentials: &RepositoryWatchClientLoader,
+) -> Result<(), CheckoutProvisioningFailed> {
+    let result = provision_git(runner, checkout, repository, pull_request, credentials).await;
+    if result.is_err() && checkout.staged_name.is_none() {
+        retain_dispatch_marker(checkout)?;
+    }
+    result
+}
+
+async fn provision_git<Runner: ProcessRunner>(
     runner: &mut Runner,
     checkout: &mut CheckoutDirectory,
     repository: &RepositorySlug,
@@ -208,19 +211,7 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
                 == rustix::fs::FileType::Directory => {}
         _ => return Err(CheckoutProvisioningFailed::at(CheckoutStep::Workspace)),
     }
-    let git_directory = openat(directory, ".git", DIRECTORY_FLAGS, Mode::empty())
-        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
-    let marker = openat(
-        &git_directory,
-        DISPATCH_MARKER,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::RUSR | Mode::WUSR,
-    )
-    .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
-    use std::io::Write;
-    std::fs::File::from(marker)
-        .write_all(checkout.dispatch.into_uuid().to_string().as_bytes())
-        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    retain_dispatch_marker(checkout)?;
     // Fetch the retained SHA explicitly: a branch may advance after observation,
     // and a fork's head need not be reachable from the watched repository's heads.
     let head_url = format!(
@@ -262,6 +253,23 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
     if (pinned_stat.st_dev, pinned_stat.st_ino) != (standing_stat.st_dev, standing_stat.st_ino) {
         return Err(CheckoutProvisioningFailed::at(CheckoutStep::Verify));
     }
+    Ok(())
+}
+
+fn retain_dispatch_marker(checkout: &CheckoutDirectory) -> Result<(), CheckoutProvisioningFailed> {
+    let git_directory = create_directory(&checkout.directory, std::ffi::OsStr::new(".git"))
+        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    let marker = openat(
+        &git_directory,
+        DISPATCH_MARKER,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    use std::io::Write;
+    std::fs::File::from(marker)
+        .write_all(checkout.dispatch.into_uuid().to_string().as_bytes())
+        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
     Ok(())
 }
 
@@ -395,6 +403,9 @@ pub(crate) fn remove(
     {
         return Err(rustix::io::Errno::STALE);
     }
+    if !marker_matches(&directory, dispatch)? {
+        return Ok(());
+    }
     let directory = read_removal_directory(&directory)?;
     remove_contents(&directory, &[".git", DISPATCH_MARKER])?;
     remove_directory_entry(&parent, &name, &directory)
@@ -438,9 +449,18 @@ fn marker_matches(
     directory: &OwnedFd,
     dispatch: RepoWatchDispatchId,
 ) -> Result<bool, rustix::io::Errno> {
+    restore_owner_permissions(directory, Mode::XUSR)?;
+    let git_directory = match pin_removal_directory(directory, std::ffi::OsStr::new(".git")) {
+        Ok(directory) => directory,
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    restore_owner_permissions(&git_directory, Mode::XUSR)?;
     let marker = match rustix::fs::openat2(
-        directory,
-        format!(".git/{DISPATCH_MARKER}"),
+        &git_directory,
+        DISPATCH_MARKER,
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
         rustix::fs::ResolveFlags::NO_SYMLINKS | rustix::fs::ResolveFlags::NO_XDEV,
@@ -478,17 +498,23 @@ fn pin_removal_directory(
 
 #[cfg(target_os = "linux")]
 fn read_removal_directory(directory: &OwnedFd) -> Result<OwnedFd, rustix::io::Errno> {
+    restore_owner_permissions(directory, Mode::RWXU)?;
+    openat(directory, ".", DIRECTORY_FLAGS, Mode::empty())
+}
+
+#[cfg(target_os = "linux")]
+fn restore_owner_permissions(directory: &OwnedFd, required: Mode) -> Result<(), rustix::io::Errno> {
     let mode = Mode::from_raw_mode(rustix::fs::fstat(directory)?.st_mode);
-    if !mode.contains(Mode::RWXU) {
+    if !mode.contains(required) {
         // O_PATH pins unreadable directories; procfs addresses that inode for chmod.
         rustix::fs::chmodat(
             rustix::fs::CWD,
             format!("/proc/self/fd/{}", directory.as_raw_fd()),
-            mode | Mode::RWXU,
+            mode | required,
             rustix::fs::AtFlags::empty(),
         )?;
     }
-    openat(directory, ".", DIRECTORY_FLAGS, Mode::empty())
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -535,6 +561,7 @@ fn remove_entry(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn remove_directory_entry(
     parent: &OwnedFd,
     name: &std::ffi::OsStr,
@@ -569,9 +596,15 @@ mod tests {
             .derived_path(session)
             .with_file_name(format!(".checkout-{}", dispatch.into_uuid()));
         assert!(staged.is_dir());
-        let mut checkout = checkout;
-        checkout.staged_name = None; // Leave the entry as an interrupted process would.
+        let identity = checkout.identity;
         drop(checkout);
+        let reopened = prepare(&roots, session, dispatch).expect("reopen after cancellation");
+        assert_eq!(
+            reopened.identity, identity,
+            "cancellation preserves the inode for identity retention and replay"
+        );
+        assert!(!reopened.created);
+        drop(reopened);
         remove(&roots, session, dispatch, false, None)?;
         assert!(!staged.exists());
         assert!(!roots.derived_path(session).exists());

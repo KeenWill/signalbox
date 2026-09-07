@@ -451,6 +451,14 @@ where
         })
     }
 
+    /// Shares the process runner pinned during workspace tool composition.
+    pub fn process_runner(&self) -> Option<ExecRunner> {
+        self.executor
+            .workspace_bound
+            .as_ref()
+            .map(SessionWorkspaceExecutors::process_runner)
+    }
+
     /// Shares the workspace-binding authority used by workspace-bound tools.
     pub fn workspace_instruction_root_resolver(&self) -> Option<WorkspaceInstructionRootResolver>
     where

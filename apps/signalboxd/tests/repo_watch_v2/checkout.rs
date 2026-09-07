@@ -323,6 +323,7 @@ system_prompt = "Inspect repository activity."
             module,
             store,
             sink: RepositoryWatchCommandSink {
+                checkout_runner: None,
                 pool: core,
                 models: Arc::new(models),
                 eligibility_nudge,
@@ -727,6 +728,117 @@ async fn dispatch_provisions_the_retained_head_at_the_git_tools_root() -> Result
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn checkout_keeps_the_composed_runner_after_supervisor_removal() -> Result<(), Box<dyn Error>>
+{
+    assert_checkout_keeps_composed_runner(SupervisorChange::Removed).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn checkout_keeps_the_composed_runner_after_supervisor_replacement()
+-> Result<(), Box<dyn Error>> {
+    assert_checkout_keeps_composed_runner(SupervisorChange::Replaced).await
+}
+
+enum SupervisorChange {
+    Removed,
+    Replaced,
+}
+
+async fn assert_checkout_keeps_composed_runner(
+    change: SupervisorChange,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_model_runtime::CredentialReference;
+    use signalbox_tools_code_host::GitHubCodeHostTransport;
+    use signalbox_tools_github::GitHubEgressPolicy;
+    use signalbox_tools_web::WebFetchEgressPolicy;
+    use signalboxd::{
+        CodeHostNumericBounds, DaemonTools, FileCredentialAccess, MappedDaemonCredentialInputs,
+    };
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let mut fixture = CheckoutFixture::new().await?;
+    let executable = std::env::current_exe()?;
+    let supervisor = fixture._files.path().join("supervisor");
+    let ran_replacement = fixture._files.path().join("replacement-ran");
+    std::fs::copy(&executable, &supervisor)?;
+    let models = HubModelConfiguration::parse(&fixture.catalog.replace(
+        executable.to_str().expect("fixture executable"),
+        supervisor.to_str().expect("fixture supervisor"),
+    ))?;
+    fixture.sink.models = Arc::new(models);
+    let configuration = fixture.sink.models.daemon_tools().expect("tools");
+    let credentials = FileCredentialAccess::new(
+        fixture._files.path().join("poll-token"),
+        CredentialReference::new("fixture-credential"),
+    );
+    let tools = DaemonTools::try_new_production(
+        || std::time::SystemTime::UNIX_EPOCH,
+        fixture.core.clone(),
+        MappedDaemonCredentialInputs {
+            web_search: credentials.clone(),
+            code_host: credentials.clone(),
+            github: credentials,
+        },
+        GitHubCodeHostTransport::try_new(CodeHostNumericBounds::new(
+            None, None, None, None, None, None,
+        ))?,
+        GitHubEgressPolicy::github_api_only(),
+        configuration.workspace_root(),
+        configuration.git_identity().clone(),
+        configuration.exec_supervisor_executable(),
+        None,
+        WebFetchEgressPolicy::deny_all(),
+    )?;
+    fixture.sink.checkout_runner = tools.process_runner();
+    let identity = std::fs::metadata(&supervisor)?;
+    match change {
+        SupervisorChange::Removed => std::fs::remove_file(&supervisor)?,
+        SupervisorChange::Replaced => {
+            let replacement = supervisor.with_extension("new");
+            std::fs::write(
+                &replacement,
+                format!("#!/bin/sh\n: > '{}'\nexit 99\n", ran_replacement.display()),
+            )?;
+            std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::rename(&replacement, &supervisor)?;
+        }
+    }
+    let pinned = fixture
+        .sink
+        .checkout_runner
+        .as_ref()
+        .expect("composed runner");
+    assert_eq!(
+        std::fs::metadata(pinned.sandbox_launcher_program())?.ino(),
+        identity.ino()
+    );
+    let watch = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("watch")
+        .clone();
+    signalboxd::repo_watch_dispatch::submit_pending(&fixture.store, &watch, &mut fixture.sink)
+        .await
+        .expect("submit using composed runner");
+    let step: String = sqlx::query_scalar(
+        "SELECT checkout_failure_step FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    // The pinned test harness rejects supervisor arguments, so reaching clone proves the runner was retained.
+    assert_eq!(step, "clone");
+    assert!(
+        !ran_replacement.exists(),
+        "checkout must never execute the replacement binary"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn clone_failure_retires_dispatch_with_only_step_and_exit_status()
 -> Result<(), Box<dyn Error>> {
     let mut fixture = CheckoutFixture::new().await?;
@@ -775,6 +887,72 @@ async fn recovery_fetches_an_existing_checkout_without_cloning_again() -> Result
             .fetch_one(&fixture.module)
             .await?;
     assert_eq!(head, fixture.head.as_str());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cancellation_during_identity_retention_preserves_staging_for_replay()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::checkout::CheckoutDirectoryIdentity;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    let (session, staged) = fixture.stage_before_publication().await?;
+    std::fs::remove_dir(&staged)?;
+    let core = fixture.core.clone();
+    // This fixture lock pauses only the ownership UPDATE, after prepare has created staging.
+    sqlx::query("CREATE FUNCTION mod_repo_watch.pause_checkout_identity() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1); RETURN NEW; END $$")
+        .execute(&core).await?;
+    sqlx::query("CREATE TRIGGER pause_checkout_identity BEFORE UPDATE OF checkout_device ON mod_repo_watch.dispatch_ledger FOR EACH ROW EXECUTE FUNCTION mod_repo_watch.pause_checkout_identity()")
+        .execute(&core).await?;
+    let mut blocker = core.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(1)")
+        .execute(&mut *blocker)
+        .await?;
+    let mut submission = Box::pin(fixture.submit_without_lifecycle_settlement());
+    let blocked = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory')")
+                .fetch_one(&core).await?;
+            if waiting {
+                return Ok::<_, sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    tokio::select! {
+        () = &mut submission => panic!("identity retention must wait for the fixture lock"),
+        result = blocked => result??,
+    }
+    let metadata = std::fs::metadata(&staged)?;
+    drop(submission);
+    assert!(
+        staged.is_dir(),
+        "cancellation must preserve staging once identity retention starts"
+    );
+    blocker.commit().await?;
+    let identity = CheckoutDirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    fixture
+        .store
+        .retain_checkout_identity(fixture.command, identity, true)
+        .await?;
+    fixture.dispatch().await;
+    let root = fixture.root(session);
+    assert_eq!(std::fs::metadata(&root)?.ino(), identity.inode);
+    assert!(root.join(".git").is_dir());
+    assert!(
+        fixture
+            .store
+            .dispatch_checkout(fixture.command)
+            .await?
+            .expect("checkout")
+            .retired_reason
+            .is_none()
+    );
     Ok(())
 }
 
@@ -1096,6 +1274,7 @@ async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_command
         fixture.module.clone(),
         models.repository_watch().cloned(),
         RepositoryWatchServices {
+            checkout_runner: None,
             core_pool: fixture.core.clone(),
             models: Arc::new(models),
             templates: Arc::new(templates),
@@ -1208,6 +1387,11 @@ async fn assert_startup_removes_prepared_directory(
     };
     std::fs::create_dir_all(&root)?;
     if matches!(location, PreparedLocation::Published) {
+        std::fs::create_dir(root.join(".git"))?;
+        std::fs::write(
+            root.join(".git/signalbox-dispatch"),
+            pending[0].dispatch().into_uuid().to_string(),
+        )?;
         sqlx::query("UPDATE dispatch_ledger SET checkout_created = true WHERE command_id = $1")
             .bind(fixture.command.into_uuid())
             .execute(&fixture.module)
@@ -1443,14 +1627,29 @@ async fn dispatch_never_adopts_or_removes_a_preexisting_directory() -> Result<()
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
 async fn cleanup_preserves_reused_inode_without_dispatch_marker() -> Result<(), Box<dyn Error>> {
-    assert_cleanup_preserves_reused_inode(ReusedMarker::Absent).await
+    assert_cleanup_preserves_reused_inode(ReusedMarker::Absent, RemovalLocation::Sibling).await
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
 async fn cleanup_preserves_reused_inode_with_another_dispatch_marker() -> Result<(), Box<dyn Error>>
 {
-    assert_cleanup_preserves_reused_inode(ReusedMarker::AnotherDispatch).await
+    assert_cleanup_preserves_reused_inode(ReusedMarker::AnotherDispatch, RemovalLocation::Sibling)
+        .await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_preserves_original_path_without_dispatch_marker() -> Result<(), Box<dyn Error>> {
+    assert_cleanup_preserves_reused_inode(ReusedMarker::Absent, RemovalLocation::Original).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_preserves_original_path_with_another_dispatch_marker() -> Result<(), Box<dyn Error>>
+{
+    assert_cleanup_preserves_reused_inode(ReusedMarker::AnotherDispatch, RemovalLocation::Original)
+        .await
 }
 
 enum ReusedMarker {
@@ -1458,7 +1657,15 @@ enum ReusedMarker {
     AnotherDispatch,
 }
 
-async fn assert_cleanup_preserves_reused_inode(marker: ReusedMarker) -> Result<(), Box<dyn Error>> {
+enum RemovalLocation {
+    Original,
+    Sibling,
+}
+
+async fn assert_cleanup_preserves_reused_inode(
+    marker: ReusedMarker,
+    location: RemovalLocation,
+) -> Result<(), Box<dyn Error>> {
     use signalboxd::repo_watch_dispatch::scavenge_checkouts;
     use std::os::unix::fs::MetadataExt;
 
@@ -1477,7 +1684,10 @@ async fn assert_cleanup_preserves_reused_inode(marker: ReusedMarker) -> Result<(
         dispatch.into_uuid().to_string()
     );
     std::fs::remove_dir_all(&root)?;
-    let unrelated = root.with_file_name("unrelated-checkout");
+    let unrelated = match location {
+        RemovalLocation::Original => root.clone(),
+        RemovalLocation::Sibling => root.with_file_name("unrelated-checkout"),
+    };
     std::fs::create_dir_all(unrelated.join(".git"))?;
     std::fs::write(unrelated.join("keep"), b"unrelated contents")?;
     if matches!(marker, ReusedMarker::AnotherDispatch) {
@@ -1503,6 +1713,36 @@ async fn assert_cleanup_preserves_reused_inode(marker: ReusedMarker) -> Result<(
         b"unrelated contents"
     );
     assert!(restarted.checkout_removal_candidates().await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn cleanup_restores_search_permission_before_reading_a_renamed_marker()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    let renamed = root.with_file_name("unsearchable-checkout");
+    std::fs::rename(&root, &renamed)?;
+    std::fs::set_permissions(renamed.join(".git"), std::fs::Permissions::from_mode(0o000))?;
+    std::fs::set_permissions(&renamed, std::fs::Permissions::from_mode(0o000))?;
+    fixture.stop(session).await;
+    scavenge_checkouts(&fixture.store, &fixture.core)
+        .await
+        .expect("search permission restored before marker lookup");
+    assert!(!renamed.exists());
+    assert!(
+        fixture
+            .store
+            .checkout_removal_candidates()
+            .await?
+            .is_empty()
+    );
     Ok(())
 }
 

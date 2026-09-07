@@ -28,6 +28,7 @@ use crate::{
 
 /// Core capabilities remain in daemon-owned adapters; the module receives its own pool.
 pub struct RepositoryWatchServices {
+    pub checkout_runner: Option<signalbox_tools_exec::TokioProcessRunner>,
     pub core_pool: PgPool,
     pub models: Arc<HubModelConfiguration>,
     pub templates: Arc<SessionTemplateConfiguration>,
@@ -133,6 +134,7 @@ impl RepositoryWatchRuntime {
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
                 factory: RepositoryWatchCommandFactory(services.templates),
                 sink: RepositoryWatchCommandSink {
+                    checkout_runner: services.checkout_runner,
                     pool: services.core_pool,
                     models: services.models,
                     eligibility_nudge: services.eligibility_nudge,

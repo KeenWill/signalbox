@@ -1704,6 +1704,7 @@ async fn run_hub(
             .roots()
             .to_vec(),
     );
+    let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
     let migration_pool = pool.clone();
@@ -2108,6 +2109,7 @@ async fn run_hub(
                 module_pool,
                 model_configuration.repository_watch().cloned(),
                 RepositoryWatchServices {
+                    checkout_runner: checkout_runner.clone(),
                     core_pool: pool.clone(),
                     models: Arc::new(model_configuration.clone()),
                     templates: Arc::new(template_configuration.clone()),
