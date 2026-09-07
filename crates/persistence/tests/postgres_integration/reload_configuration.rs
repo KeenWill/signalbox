@@ -134,3 +134,106 @@ async fn reload_configuration_refusal_claims_identity_and_requires_a_typed_recor
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn reload_migration_preserves_oauth_commands_when_applied_after_oauth()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::oauth_credential::{
+        OauthCredentialCommand, OauthCredentialFailure, OauthCredentialHandlingOutcome,
+        OauthCredentialOperation, OauthCredentialOutcome, OauthCredentialRepository,
+    };
+    let (_container, pool, _) = unmigrated_postgres().await?;
+    // Model an installed OAuth schema before either reload registry migration arrives.
+    let previous = sqlx::migrate::Migrator::with_migrations(
+        signalbox_persistence::MIGRATOR
+            .iter()
+            .filter(|migration| ![202609071000, 202609071600].contains(&migration.version))
+            .cloned()
+            .collect(),
+    );
+    previous.run(&pool).await?;
+    let mut commands = Vec::new();
+    for (kind, operation) in [
+        (
+            "provision_oauth_credential",
+            OauthCredentialOperation::Provision,
+        ),
+        (
+            "reprovision_oauth_credential",
+            OauthCredentialOperation::Reprovision,
+        ),
+        ("delete_oauth_credential", OauthCredentialOperation::Delete),
+    ] {
+        let command = OauthCredentialCommand {
+            command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+            operation,
+            profile: "migration-fixture".to_owned(),
+        };
+        let mut tx = pool.begin().await?;
+        sqlx::query("INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind, issuer_module) VALUES ($1, $2, 1, transaction_timestamp(), 'operator', NULL)")
+            .bind(command.command_id.into_uuid()).bind(kind).execute(&mut *tx).await?;
+        let request_sql = format!(
+            "INSERT INTO {kind}_command (command_id, command_kind, storage_version, profile) VALUES ($1, $2, 1, $3)"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(request_sql.as_str()))
+            .bind(command.command_id.into_uuid())
+            .bind(kind)
+            .bind(&command.profile)
+            .execute(&mut *tx)
+            .await?;
+        let result_sql = format!(
+            "INSERT INTO {kind}_result (command_id, outcome, reason) VALUES ($1, 'failed', 'unknown_profile')"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(result_sql.as_str()))
+            .bind(command.command_id.into_uuid())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        commands.push(command);
+    }
+    migrate(&pool).await?;
+    let repository = OauthCredentialRepository::new(pool.clone());
+    for command in commands {
+        assert_eq!(
+            repository
+                .record(&command, || panic!("stored receipt must replay"))
+                .await?,
+            OauthCredentialHandlingOutcome::Recorded(OauthCredentialOutcome::Failed(
+                OauthCredentialFailure::UnknownProfile
+            ))
+        );
+        let fresh = OauthCredentialCommand {
+            command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+            ..command
+        };
+        assert_eq!(
+            repository
+                .record(&fresh, || OauthCredentialOutcome::Failed(
+                    OauthCredentialFailure::UnknownProfile
+                ))
+                .await?,
+            OauthCredentialHandlingOutcome::Recorded(OauthCredentialOutcome::Failed(
+                OauthCredentialFailure::UnknownProfile
+            ))
+        );
+    }
+    let reload = ReloadConfigurationRepository::new(pool.clone());
+    let refusal = ReloadResult::Failed {
+        phase: ReloadPhase::Validate,
+        reason: "migration fixture refusal".to_owned(),
+    };
+    assert_eq!(
+        reload
+            .claim(
+                ReloadConfiguration {
+                    command_id: DurableCommandId::from_uuid(Uuid::now_v7())
+                },
+                Err(&refusal)
+            )
+            .await?,
+        ReloadClaim::Settled(ReloadLookup::Recorded(refusal))
+    );
+    pool.close().await;
+    Ok(())
+}
