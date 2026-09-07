@@ -167,9 +167,10 @@ impl RepositoryWatchContinuation {
             _ => return Err(ContinuationCompactionError::Rejected),
         }
         let inputs = SubmitInputRepository::new(pool.clone());
-        let (command, recorded) = admission_after_defaults_rejections(&inputs, session, terminal)
-            .await
-            .map_err(ContinuationCompactionError::Submit)?;
+        let (command, recorded) =
+            admission_after_configuration_rejections(&inputs, session, terminal)
+                .await
+                .map_err(ContinuationCompactionError::Submit)?;
         match recorded {
             Some(SubmitInputResult::Applied(_)) => return Ok(()),
             Some(SubmitInputResult::Rejected(_)) => {
@@ -226,7 +227,7 @@ pub(super) async fn successor_requires_compaction(
             predecessor,
             command,
         }) => {
-            let (admission, result) = admission_after_defaults_rejections(
+            let (admission, result) = admission_after_configuration_rejections(
                 &SubmitInputRepository::new(pool.clone()),
                 session,
                 predecessor,
@@ -239,7 +240,7 @@ pub(super) async fn successor_requires_compaction(
     }
 }
 
-async fn admission_after_defaults_rejections(
+async fn admission_after_configuration_rejections(
     repository: &SubmitInputRepository,
     session: SessionId,
     terminal: TurnId,
@@ -249,9 +250,10 @@ async fn admission_after_defaults_rejections(
         let recorded = repository.load(command).await?;
         match recorded.as_ref().map(|recorded| recorded.result()) {
             Some(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::SessionDefaultsVersionMismatch { .. },
+                SubmitInputRejectedResult::SessionDefaultsVersionMismatch { .. }
+                | SubmitInputRejectedResult::UnknownModelAlias { .. },
             )) => {
-                // Only an immutable defaults rejection admits another command;
+                // An immutable configuration rejection admits another command;
                 // concurrent retries traverse the same chain and stop at success.
                 command = defaults_retry_command(command);
             }

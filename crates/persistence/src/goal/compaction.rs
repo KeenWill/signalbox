@@ -21,6 +21,13 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTurnContinuationOutcome::NotPursuing);
         }
+        if goal_turn_generation(&mut transaction, session, predecessor)
+            .await?
+            .is_none()
+        {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotCurrentGoalTurn);
+        }
         let Some(goal) = load_goal_from_connection(&mut transaction, session).await? else {
             transaction.rollback().await?;
             return Ok(GoalTurnContinuationOutcome::NotCurrentGoalTurn);
