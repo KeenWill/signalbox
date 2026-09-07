@@ -22,7 +22,7 @@ use crate::scalars::{
     BlobChunk, CanonicalBlobDigest, CanonicalU64, CanonicalUuid, ContentFragment,
     FrameValidationError, MAX_BLOB_READ_BYTES, MAX_MODEL_CAPABILITY_CATALOG_ENTRIES,
     ModelCallDollarCost, ModelCallTokenUsage, SystemPromptMember, SystemPromptText,
-    UsageProvenance, deserialize_required_nullable,
+    UsageProvenance, deserialize_optional_non_null, deserialize_required_nullable,
 };
 use crate::session::{
     ConversationCursor, ConversationSummary, MetadataLastWriter, SessionMetadata, SessionPlacement,
@@ -254,7 +254,11 @@ pub enum ServerMessage {
     /// Input acceptance receipt.
     InputSubmitted {
         /// Present exactly for a stop-turn acceptance.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,
@@ -281,7 +285,11 @@ pub enum ServerMessage {
     /// A durable user goal command appended one event.
     GoalTransitionApplied {
         /// Present exactly for a stop-goal transition.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,

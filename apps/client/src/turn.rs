@@ -336,6 +336,7 @@ pub(crate) async fn submit_input(
         ServerMessage::InputSubmitted {
             session_id: submitted_session,
             turn_id,
+            termination: None,
             ..
         } if submitted_session == session_id => Ok(SubmitInputReceipt::Turn { turn_id }),
         ServerMessage::SteeringSubmitted {
@@ -379,6 +380,7 @@ pub(crate) async fn reconcile_turn(
         ServerMessage::InputSubmitted {
             session_id: submitted_session,
             turn_id,
+            termination: None,
             ..
         } if submitted_session == session_id => Ok(turn_id),
         ServerMessage::Error {
