@@ -2,6 +2,227 @@
 
 # review_workflow
 
+## ReviewExternalLinkAssociation
+
+```rust
+pub enum ReviewExternalLinkAssociation {
+    Target(ReviewTargetId),
+    Run(ReviewRunRef),
+    Finding(ReviewFindingRef),
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ReviewExternalLinkAssociation {
+    pub const fn target(self) -> ReviewTargetId;
+}
+```
+
+## ReviewExternalObjectKind
+
+```rust
+pub enum ReviewExternalObjectKind {
+    ChangeRequest,
+    Commit,
+    Review,
+    ReviewThread,
+    ReviewComment,
+    ChangeRequestComment,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ReviewExternalLinkAttachment
+
+```rust
+pub struct ReviewExternalLinkAttachment {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkAttachment {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+        external_object: ReviewKey,
+    ) -> Self;
+    pub const fn link(&self) -> ReviewExternalLinkId;
+    pub const fn pass(&self) -> ReviewPassRef;
+    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
+    pub const fn run_evidence(&self) -> ReviewRunEvidence;
+    pub const fn external_object(&self) -> &ReviewKey;
+}
+```
+
+## ReviewExternalObjectState
+
+```rust
+pub enum ReviewExternalObjectState {
+    Current,
+    Outdated,
+    Resolved,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ReviewExternalLinkObservation
+
+```rust
+pub struct ReviewExternalLinkObservation {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkObservation {
+    pub const fn new(
+        link: ReviewExternalLinkId,
+        ordinal: ReviewEventOrdinal,
+        pass: ReviewPassRef,
+        pass_evidence: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+        state: ReviewExternalObjectState,
+    ) -> Self;
+    pub const fn link(&self) -> ReviewExternalLinkId;
+    pub const fn ordinal(&self) -> ReviewEventOrdinal;
+    pub const fn pass(&self) -> ReviewPassRef;
+    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
+    pub const fn run_evidence(&self) -> ReviewRunEvidence;
+    pub const fn state(&self) -> ReviewExternalObjectState;
+}
+```
+
+## ReviewExternalLinkClaim
+
+```rust
+pub struct ReviewExternalLinkClaim {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkClaim {
+    pub const fn new(pass: ReviewPassEvidence, run: ReviewRunEvidence) -> Self;
+    pub const fn pass(&self) -> ReviewPassRef;
+    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
+    pub const fn run_evidence(&self) -> ReviewRunEvidence;
+}
+```
+
+## ReviewExternalLink
+
+```rust
+pub struct ReviewExternalLink {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLink {
+    pub fn try_reserve(
+        id: ReviewExternalLinkId,
+        association: ReviewExternalLinkAssociation,
+        provider: ReviewKey,
+        object_kind: ReviewExternalObjectKind,
+        target: &ReviewTarget,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionFailure>;
+    pub fn try_reconstitute(
+        id: ReviewExternalLinkId,
+        association: ReviewExternalLinkAssociation,
+        provider: ReviewKey,
+        object_kind: ReviewExternalObjectKind,
+        attachment: option::Option<ReviewExternalLinkAttachment>,
+        observations: vec::Vec<ReviewExternalLinkObservation>,
+        claims: vec::Vec<ReviewExternalLinkClaim>,
+        target: &ReviewTarget,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionFailure>;
+    pub fn attach(
+        self,
+        attachment: ReviewExternalLinkAttachment,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn observe(
+        self,
+        observation: ReviewExternalLinkObservation,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn confirm_unchanged(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
+    pub fn block_publication(
+        self,
+        pass: ReviewPassEvidence,
+        run: ReviewRunEvidence,
+    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
+    pub const fn id(&self) -> ReviewExternalLinkId;
+    pub const fn association(&self) -> ReviewExternalLinkAssociation;
+    pub const fn provider(&self) -> &ReviewKey;
+    pub const fn object_kind(&self) -> ReviewExternalObjectKind;
+    pub const fn attachment(&self) -> option::Option<&ReviewExternalLinkAttachment>;
+    pub fn observations(&self) -> &[ReviewExternalLinkObservation];
+    pub fn claims(&self) -> &[ReviewExternalLinkClaim];
+}
+```
+
+## ReviewExternalObjectClaim
+
+```rust
+pub struct ReviewExternalObjectClaim {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalObjectClaim {
+    pub fn try_new(
+        link: &ReviewExternalLink,
+        target: &ReviewTarget,
+    ) -> result::Result<Self, ReviewExternalObjectClaimError>;
+    pub fn validate_reassociation(
+        &self,
+        candidate: &Self,
+    ) -> result::Result<(), ReviewExternalObjectClaimError>;
+    pub const fn target(&self) -> ReviewTargetId;
+    pub const fn external_object(&self) -> &ReviewKey;
+}
+```
+
+## ReviewExternalObjectClaimError
+
+```rust
+pub enum ReviewExternalObjectClaimError {
+    ForeignTarget,
+    ProviderMismatch,
+    NotAttached,
+    DifferentObject,
+    SameTarget,
+    UnrelatedTarget,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ReviewExternalLinkTransitionError
+
+```rust
+pub struct ReviewExternalLinkTransitionError {/* private */}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ReviewExternalLinkTransitionError {
+    pub const fn current(&self) -> &ReviewExternalLink;
+    pub const fn failure(&self) -> ReviewExternalLinkTransitionFailure;
+    pub fn into_parts(self) -> (ReviewExternalLink, ReviewExternalLinkTransitionFailure);
+}
+```
+
+## ReviewExternalLinkTransitionFailure
+
+```rust
+pub enum ReviewExternalLinkTransitionFailure {
+    ForeignAssociationTarget,
+    ProviderMismatch,
+    AlreadyAttached,
+    ForeignAttachmentLink,
+    ForeignObservationLink,
+    ForeignPass,
+    IncompatibleAttachmentPass,
+    AttachmentPassEvidenceMismatch,
+    IncompatibleAttachmentRunEvidence,
+    IncompatibleObservationPass,
+    ObservationPassEvidenceMismatch,
+    IncompatibleObservationRunEvidence,
+    IncompatiblePublicationBlockPass,
+    IncompatiblePublicationBlockRunEvidence,
+    UnchangedObservation,
+    ConflictingPassEvidence,
+    ConflictingRunEvidence,
+    NotAttached,
+    NoncontiguousOrdinal {
+        expected: option::Option<ReviewEventOrdinal>,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## ReviewFindingDiffSide
 
 ```rust
@@ -332,227 +553,6 @@ impl ReviewFindingTransitionError {
         ReviewFindingTransitionFailure,
     );
 }
-```
-
-## ReviewExternalLinkAssociation
-
-```rust
-pub enum ReviewExternalLinkAssociation {
-    Target(ReviewTargetId),
-    Run(ReviewRunRef),
-    Finding(ReviewFindingRef),
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-impl ReviewExternalLinkAssociation {
-    pub const fn target(self) -> ReviewTargetId;
-}
-```
-
-## ReviewExternalObjectKind
-
-```rust
-pub enum ReviewExternalObjectKind {
-    ChangeRequest,
-    Commit,
-    Review,
-    ReviewThread,
-    ReviewComment,
-    ChangeRequestComment,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ReviewExternalLinkAttachment
-
-```rust
-pub struct ReviewExternalLinkAttachment {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkAttachment {
-    pub const fn new(
-        link: ReviewExternalLinkId,
-        pass: ReviewPassRef,
-        pass_evidence: ReviewPassEvidence,
-        run: ReviewRunEvidence,
-        external_object: ReviewKey,
-    ) -> Self;
-    pub const fn link(&self) -> ReviewExternalLinkId;
-    pub const fn pass(&self) -> ReviewPassRef;
-    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
-    pub const fn run_evidence(&self) -> ReviewRunEvidence;
-    pub const fn external_object(&self) -> &ReviewKey;
-}
-```
-
-## ReviewExternalObjectState
-
-```rust
-pub enum ReviewExternalObjectState {
-    Current,
-    Outdated,
-    Resolved,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
-```
-
-## ReviewExternalLinkObservation
-
-```rust
-pub struct ReviewExternalLinkObservation {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkObservation {
-    pub const fn new(
-        link: ReviewExternalLinkId,
-        ordinal: ReviewEventOrdinal,
-        pass: ReviewPassRef,
-        pass_evidence: ReviewPassEvidence,
-        run: ReviewRunEvidence,
-        state: ReviewExternalObjectState,
-    ) -> Self;
-    pub const fn link(&self) -> ReviewExternalLinkId;
-    pub const fn ordinal(&self) -> ReviewEventOrdinal;
-    pub const fn pass(&self) -> ReviewPassRef;
-    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
-    pub const fn run_evidence(&self) -> ReviewRunEvidence;
-    pub const fn state(&self) -> ReviewExternalObjectState;
-}
-```
-
-## ReviewExternalLinkClaim
-
-```rust
-pub struct ReviewExternalLinkClaim {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkClaim {
-    pub const fn new(pass: ReviewPassEvidence, run: ReviewRunEvidence) -> Self;
-    pub const fn pass(&self) -> ReviewPassRef;
-    pub const fn pass_evidence(&self) -> &ReviewPassEvidence;
-    pub const fn run_evidence(&self) -> ReviewRunEvidence;
-}
-```
-
-## ReviewExternalLink
-
-```rust
-pub struct ReviewExternalLink {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLink {
-    pub fn try_reserve(
-        id: ReviewExternalLinkId,
-        association: ReviewExternalLinkAssociation,
-        provider: ReviewKey,
-        object_kind: ReviewExternalObjectKind,
-        target: &ReviewTarget,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionFailure>;
-    pub fn try_reconstitute(
-        id: ReviewExternalLinkId,
-        association: ReviewExternalLinkAssociation,
-        provider: ReviewKey,
-        object_kind: ReviewExternalObjectKind,
-        attachment: option::Option<ReviewExternalLinkAttachment>,
-        observations: vec::Vec<ReviewExternalLinkObservation>,
-        claims: vec::Vec<ReviewExternalLinkClaim>,
-        target: &ReviewTarget,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionFailure>;
-    pub fn attach(
-        self,
-        attachment: ReviewExternalLinkAttachment,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
-    pub fn observe(
-        self,
-        observation: ReviewExternalLinkObservation,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
-    pub fn confirm_unchanged(
-        self,
-        pass: ReviewPassEvidence,
-        run: ReviewRunEvidence,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
-    pub fn block_publication(
-        self,
-        pass: ReviewPassEvidence,
-        run: ReviewRunEvidence,
-    ) -> result::Result<Self, ReviewExternalLinkTransitionError>;
-    pub const fn id(&self) -> ReviewExternalLinkId;
-    pub const fn association(&self) -> ReviewExternalLinkAssociation;
-    pub const fn provider(&self) -> &ReviewKey;
-    pub const fn object_kind(&self) -> ReviewExternalObjectKind;
-    pub const fn attachment(&self) -> option::Option<&ReviewExternalLinkAttachment>;
-    pub fn observations(&self) -> &[ReviewExternalLinkObservation];
-    pub fn claims(&self) -> &[ReviewExternalLinkClaim];
-}
-```
-
-## ReviewExternalObjectClaim
-
-```rust
-pub struct ReviewExternalObjectClaim {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalObjectClaim {
-    pub fn try_new(
-        link: &ReviewExternalLink,
-        target: &ReviewTarget,
-    ) -> result::Result<Self, ReviewExternalObjectClaimError>;
-    pub fn validate_reassociation(
-        &self,
-        candidate: &Self,
-    ) -> result::Result<(), ReviewExternalObjectClaimError>;
-    pub const fn target(&self) -> ReviewTargetId;
-    pub const fn external_object(&self) -> &ReviewKey;
-}
-```
-
-## ReviewExternalObjectClaimError
-
-```rust
-pub enum ReviewExternalObjectClaimError {
-    ForeignTarget,
-    ProviderMismatch,
-    NotAttached,
-    DifferentObject,
-    SameTarget,
-    UnrelatedTarget,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-```
-
-## ReviewExternalLinkTransitionError
-
-```rust
-pub struct ReviewExternalLinkTransitionError {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl ReviewExternalLinkTransitionError {
-    pub const fn current(&self) -> &ReviewExternalLink;
-    pub const fn failure(&self) -> ReviewExternalLinkTransitionFailure;
-    pub fn into_parts(self) -> (ReviewExternalLink, ReviewExternalLinkTransitionFailure);
-}
-```
-
-## ReviewExternalLinkTransitionFailure
-
-```rust
-pub enum ReviewExternalLinkTransitionFailure {
-    ForeignAssociationTarget,
-    ProviderMismatch,
-    AlreadyAttached,
-    ForeignAttachmentLink,
-    ForeignObservationLink,
-    ForeignPass,
-    IncompatibleAttachmentPass,
-    AttachmentPassEvidenceMismatch,
-    IncompatibleAttachmentRunEvidence,
-    IncompatibleObservationPass,
-    ObservationPassEvidenceMismatch,
-    IncompatibleObservationRunEvidence,
-    IncompatiblePublicationBlockPass,
-    IncompatiblePublicationBlockRunEvidence,
-    UnchangedObservation,
-    ConflictingPassEvidence,
-    ConflictingRunEvidence,
-    NotAttached,
-    NoncontiguousOrdinal {
-        expected: option::Option<ReviewEventOrdinal>,
-    },
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ReviewPassKind

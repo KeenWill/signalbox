@@ -11,7 +11,7 @@ The context sits above sessions. Session execution belongs to
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
 execution to [tool loop](tool-loop.md), and the shared relational mechanics to
 [persistence protocol](persistence-protocol.md). The domain types live in
-`crates/domain/src/review_workflow.rs`.
+`crates/domain/src/review_workflow/`.
 
 Its records are targets, runs, passes, findings, and external links. A target is
 one immutable snapshot of a reviewed revision; a refreshed change request is

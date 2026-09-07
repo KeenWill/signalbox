@@ -531,7 +531,10 @@ async fn fetch_workflows(
                 ))
                 .await?;
             for run in admit(value["workflow_runs"].as_array())? {
-                if run["status"] != "completed" || run["head_repository"].is_null() {
+                if run["status"] != "completed"
+                    || run["head_repository"].is_null()
+                    || run["head_branch"].is_null()
+                {
                     continue;
                 }
                 let head_repository = admit(
@@ -785,6 +788,31 @@ mod tests {
             .insert(
                 0,
                 json!({"status": "completed", "head_repository": null, "head_branch": "main"}),
+            );
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("complete observation");
+        assert_eq!(observed.observation.state().workflow_runs().len(), 1);
+        assert_eq!(
+            observed.observation.state().workflow_runs()[0].id().get(),
+            6
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_workflow_without_a_head_branch_does_not_block_watched_runs() {
+        let mut io = fixture();
+        io.pages
+            .get_mut("/repos/example/project/actions/workflows/5/runs?per_page=100&page=1")
+            .expect("workflow page")
+            .0["workflow_runs"]
+            .as_array_mut()
+            .expect("runs")
+            .insert(
+                0,
+                json!({"status": "completed", "head_repository": {"full_name": "example/project"}, "head_branch": null}),
             );
         let repository =
             RepositorySlug::try_new(String::from("example/project")).expect("repository");

@@ -1885,6 +1885,14 @@ impl PostgresModelCallRepository {
                 &mut next_reclassified_turn,
             )?;
             let usage = observation.usage();
+            if let Some(snapshot) = observation.rate_limits() {
+                crate::credential_capacity::retain_call_rate_limits(
+                    &mut transaction,
+                    observation.call(),
+                    snapshot,
+                )
+                .await?;
+            }
             let retained_input_tokens = observation.observation().retained_input_tokens();
             let retained_output_tokens = observation.observation().retained_output_tokens();
             let provider_failure_cause = observation.provider_failure_cause();

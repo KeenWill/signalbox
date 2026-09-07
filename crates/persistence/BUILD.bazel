@@ -1,0 +1,65 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//cargo:defs.bzl", "extract_cargo_lints")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+exports_files(["Cargo.toml"])
+
+extract_cargo_lints(
+    name = "cargo_lints",
+    manifest = "Cargo.toml",
+    workspace = "//:Cargo.toml",
+)
+
+rust_library(
+    name = "signalbox_persistence",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = glob(["migrations/*.sql"]) + ["//:config/signalboxd.example.toml"],
+    crate_features = [
+        "postgres-integration",
+        "test-support",
+    ],
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(proc_macro = True),
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//crates/application:signalbox_application",
+        "//crates/blob-store:signalbox_blob_store",
+        "//crates/domain:signalbox_domain",
+        "//crates/newtype:signalbox_newtype",
+        "//crates/tools-plan:signalbox_tools_plan",
+    ] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "search_path_postgres",
+    srcs = ["tests/search_path_postgres.rs"],
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["--ignored"],
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    tags = [
+        "manual",
+        "requires-network",
+    ],
+    deps = [":signalbox_persistence"] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

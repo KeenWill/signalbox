@@ -890,6 +890,7 @@ struct AcceptanceObservations<AcceptancePossible, Correlation> {
     telemetry: ModelCallTelemetry,
     text_deltas: Option<ProviderTextDeltaContext>,
     observations: Vec<Observation<Correlation>>,
+    rate_limits: Option<signalbox_domain::ProviderRateLimitSnapshot>,
 }
 
 struct ProviderTextDeltaContext {
@@ -905,6 +906,31 @@ where
     AcceptancePossible: FnOnce(),
     Correlation: PartialEq,
 {
+    fn observe_rate_limits(
+        &mut self,
+        correlation: Correlation,
+        snapshot: signalbox_model_runtime::RateLimitSnapshot,
+    ) {
+        if correlation != self.expected_correlation {
+            self.correlation_mismatch = true;
+            return;
+        }
+        self.rate_limits = Some(signalbox_domain::ProviderRateLimitSnapshot::new(
+            snapshot.observed_at,
+            snapshot
+                .windows
+                .into_iter()
+                .map(|window| {
+                    signalbox_domain::ProviderRateLimitWindow::new(
+                        window.remaining_percent,
+                        window.window_duration,
+                        window.resets_at,
+                    )
+                })
+                .collect(),
+        ));
+    }
+
     fn observe(&mut self, observation: Observation<Correlation>) {
         if observation.correlation != self.expected_correlation {
             self.correlation_mismatch = true;
@@ -1291,6 +1317,7 @@ where
                 sink: Arc::clone(&self.text_deltas),
             }),
             observations: Vec::new(),
+            rate_limits: None,
         };
         let report = self
             .runtime
@@ -1309,6 +1336,7 @@ where
             ));
         }
         let usage = provider_reported_token_usage(&report.evidence);
+        let rate_limits = observations.rate_limits.take();
         let retry_after = match &report.evidence {
             TerminalEvidence::ProviderError(error) => error.exchange.retry_after,
             _ => None,
@@ -1328,7 +1356,7 @@ where
         })?;
         report_classified_outcome(telemetry, &classified);
         let correlation = authorized.observation_correlation();
-        Ok(match classified.cause {
+        Ok((match classified.cause {
             ModelCallCauseCode::ProviderError(kind) => correlation
                 .bind_provider_failure_observation_with_retry_after(
                     provider_failure_cause(kind),
@@ -1338,6 +1366,7 @@ where
                 ),
             _ => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
         })
+        .with_rate_limits(rate_limits))
     }
 }
 
@@ -2283,6 +2312,105 @@ mod tests {
     const SYNTHETIC_MALFORMED_TOOL_SCHEMA: &str = "{";
     const SYNTHETIC_INVALID_TOOL_NAME: &str = "synthetic_invalid_tool";
 
+    fn capacity_sink() -> AcceptanceObservations<fn(), ModelCallId> {
+        AcceptanceObservations {
+            expected_correlation: call(),
+            correlation_mismatch: false,
+            acceptance_possible: None,
+            telemetry: telemetry(),
+            text_deltas: None,
+            observations: Vec::new(),
+            rate_limits: None,
+        }
+    }
+
+    #[test]
+    fn capacity_bridge_retains_latest_snapshot_through_both_redacting_sinks() {
+        use signalbox_model_runtime::{
+            CredentialRedactingSink, CredentialValue, RateLimitSnapshot, RateLimitWindow,
+            RedactingSink,
+        };
+        use std::time::{Duration, SystemTime};
+
+        let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let resets_at = observed_at + Duration::from_secs(900);
+        let mut sink = capacity_sink();
+        sink.observe_rate_limits(
+            call(),
+            RateLimitSnapshot {
+                observed_at: observed_at - Duration::from_secs(1),
+                windows: vec![RateLimitWindow {
+                    remaining_percent: 91,
+                    window_duration: None,
+                    resets_at: None,
+                }],
+            },
+        );
+        let credential = CredentialValue::new(b"synthetic-capacity-test-secret".to_vec());
+        {
+            let mut exact = CredentialRedactingSink::new(&mut sink, &credential);
+            let mut shaped = RedactingSink::new(&mut exact);
+            shaped.observe_rate_limits(
+                call(),
+                RateLimitSnapshot {
+                    observed_at,
+                    windows: vec![
+                        RateLimitWindow {
+                            remaining_percent: 23,
+                            window_duration: Some(Duration::from_secs(18_000)),
+                            resets_at: Some(resets_at),
+                        },
+                        RateLimitWindow {
+                            remaining_percent: 0,
+                            window_duration: None,
+                            resets_at: None,
+                        },
+                    ],
+                },
+            );
+        }
+        sink.observe(Observation {
+            correlation: call(),
+            fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+        });
+        let retained = sink
+            .rate_limits
+            .expect("capacity survives both redacting sinks");
+        assert_eq!(*retained.observed_at(), observed_at);
+        assert_eq!(retained.windows().len(), 2);
+        assert_eq!(*retained.windows()[0].remaining_percent(), 23);
+        assert_eq!(
+            *retained.windows()[0].window_duration(),
+            Some(Duration::from_secs(18_000))
+        );
+        assert_eq!(*retained.windows()[0].resets_at(), Some(resets_at));
+        assert_eq!(*retained.windows()[1].remaining_percent(), 0);
+        assert_eq!(*retained.windows()[1].window_duration(), None);
+        assert_eq!(*retained.windows()[1].resets_at(), None);
+    }
+
+    #[test]
+    fn capacity_bridge_rejects_evidence_for_another_call() {
+        use signalbox_model_runtime::{RateLimitSnapshot, RateLimitWindow};
+        let mut sink = capacity_sink();
+        sink.observe_rate_limits(
+            ModelCallId::from_uuid(Uuid::from_u128(99)),
+            RateLimitSnapshot {
+                observed_at: std::time::SystemTime::UNIX_EPOCH,
+                windows: vec![RateLimitWindow {
+                    remaining_percent: 7,
+                    window_duration: None,
+                    resets_at: None,
+                }],
+            },
+        );
+        assert!(
+            sink.correlation_mismatch,
+            "misbound evidence must fail the invocation closed"
+        );
+        assert_eq!(sink.rate_limits, None);
+    }
+
     fn call() -> ModelCallId {
         ModelCallId::from_uuid(Uuid::from_u128(1))
     }
@@ -2707,6 +2835,7 @@ mod tests {
             telemetry: telemetry(),
             text_deltas: None,
             observations: Vec::new(),
+            rate_limits: None,
         };
 
         sink.observe(Observation {
@@ -2743,6 +2872,7 @@ mod tests {
             telemetry: telemetry(),
             text_deltas: None,
             observations: Vec::new(),
+            rate_limits: None,
         };
 
         sink.observe(Observation {
@@ -2794,6 +2924,7 @@ mod tests {
                 sink: Arc::new(recorded.clone()),
             }),
             observations: Vec::new(),
+            rate_limits: None,
         };
         let mismatched = Observation {
             correlation: ModelCallId::from_uuid(Uuid::from_u128(2)),

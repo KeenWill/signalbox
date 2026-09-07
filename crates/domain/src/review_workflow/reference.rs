@@ -1,6 +1,9 @@
 //! Review reference for `docs/spec/review-workflows.md`.
 
-use super::{ReviewFindingId, ReviewPassId, ReviewRunId, ReviewTargetId};
+use crate::ReviewFindingId;
+use crate::ReviewPassId;
+use crate::ReviewRunId;
+use crate::ReviewTargetId;
 
 /// A target-bound review-run reference.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
