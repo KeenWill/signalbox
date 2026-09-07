@@ -66,3 +66,27 @@ fn reload_receipts_reject_control_text_and_oversized_reasons()
     }
     Ok(())
 }
+
+#[test]
+fn reload_success_requires_the_complete_ordered_section_inventory() {
+    for inventory in [
+        serde_json::json!([]),
+        serde_json::json!(["model_catalog", "session_templates"]),
+        serde_json::json!([
+            "model_catalog",
+            "session_templates",
+            "repo_watch",
+            "repo_watch"
+        ]),
+        serde_json::json!(["repo_watch", "session_templates", "model_catalog"]),
+    ] {
+        let frame = serde_json::json!({
+            "version":1, "request_id":"1", "message": {
+                "type":"configuration_reloaded",
+                "command_id":"00000000-0000-0000-0000-000000000001",
+                "reloaded_sections":inventory,
+            },
+        });
+        assert_server_malformed(&frame.to_string());
+    }
+}

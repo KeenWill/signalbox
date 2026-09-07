@@ -444,6 +444,14 @@ impl ConfigurationReload {
                 "startup-only configuration differs",
             ));
         }
+        if self.watch.is_none()
+            && models.repository_watch() != self.catalogs().models.repository_watch()
+        {
+            return Err(failure(
+                ReloadPhase::Validate,
+                "repository-watch configuration changes require restart",
+            ));
+        }
         let templates =
             SessionTemplateConfiguration::read(&self.template_path, || self.home.clone(), &models)
                 .map_err(|error| {
@@ -559,6 +567,37 @@ mod tests {
             reload.read_replacement().expect_err("startup changes fail"),
             failure(ReloadPhase::Validate, "startup-only configuration differs")
         );
+    }
+
+    #[tokio::test]
+    async fn replacement_refuses_repository_watch_edits_before_installation() {
+        let (_directory, reload) = fixture();
+        // Repository identity, interval, and unread credential path are arbitrary fixture data.
+        let source = format!(
+            r#"{}
+[repository_watch]
+version = 1
+enabled = false
+signal_reviewers = []
+[[repository_watch.repositories]]
+repository = "example/reload"
+poll_interval_seconds = 60
+credential_file = "/unused/reload-token"
+"#,
+            reload.catalogs().models.source()
+        );
+        HubModelConfiguration::parse(&source).expect("valid repository-watch replacement");
+        std::fs::write(&reload.model_path, source).expect("replacement");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("watch edits require activation"),
+            failure(
+                ReloadPhase::Validate,
+                "repository-watch configuration changes require restart"
+            ),
+        );
+        assert!(reload.catalogs().models.repository_watch().is_none());
     }
 
     #[tokio::test]
