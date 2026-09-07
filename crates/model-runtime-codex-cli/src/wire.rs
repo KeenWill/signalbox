@@ -1,78 +1,6 @@
-//! Codex JSONL and adapter-envelope wire types.
+//! Adapter response-envelope wire types.
 
 use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ThreadStarted {
-    pub(crate) thread_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct TurnCompleted {
-    pub(crate) usage: Usage,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct TurnFailed {
-    pub(crate) error: ThreadError,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ThreadError {
-    pub(crate) message: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct Usage {
-    #[serde(default)]
-    pub(crate) input_tokens: Option<i64>,
-    #[serde(default)]
-    pub(crate) cached_input_tokens: Option<i64>,
-    #[serde(default)]
-    pub(crate) cache_write_input_tokens: Option<i64>,
-    #[serde(default)]
-    pub(crate) output_tokens: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ItemEvent {
-    pub(crate) item: Item,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ItemLifecycleEvent {
-    pub(crate) item: ItemIdentity,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ItemIdentity {
-    pub(crate) id: String,
-    #[serde(rename = "type")]
-    pub(crate) item_type: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct Item {
-    pub(crate) id: String,
-    #[serde(flatten)]
-    pub(crate) details: ItemDetails,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ItemDetails {
-    AgentMessage {
-        text: String,
-    },
-    Reasoning {
-        text: String,
-    },
-    Error {
-        message: String,
-    },
-    #[serde(other)]
-    Other,
-}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ModelEnvelope {
@@ -107,7 +35,7 @@ pub(crate) struct EnvelopeToolCall {
     pub(crate) arguments: String,
 }
 
-/// Schema passed to `codex exec --output-schema`.
+/// Schema passed to `turn/start.outputSchema`.
 ///
 /// Every object supplies `additionalProperties: false` and requires all its
 /// properties, which strict structured-output validation demands of every

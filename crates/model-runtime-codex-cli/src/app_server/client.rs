@@ -150,6 +150,11 @@ impl Client {
             }
             Phase::TurnStart => {
                 let response: TurnStartResponse = decode(result)?;
+                self.activity.assistant_output_observed |= response
+                    .turn
+                    .items
+                    .iter()
+                    .any(item_precludes_non_acceptance);
                 self.check_turn(&response.turn.id)?;
                 self.phase = Phase::Running;
                 Ok(Event::Ignored)

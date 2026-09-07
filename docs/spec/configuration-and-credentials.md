@@ -373,8 +373,10 @@ An HTTP adapter proves non-acceptance only with a decoded native error envelope
 naming the cause in a pre-stream error response. An SSE error record never
 carries that proof, whatever token it holds, because by then the provider has
 begun processing the request. The Codex CLI proves non-acceptance instead
-through its machine-readable `turn.failed` closure, so a `codex_cli` pool admits
-`switch_now` on all three availability causes.
+through its typed failed `turn/completed` closure under the
+[runtime proof rule](runtime-substrate.md), so a `codex_cli` pool admits
+`switch_now` on all three availability causes; an unproven availability failure
+authorizes no successor.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
 observed it, and nothing ends one. It applies to every session except one that
