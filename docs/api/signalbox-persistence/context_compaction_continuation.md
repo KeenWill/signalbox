@@ -13,17 +13,26 @@ impl context_compaction_continuation::CompactionContinuationRepository {
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<option::Option<signalbox_domain::TurnId>, error::Error>;
-    pub async fn command_recorded(
-        &self,
-        command: signalbox_domain::DurableCommandId,
-    ) -> result::Result<bool, error::Error>;
-    pub async fn requires_compaction(
+    pub async fn uncompacted_successor(
         &self,
         session: signalbox_domain::SessionId,
         turn: signalbox_domain::TurnId,
-        ordinary_command: impl function::FnOnce(
-            signalbox_domain::TurnId,
-        ) -> signalbox_domain::DurableCommandId,
-    ) -> result::Result<bool, error::Error>;
+    ) -> result::Result<
+        option::Option<context_compaction_continuation::CompactionSuccessor>,
+        error::Error,
+    >;
 }
+```
+
+## CompactionSuccessor
+
+```rust
+pub enum CompactionSuccessor {
+    Goal,
+    Submitted {
+        predecessor: signalbox_domain::TurnId,
+        command: signalbox_domain::DurableCommandId,
+    },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

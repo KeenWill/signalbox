@@ -9,6 +9,20 @@ pub struct CompactionContinuationRepository {
     pool: PgPool,
 }
 
+/// Source of an uncompacted repository-watch successor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactionSuccessor {
+    /// The goal lineage binds the successor to a headroom terminalization.
+    Goal,
+    /// An ordinary input must match the terminalization's admission command.
+    Submitted {
+        /// The headroom-terminal predecessor.
+        predecessor: TurnId,
+        /// The durable command that admitted this successor.
+        command: DurableCommandId,
+    },
+}
+
 #[derive(FromRow)]
 struct StoredSuccessor {
     accepting_command_id: Option<Uuid>,
@@ -45,21 +59,12 @@ impl CompactionContinuationRepository {
         .map(|turn| turn.map(TurnId::from_uuid))
     }
 
-    /// Whether the bounded ordinary-input command already has a durable result.
-    pub async fn command_recorded(&self, command: DurableCommandId) -> Result<bool, sqlx::Error> {
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1)")
-            .bind(command.into_uuid())
-            .fetch_one(&self.pool)
-            .await
-    }
-
-    /// Whether this successor still owes compaction before activation.
-    pub async fn requires_compaction(
+    /// Loads the source of a successor that has no applied compaction receipt.
+    pub async fn uncompacted_successor(
         &self,
         session: SessionId,
         turn: TurnId,
-        ordinary_command: impl FnOnce(TurnId) -> DurableCommandId,
-    ) -> Result<bool, sqlx::Error> {
+    ) -> Result<Option<CompactionSuccessor>, sqlx::Error> {
         let row = sqlx::query_as::<_, StoredSuccessor>(
             "SELECT origin.accepting_command_id, previous.turn_id AS previous_turn,
                     EXISTS (SELECT 1 FROM goal_turn AS goal
@@ -91,11 +96,16 @@ impl CompactionContinuationRepository {
         .bind(turn.into_uuid())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.is_some_and(|row| {
-            !row.compacted
-                && (row.goal_continuation
-                    || row.accepting_command_id
-                        == Some(ordinary_command(TurnId::from_uuid(row.previous_turn)).into_uuid()))
+        Ok(row.filter(|row| !row.compacted).and_then(|row| {
+            if row.goal_continuation {
+                Some(CompactionSuccessor::Goal)
+            } else {
+                row.accepting_command_id
+                    .map(|command| CompactionSuccessor::Submitted {
+                        predecessor: TurnId::from_uuid(row.previous_turn),
+                        command: DurableCommandId::from_uuid(command),
+                    })
+            }
         }))
     }
 }

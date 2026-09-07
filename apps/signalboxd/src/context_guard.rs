@@ -2,6 +2,9 @@
 
 use std::{error::Error, fmt, future::Future, sync::Arc};
 
+#[cfg(feature = "test-support")]
+pub use continuation::repository_watch_continuation_test_request;
+
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, InProcessEligibilityNudge, ModelCallInputTokenCount,
     ModelCallInputTokenCounter, OperatorFailureClass, SchedulerPassExpiryHandler, ToolCatalog,

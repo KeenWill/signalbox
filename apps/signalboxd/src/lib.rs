@@ -99,6 +99,8 @@ pub use configuration::{
     OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
     WorkspaceInstructionConfiguration,
 };
+#[cfg(feature = "test-support")]
+pub use context_guard::repository_watch_continuation_test_request;
 pub use context_guard::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,
     ReportedUsageCompactionError,
