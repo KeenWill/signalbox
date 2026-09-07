@@ -198,6 +198,9 @@ impl CreateSessionRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::ReloadConfiguration
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential
                 | CommandKind::SessionLifecycle,
             ) => {
                 transaction.rollback().await?;
@@ -254,6 +257,9 @@ impl CreateSessionRepository {
                     | CommandKind::MintGitRemote
                     | CommandKind::WithdrawGitRemote
                     | CommandKind::ReloadConfiguration
+                    | CommandKind::ProvisionOauthCredential
+                    | CommandKind::ReprovisionOauthCredential
+                    | CommandKind::DeleteOauthCredential
                     | CommandKind::SessionLifecycle,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
@@ -314,6 +320,9 @@ impl CreateSessionRepository {
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
                 | CommandKind::ReloadConfiguration
+                | CommandKind::ProvisionOauthCredential
+                | CommandKind::ReprovisionOauthCredential
+                | CommandKind::DeleteOauthCredential
                 | CommandKind::SessionLifecycle,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }

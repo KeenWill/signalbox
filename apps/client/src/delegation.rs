@@ -335,6 +335,8 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::ReviewOrchestration { .. }
         | ServerMessage::ConfigurationReloaded { .. }
         | ServerMessage::ConfigurationReloadFailed { .. }
+        | ServerMessage::OauthCredentialAuthorization { .. }
+        | ServerMessage::OauthCredentialReceipt { .. }
         | ServerMessage::DeploymentLimits { .. } => DelegationResponse::Unexpected,
     }
 }

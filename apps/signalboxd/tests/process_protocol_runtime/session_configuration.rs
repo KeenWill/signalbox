@@ -986,3 +986,59 @@ async fn reload_configuration_swaps_request_catalogs_and_replays_without_reading
     socket.cleanup()?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn reload_receipt_failure_requires_recovery_after_catalog_installation()
+-> Result<(), Box<dyn Error>> {
+    use signalboxd::configuration_reload::{ConfigurationReload, ConfigurationReloadError};
+    let (_container, pool) = postgres().await?;
+    let files = tempfile::tempdir()?;
+    let model_path = files.path().join("models.toml");
+    let template_path = files.path().join("templates.toml");
+    let mut source = MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    let example = include_str!("../../../../config/signalboxd.example.toml")
+        .parse::<toml_edit::DocumentMut>()?;
+    source.insert("numeric_bounds", example["numeric_bounds"].clone());
+    let models = HubModelConfiguration::parse(&source.to_string())?;
+    let mut replacement = source;
+    replacement.remove("aliases");
+    fs::write(&model_path, replacement.to_string())?;
+    fs::write(&template_path, "version = 1\n")?;
+    let reload = ConfigurationReload::new(
+        pool.clone(),
+        models,
+        signalboxd::SessionTemplateConfiguration::default(),
+        model_path,
+        template_path,
+        None,
+    )
+    .map_err(|error| io::Error::other(format!("reload fixture: {error:?}")))?;
+    sqlx::raw_sql("CREATE FUNCTION reject_reload_receipt_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'receipt fixture failure'; END $$;
+        CREATE TRIGGER reject_reload_receipt_fixture BEFORE INSERT ON reload_configuration_result FOR EACH ROW EXECUTE FUNCTION reject_reload_receipt_fixture();")
+        .execute(&pool).await?;
+    let error = reload
+        .reload(
+            signalbox_persistence::reload_configuration::ReloadConfiguration {
+                command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            },
+        )
+        .await
+        .expect_err("receipt commit fails after installation");
+    assert!(matches!(
+        error,
+        ConfigurationReloadError::RecoveryRequired(_)
+    ));
+    assert_eq!(reload.catalogs().models.model_aliases().count(), 0);
+    assert_eq!(
+        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
+            pool.clone()
+        )
+        .pending()
+        .await?
+        .len(),
+        1
+    );
+    pool.close().await;
+    Ok(())
+}

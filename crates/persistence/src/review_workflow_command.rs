@@ -175,6 +175,9 @@ async fn inspect_existing(
             | CommandKind::MintGitRemote
             | CommandKind::WithdrawGitRemote
             | CommandKind::ReloadConfiguration
+            | CommandKind::ProvisionOauthCredential
+            | CommandKind::ReprovisionOauthCredential
+            | CommandKind::DeleteOauthCredential
             | CommandKind::SessionLifecycle,
         ) => Ok(ClaimInspection::Conflicting),
     }

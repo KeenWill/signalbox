@@ -3261,7 +3261,7 @@ fn configuration_admits_switch_now_for_a_codex_terminal_failure() {
     );
 
     HubModelConfiguration::parse(&substituting)
-        .expect("Codex turn.failed proves that a successor cannot duplicate acceptance");
+        .expect("Codex typed failed-turn proof permits availability successors");
 }
 
 #[test]

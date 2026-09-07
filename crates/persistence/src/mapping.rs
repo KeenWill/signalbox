@@ -1805,6 +1805,13 @@ pub(crate) fn tool_approval_decision_source_from_str(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DurableCommandKind {
     ReloadConfiguration,
+    /// OAuth administration command.
+    ProvisionOauthCredential,
+    /// OAuth administration command.
+    ReprovisionOauthCredential,
+    /// OAuth administration command.
+    DeleteOauthCredential,
+
     /// Session creation.
     CreateSession,
     /// Session creation from an imported frontier.
@@ -1861,6 +1868,9 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
         DurableCommandKind::ReloadConfiguration => "reload_configuration",
         DurableCommandKind::SessionLifecycle => "session_lifecycle",
+        DurableCommandKind::ProvisionOauthCredential => "provision_oauth_credential",
+        DurableCommandKind::ReprovisionOauthCredential => "reprovision_oauth_credential",
+        DurableCommandKind::DeleteOauthCredential => "delete_oauth_credential",
     }
 }
 
@@ -1886,6 +1896,10 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
         "session_lifecycle" => Some(DurableCommandKind::SessionLifecycle),
         "reload_configuration" => Some(DurableCommandKind::ReloadConfiguration),
+        "provision_oauth_credential" => Some(DurableCommandKind::ProvisionOauthCredential),
+        "reprovision_oauth_credential" => Some(DurableCommandKind::ReprovisionOauthCredential),
+        "delete_oauth_credential" => Some(DurableCommandKind::DeleteOauthCredential),
+
         _ => None,
     }
 }
