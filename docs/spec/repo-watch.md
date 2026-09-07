@@ -126,9 +126,15 @@ attempt to finish and does not postpone the periodic poll deadline. Each attempt
 reloads its committed comparison baseline and frontier, including compacted
 merged pull requests and their head repository identities, fetches a complete
 observation, and commits the differ's facts with their poll or webhook lineage.
-Failed observations leave the prior committed state intact. The daemon starts
-these tasks, the configured webhook listener, and one serialized command worker
-beside the convergence sweep, and drains them before closing its database.
+Workflow reads query completed runs by distinct current head SHA for the default
+branch and retained pull-request base and same-repository head branches; prior
+completions for those branches remain comparison input. Each observation admits
+at most 1,000 REST and GraphQL requests combined; exhausting that budget rejects
+the incomplete observation. Check inventories exceeding GitHub's 1,000-suite
+commit limit also reject the observation. Failed observations leave the prior
+committed state intact. The daemon starts these tasks, the configured webhook
+listener, and one serialized command worker beside the convergence sweep, and
+drains them before closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
 repository before accepting a delivery. An empty resolved webhook secret is

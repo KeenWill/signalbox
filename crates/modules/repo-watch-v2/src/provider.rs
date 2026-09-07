@@ -25,6 +25,12 @@ use crate::{
 
 // GitHub's maximum REST page size, used only to select complete provider pages.
 const PAGE_SIZE: u16 = 100;
+// One attempt may consume at most one fifth of the authenticated user's
+// 5,000-request REST allowance, counting GraphQL requests against the same ceiling.
+const MAX_OBSERVATION_REQUESTS: usize = 1_000;
+// GitHub's commit check-run endpoint includes only its 1,000 most recent suites:
+// https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference
+const COMMIT_CHECK_SUITE_LIMIT: usize = 1_000;
 const THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -42,6 +48,12 @@ query RepositoryWatchReviewThreads($owner: String!, $name: String!, $number: Int
 pub enum ObservationError {
     Transport(GitHubClientError),
     InvalidResponse,
+    RequestBudgetExceeded {
+        limit: usize,
+    },
+    CheckSuiteLimitExceeded {
+        limit: usize,
+    },
     Request {
         path: String,
         source: Box<ObservationError>,
@@ -61,6 +73,14 @@ impl fmt::Display for ObservationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport(error) => write!(f, "{error}"),
+            Self::CheckSuiteLimitExceeded { limit } => write!(
+                f,
+                "commit check-run inventory exceeds GitHub's {limit}-suite limit"
+            ),
+            Self::RequestBudgetExceeded { limit } => write!(
+                f,
+                "repository-watch observation request budget exhausted after {limit} requests"
+            ),
             Self::InvalidResponse => {
                 f.write_str("repository-watch provider observation is invalid")
             }
@@ -73,7 +93,9 @@ impl Error for ObservationError {
         match self {
             Self::Transport(error) => Some(error),
             Self::Request { source, .. } => Some(source),
-            Self::InvalidResponse => None,
+            Self::InvalidResponse
+            | Self::RequestBudgetExceeded { .. }
+            | Self::CheckSuiteLimitExceeded { .. } => None,
         }
     }
 }
@@ -152,11 +174,14 @@ impl GitHubObservationRead for GitHubClient {
 
 struct ObservationReadCounts<'a, T> {
     io: &'a T,
+    requests: std::sync::atomic::AtomicUsize,
     comments: std::sync::atomic::AtomicUsize,
 }
 
 impl<T: GitHubObservationRead> GitHubObservationRead for ObservationReadCounts<'_, T> {
     async fn page(&self, path: &str) -> Result<(Value, bool), ObservationError> {
+        self.requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let result = self.io.page(path).await?;
         if path
             .split('?')
@@ -171,6 +196,42 @@ impl<T: GitHubObservationRead> GitHubObservationRead for ObservationReadCounts<'
         Ok(result)
     }
     async fn threads(&self, request: Value) -> Result<Value, ObservationError> {
+        self.requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.io.threads(request).await
+    }
+}
+
+struct ObservationReadBudget<'a, T> {
+    io: &'a T,
+    requests: std::sync::atomic::AtomicUsize,
+}
+
+impl<T> ObservationReadBudget<'_, T> {
+    fn reserve(&self, path: &str) -> Result<(), ObservationError> {
+        self.requests
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |count| (count < MAX_OBSERVATION_REQUESTS).then_some(count + 1),
+            )
+            .map(|_| ())
+            .map_err(|_| {
+                ObservationError::RequestBudgetExceeded {
+                    limit: MAX_OBSERVATION_REQUESTS,
+                }
+                .at(path)
+            })
+    }
+}
+
+impl<T: GitHubObservationRead> GitHubObservationRead for ObservationReadBudget<'_, T> {
+    async fn page(&self, path: &str) -> Result<(Value, bool), ObservationError> {
+        self.reserve(path)?;
+        self.io.page(path).await
+    }
+    async fn threads(&self, request: Value) -> Result<Value, ObservationError> {
+        self.reserve("/graphql")?;
         self.io.threads(request).await
     }
 }
@@ -218,6 +279,7 @@ where
             .map_err(RepositoryAttemptError::Client)?;
         let counted = ObservationReadCounts {
             io: &client,
+            requests: std::sync::atomic::AtomicUsize::new(0),
             comments: std::sync::atomic::AtomicUsize::new(0),
         };
         let observed = fetch_observation(
@@ -247,6 +309,7 @@ where
                         .count(),
                     branches = state.branch_heads().len(),
                     workflow_runs = state.workflow_runs().len(),
+                    requests = counted.requests.load(std::sync::atomic::Ordering::Relaxed),
                     comments = counted.comments.load(std::sync::atomic::Ordering::Relaxed),
                     elapsed_ms = started.elapsed().as_millis(),
                     "repository-watch observation completed"
@@ -279,6 +342,11 @@ pub async fn fetch_observation(
     previous: Option<&RepoWatchObservation>,
     merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
 ) -> Result<RepositoryObservation, ObservationError> {
+    let budget = ObservationReadBudget {
+        io,
+        requests: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let io = &budget;
     let root = format!("/repos/{}", repository.as_str());
     let (metadata, _) = read_page(io, &root).await?;
     let default_branch =
@@ -333,7 +401,20 @@ pub async fn fetch_observation(
             .find(|baseline| baseline.number() == number);
         pulls.push(fetch_pull(io, &root, repository, number, reviewers, prior, merged).await?);
     }
-    let workflow_runs = fetch_workflows(io, &root, repository, &branch_heads, previous).await?;
+    let retained_branches = branch_heads
+        .iter()
+        .filter(|branch| {
+            branch.branch() == &default_branch
+                || pulls.iter().any(|pull| {
+                    branch.branch() == pull.context().base_branch()
+                        || (pull.context().head_repository() == repository
+                            && branch.branch() == pull.context().head_branch())
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let workflow_runs =
+        fetch_workflows(io, &root, repository, &retained_branches, previous).await?;
     let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
         pull_requests: pulls,
         branch_heads,
@@ -412,15 +493,48 @@ async fn fetch_pull(
         Some(false) => MergeableState::Conflicting,
         None => MergeableState::Unknown,
     };
+    let ((completed_check_suites, completed_check_runs), reviews, threads, reactions) = tokio::try_join!(
+        fetch_checks(io, root, context.head_sha()),
+        fetch_reviews(io, &path, previous),
+        fetch_threads(io, repository, number),
+        fetch_reactions(io, root, number, reviewers),
+    )?;
+    RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context,
+        lifecycle,
+        mergeable_state,
+        completed_check_suites,
+        completed_check_runs,
+        reviews,
+        threads,
+        reactions,
+    })
+    .map_err(|_| detail.invalid())
+}
+
+async fn fetch_checks(
+    io: &impl GitHubObservationRead,
+    root: &str,
+    head: &CommitSha,
+) -> Result<
+    (
+        Vec<RepoWatchCheckSuiteObservation>,
+        Vec<RepoWatchCheckRunObservation>,
+    ),
+    ObservationError,
+> {
     let suites = pages(
         io,
-        &format!(
-            "{root}/commits/{}/check-suites?filter=all",
-            context.head_sha().as_str()
-        ),
+        &format!("{root}/commits/{}/check-suites?filter=all", head.as_str()),
         Some("check_suites"),
     )
     .await?;
+    if let Some(overflow) = suites.get(COMMIT_CHECK_SUITE_LIMIT) {
+        return Err(ObservationError::CheckSuiteLimitExceeded {
+            limit: COMMIT_CHECK_SUITE_LIMIT,
+        }
+        .at(&overflow.path));
+    }
     let mut completed_check_suites = Vec::new();
     let mut completed_check_runs = Vec::new();
     for suite in suites {
@@ -446,19 +560,26 @@ async fn fetch_pull(
                 },
             ));
         }
-        for run in pages(
-            io,
-            &format!("{root}/check-suites/{}/check-runs?filter=all", id.get()),
-            Some("check_runs"),
-        )
-        .await?
-        {
-            if run["status"] != "completed" {
-                continue;
-            }
+    }
+    for run in pages(
+        io,
+        &format!("{root}/commits/{}/check-runs?filter=all", head.as_str()),
+        Some("check_runs"),
+    )
+    .await?
+    {
+        if run["status"] == "completed" {
             completed_check_runs.push(run.admit(check_run(&run))?);
         }
     }
+    Ok((completed_check_suites, completed_check_runs))
+}
+
+async fn fetch_reviews(
+    io: &impl GitHubObservationRead,
+    path: &str,
+    previous: Option<&RepoWatchPullRequestState>,
+) -> Result<Vec<RepoWatchReviewObservation>, ObservationError> {
     let mut reviews = Vec::new();
     for review in pages(io, &format!("{path}/reviews"), None).await? {
         let state = match review["state"].as_str() {
@@ -487,19 +608,7 @@ async fn fetch_pull(
             review.admit(CommitSha::try_new(review.text(&review["commit_id"])?).ok())?,
         ));
     }
-    let threads = fetch_threads(io, repository, number).await?;
-    let reactions = fetch_reactions(io, root, number, reviewers).await?;
-    RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
-        context,
-        lifecycle,
-        mergeable_state,
-        completed_check_suites,
-        completed_check_runs,
-        reviews,
-        threads,
-        reactions,
-    })
-    .map_err(|_| detail.invalid())
+    Ok(reviews)
 }
 
 fn pull_context(
@@ -655,76 +764,62 @@ async fn fetch_workflows(
     branches: &[RepoWatchBranchHead],
     previous: Option<&RepoWatchObservation>,
 ) -> Result<Vec<RepoWatchWorkflowRunObservation>, ObservationError> {
-    let mut runs = Vec::new();
-    for workflow in pages(io, &format!("{root}/actions/workflows"), Some("workflows")).await? {
-        let id = workflow.admit(object_id(&workflow["id"]))?;
-        let name = workflow.admit(WorkflowName::try_new(workflow.text(&workflow["name"])?).ok())?;
-        let mut pending = branches.iter().map(|b| b.branch()).collect::<BTreeSet<_>>();
-        let mut page = 1_u64;
-        while !pending.is_empty() {
-            let (value, next) = read_page(
-                io,
-                &page_path(&format!("{root}/actions/workflows/{}/runs", id.get()), page),
-            )
-            .await?;
-            for run in value.admit(value["workflow_runs"].as_array())? {
-                if run["status"] != "completed"
-                    || run["head_repository"].is_null()
-                    || run["head_branch"].is_null()
-                {
-                    continue;
-                }
-                let head_repository = value.admit(
-                    RepositorySlug::try_new(value.text(&run["head_repository"]["full_name"])?).ok(),
-                )?;
-                if &head_repository != repository {
-                    continue;
-                }
-                let branch =
-                    value.admit(BranchName::try_new(value.text(&run["head_branch"])?).ok())?;
-                if !pending.remove(&branch) {
-                    continue;
-                }
-                let candidate = RepoWatchWorkflowRunObservation::new(
-                    value.admit(object_id(&run["id"]))?,
-                    id,
-                    RepoWatchWorkflowRunAttempt::new(value.admit(positive(&run["run_attempt"]))?),
-                    branch.clone(),
-                    name.clone(),
-                    value.admit(conclusion(&run["conclusion"]))?,
-                );
-                let prior = previous.and_then(|p| {
-                    p.state()
-                        .workflow_runs()
-                        .iter()
-                        .find(|r| r.workflow_id() == id && r.branch() == &branch)
-                });
-                runs.push(
-                    prior
-                        .filter(|p| {
-                            (p.id(), p.attempt().get())
-                                > (candidate.id(), candidate.attempt().get())
-                        })
-                        .cloned()
-                        .unwrap_or(candidate),
-                );
-            }
-            if !next {
-                break;
-            }
-            page = page
-                .checked_add(1)
-                .ok_or(ObservationError::InvalidResponse)?;
-        }
-        runs.extend(
-            previous
-                .into_iter()
-                .flat_map(|p| p.state().workflow_runs())
-                .filter(|r| r.workflow_id() == id && pending.contains(r.branch()))
-                .cloned(),
+    let mut runs = previous
+        .into_iter()
+        .flat_map(|p| p.state().workflow_runs())
+        .filter(|run| {
+            branches
+                .iter()
+                .any(|branch| branch.branch() == run.branch())
+        })
+        .map(|run| ((run.workflow_id(), run.branch().clone()), run.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for head in branches
+        .iter()
+        .map(RepoWatchBranchHead::head)
+        .collect::<BTreeSet<_>>()
+    {
+        let path = format!(
+            "{root}/actions/runs?head_sha={}&status=completed",
+            head.as_str()
         );
+        for run in pages(io, &path, Some("workflow_runs")).await? {
+            if run["status"] != "completed"
+                || run["head_repository"].is_null()
+                || run["head_branch"].is_null()
+            {
+                continue;
+            }
+            let head_repository = run.admit(
+                RepositorySlug::try_new(run.text(&run["head_repository"]["full_name"])?).ok(),
+            )?;
+            if &head_repository != repository {
+                continue;
+            }
+            let branch = run.admit(BranchName::try_new(run.text(&run["head_branch"])?).ok())?;
+            if !branches
+                .iter()
+                .any(|retained| retained.branch() == &branch && retained.head() == head)
+            {
+                continue;
+            }
+            let candidate = RepoWatchWorkflowRunObservation::new(
+                run.admit(object_id(&run["id"]))?,
+                run.admit(object_id(&run["workflow_id"]))?,
+                RepoWatchWorkflowRunAttempt::new(run.admit(positive(&run["run_attempt"]))?),
+                branch.clone(),
+                run.admit(WorkflowName::try_new(run.text(&run["name"])?).ok())?,
+                run.admit(conclusion(&run["conclusion"]))?,
+            );
+            let key = (candidate.workflow_id(), branch);
+            if runs.get(&key).is_none_or(|prior| {
+                (candidate.id(), candidate.attempt().get()) > (prior.id(), prior.attempt().get())
+            }) {
+                runs.insert(key, candidate);
+            }
+        }
     }
-    Ok(runs)
+    Ok(runs.into_values().collect())
 }
 
 fn admit<T>(value: Option<T>) -> Result<T, ObservationError> {
@@ -778,7 +873,7 @@ mod tests {
             (format!("{root}/commits/{HEAD}/check-suites?filter=all&per_page=100&page=1"), json!({
                 "check_suites": [{"id": 2, "status": "completed", "updated_at": "suite-completion", "conclusion": "success"}]
             }), false),
-            (format!("{root}/check-suites/2/check-runs?filter=all&per_page=100&page=1"), json!({
+            (format!("{root}/commits/{HEAD}/check-runs?filter=all&per_page=100&page=1"), json!({
                 "check_runs": [{"id": 3, "status": "completed", "completed_at": "run-completion", "name": "tests", "conclusion": "success"}]
             }), false),
             (format!("{root}/pulls/1/reviews?per_page=100&page=1"), json!([
@@ -790,11 +885,8 @@ mod tests {
                 {"user": {"login": "reviewer"}, "content": "+1"},
                 {"user": {"login": "unconfigured"}, "content": "-1"}
             ]), false),
-            (format!("{root}/actions/workflows?per_page=100&page=1"), json!({
-                "workflows": [{"id": 5, "name": "CI"}]
-            }), false),
-            (format!("{root}/actions/workflows/5/runs?per_page=100&page=1"), json!({
-                "workflow_runs": [{"id": 6, "run_attempt": 1, "head_branch": "main",
+            (format!("{root}/actions/runs?head_sha={HEAD}&status=completed&per_page=100&page=1"), json!({
+                "workflow_runs": [{"id": 6, "workflow_id": 5, "name": "CI", "run_attempt": 1, "head_branch": "main",
                     "head_repository": {"full_name": "example/project"},
                     "status": "completed", "conclusion": "success"}]
             }), false),
@@ -808,6 +900,131 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn githubs_commit_check_run_suite_limit_rejects_an_incomplete_inventory() {
+        let mut io = fixture();
+        let root = "/repos/example/project";
+        let suite_path = format!("{root}/commits/{HEAD}/check-suites?filter=all");
+        let suites = (1..=COMMIT_CHECK_SUITE_LIMIT + 1)
+            .map(|id| json!({"id": id, "status": "queued"}))
+            .collect::<Vec<_>>();
+        let chunks = suites.chunks(usize::from(PAGE_SIZE));
+        let page_count = chunks.len();
+        for (index, chunk) in chunks.enumerate() {
+            io.pages.insert(
+                page_path(&suite_path, (index + 1) as u64),
+                (json!({"check_suites": chunk}), index + 1 < page_count),
+            );
+        }
+        let head = CommitSha::try_new(HEAD.to_owned()).expect("head");
+        let error = fetch_checks(&io, root, &head)
+            .await
+            .expect_err("GitHub would truncate the inventory");
+        assert!(
+            error
+                .to_string()
+                .contains("commit check-run inventory exceeds GitHub's 1000-suite limit")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&page_path(&suite_path, page_count as u64))
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_reads_only_retained_heads_and_keeps_latest_attempt() {
+        let mut io = fixture();
+        let branch_path = "/repos/example/project/branches?per_page=100&page=1";
+        // The unrelated branch has no workflow history and must never be searched.
+        io.pages.get_mut(branch_path).expect("branch page").0.as_array_mut().expect("branches").push(
+            json!({"name": "unrelated", "commit": {"sha": "2222222222222222222222222222222222222222"}})
+        );
+        let path = format!(
+            "/repos/example/project/actions/runs?head_sha={HEAD}&status=completed&per_page=100&page=1"
+        );
+        let first = io.pages.get_mut(&path).expect("workflow page");
+        let mut older = first.0["workflow_runs"][0].clone();
+        first.0["workflow_runs"][0]["run_attempt"] = json!(2);
+        older["run_attempt"] = json!(1);
+        first.1 = true;
+        io.pages.insert(
+            path.replace("&page=1", "&page=2"),
+            (json!({"workflow_runs": [older]}), false),
+        );
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let observed = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect("bounded observation");
+        assert_eq!(observed.observation.state().workflow_runs().len(), 1);
+        assert_eq!(
+            observed.observation.state().workflow_runs()[0]
+                .attempt()
+                .get(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_endless_provider_exhausts_the_observation_budget_without_an_extra_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Endless {
+            calls: AtomicUsize,
+        }
+        impl GitHubObservationRead for Endless {
+            async fn page(&self, path: &str) -> Result<(Value, bool), ObservationError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(if path == "/repos/example/project" {
+                    (json!({"default_branch": "main"}), false)
+                } else {
+                    (json!([]), true)
+                })
+            }
+            async fn threads(&self, _: Value) -> Result<Value, ObservationError> {
+                panic!("branch pagination never reaches GraphQL")
+            }
+        }
+        let io = Endless {
+            calls: AtomicUsize::new(0),
+        };
+        let repository =
+            RepositorySlug::try_new(String::from("example/project")).expect("repository");
+        let error = fetch_observation(&io, &repository, &[], None, &[])
+            .await
+            .expect_err("budget rejects incomplete observation");
+        assert_eq!(io.calls.load(Ordering::Relaxed), MAX_OBSERVATION_REQUESTS);
+        assert!(
+            error
+                .to_string()
+                .contains("observation request budget exhausted")
+        );
+        assert!(error.to_string().contains(&format!(
+            "/branches?per_page=100&page={MAX_OBSERVATION_REQUESTS}"
+        )));
+    }
+
+    #[tokio::test]
+    async fn rest_and_graphql_share_the_same_observation_request_budget() {
+        let io = fixture();
+        let budget = ObservationReadBudget {
+            io: &io,
+            requests: std::sync::atomic::AtomicUsize::new(MAX_OBSERVATION_REQUESTS - 1),
+        };
+        budget
+            .threads(json!({}))
+            .await
+            .expect("last admitted request");
+        let error = budget
+            .page("/repos/example/project")
+            .await
+            .expect_err("REST cannot exceed the shared budget");
+        assert!(
+            error
+                .to_string()
+                .contains("observation request budget exhausted")
+        );
+    }
     #[tokio::test]
     async fn invalid_branch_reports_its_original_page_after_pagination() {
         let mut io = fixture();
@@ -880,7 +1097,7 @@ mod tests {
     async fn workflow_repository_comparison_uses_canonical_slugs() {
         let mut io = fixture();
         io.pages
-            .get_mut("/repos/example/project/actions/workflows/5/runs?per_page=100&page=1")
+            .get_mut("/repos/example/project/actions/runs?head_sha=1111111111111111111111111111111111111111&status=completed&per_page=100&page=1")
             .expect("workflow page")
             .0["workflow_runs"][0]["head_repository"]["full_name"] = json!("Example/Project");
         let repository =
@@ -940,7 +1157,7 @@ mod tests {
     async fn historical_workflow_without_a_head_repository_does_not_block_watched_runs() {
         let mut io = fixture();
         io.pages
-            .get_mut("/repos/example/project/actions/workflows/5/runs?per_page=100&page=1")
+            .get_mut("/repos/example/project/actions/runs?head_sha=1111111111111111111111111111111111111111&status=completed&per_page=100&page=1")
             .expect("workflow page")
             .0["workflow_runs"]
             .as_array_mut()
@@ -965,7 +1182,7 @@ mod tests {
     async fn historical_workflow_without_a_head_branch_does_not_block_watched_runs() {
         let mut io = fixture();
         io.pages
-            .get_mut("/repos/example/project/actions/workflows/5/runs?per_page=100&page=1")
+            .get_mut("/repos/example/project/actions/runs?head_sha=1111111111111111111111111111111111111111&status=completed&per_page=100&page=1")
             .expect("workflow page")
             .0["workflow_runs"]
             .as_array_mut()
