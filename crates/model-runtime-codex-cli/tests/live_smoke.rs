@@ -2000,6 +2000,7 @@ mod app_server_probe {
         rpc_code: Option<i64>,
         status: &'static str,
         unauthorized: bool,
+        error_info: &'static str,
         path_present: bool,
         refresh_requests: usize,
         windows: Vec<Value>,
@@ -2011,8 +2012,25 @@ mod app_server_probe {
         std::fs::write(empty_home.path().join("config.toml"), "").expect("empty config");
         let empty = exchange(executable, empty_home.path(), working.path()).await;
         println!(
-            "PROBE a observed empty_home stage={} rpc_code={:?} status={} unauthorized={}",
-            empty.stage, empty.rpc_code, empty.status, empty.unauthorized
+            "PROBE a observed empty_home stage={} rpc_code={:?} status={} unauthorized={} codex_error_info={}",
+            empty.stage, empty.rpc_code, empty.status, empty.unauthorized, empty.error_info
+        );
+
+        let invalid_home = tempfile::tempdir().expect("synthetic invalid login home");
+        std::fs::write(invalid_home.path().join("config.toml"), "").expect("empty config");
+        std::fs::write(
+            invalid_home.path().join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-signalbox-invalid-probe-credential"}"#,
+        )
+        .expect("write a deliberately invalid synthetic credential");
+        let invalid = exchange(executable, invalid_home.path(), working.path()).await;
+        println!(
+            "PROBE a observed synthetic_invalid_login stage={} rpc_code={:?} status={} unauthorized={} codex_error_info={}",
+            invalid.stage,
+            invalid.rpc_code,
+            invalid.status,
+            invalid.unauthorized,
+            invalid.error_info
         );
 
         let home = tempfile::tempdir().expect("authenticated probe home");
@@ -2165,6 +2183,7 @@ mod app_server_probe {
                         }
                     } else if method == "turn/completed" {
                         observed.unauthorized = frame["params"]["turn"]["error"]["codexErrorInfo"] == "unauthorized";
+                        observed.error_info = error_tag(&frame["params"]["turn"]["error"]["codexErrorInfo"]);
                         observed.status = match frame["params"]["turn"]["status"].as_str() {
                             Some("completed") => "completed",
                             Some("failed") => "failed",
@@ -2207,5 +2226,35 @@ mod app_server_probe {
         kill_probe_group(group);
         let _ = child.wait().await;
         observed
+    }
+
+    fn error_tag(value: &Value) -> &'static str {
+        const TAGS: &[&str] = &[
+            "contextWindowExceeded",
+            "sessionBudgetExceeded",
+            "usageLimitExceeded",
+            "rateLimitExceeded",
+            "serverOverloaded",
+            "cyberPolicy",
+            "misalignmentPolicyViolation",
+            "httpConnectionFailed",
+            "responseStreamConnectionFailed",
+            "internalServerError",
+            "unauthorized",
+            "badRequest",
+            "threadRollbackFailed",
+            "sandboxError",
+            "responseStreamDisconnected",
+            "responseTooManyFailedAttempts",
+            "activeTurnNotSteerable",
+            "other",
+        ];
+        if value.is_null() {
+            return "absent";
+        }
+        TAGS.iter()
+            .copied()
+            .find(|tag| value.as_str() == Some(tag) || value.get(tag).is_some())
+            .unwrap_or("unknown")
     }
 }
