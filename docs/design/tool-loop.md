@@ -66,16 +66,16 @@ tool-result entries nor prepares a continuation. This recovery takeover is the
 exception to waiting for the lost offered request to resolve. The request
 remains recovery-pending until its retry resolves or
 [terminalization wins](turn-lifecycle-and-scheduling.md). If the retry resolves
-first, later requests execute in proposal order. The transaction resolving a
+first, later requests execute in proposal order. The transaction offering a
 fresh retry attempt terminalizes the retained lost attempt as superseded by that
-fresh attempt before continuation, without an extra result entry. Once the whole
-batch resolves, the ordinary continuation transaction projects every result in
-proposal order, appends the pending relocation entry, and prepares the next
-call. Retry correlation crosses the placement boundary and therefore validates
-the lost attempt and successor placement generations without requiring their
-runner ids to match. An executor-dispatched attempt otherwise completes or
-receives its effect-class crash classification; placement loss never rewrites or
-cancels it.
+fresh attempt atomically with the retry offer, without an extra result entry.
+Once the whole batch resolves, the ordinary continuation transaction projects
+every result in proposal order, appends the pending relocation entry, and
+prepares the next call. Retry correlation crosses the placement boundary and
+therefore validates the lost attempt and successor placement generations without
+requiring their runner ids to match. An executor-dispatched attempt otherwise
+completes or receives its effect-class crash classification; placement loss
+never rewrites or cancels it.
 
 A family declares an admissibility check for a condition it can evaluate before
 approval. Where a family declares one, that check takes precedence over the
@@ -197,8 +197,8 @@ continuation transaction projects the complete batch. Executor-dispatched
 attempts otherwise complete or receive effect-class crash classification;
 placement loss never rewrites or cancels them.
 
-Resolving a fresh retry leaves the retained lost attempt terminal and superseded
-by that retry before continuation, without an extra result entry.
+Offering a fresh retry atomically leaves the retained lost attempt terminal and
+superseded by that retry, without an extra result entry or two live attempts.
 
 A request a declaring family marks inadmissible resolves before approval with no
 approval state, no judge call, no attempt row, and no executor work; it projects
