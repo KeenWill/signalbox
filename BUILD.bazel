@@ -3,6 +3,7 @@ load("@rules_python//python:defs.bzl", "py_test")
 load("//tooling/bazel:source_manifest.bzl", "source_manifest")
 
 exports_files([
+    ".cargo/config.toml",
     "Cargo.lock",
     "Cargo.toml",
     "__subpackages__",
@@ -334,6 +335,7 @@ test_suite(
         "//crates/model-runtime-anthropic:loopback",
         "//crates/model-runtime-openai:loopback",
         "//crates/ownership-seam:lifecycle_vocabulary",
+        "//crates/persistence:importer_conformance_corpus",
         "//crates/tool-schema-derive:derive",
     ],
 )

@@ -874,3 +874,48 @@ filegroup(
     srcs = glob(["**/*.rs"]),
     visibility = ["//:__pkg__"],
 )
+
+rust_test(
+    name = "importer_conformance_corpus",
+    size = "small",
+    srcs = ["tests/importer_conformance_corpus.rs"],
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = [
+        "--test-threads=16",
+    ],
+    compile_data = glob(["tests/fixtures/importer-conformance/*.jsonl"]),
+    crate_features = [
+        "postgres-integration",
+        "test-support",
+    ],
+    crate_root = "tests/importer_conformance_corpus.rs",
+    data = glob(["tests/fixtures/importer-conformance/golden/**"]) + ["//:.cargo/config.toml"],
+    edition = crate_edition(),
+    lint_config = ":cargo_lints",
+    proc_macro_deps = ["//crates/derive:signalbox_derive"] + all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/persistence"},
+    rustc_env_files = [":cargo_environment"],
+    rustc_flags = [
+        "--forbid=unsafe_code",
+        "--deny=warnings",
+    ],
+    deps = [
+        ":signalbox_persistence",
+        "//crates/application:signalbox_application",
+        "//crates/blob-store:signalbox_blob_store",
+        "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
+        "//crates/conversation-import-codex:signalbox_conversation_import_codex",
+        "//crates/domain:signalbox_domain",
+        "//crates/newtype:signalbox_newtype",
+        "//crates/tools-plan:signalbox_tools_plan",
+    ] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

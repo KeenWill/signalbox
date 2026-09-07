@@ -94,3 +94,8 @@ outside the sandbox and always executes; the other results are cacheable.
 PDF, SVG, video, and registry behavior. These fixture-based targets are included
 in `//:bazel_tests` and cache their results. Audio worker and process-isolation
 tests continue in the Cargo job that provisions the real sandbox.
+
+The importer conformance corpus runs in `//:rust_integration_tests`. Its JSONL
+inputs, golden files, and Cargo configuration are declared separately. Golden
+paths remain absolute under Cargo and are anchored in the test runfiles under
+Bazel.
