@@ -1324,7 +1324,11 @@ async fn streamed_reasoning_replays_exact_completed_bytes_between_two_tool_calls
     for part in completion.content {
         match part {
             AssistantPart::ProviderReasoning { item_json } => {
-                replay.push(MessagePart::ProviderReasoning { item_json })
+                replay.push(MessagePart::ProviderReasoning {
+                    item_json,
+                    producing_target: ResolvedTarget::new("model-exact-1"),
+                    producing_credential: CredentialReference::new("openai-primary"),
+                })
             }
             AssistantPart::ToolCall(call) => {
                 results.push(MessagePart::ToolResult(ToolResultRecord {

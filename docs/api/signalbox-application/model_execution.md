@@ -53,6 +53,18 @@ impl fmt::Debug for ModelAttachmentStub {
 }
 ```
 
+## ProviderReasoningProvenance
+
+```rust
+pub struct ProviderReasoningProvenance {
+    pub source: signalbox_domain::SemanticTranscriptEntryRef,
+    pub producing_call: signalbox_domain::ModelCallId,
+    pub producing_target: signalbox_domain::ResolvedProviderTarget,
+    pub producing_credential: ModelCallCredentialReference,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## ModelConversationMessage
 
 ```rust
@@ -174,8 +186,10 @@ impl PreparedModelOperation {
         system_prompt: option::Option<signalbox_domain::SessionSystemPrompt>,
         tools: boxed::Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
+        reasoning_provenance: &[ProviderReasoningProvenance],
     ) -> result::Result<Self, ModelFrontierRenderingError>;
     pub const fn request(&self) -> &signalbox_domain::PreparedModelCallRequest;
+    pub fn reasoning_provenance(&self) -> &[ProviderReasoningProvenance];
     pub const fn credential_reference(&self) -> &ModelCallCredentialReference;
     pub fn system_prompt(&self) -> option::Option<&str>;
     pub fn messages(&self) -> &[ModelConversationMessage];
@@ -190,6 +204,9 @@ impl PreparedModelOperation {
 
 ```rust
 pub enum ModelFrontierRenderingError {
+    MissingOrMismatchedReasoningProvenance {
+        entry: signalbox_domain::SemanticTranscriptEntryRef,
+    },
     MissingOriginContent {
         entry: signalbox_domain::SemanticTranscriptEntryRef,
         accepted_input: signalbox_domain::AcceptedInputId,
@@ -250,6 +267,7 @@ pub enum PrepareModelCallOutcome {
         recorded_user_overrides: boxed::Box<[signalbox_domain::RecordedUserOverride]>,
         system_prompt: option::Option<signalbox_domain::SessionSystemPrompt>,
         tool_entries: boxed::Box<[ResolvedToolConversationEntry]>,
+        reasoning_provenance: boxed::Box<[ProviderReasoningProvenance]>,
     },
     TargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),
 }

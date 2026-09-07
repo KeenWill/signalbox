@@ -42,6 +42,8 @@ pub enum MessagePart {
     },
     ProviderReasoning {
         item_json: string::String,
+        producing_target: ResolvedTarget,
+        producing_credential: CredentialReference,
     },
     ProviderCompaction {
         block_json: string::String,

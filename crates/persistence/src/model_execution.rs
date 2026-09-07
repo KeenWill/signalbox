@@ -13,6 +13,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use signalbox_application::ProviderReasoningProvenance;
 use signalbox_application::{
     AttachmentPreparationFailure, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
     AvailabilitySuccessorOutcome, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
@@ -138,6 +139,7 @@ pub struct ProspectiveModelCall {
     credential_reference: ModelCallCredentialReference,
     system_prompt: Option<signalbox_domain::SessionSystemPrompt>,
     tool_entries: Box<[ResolvedToolConversationEntry]>,
+    reasoning_provenance: Box<[ProviderReasoningProvenance]>,
     projected_members: Box<[SemanticTranscriptEntryRef]>,
     uncommitted_content_bytes: u64,
 }
@@ -222,6 +224,7 @@ impl ProspectiveModelCall {
             self.system_prompt.clone(),
             tools,
             &self.tool_entries,
+            &self.reasoning_provenance,
         )
     }
 
@@ -874,6 +877,7 @@ impl PostgresModelCallRepository {
                                      AND entry.payload_kind IN (
                                          'assistant_text',
                                          'provider_compaction',
+                                         'provider_reasoning',
                                          'assistant_tool_use'
                                      )
                                 THEN 0
@@ -927,6 +931,8 @@ impl PostgresModelCallRepository {
                                     WHEN 'context_summary' THEN
                                         COALESCE(octet_length(entry.context_summary_value), 0)
                                     WHEN 'assistant_text' THEN
+                                        COALESCE(octet_length(entry.assistant_text_value), 0)
+                                    WHEN 'provider_reasoning' THEN
                                         COALESCE(octet_length(entry.assistant_text_value), 0)
                                     WHEN 'provider_compaction' THEN
                                         CASE WHEN $5::boolean THEN
@@ -994,6 +1000,7 @@ impl PostgresModelCallRepository {
                                           latest_call.call_kind = 'ordinary'
                                           AND entry.payload_kind IN (
                                               'assistant_text',
+                                              'provider_reasoning',
                                               'assistant_tool_use'
                                           )
                                           AND entry.producing_model_call_id =
@@ -1295,6 +1302,8 @@ impl PostgresModelCallRepository {
         )
         .await?;
         let tool_entries = load_tool_conversation_entries(&mut transaction, &request).await?;
+        let reasoning_provenance =
+            load_provider_reasoning_provenance(&mut transaction, &request).await?;
         let fast_mode = request.model_settings().effective().fast_mode();
         let credential_reference = resolve_session_credential(
             &mut transaction,
@@ -1347,6 +1356,7 @@ impl PostgresModelCallRepository {
             credential_reference,
             system_prompt,
             tool_entries,
+            reasoning_provenance,
             projected_members,
             uncommitted_content_bytes,
         }))
@@ -1554,6 +1564,8 @@ impl PostgresModelCallRepository {
                         .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
+                        let reasoning_provenance =
+                            load_provider_reasoning_provenance(&mut transaction, &request).await?;
                         let recorded_user_overrides =
                             load_call_user_overrides(&mut transaction, session, current_call_id)
                                 .await?;
@@ -1566,6 +1578,7 @@ impl PostgresModelCallRepository {
                                 recorded_user_overrides,
                                 system_prompt,
                                 tool_entries,
+                                reasoning_provenance,
                             },
                         ))
                     }
@@ -7820,6 +7833,76 @@ pub(crate) async fn insert_prepared_call(
     )
     .await?;
     Ok(())
+}
+
+async fn load_provider_reasoning_provenance(
+    connection: &mut PgConnection,
+    request: &PreparedModelCallRequest,
+) -> Result<Box<[ProviderReasoningProvenance]>, ModelCallRepositoryError> {
+    let entries = request
+        .frontier_entries()
+        .filter_map(|entry| {
+            if let SemanticTranscriptEntryPayload::ProviderReasoning { producing_call, .. } =
+                entry.payload()
+            {
+                Some((entry.reference(), *producing_call))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Ok(Box::new([]));
+    }
+    let sessions = entries
+        .iter()
+        .map(|(source, _)| source.source_session().into_uuid())
+        .collect::<Vec<_>>();
+    let identifiers = entries
+        .iter()
+        .map(|(source, _)| source.entry().into_uuid())
+        .collect::<Vec<_>>();
+    let calls = entries
+        .iter()
+        .map(|(_, call)| call.into_uuid())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT retained.source_session_id, retained.semantic_entry_id,
+                call.model_call_id, call.effective_provider_model_identity_id,
+                call.credential_reference
+           FROM UNNEST($1::uuid[], $2::uuid[], $3::uuid[]) WITH ORDINALITY
+                AS retained(source_session_id, semantic_entry_id, producing_call_id, ordinal)
+           JOIN model_call AS call
+             ON call.session_id = retained.source_session_id
+            AND call.model_call_id = retained.producing_call_id
+          ORDER BY retained.ordinal",
+    )
+    .bind(sessions)
+    .bind(identifiers)
+    .bind(calls)
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.len() != entries.len() {
+        return Err(ModelCallCorruption::Missing("provider reasoning producing call").into());
+    }
+    rows.iter()
+        .map(|row| {
+            Ok(ProviderReasoningProvenance {
+                source: SemanticTranscriptEntryRef::from_source(
+                    SessionId::from_uuid(row.try_get("source_session_id")?),
+                    SemanticTranscriptEntryId::from_uuid(row.try_get("semantic_entry_id")?),
+                ),
+                producing_call: ModelCallId::from_uuid(row.try_get("model_call_id")?),
+                producing_target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                    row.try_get("effective_provider_model_identity_id")?,
+                )),
+                producing_credential: ModelCallCredentialReference::new(
+                    row.try_get::<String, _>("credential_reference")?,
+                ),
+            })
+        })
+        .collect::<Result<Vec<_>, ModelCallRepositoryError>>()
+        .map(Vec::into_boxed_slice)
 }
 
 async fn load_tool_conversation_entries(

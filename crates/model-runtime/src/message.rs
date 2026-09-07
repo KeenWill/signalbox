@@ -76,6 +76,10 @@ pub enum MessagePart {
     ProviderReasoning {
         /// The complete provider output item as raw JSON.
         item_json: String,
+        /// Effective runtime target used by the producing call.
+        producing_target: crate::ResolvedTarget,
+        /// Non-secret credential reference pinned by the producing call.
+        producing_credential: crate::CredentialReference,
     },
     /// An opaque provider-produced compaction block replayed unchanged.
     ProviderCompaction {

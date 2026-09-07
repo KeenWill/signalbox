@@ -447,7 +447,7 @@ fn wire_messages(
                     "OpenAI cannot replay another provider's thinking",
                 ));
             }
-            MessagePart::ProviderReasoning { item_json } => {
+            MessagePart::ProviderReasoning { item_json, .. } => {
                 if message.role != ConversationRole::Assistant {
                     return Err(unsupported("provider reasoning requires assistant history"));
                 }
