@@ -5,7 +5,7 @@ use std::{collections::HashSet, future::Future, time::Duration};
 use futures_util::StreamExt;
 use reqwest::{
     Client, Method, Response, StatusCode, Url,
-    header::{ACCEPT, LOCATION, USER_AGENT},
+    header::{ACCEPT, HeaderMap, HeaderValue, LOCATION, USER_AGENT},
 };
 use signalbox_github_transport::{
     DEFAULT_ACCEPT, GRAPHQL_URL, REST_BASE_URL, ResponseExtent, StatusClass, authenticated_request,
@@ -1539,8 +1539,9 @@ impl GitHubCodeHostTransport {
     ) -> Result<Response, CodeHostTransportFailure> {
         let authentication = authorization(credential.expose_bytes())
             .map_err(|_| CodeHostTransportFailure::InvalidCredential)?;
-        let request = authenticated_request(&self.client, method, url, authentication, body)
-            .header(ACCEPT, accept);
+        let headers = HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static(accept))]);
+        let request =
+            authenticated_request(&self.client, method, url, authentication, body).headers(headers);
         request
             .send()
             .await
@@ -4128,6 +4129,55 @@ mod tests {
             TEST_RESULT_ITEMS
         );
         assert_eq!(request, path_lookup_requests("src"));
+    }
+
+    #[tokio::test]
+    async fn specialized_reads_send_only_the_requested_accept_representation() {
+        let (transport, listener) = repository_test_transport().await;
+        let credential = test_credential();
+
+        let (response, accepts) = tokio::join!(
+            transport.send_authenticated_with_accept(
+                Method::GET,
+                transport.rest_base.clone(),
+                None,
+                BLOB_RAW_ACCEPT,
+                &credential,
+            ),
+            serve_and_capture_accept_headers(&listener),
+        );
+
+        assert_eq!(
+            response.expect("fixture response succeeds").status(),
+            StatusCode::OK
+        );
+        assert_eq!(accepts, [BLOB_RAW_ACCEPT]);
+    }
+
+    async fn serve_and_capture_accept_headers(listener: &tokio::net::TcpListener) -> Vec<String> {
+        let (mut stream, _) = listener.accept().await.expect("one request connects");
+        let mut reader = BufReader::new(&mut stream);
+        let mut accepts = Vec::new();
+        loop {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("request header is readable");
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("accept:") {
+                accepts.push(value.trim().to_owned());
+            }
+        }
+        drop(reader);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("fixture response is writable");
+        accepts
     }
 
     async fn repository_test_transport() -> (GitHubCodeHostTransport, tokio::net::TcpListener) {
