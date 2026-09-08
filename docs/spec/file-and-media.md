@@ -115,6 +115,10 @@ The daemon owns three deadlines: one wall deadline for each worker invocation,
 one across all serial reader probes of an inspection, and one across the
 isolation probes of every configured worker. No test covers the set.
 
+Archive validation fits the effective source-byte and range ceilings; entry
+decoding uses the remaining aggregate expansion allowance, with one byte to
+detect exhaustion.
+
 A stored source may be larger than a view's envelope. A streaming view requests
 it in bounded frames within its declared source work; a whole-decode view may
 reject it without changing the blob.
