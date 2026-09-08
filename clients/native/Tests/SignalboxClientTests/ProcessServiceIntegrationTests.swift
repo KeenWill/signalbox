@@ -3368,6 +3368,36 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testRetiringTheLastQueuedGoalTurnClearsQueuedActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
+
+    viewModel.apply(.event(try ProcessProjectionFixture.goalTurnRetiredEvent()))
+
+    XCTAssertTrue(viewModel.pendingInputs.isEmpty)
+    XCTAssertTrue(viewModel.acceptedInputsAwaitingTranscript.isEmpty)
+    XCTAssertEqual(viewModel.activity, .unavailable)
+  }
+
+  @MainActor
+  func testRetiringAGoalTurnPreservesOtherQueuedActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
+    viewModel.apply(.event(try ProcessProjectionFixture.secondAcceptedEvent()))
+
+    viewModel.apply(.event(try ProcessProjectionFixture.goalTurnRetiredEvent()))
+
+    XCTAssertEqual(
+      viewModel.pendingInputs.map(\.id.rawValue), ProcessProjectionFixture.remainingPendingIDs)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
+  }
+
+  @MainActor
   func testRefusedTurnRemovesMatchingPendingInput() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -11204,6 +11234,17 @@ private enum ProcessProjectionFixture {
       }
       """,
       cursor: cursor
+    )
+  }
+
+  static func goalTurnRetiredEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"goal_turn_retired",
+        "turn_id":"\(ProcessDriverFixture.turn)"
+      }
+      """
     )
   }
 

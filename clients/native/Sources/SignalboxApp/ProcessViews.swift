@@ -2041,6 +2041,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case .goalTurnRetired(let turnID):
       pendingInputs.removeAll { $0.turnID == turnID }
       acceptedInputsAwaitingTranscript.removeAll { $0.turnID == turnID }
+      if pendingInputs.isEmpty, activeTurnID == nil, activity.state == .queued {
+        activity = .unavailable
+      }
     case .childSpawned(_, let child, _):
       showDelegationUpdate("Child spawned", "Session \(child.rawValue)")
     case .childWaiting(_, _, let child, let mode):
