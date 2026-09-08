@@ -72,6 +72,14 @@ impl WorkspaceRepository {
         requested_root: &str,
     ) -> Result<Option<WorkspaceOutcome>, WorkspaceError> {
         let mut connection = self.pool.acquire().await?;
+        match command_registry::inspect(&mut connection, command_id)
+            .await
+            .map_err(registry_error)?
+        {
+            None => return Ok(None),
+            Some(CommandKind::RegisterWorkspace) => {}
+            Some(_) => return Ok(Some(WorkspaceOutcome::ConflictingReuse)),
+        }
         let Some(row) = sqlx::query(
             "SELECT root_path, storage_version, registration_request_root FROM workspace WHERE command_id = $1",
         )
@@ -202,25 +210,7 @@ async fn replay(
 ) -> Result<Option<WorkspaceOutcome>, WorkspaceError> {
     let Some(stored_kind) = command_registry::inspect(connection, command.command_id())
         .await
-        .map_err(|error| match error {
-            command_registry::RegistryInspectionError::Database(error) => {
-                WorkspaceError::Database(error)
-            }
-            command_registry::RegistryInspectionError::Corruption(error) => {
-                WorkspaceError::Corruption(match error {
-                    command_registry::RegistryCorruption::UnsupportedKind(_) => "registry kind",
-                    command_registry::RegistryCorruption::UnsupportedVersion(_) => {
-                        "registry version"
-                    }
-                    command_registry::RegistryCorruption::MissingTypedRecord(_) => {
-                        "registry typed record"
-                    }
-                    command_registry::RegistryCorruption::ConflictingTypedRecords => {
-                        "registry record conflict"
-                    }
-                })
-            }
-        })?
+        .map_err(registry_error)?
     else {
         return Ok(None);
     };
@@ -285,8 +275,31 @@ fn registration_request_root(row: &sqlx::postgres::PgRow) -> Result<String, Work
     let original: Option<String> = row.try_get("registration_request_root")?;
     match (row.try_get::<i16, _>("storage_version")?, original) {
         (1, None) => Ok(row.try_get("root_path")?),
-        (1 | 2, Some(original)) => Ok(original),
+        (2, Some(original)) => Ok(original),
+        (1, Some(_)) => Err(WorkspaceError::Corruption(
+            "registration request root version",
+        )),
         (2, None) => Err(WorkspaceError::Corruption("registration request root")),
         _ => Err(WorkspaceError::Corruption("registration storage version")),
+    }
+}
+
+fn registry_error(error: command_registry::RegistryInspectionError) -> WorkspaceError {
+    match error {
+        command_registry::RegistryInspectionError::Database(error) => {
+            WorkspaceError::Database(error)
+        }
+        command_registry::RegistryInspectionError::Corruption(error) => {
+            WorkspaceError::Corruption(match error {
+                command_registry::RegistryCorruption::UnsupportedKind(_) => "registry kind",
+                command_registry::RegistryCorruption::UnsupportedVersion(_) => "registry version",
+                command_registry::RegistryCorruption::MissingTypedRecord(_) => {
+                    "registry typed record"
+                }
+                command_registry::RegistryCorruption::ConflictingTypedRecords => {
+                    "registry record conflict"
+                }
+            })
+        }
     }
 }
