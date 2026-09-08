@@ -3067,7 +3067,7 @@ async fn cancellation_after_spawn_interrupts_once_without_respawn() {
     assert_eq!(spawn_count(temporary.path()), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_is_not_starved_by_continuously_ready_stdout() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime(temporary.path(), fake_cli());
@@ -3076,12 +3076,29 @@ async fn cancellation_is_not_starved_by_continuously_ready_stdout() {
         operation("busy_stdout", DeliveryMode::Streamed, OperationShape::Text),
     )
     .await;
-    let cancellation = cancel_after_record(temporary.path().join("fake-codex-busy-stdout"));
+    let cancellation =
+        cancel_after_wall_clock_record(temporary.path().join("fake-codex-busy-stdout"));
     let mut observations = Vec::new();
+    let (finished, completion) = std::sync::mpsc::channel::<()>();
+    let (expired, watchdog) = tokio::sync::oneshot::channel();
+    let watchdog_thread = std::thread::spawn(move || {
+        if matches!(
+            completion.recv_timeout(OFFLINE_HARNESS_TIMEOUT),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            let _ = expired.send(());
+        }
+    });
 
-    let report = runtime
-        .execute(prepared, &mut observations, cancellation)
-        .await;
+    let report = tokio::select! {
+        biased;
+        _ = watchdog => panic!("stdout-flood cancellation completes within the wall-clock bound"),
+        report = runtime.execute(prepared, &mut observations, cancellation) => report,
+    };
+    drop(finished);
+    watchdog_thread
+        .join()
+        .expect("the wall-clock watchdog exits");
 
     assert_eq!(
         boundary_loss(&report.evidence).cause,
@@ -5169,6 +5186,31 @@ fn linux_proc_stat_group_parse_survives_a_parenthesized_command() {
 #[test]
 fn linux_own_process_group_has_a_live_member() {
     assert!(process_group_has_live_member(rustix::process::getpgrp()));
+}
+
+/// Keeps paused Tokio time from advancing the exchange deadline while the
+/// operating-system child is still starting; only the readiness watchdog uses
+/// wall time, and completion of that barrier makes cancellation ready.
+fn cancel_after_wall_clock_record(path: std::path::PathBuf) -> CancellationSignal {
+    let watcher = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + OFFLINE_HARNESS_TIMEOUT;
+        while std::fs::read_to_string(&path)
+            .map(|content| content.lines().count())
+            .unwrap_or_default()
+            == 0
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fake CLI records readiness before the wall-clock bound"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    CancellationSignal::when(async move {
+        watcher
+            .await
+            .expect("the wall-clock readiness barrier completes");
+    })
 }
 
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
