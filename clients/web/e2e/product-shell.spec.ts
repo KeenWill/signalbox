@@ -827,10 +827,8 @@ test('runs product navigation sequences but leaves Mod+K to an editing field', a
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
   await expect(search).toHaveAttribute('data-mod-k-default-prevented', 'false')
 
-  // The landed shell keeps `surface.escape` away from every editable product control, so Escape
-  // does not release the field and the sequence stays ordinary text input. Narrowing that guard is
-  // deferred on KeenWill/signalbox#1316.
-  await search.press('Escape')
+  // Navigation sequences remain ordinary text while the search field owns focus.
+  await expect(search).toBeFocused()
   await page.keyboard.press('g')
   await page.keyboard.press('a')
   await expect(page).toHaveURL(/\/search$/)
@@ -1216,6 +1214,61 @@ test('shares expired Imports admission failure with the shell retry state', asyn
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('withholds Search focus after cached bootstrap refetch failure and restores it on retry', async ({
+  page,
+}) => {
+  await page.clock.install()
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.clock.fastForward(30_001)
+  await page
+    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
+    .fill('expired-admission')
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await page.getByRole('link', { name: /^Search Global and session search/ }).click()
+  await expect(
+    page.getByRole('heading', { name: 'Search availability could not be checked' }),
+  ).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await page.evaluate(() => {
+    let shortcutEvent: KeyboardEvent | undefined
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.shiftKey && event.key.toLowerCase() === 'f') {
+          shortcutEvent = event
+        }
+      },
+      true,
+    )
+    document.addEventListener('keyup', (event) => {
+      if (event.key.toLowerCase() === 'f' && shortcutEvent) {
+        document.body.dataset.searchFocusDefaultPrevented = String(shortcutEvent.defaultPrevented)
+      }
+    })
+  })
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+Shift+f`)
+  await expect(page.locator('body')).toHaveAttribute('data-search-focus-default-prevented', 'false')
+
+  await useDeterministicBootstrap(page)
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeVisible()
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Focus lexical search/ }).click()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await page.keyboard.press(`${modifier}+Shift+f`)
+  await expect(page.locator('body')).toHaveAttribute('data-search-focus-default-prevented', 'true')
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
 })
 
 test('mounts Imports after the daemon contract recovers', async ({ page }) => {

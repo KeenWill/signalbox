@@ -647,7 +647,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .cancelled(_, _, let terminalModelCallID):
       return terminalModelCallID
     case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
-      .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+      .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .refused,
       .reconciliationRequired, .toolReconciliationRequired, .unknown:
       return nil
@@ -665,7 +665,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         .reconciliationRequired(_, _, let modelCallID):
         modelCallIDs.insert(modelCallID.rawValue)
       case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
-        .activeAwaitingChild, .activeAwaitingToolApproval,
+        .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingToolApproval,
         .activeAwaitingToolRecovery, .failed, .completed, .cancelled,
         .toolReconciliationRequired, .unknown:
         break
@@ -1182,7 +1182,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         content = nil
       }
     case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
-      .activeAwaitingChild,
+      .activeAwaitingCredentialAvailability, .activeAwaitingChild,
       .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
@@ -1281,7 +1281,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func turnStateIsActive(_ state: SignalboxTranscriptTurnState) -> Bool {
     switch state {
-    case .activeRunning, .activeAwaitingChild, .activeAwaitingToolApproval,
+    case .activeRunning, .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingToolApproval,
       .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .reconciliationRequired,
       .toolReconciliationRequired:
       return true
@@ -1956,6 +1956,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return .init(state: .recoveryRequired, label: "Recovery required")
       }
       return .init(state: .running, label: "Running")
+    case .activeAwaitingCredentialAvailability:
+      return .init(state: .running, label: "Awaiting credential availability")
     case .activeAwaitingChild:
       return .init(state: .running, label: "Awaiting child")
     case .activeAwaitingToolApproval:

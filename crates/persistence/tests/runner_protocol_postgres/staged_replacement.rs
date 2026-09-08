@@ -315,11 +315,7 @@ async fn assert_pre_pin_replacement_after_model_observation(
             None,
         )
         .await?;
-    let repository = if observation == PrePinObservation::DetachedCommand {
-        model_repository(&pool)
-    } else {
-        model_repository(&pool).with_runner_recovery(store.clone())
-    };
+    let repository = model_repository(&pool).with_runner_recovery(store.clone());
     let call = ModelCallId::from_uuid(Uuid::now_v7());
     repository
         .prepare_initial_call(
@@ -421,10 +417,6 @@ async fn assert_pre_pin_replacement_after_model_observation(
         )
         .await?;
     if observation == PrePinObservation::DetachedCommand {
-        assert_eq!(
-            store.replace_lost_runner(command.clone()).await?,
-            RunnerRecoveryOutcome::Pending
-        );
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             boundary_notifications.recv(),

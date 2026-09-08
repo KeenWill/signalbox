@@ -1,8 +1,9 @@
 # Credential availability design
 
-This design is not built; it extends
-[credential availability](../spec/credential-availability.md) with the wait
-endings a pool configured to park reaches and their release.
+The remaining design extends
+[credential availability](../spec/credential-availability.md) with contention,
+capacity reservations, and the terminal projection of a wait release after a
+predecessor call.
 
 ## Goal
 
@@ -42,84 +43,15 @@ two wakes matter because the wait also records excluded members, and one can
 become admissible while every bounded member stays saturated. A restart alone is
 not a wake.
 
-Exhausted-wait: nothing is admissible, nothing was skipped merely for a bound,
-and a wait is selected. The same wait phase with closed cause exhausted, and the
-same attempt disposition. Its wakes are the deadline, a durable
-member-availability update, and an operator clear of an exclusion. The deadline
-is computed per member, not per exclusion: a member becomes admissible by time
-passage exactly when every one of its active exclusions expires at the reset it
-reports, that is, at the latest of those resets. The wait's deadline is the
-earliest such time across the members that qualify. A chain exclusion, a
-`switch_next_turn` displacement and a profile quarantine never contribute a
-deadline, because none of them expires by time passage. A chain exclusion clears
-at turn end, a displacement when another member is prepared or an operator
-clears it, and a quarantine by operator command. The wait is deadline-free only
-when no member can become admissible by time passage, and no timer ends a
-deadline-free wait.
-
-A successor prepared on wait release retains any predecessor call and its
-non-acceptance proof in its origin. Release never readmits the member whose
-failure parked the turn.
-
-Wait-transition fail (no call): a released wait finds the pool exhausted, no
-wait is selected again, and this chain has issued no call. The wait's own
-attempt is immutable, so one transaction consumes the wait, opens a fresh
-call-free attempt, ends it KnownFailure, reclassifies any steering still pending
-on the source turn as a queued successor, and terminalizes the turn Failed. Both
-terminalizing releases owe that reclassification, as the parked-stop transaction
-does. The fresh attempt's continuation origin is the wait-release origin naming
-the consumed wait; the unique continuation chain is total over attempts, so an
-attempt without an origin could not be reconstituted. The producer, records,
-wire shape and evidence are pre-call fail's, plus the consumed wait.
-
-Wait-transition fail (after call): the same release and exhaustion where this
-chain had already issued a call. The predecessor attempt ended KnownFailure
-earlier without terminalizing and the wait's attempt is immutable, so the same
-fresh call-free attempt is opened and ended KnownFailure and the turn
-terminalizes Failed. The continuation origin is the wait-release origin naming
-the consumed wait and this chain's predecessor call, its qualifying cause and
-its non-acceptance proof. The producer is the wait-transition failure producer
-of `TurnFailed`, differing from the pre-call producer only in naming the
-predecessor call that supplied the cause. The terminal evidence is the
-predecessor's provider cause as a provider error, never pool exhaustion. This
-ending owes a wire shape that correlates the predecessor call with a terminal
-attempt that owns no call; the built failed shape carries a provider cause only
-inside a nonnull terminal model call, so it cannot serve.
-
-Wait selection: `park` and `fail` act through one question, whether this
-exhaustion selects a wait; `fail` never selects one, and `park` selects one only
-when some member's every active exclusion is one a wake can clear, so that one
-wake can readmit that whole member. No wake clears a chain exclusion, so a
-member holding one never qualifies, whatever else it holds. A pending
-`switch_next_turn` displacement is clearable, because an operator clear removes
-it and publishes the member-availability update that wakes the wait. Where no
-member qualifies, no wait is selected and the exhaustion ends in a failure
-ending exactly as a `fail` pool would. At an admission the failing attempt
-chooses which, pre-call fail when that attempt is call-free and post-failure
-fail when the observation closing a provider failure finds the exhaustion; at a
-release, whether this chain has issued a call chooses wait-transition fail (no
-call) or wait-transition fail (after call).
+Wait-transition failure after a predecessor call needs a wire shape correlating
+that call with a terminal attempt that owns no call. The provider cause remains
+the predecessor's; the terminal evidence never reports pool exhaustion.
 
 A contended wait becomes exhausted when a woken waiter finds every formerly
 bounded candidate durably excluded, and then re-runs the exhaustion policy
 rather than staying parked: the pool's configured value decides afresh, a wait
 that is still selected is rewritten in place to the exhausted form, and a `fail`
 pool terminalizes.
-
-Release: releasing a parked wait resumes the chain that parked and re-evaluates
-admission from current state. A chain exclusion stays as the spec page states
-it; every other exclusion the wait recorded is re-read from its current active
-state at release, so a passed reset or an authorized clear readmits that member.
-The release origin carries the predecessor call, cause and proof exactly where
-this chain had observed a qualifying failure before parking, because the release
-may then select a remaining member only as that failure's authorized successor.
-
-Cancellation leaves this machine rather than ending inside it. An accepted stop
-against a parked wait consumes the wait, creates a fresh immediate-successor
-attempt, records the applied-interrupt proof, ends that attempt
-AfterCancellation(Cancelled), appends `TurnCancelled` after the wait's latest
-frontier, and terminalizes the turn Cancelled, under
-[turn lifecycle and scheduling](../spec/turn-lifecycle-and-scheduling.md).
 
 Storage: one wait row per parked turn, of form contended or exhausted, carrying
 the frozen policy identity, every durable exclusion that removed a member, and
@@ -151,20 +83,13 @@ failure attempt, and terminalizes the turn as wait-transition fail (no call) or
 (after call). Lock order is
 [persistence protocol](../spec/persistence-protocol.md)'s.
 
-Wire: a parked turn projects an active transcript turn state that retains the
-turn and its slot, never a terminal one, and no rejection detail.
-Wait-transition fail (no call) projects a turn state naming pool exhaustion, the
-live event `turn_failed`, and a typed `turn_credential_pool_exhausted` live
-event. The ending owns no call, so its evidence uses the frozen pool-policy
-revision. The read's rejection detail for a revision it cannot resolve names the
-session, turn and policy. Which member served an ordinary selection, and whether
-a completed successor chain is shown to a client, stay undecided in
-[open questions](../open-questions.md).
-
-Park on the pre-call path: a fresh admission that finds the pool exhausted
-consults the exhaustion value of the pool-policy revision it resolved. `park`
-selects a wait under the wait-selection rule above; `fail` terminalizes as the
-spec page states.
+Wire: Wait-transition fail (no call) projects a turn state naming pool
+exhaustion, the live event `turn_failed`, and a typed
+`turn_credential_pool_exhausted` live event. The ending owns no call, so its
+evidence uses the frozen pool-policy revision. The read's rejection detail for a
+revision it cannot resolve names the session, turn and policy. Which member
+served an ordinary selection, and whether a completed successor chain is shown
+to a client, stay undecided in [open questions](../open-questions.md).
 
 ## Compatibility constraints
 

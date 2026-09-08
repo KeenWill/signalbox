@@ -253,8 +253,10 @@ review-findings listing takes its run and its findings from separate
 transactions. Every reported duration is clamped nonnegative and sampled against
 the database transaction timestamp, not a client clock.
 
-Every read that holds a pooled connection across more than one statement takes
-one snapshot-reader admission; the single-statement defaults read takes none.
+Except for immutable credential-pool policy validation, every read that holds a
+pooled connection across more than one statement takes one snapshot-reader
+admission; the single-statement defaults read takes none. Pool-policy validation
+takes no admission so a follower can validate its snapshot while holding one.
 Every request states its admission class before dispatch, so no read verb
 reaches the pool by omission. The reader budget leaves at least two pool
 connections outside snapshot work.
@@ -571,8 +573,8 @@ belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
 version-1 encoding, and the closed receipt algebra belong here, and a later
 incompatible shape requires a new protocol version.
 
-If counted-activation revalidation finds no admissible member, activation and
-pool-exhaustion terminalization commit together before execution resumes.
+If counted-activation revalidation selects pre-call exhaustion failure,
+activation and terminalization commit together before execution resumes.
 
 When no pool member is admissible, pre-call exhaustion projects
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
@@ -613,9 +615,12 @@ and order, the snapshot state and the live event carry identical `members`, the
 policy read returns the same inventory, and the client exposes the terminal
 state only after those checks pass.
 
+Credential admission waits project the active turn state
+`active_awaiting_credential_availability`, carrying the call-free ended
+`wait_attempt_id` and the closed `exhausted` cause. The terminal client keeps
+following that turn.
+
 ## Planned
 
 - Runner creation and status requests, and the status read's failure evidence:
-  [design](../design/process-protocol.md).
-- Typed projection of the credential-availability wait:
   [design](../design/process-protocol.md).
