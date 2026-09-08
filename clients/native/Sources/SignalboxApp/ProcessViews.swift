@@ -1536,7 +1536,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     var preparedForAttempt: SignalboxPreparedInputSubmission?
     var reusedUnresolvedSubmission = false
     do {
-      var prepared: SignalboxPreparedInputSubmission
+      let prepared: SignalboxPreparedInputSubmission
       if let unresolvedSubmission,
         unresolvedSubmission.modelSettings == perCallSettings,
         hasExactUTF8(unresolvedSubmission.content, content)
@@ -1547,9 +1547,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         unresolvedSubmission = nil
         prepared = try await service.prepareInputSubmission(
           session: session,
-          content: content
+          content: content,
+          modelSettings: perCallSettings
         )
-        prepared.modelSettings = perCallSettings
       }
       preparedForAttempt = prepared
       guard serviceGeneration == generation else {
@@ -1703,7 +1703,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     var preparedForAttempt: SignalboxPreparedTurnReconciliation?
     var reusedUnresolvedReconciliation = false
     do {
-      var prepared: SignalboxPreparedTurnReconciliation
+      let prepared: SignalboxPreparedTurnReconciliation
       if let unresolvedReconciliation,
         unresolvedReconciliation.sessionID == session.id,
         unresolvedReconciliation.modelSettings == perCallSettings,
@@ -1716,9 +1716,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         prepared = try await service.prepareTurnReconciliation(
           session: session,
           activeTurnID: activeTurnID,
-          content: content
+          content: content,
+          modelSettings: perCallSettings
         )
-        prepared.modelSettings = perCallSettings
       }
       preparedForAttempt = prepared
       guard serviceGeneration == generation else {
@@ -1804,7 +1804,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     var preparedForAttempt: SignalboxPreparedTurnStop?
     var reusedUnresolvedTurnStop = false
     do {
-      var prepared: SignalboxPreparedTurnStop
+      let prepared: SignalboxPreparedTurnStop
       if let unresolvedTurnStop,
         unresolvedTurnStop.sessionID == session.id,
         unresolvedTurnStop.modelSettings == perCallSettings,
@@ -1817,9 +1817,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         prepared = try await service.prepareTurnStop(
           session: session,
           activeTurnID: activeTurnID,
-          content: content
+          content: content,
+          modelSettings: perCallSettings
         )
-        prepared.modelSettings = perCallSettings
       }
       preparedForAttempt = prepared
       guard serviceGeneration == generation else {
@@ -2111,6 +2111,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     else {
       return
     }
+    if session.modelSelection != refreshed.modelSelection { perCallSettings = .inheritAll }
     session = refreshed
   }
 

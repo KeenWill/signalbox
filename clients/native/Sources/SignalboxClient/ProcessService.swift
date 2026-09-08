@@ -120,7 +120,7 @@ public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
-  public var modelSettings: SignalboxModelSettingsOverlay = .inheritAll
+  public let modelSettings: SignalboxModelSettingsOverlay
   public let modelSelection: SignalboxModelSelection
 
   public init(
@@ -128,13 +128,15 @@ public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
     sessionID: SignalboxCanonicalUUID,
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
-    modelSelection: SignalboxModelSelection
+    modelSelection: SignalboxModelSelection,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) {
     self.commandID = commandID
     self.sessionID = sessionID
     self.content = content
     self.expectedDefaultsVersion = expectedDefaultsVersion
     self.modelSelection = modelSelection
+    self.modelSettings = modelSettings
   }
 
   fileprivate var request: SignalboxProcessClientRequest {
@@ -238,7 +240,7 @@ public struct SignalboxPreparedTurnReconciliation: Equatable, Sendable {
   public let activeTurnID: SignalboxCanonicalUUID
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
-  public var modelSettings: SignalboxModelSettingsOverlay = .inheritAll
+  public let modelSettings: SignalboxModelSettingsOverlay
   public let modelSelection: SignalboxModelSelection
 
   public init(
@@ -247,7 +249,8 @@ public struct SignalboxPreparedTurnReconciliation: Equatable, Sendable {
     activeTurnID: SignalboxCanonicalUUID,
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
-    modelSelection: SignalboxModelSelection
+    modelSelection: SignalboxModelSelection,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) {
     self.commandID = commandID
     self.sessionID = sessionID
@@ -255,6 +258,7 @@ public struct SignalboxPreparedTurnReconciliation: Equatable, Sendable {
     self.content = content
     self.expectedDefaultsVersion = expectedDefaultsVersion
     self.modelSelection = modelSelection
+    self.modelSettings = modelSettings
   }
 
   fileprivate var request: SignalboxProcessClientRequest {
@@ -276,7 +280,7 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
   public let descendantScope: SignalboxDescendantTerminationScope
-  public var modelSettings: SignalboxModelSettingsOverlay = .inheritAll
+  public let modelSettings: SignalboxModelSettingsOverlay
   public let modelSelection: SignalboxModelSelection
 
   public init(
@@ -286,7 +290,8 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
     descendantScope: SignalboxDescendantTerminationScope = .parentAlone,
-    modelSelection: SignalboxModelSelection
+    modelSelection: SignalboxModelSelection,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) {
     self.commandID = commandID
     self.sessionID = sessionID
@@ -295,6 +300,7 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
     self.expectedDefaultsVersion = expectedDefaultsVersion
     self.descendantScope = descendantScope
     self.modelSelection = modelSelection
+    self.modelSettings = modelSettings
   }
 
   fileprivate var request: SignalboxProcessClientRequest {
@@ -350,7 +356,8 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   ) async throws -> SignalboxProcessSession
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay
   ) async throws -> SignalboxPreparedInputSubmission
   func submit(
     _ submission: SignalboxPreparedInputSubmission
@@ -382,7 +389,8 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   func prepareTurnReconciliation(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay
   ) async throws -> SignalboxPreparedTurnReconciliation
   func reconcileTurn(
     _ prepared: SignalboxPreparedTurnReconciliation
@@ -390,7 +398,8 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   func prepareTurnStop(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay
   ) async throws -> SignalboxPreparedTurnStop
   func stopTurn(
     _ prepared: SignalboxPreparedTurnStop
@@ -522,7 +531,8 @@ extension SignalboxProcessServiceProtocol {
   public func prepareTurnReconciliation(
     session _: SignalboxProcessSession,
     activeTurnID _: SignalboxCanonicalUUID,
-    content _: String
+    content _: String,
+    modelSettings _: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnReconciliation {
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement turn reconciliation."
@@ -541,7 +551,8 @@ extension SignalboxProcessServiceProtocol {
   public func prepareTurnStop(
     session _: SignalboxProcessSession,
     activeTurnID _: SignalboxCanonicalUUID,
-    content _: String
+    content _: String,
+    modelSettings _: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnStop {
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement turn stops."
@@ -635,6 +646,9 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         case .modelCapabilitiesStart where !started:
           started = true
         case .modelCapabilityItem(let item) where started:
+          guard items.count < SignalboxProcessProtocol.maximumModelCapabilityCatalogEntries else {
+            throw SignalboxProcessServiceError.invalidPage("The model-capability catalog exceeded the protocol limit.")
+          }
           guard items.last.map({ $0.selectionID.rawValue < item.selectionID.rawValue }) ?? true else {
             throw SignalboxProcessServiceError.invalidPage("Model capabilities were not in strict identity order.")
           }
@@ -975,14 +989,16 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
 
   public func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     SignalboxPreparedInputSubmission(
       commandID: try commandID(),
       sessionID: session.id,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -1126,7 +1142,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   public func prepareTurnReconciliation(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnReconciliation {
     SignalboxPreparedTurnReconciliation(
       commandID: try commandID(),
@@ -1134,7 +1151,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       activeTurnID: activeTurnID,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -1173,7 +1191,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   public func prepareTurnStop(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnStop {
     SignalboxPreparedTurnStop(
       commandID: try commandID(),
@@ -1181,7 +1200,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       activeTurnID: activeTurnID,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 

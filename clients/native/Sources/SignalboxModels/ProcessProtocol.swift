@@ -15,6 +15,8 @@ public enum SignalboxProcessProtocol {
   public static let maximumImportedConversationTitleScalars = 256
   public static let maximumImportedTextPreviewUTF8Bytes = 256
   public static let maximumModelAliasCatalogEntries = 10_000
+  // crates/process-protocol/src/scalars.rs: MAX_MODEL_CAPABILITY_CATALOG_ENTRIES.
+  public static let maximumModelCapabilityCatalogEntries = 10_000
   public static let maximumStreamedTextUTF8Bytes = 8 * 1024 * 1024
   public static let maximumUserInputParts = 256
   public static let maximumUserInputTextUTF8Bytes = 1_048_576

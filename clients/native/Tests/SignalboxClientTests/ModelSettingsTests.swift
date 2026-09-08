@@ -56,6 +56,23 @@ final class ModelSettingsTests: XCTestCase {
     }
   }
 
+  func testCapabilityCatalogStopsAtTheProtocolEntryLimit() async throws {
+    let tooMany = SignalboxProcessProtocol.maximumModelCapabilityCatalogEntries + 1
+    let entries = try (1...tooMany).map { ordinal in
+      try SettingsFixture.frame(["type": "model_capability_item",
+        "selection_id": String(format: "00000000-0000-4000-8000-%012x", ordinal),
+        "capabilities": ["reasoning_levels": [], "fast_mode_supported": false, "service_tiers": []]])
+    }
+    let requester = SettingsRequester(pages: [[try SettingsFixture.frame(["type": "model_capabilities_start"])] + entries])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    do {
+      _ = try await service.listModelCapabilities()
+      XCTFail("The catalog must stop retaining entries before waiting for a terminator.")
+    } catch let error as SignalboxProcessServiceError {
+      XCTAssertEqual(error, .invalidPage("The model-capability catalog exceeded the protocol limit."))
+    }
+  }
+
   func testPerCallSettingsReachEveryNativeInputCommand() async throws {
     let overlay = SignalboxModelSettingsOverlay(reasoningLevel: .value(.low),
       fastMode: .inherit, serviceTier: .providerDefault)
@@ -64,14 +81,12 @@ final class ModelSettingsTests: XCTestCase {
     let requester = SettingsRequester(pages: [[refusal], [refusal], [refusal]])
     let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
     let session = try SettingsFixture.session()
-    var input = try await service.prepareInputSubmission(session: session, content: SettingsFixture.input)
-    input.modelSettings = overlay
-    var reconciliation = try await service.prepareTurnReconciliation(session: session,
-      activeTurnID: SettingsFixture.turnID, content: SettingsFixture.input)
-    reconciliation.modelSettings = overlay
-    var stop = try await service.prepareTurnStop(session: session,
-      activeTurnID: SettingsFixture.turnID, content: SettingsFixture.input)
-    stop.modelSettings = overlay
+    let input = try await service.prepareInputSubmission(session: session, content: SettingsFixture.input,
+      modelSettings: overlay)
+    let reconciliation = try await service.prepareTurnReconciliation(session: session,
+      activeTurnID: SettingsFixture.turnID, content: SettingsFixture.input, modelSettings: overlay)
+    let stop = try await service.prepareTurnStop(session: session,
+      activeTurnID: SettingsFixture.turnID, content: SettingsFixture.input, modelSettings: overlay)
 
     do { _ = try await service.submit(input); XCTFail("Expected fixture refusal.") }
     catch let error as SignalboxProcessServiceError {
