@@ -1,13 +1,14 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { flexRender } from '@tanstack/react-table'
 import { getCoreRowModel, type LegacyColumnDef, useLegacyTable } from '@tanstack/react-table/legacy'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import { Search } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   WebSearchPage,
   WebUsageCallKind,
   WebUsageCallPage,
+  WebUsageSummary,
 } from './generated/web-contract.mjs'
 import type { SearchUsageSource, UsageFilters } from './search-usage/model'
 
@@ -46,13 +47,32 @@ const shortIdentity = (value: string): string => `${value.slice(0, 8)}…${value
 const tokenText = (value: string | null): string =>
   value === null ? '—' : BigInt(value).toLocaleString()
 
-const tokenSummary = (tokens: UsageCall['tokens']): string =>
-  `in ${tokenText(tokens.input)} · out ${tokenText(tokens.output)} · cache ${tokenText(tokens.cache_read_input)}`
+export const tokenSummary = (tokens: UsageCall['tokens']): string =>
+  `in ${tokenText(tokens.input)} · out ${tokenText(tokens.output)} · cache write ${tokenText(tokens.cache_creation_input)} · cache read ${tokenText(tokens.cache_read_input)}`
 
 const costText = (cost: UsageCall['cost']): string =>
   cost.status === 'derived'
     ? `$${cost.amount_usd} · ${cost.label.replaceAll('_', ' ')} · ${cost.rate_version}`
     : `Unavailable · ${cost.reason.replaceAll('_', ' ')}`
+
+export const searchResultIdentity = (result: SearchResult): string =>
+  `${result.session_id}:${result.address.event_sequence}:${result.projection_id}`
+
+export const usageGroupIdentity = (group: WebUsageSummary['groups'][number]): string =>
+  JSON.stringify([
+    group.model_id,
+    group.profile_id ?? null,
+    group.provenance,
+    group.call_kind,
+    group.input_semantics,
+    group.coverage.input,
+    group.coverage.output,
+    group.coverage.cache_creation_input,
+    group.coverage.cache_read_input,
+    group.cost.status === 'derived'
+      ? [group.cost.status, group.cost.label, group.cost.rate_version]
+      : [group.cost.status, group.cost.reason],
+  ])
 
 interface SnippetPart {
   text: string
@@ -105,11 +125,15 @@ function SearchResults({
     getScrollElement: () => parentRef.current,
     estimateSize: () => 62,
     overscan: SEARCH_OVERSCAN_ROWS,
+    rangeExtractor: (range) => {
+      const indexes = defaultRangeExtractor(range)
+      return selected < 0 || indexes.includes(selected)
+        ? indexes
+        : [...indexes, selected].sort((left, right) => left - right)
+    },
     getItemKey: (index) => {
       const result = results[index]
-      return result
-        ? `${result.session_id}:${result.address.event_sequence}:${result.source.kind}`
-        : index
+      return result ? searchResultIdentity(result) : index
     },
   })
   const virtualRows = virtualizer.getVirtualItems()
@@ -157,7 +181,7 @@ function SearchResults({
               // biome-ignore lint/a11y: Focus remains on the aria-activedescendant listbox.
               <div
                 id={`search-result-${virtualRow.index}`}
-                key={`${result.session_id}:${result.address.event_sequence}:${result.source.kind}`}
+                key={searchResultIdentity(result)}
                 role="option"
                 aria-selected={selected === virtualRow.index}
                 aria-posinset={virtualRow.index + 1}
@@ -322,8 +346,10 @@ export function SearchUsageWorkbench({
 }) {
   const [draftQuery, setDraftQuery] = useState(route.q)
   const searchIdentity = `${route.searchScope}\u0000${route.q}`
-  const [searchSelection, setSearchSelection] = useState({ identity: searchIdentity, index: 0 })
-  const selectedSearch = searchSelection.identity === searchIdentity ? searchSelection.index : 0
+  const [searchSelection, setSearchSelection] = useState<{
+    identity: string
+    resultId: string | null
+  }>({ identity: searchIdentity, resultId: null })
   const [revealState, setRevealState] = useState<'idle' | 'loading' | 'failed'>('idle')
 
   useEffect(() => setDraftQuery(route.q), [route.q])
@@ -353,6 +379,17 @@ export function SearchUsageWorkbench({
     maxPages: SEARCH_RETAINED_PAGES,
   })
   const results = searchQuery.data?.pages.flatMap((page) => page.results) ?? []
+
+  const firstResultId = results[0] ? searchResultIdentity(results[0]) : null
+  useEffect(() => {
+    if (searchSelection.identity !== searchIdentity || searchSelection.resultId === null) {
+      setSearchSelection({ identity: searchIdentity, resultId: firstResultId })
+    }
+  }, [firstResultId, searchIdentity, searchSelection.identity, searchSelection.resultId])
+  const selectedSearch =
+    searchSelection.identity === searchIdentity
+      ? results.findIndex((result) => searchResultIdentity(result) === searchSelection.resultId)
+      : -1
 
   const filters = useMemo<UsageFilters>(
     () => ({
@@ -476,8 +513,15 @@ export function SearchUsageWorkbench({
           ) : (
             <SearchResults
               results={results}
-              selected={results.length === 0 ? -1 : Math.min(selectedSearch, results.length - 1)}
-              onSelected={(index) => setSearchSelection({ identity: searchIdentity, index })}
+              selected={selectedSearch}
+              onSelected={(index) => {
+                const result = results[index]
+                if (result)
+                  setSearchSelection({
+                    identity: searchIdentity,
+                    resultId: searchResultIdentity(result),
+                  })
+              }}
               onReveal={(result) => void reveal(result)}
               hasNextPage={searchQuery.hasNextPage}
               loadNextPage={() => void searchQuery.fetchNextPage()}
@@ -519,7 +563,7 @@ export function SearchUsageWorkbench({
             {usageSummary.data?.groups.map((group) => (
               <button
                 type="button"
-                key={`${group.model_id}:${group.provenance}:${group.call_kind}:${costText(group.cost)}`}
+                key={usageGroupIdentity(group)}
                 onClick={() =>
                   onRouteChange({
                     modelId: group.model_id,
@@ -538,7 +582,7 @@ export function SearchUsageWorkbench({
             ))}
           </section>
           {usageSummary.data?.truncated && (
-            <p className="surface-warning">Summary reached its advertised group ceiling.</p>
+            <p className="surface-warning">Summary reached an advertised safety ceiling.</p>
           )}
           {usageSummary.isError || usageCalls.isError ? (
             <p className="surface-error" role="alert">

@@ -10,14 +10,6 @@ interface BrowserProblems {
 // still failing if either virtualized surface materializes its complete bounded window.
 const VIRTUALIZED_MOUNTED_ROWS_EXCLUSIVE_CEILING = 50
 
-// Tunable effective ceiling for the densest text surface. The usage screen renders the scenario
-// sidebar, a six-column call table, and three aggregate cards at once, so host-to-host font
-// metric differences change line wrapping rather than only rasterizing glyphs differently. The
-// drift between this golden and the CI runner's rendering of the same commit measures 3.75%,
-// above the shared cross-host ceiling in playwright.config.ts, so the bound is widened here
-// alone and every other screenshot keeps the tighter global one.
-const USAGE_TEXT_DENSITY_TOLERANCE = 0.045
-
 const largeTimelineFixture = {
   path: '/scenario/large-timeline',
   logicalItems: 100_000,
@@ -671,7 +663,10 @@ test('captures bounded search evidence', async ({ page }, testInfo) => {
     'data-total-loaded',
     searchUsageFixture.searchLoadedItems,
   )
-  await expect(page).toHaveScreenshot('search-usage-dark.png', { animations: 'disabled' })
+  await expect(page).toHaveScreenshot('search-usage-dark.png', {
+    animations: 'disabled',
+    maxDiffPixelRatio: 0,
+  })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -685,7 +680,7 @@ test('captures mixed usage and cost evidence', async ({ page }, testInfo) => {
   )
   await expect(page).toHaveScreenshot('usage-dark.png', {
     animations: 'disabled',
-    maxDiffPixelRatio: USAGE_TEXT_DENSITY_TOLERANCE,
+    maxDiffPixelRatio: 0,
   })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -844,4 +839,38 @@ test('captures the pinned narrow responsive shell', async ({ page }, testInfo) =
   await expect(page.getByRole('button', { name: 'Open scenarios' })).toBeVisible()
   await expect(page).toHaveScreenshot('responsive-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('clears selection when its search page is evicted and preserves shared-address projections', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.goto(searchUsageFixture.searchPath)
+  const results = page.getByRole('listbox', { name: 'Lexical search results' })
+  await expect(results).toHaveAttribute('aria-activedescendant', 'search-result-0')
+  const firstAddress = await results.getByRole('option').first().textContent()
+  for (let read = 2; read <= 7; read += 1) {
+    await page.getByRole('button', { name: 'Load next bounded page' }).click()
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.__SIGNALBOX_SEARCH_USAGE_DIAGNOSTICS__?.()?.searchReads),
+      )
+      .toBe(read)
+    await expect(results).toHaveAttribute('data-total-loaded', String(Math.min(read, 6) * 72))
+  }
+  await expect(results).not.toHaveAttribute('aria-activedescendant')
+  expect(await results.getByRole('option').first().textContent()).not.toBe(firstAddress)
+  await results.press('Enter')
+  expect(
+    await page.evaluate(
+      () => window.__SIGNALBOX_SEARCH_USAGE_DIAGNOSTICS__?.()?.transcriptRevealReads,
+    ),
+  ).toBe(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not advertise search focus while the usage view owns the surface', async ({ page }) => {
+  await page.goto(searchUsageFixture.usagePath)
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
 })

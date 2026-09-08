@@ -143,10 +143,10 @@ export function Workspace({
           document.querySelector<HTMLElement>('.artifact-heading')
         target?.focus()
       },
-      searchAvailable: knownId === 'search-usage',
+      searchAvailable: knownId === 'search-usage' && route.view === 'search',
       focusSearch: () => document.querySelector<HTMLInputElement>('#lexical-search-input')?.focus(),
     }),
-    [dispatch, knownId, navigate, timelineIds],
+    [dispatch, knownId, navigate, timelineIds, route.view],
   )
   useCommandHotkeys(commandContext)
 
