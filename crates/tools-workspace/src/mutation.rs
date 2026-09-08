@@ -1253,7 +1253,13 @@ fn install_staged(
             &staged.target,
             RenameFlags::NOREPLACE,
         )
-        .map_err(|error| commit_errno(&staged.path, error))?;
+        .map_err(|error| {
+            if staged.backup.is_none() && error == rustix::io::Errno::EXIST {
+                WorkspaceMutationCommitError::Conflict
+            } else {
+                commit_errno(&staged.path, error)
+            }
+        })?;
         staged.stage = None;
     }
     staged.target_installed = true;
@@ -2036,6 +2042,59 @@ mod tests {
             std::fs::read_to_string(backup).expect("backup retained"),
             "original"
         );
+    }
+
+    #[test]
+    fn concurrent_creation_of_an_absent_target_is_a_conflict() {
+        for create_before_verification in [false, true] {
+            let workspace = tempfile::tempdir().expect("workspace constructs");
+            let target = workspace.path().join("file.txt");
+            let filesystem = LocalWorkspaceFileSystem;
+            let root = WorkspaceMutationFileSystem::open_root(&filesystem, workspace.path())
+                .expect("root opens");
+            let path = WorkspaceMutationPath::try_new("file.txt").expect("path validates");
+            let expected = filesystem
+                .snapshot(
+                    &root,
+                    std::slice::from_ref(&path),
+                    MAX_WORKSPACE_MUTATION_FILE_BYTES,
+                )
+                .expect("absent target snapshots");
+            let mut staged = stage_mutation(
+                &root,
+                &expected,
+                &WorkspaceFileMutation::Write {
+                    path,
+                    content: String::from("tool content"),
+                },
+            )
+            .expect("creation stages");
+            if create_before_verification {
+                std::fs::write(&target, "concurrent writer").expect("concurrent target creates");
+            }
+            let verified = verify_precondition(&root, &expected, &staged)
+                .expect("creation defers absence check to installation");
+            if !create_before_verification {
+                std::fs::write(&target, "concurrent writer").expect("concurrent target creates");
+            }
+
+            let error = install_staged(&root, &mut staged, &expected, verified.as_ref())
+                .expect_err("concurrent creation conflicts");
+            assert_eq!(
+                rollback_result(std::slice::from_mut(&mut staged), error),
+                WorkspaceMutationCommitError::Conflict
+            );
+            assert_eq!(
+                std::fs::read_to_string(&target).expect("concurrent target retained"),
+                "concurrent writer"
+            );
+            assert_eq!(
+                std::fs::read_dir(workspace.path())
+                    .expect("workspace reads")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]
