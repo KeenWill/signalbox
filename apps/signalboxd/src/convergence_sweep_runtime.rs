@@ -116,6 +116,8 @@ struct SweepTarget {
 /// Independent supervisor for the opt-in convergence target set.
 pub struct ConvergenceSweepRuntime {
     client: Client,
+    graphql_url: String,
+    rest_base: String,
     targets: Box<[SweepTarget]>,
     interval: Duration,
     cool_off: Duration,
@@ -178,6 +180,8 @@ impl ConvergenceSweepRuntime {
             .into_boxed_slice();
         Ok(Some(Self {
             client,
+            graphql_url: GRAPHQL_URL.to_owned(),
+            rest_base: "https://api.github.com/".to_owned(),
             targets,
             interval: policy.interval(),
             cool_off: policy.cool_off(),
@@ -562,7 +566,7 @@ impl ConvergenceSweepRuntime {
                 return;
             }
         };
-        match self
+        let outcome = self
             .commissioned
             .commission_after_cool_off(
                 prepared,
@@ -570,8 +574,21 @@ impl ConvergenceSweepRuntime {
                 self.cool_off,
                 |alias| self.models.resolve_alias(alias),
             )
-            .await
-        {
+            .await;
+        self.record_commission_outcome(target, &observation, outcome)
+            .await;
+    }
+
+    async fn record_commission_outcome(
+        &self,
+        target: &SweepTarget,
+        observation: &ConvergenceSweepObservation,
+        outcome: Result<
+            CommissionDispatchOutcome,
+            signalbox_persistence::commissioned_dispatch::CommissionedDispatchRepositoryError,
+        >,
+    ) {
+        match outcome {
             Ok(
                 CommissionDispatchOutcome::Dispatched { dispatch, session }
                 | CommissionDispatchOutcome::Replayed { dispatch, session },
@@ -582,7 +599,7 @@ impl ConvergenceSweepRuntime {
                         uuid::Uuid::now_v7(),
                         &target.repository,
                         target.pull_request,
-                        &observation,
+                        observation,
                         dispatch.into_uuid(),
                         session,
                     )
@@ -596,7 +613,7 @@ impl ConvergenceSweepRuntime {
                     }
                     self.record_failure(
                         target,
-                        Some(&observation),
+                        Some(observation),
                         ConvergenceSweepFailureKind::StateAccess,
                         CensusError::State,
                     )
@@ -605,11 +622,11 @@ impl ConvergenceSweepRuntime {
                 let _ = self.eligibility_nudge.nudge(session);
             }
             Ok(CommissionDispatchOutcome::TargetBusy { .. }) => {
-                self.record_decision(target, &observation, ConvergenceSweepDecision::LiveSession)
+                self.record_decision(target, observation, ConvergenceSweepDecision::LiveSession)
                     .await;
             }
             Ok(CommissionDispatchOutcome::TargetCoolingOff { .. }) => {
-                self.record_decision(target, &observation, ConvergenceSweepDecision::CoolingOff)
+                self.record_decision(target, observation, ConvergenceSweepDecision::CoolingOff)
                     .await;
             }
             Err(error) if error.commit_ambiguous() => {
@@ -620,7 +637,7 @@ impl ConvergenceSweepRuntime {
             Ok(CommissionDispatchOutcome::ConflictingReuse) | Err(_) => {
                 self.record_failure(
                     target,
-                    Some(&observation),
+                    Some(observation),
                     ConvergenceSweepFailureKind::CommissionRefused,
                     CensusError::Request,
                 )
@@ -822,7 +839,7 @@ impl ConvergenceSweepRuntime {
     async fn rest(&self, path: &str, authorization: &HeaderValue) -> Result<Value, CensusError> {
         let mut response = self
             .client
-            .get(format!("https://api.github.com/{path}"))
+            .get(format!("{}{path}", self.rest_base))
             .header(AUTHORIZATION, authorization.clone())
             .header(ACCEPT, "application/vnd.github+json")
             .header(USER_AGENT, USER_AGENT_VALUE)
@@ -861,7 +878,7 @@ impl ConvergenceSweepRuntime {
             attempt += 1;
             let sent = self
                 .client
-                .post(GRAPHQL_URL)
+                .post(&self.graphql_url)
                 .header(AUTHORIZATION, authorization.clone())
                 .header(ACCEPT, "application/vnd.github+json")
                 .header(CONTENT_TYPE, "application/json")
@@ -1093,15 +1110,6 @@ mod tests {
         );
     }
 
-    // `reconcile_target` sequences the store primitives, and the branches it
-    // takes before the provider census are reachable against a real database
-    // with no network: the parked / `retry_ready` gate, the committed-dispatch
-    // projection repair, and the census-failure path. The branches after a
-    // successful census are not reachable here — `GRAPHQL_URL` is a const with
-    // no injection seam, so a hand-built runtime cannot be pointed at a local
-    // server. Every fixture below resolves its credential from a path that does
-    // not exist, which makes `fetch` fail before it opens a connection.
-
     const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
     const DATABASE_NAME: &str = "signalbox_convergence_sweep";
     const DATABASE_USER: &str = "signalbox";
@@ -1190,6 +1198,8 @@ mod tests {
             InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
         let runtime = ConvergenceSweepRuntime {
             client: Client::builder().build()?,
+            graphql_url: GRAPHQL_URL.to_owned(),
+            rest_base: "https://api.github.com/".to_owned(),
             targets: vec![fixture_target()].into_boxed_slice(),
             interval: Duration::from_secs(60),
             cool_off,
@@ -1542,4 +1552,5 @@ mod tests {
         tokio::time::timeout(RESTORATION_TEST_TIMEOUT, running).await??;
         Ok(())
     }
+    mod census;
 }

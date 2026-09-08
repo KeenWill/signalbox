@@ -457,7 +457,7 @@ async fn production_runner_kills_descendants_on_timeout() -> Result<(), Box<dyn 
             program: fixture_program("sh")?.into_os_string(),
             arguments: vec![OsString::from("-c"), OsString::from(script)],
             working_directory: std::env::current_dir()?,
-            timeout: Duration::from_millis(100),
+            timeout: Duration::from_secs(2),
             capture_bytes: 64,
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
@@ -465,10 +465,10 @@ async fn production_runner_kills_descendants_on_timeout() -> Result<(), Box<dyn 
         };
 
         let result = production_runner()?.run(request).await;
+        assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         let descendant = std::str::from_utf8(&result.stdout.bytes)?.parse::<u32>()?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         assert!(!std::path::Path::new(&format!("/proc/{descendant}")).exists());
         Ok(())
     })
@@ -667,7 +667,7 @@ async fn production_runner_reaps_new_session_descendant_after_leader_completion(
 async fn production_runner_reaps_new_session_descendant_on_timeout()
 -> Result<(), Box<dyn std::error::Error>> {
     with_procfs_supervision(async {
-        let timeout = Duration::from_millis(100);
+        let timeout = Duration::from_secs(2);
         let request = shell_request(
             &escaped_timeout_script()?,
             timeout,
@@ -677,10 +677,10 @@ async fn production_runner_reaps_new_session_descendant_on_timeout()
 
         let result = production_runner()?.run(request).await;
         let elapsed = started.elapsed();
+        assert_eq!(result.outcome, ProcessOutcome::TimedOut);
         let descendant = std::str::from_utf8(&result.stdout.bytes)?.parse::<u32>()?;
 
-        assert_eq!(result.outcome, ProcessOutcome::TimedOut);
-        assert!(elapsed < Duration::from_secs(2));
+        assert!(elapsed < timeout + Duration::from_secs(2));
         assert!(!std::path::Path::new(&format!("/proc/{descendant}")).exists());
         Ok(())
     })
