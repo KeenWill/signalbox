@@ -1201,13 +1201,37 @@ fn charge_font_decoding(
         if let Ok(stream) = font
             .get_deref(b"ToUnicode", document)
             .and_then(Object::as_stream)
+            && !charge_cmap_decoding(stream, remaining)?
         {
-            match stream.get_plain_content_with_limit(MAX_DECOMPRESSED_PAGE_BYTES.min(*remaining)) {
-                Ok(decoded) => *remaining -= decoded.len(),
-                Err(LopdfError::Unimplemented(_)) => {}
-                Err(LopdfError::Decompress(_)) => return Ok(false),
-                Err(_) => return Err(FileMediaProviderFailure::Failed),
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn charge_cmap_decoding(
+    stream: &Stream,
+    remaining: &mut usize,
+) -> Result<bool, FileMediaProviderFailure> {
+    let filters = stream.filters().unwrap_or_default();
+    if filters.is_empty() {
+        if stream.content.len() > MAX_DECOMPRESSED_PAGE_BYTES.min(*remaining) {
+            return Ok(false);
+        }
+        *remaining -= stream.content.len();
+        return Ok(true);
+    }
+    let mut decoder = stream.clone();
+    for filter in filters {
+        decoder.dict.set("Filter", Object::Name(filter.to_vec()));
+        match decoder.get_plain_content_with_limit(MAX_DECOMPRESSED_PAGE_BYTES.min(*remaining)) {
+            Ok(decoded) => {
+                *remaining -= decoded.len();
+                decoder.set_content(decoded);
             }
+            Err(LopdfError::Unimplemented(_)) => return Ok(true),
+            Err(LopdfError::Decompress(_)) => return Ok(false),
+            Err(_) => return Err(FileMediaProviderFailure::Failed),
         }
     }
     Ok(true)
@@ -5341,6 +5365,43 @@ endobj",
         assert!(matches!(
             read_text(&document, &pages, &ActiveSignal).expect("unsupported CMap is not fatal"),
             ProcessorReadOutput::Text { body, .. } if body.contains("visible")
+        ));
+    }
+
+    #[test]
+    fn unsupported_cmap_filter_retains_supported_prefix_charges() {
+        let (mut document, pages) = repeated_content_pages(Vec::new(), 2);
+        let expanded = vec![b' '; 64];
+        let budget = expanded.len() * pages.len();
+        let mut cmap = Stream::new(Dictionary::new(), expanded);
+        cmap.compress().expect("compress supported prefix");
+        cmap.dict.set(
+            "Filter",
+            Object::Array(vec![
+                Object::Name(b"FlateDecode".to_vec()),
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+            ]),
+        );
+        let cmap = document.add_object(cmap);
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H",
+            "ToUnicode" => cmap,
+        });
+        for (_, page) in &pages {
+            document.get_dictionary_mut(*page).expect("page").set(
+                "Resources",
+                dictionary! { "Font" => dictionary! { "F1" => font } },
+            );
+        }
+        assert!(matches!(
+            read_text_with_decoding_budget(&document, &pages, &ActiveSignal, budget - 1)
+                .expect("supported prefix consumes the aggregate budget"),
+            ProcessorReadOutput::ExpansionLimitExceeded { .. }
+        ));
+        assert!(matches!(
+            read_text_with_decoding_budget(&document, &pages, &ActiveSignal, budget)
+                .expect("supported prefixes fit; unsupported suffix uses fallback"),
+            ProcessorReadOutput::Text { .. }
         ));
     }
 
