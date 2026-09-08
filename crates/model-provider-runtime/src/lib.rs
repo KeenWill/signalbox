@@ -2469,10 +2469,9 @@ mod tests {
     }
 
     #[test]
-    fn capacity_bridge_retains_latest_snapshot_through_both_redacting_sinks() {
+    fn capacity_bridge_retains_latest_snapshot_through_exact_redaction() {
         use signalbox_model_runtime::{
             CredentialRedactingSink, CredentialValue, RateLimitSnapshot, RateLimitWindow,
-            RedactingSink,
         };
         use std::time::{Duration, SystemTime};
 
@@ -2493,8 +2492,7 @@ mod tests {
         let credential = CredentialValue::new(b"synthetic-capacity-test-secret".to_vec());
         {
             let mut exact = CredentialRedactingSink::new(&mut sink, &credential);
-            let mut shaped = RedactingSink::new(&mut exact);
-            shaped.observe_rate_limits(
+            exact.observe_rate_limits(
                 call(),
                 RateLimitSnapshot {
                     observed_at,
@@ -2517,9 +2515,7 @@ mod tests {
             correlation: call(),
             fact: ObservationFact::UsageReported(TokenUsage::unreported()),
         });
-        let retained = sink
-            .rate_limits
-            .expect("capacity survives both redacting sinks");
+        let retained = sink.rate_limits.expect("capacity survives exact redaction");
         assert_eq!(*retained.observed_at(), observed_at);
         assert_eq!(retained.windows().len(), 2);
         assert_eq!(*retained.windows()[0].remaining_percent(), 23);
@@ -3708,7 +3704,7 @@ mod tests {
         );
     }
 
-    /// A CLI-redacted argument object becomes an inert domain proposal so the
+    /// A suppressed argument object becomes an inert domain proposal so the
     /// application can record its runtime-safety denial and continue the turn.
     #[test]
     fn fully_suppressed_tool_arguments_cross_as_inert_proposal() {

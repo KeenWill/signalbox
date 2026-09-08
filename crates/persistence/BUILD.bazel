@@ -138,10 +138,12 @@ rust_postgres_test(
 
 rust_postgres_test(
     name = "postgres_integration",
+    compile_data = glob(["migrations/*.sql"]),
     srcs = glob([
         "tests/postgres_integration/**/*.rs",
         "tests/support/**/*.rs",
     ]),
+    compile_data = glob(["migrations/*.sql"]),
     crate_features = CRATE_FEATURES,
     crate_root = "tests/postgres_integration/main.rs",
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
