@@ -1149,6 +1149,25 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
         }
     }
 
+    let mut checked_families = BTreeSet::new();
+    for model in &raw.models {
+        let mut chain = BTreeSet::new();
+        let mut next = Some(model.id.as_str());
+        while let Some(id) = next {
+            if checked_families.contains(id) {
+                break;
+            }
+            if !chain.insert(id) {
+                return Err(CatalogError::new(format!(
+                    "model {} has a cyclic family reference",
+                    model.id
+                )));
+            }
+            next = raw.models[model_index[id]].family.as_deref();
+        }
+        checked_families.extend(chain);
+    }
+
     unique_ids(raw.rate_sets.iter().map(|set| set.id.as_str()), "rate set")?;
     for set in &raw.rate_sets {
         if !set.commercial_channel.is_api_rate_channel() {
@@ -1342,6 +1361,18 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
     Ok(model_index)
 }
 
+// These exact first posts have reviewed staff authorship in the source ledger.
+// Replies and other posts on the community host carry no such attestation.
+fn verified_community_post(url: &Url) -> bool {
+    url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(
+            url.path(),
+            "/t/announcing-gpt-4o-in-the-api/744700"
+                | "/t/o3-is-80-cheaper-and-introducing-o3-pro/1284925"
+        )
+}
+
 fn validate_source(source: &Source) -> Result<(), CatalogError> {
     validate_nonempty(&source.id, "source id")?;
     validate_nonempty(&source.title, "source title")?;
@@ -1371,10 +1402,10 @@ fn validate_source(source: &Source) -> Result<(), CatalogError> {
                     | "developers.openai.com"
                     | "platform.openai.com"
                     | "help.openai.com"
-                    | "community.openai.com"
                     | "cdn.openai.com",
                 ),
             ) => true,
+            (Provider::Openai, Some("community.openai.com")) => verified_community_post(&url),
             (Provider::Openai, Some("github.com")) => github_path_is_owned_by(&url, "openai"),
             (
                 Provider::Anthropic,
@@ -1527,6 +1558,16 @@ fn validate_rate(rate: &Rate, subject: &str) -> Result<(), CatalogError> {
     Ok(())
 }
 
+fn same_rate_value(left: &Rate, right: &Rate) -> Result<bool, CatalogError> {
+    match (&left.usd_per_million_tokens, &right.usd_per_million_tokens) {
+        (Some(left), Some(right)) => Ok(decimal(left, "rate")? == decimal(right, "rate")?),
+        (None, None) => Ok(left.original.currency == right.original.currency
+            && left.original.unit == right.original.unit
+            && decimal(&left.original.amount, "rate")? == decimal(&right.original.amount, "rate")?),
+        _ => Ok(false),
+    }
+}
+
 fn validate_rate_overlaps(rate_sets: &[RateSet]) -> Result<(), CatalogError> {
     for (left_index, left) in rate_sets.iter().enumerate() {
         for right in rate_sets.iter().skip(left_index + 1) {
@@ -1541,8 +1582,7 @@ fn validate_rate_overlaps(rate_sets: &[RateSet]) -> Result<(), CatalogError> {
                 if let Some(right_rate) = right.rates.iter().find(|right_rate| {
                     right_rate.dimension == left_rate.dimension
                         && right_rate.qualifier == left_rate.qualifier
-                }) && (left_rate.usd_per_million_tokens != right_rate.usd_per_million_tokens
-                    || left_rate.original != right_rate.original)
+                }) && !same_rate_value(left_rate, right_rate)?
                 {
                     return Err(CatalogError::new(format!(
                         "incompatible overlapping rate sets {} and {}",

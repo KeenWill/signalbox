@@ -1,7 +1,7 @@
 use super::{
     credential_files::{credential_file_references_conflict, resolved_credential_file_reference},
     error::HubModelConfigurationError,
-    numeric_bounds::NumericBoundsConfiguration,
+    numeric_bounds::{NumericBoundsConfiguration, parse_numeric_bound_duration},
     toml_scalars::{reject_unknown_fields, required_string},
 };
 use signalbox_domain::{
@@ -364,9 +364,8 @@ pub(super) fn parse_repository_watch_configuration(
         }
         let interval = repository
             .get("poll_interval_seconds")
-            .and_then(Item::as_integer)
-            .and_then(|value| u64::try_from(value).ok())
-            .filter(|value| *value > 0)
+            .and_then(parse_duration_seconds)
+            .filter(|value| !value.is_zero())
             .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
         let credential_file = PathBuf::from(
             required_string(repository, "credential_file")
@@ -452,7 +451,7 @@ pub(super) fn parse_repository_watch_configuration(
             parse_convergence_pull_requests(repository.get("convergence_pull_requests"))?;
         repositories.push(WatchedRepositoryConfiguration {
             repository: repository_slug,
-            poll_interval: Duration::from_secs(interval),
+            poll_interval: interval,
             credential_file,
             webhook: repository_webhook,
             convergence_pull_requests: convergence_pull_requests.into_boxed_slice(),
@@ -524,12 +523,20 @@ fn bounded_positive_duration(
 ) -> Result<Duration, HubModelConfigurationError> {
     table
         .get(field)
-        .and_then(Item::as_integer)
-        .and_then(|value| u64::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .map(Duration::from_secs)
+        .and_then(parse_duration_seconds)
+        .filter(|value| !value.is_zero())
         .filter(|value| ceiling.is_none_or(|ceiling| *value <= ceiling))
         .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+}
+
+fn parse_duration_seconds(item: &Item) -> Option<Duration> {
+    match item.as_str() {
+        Some(value) => parse_numeric_bound_duration(value),
+        None => item
+            .as_integer()
+            .and_then(|value| u64::try_from(value).ok())
+            .map(Duration::from_secs),
+    }
 }
 
 fn parse_convergence_pull_requests(
@@ -671,10 +678,8 @@ fn parse_repository_watch_rules(
         let cooldown = table
             .get("cooldown_seconds")
             .map(|item| {
-                item.as_integer()
-                    .and_then(|value| u64::try_from(value).ok())
-                    .filter(|value| *value <= i64::MAX as u64)
-                    .map(Duration::from_secs)
+                parse_duration_seconds(item)
+                    .filter(|value| value.as_secs() <= i64::MAX as u64)
                     .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
             })
             .transpose()?

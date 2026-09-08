@@ -93,7 +93,10 @@ names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 `[numeric_bounds]` table holds the central numeric-bound inventory and the
 loader supplies no default for any member, while other tables carry their own
 configured limits. Numeric-bound duration policies use Jiff's friendly
-unsigned-duration syntax. `repository_watch_webhook_retention` must be positive
+unsigned-duration syntax. `max_review_findings_per_run` must be finite and no
+greater than its domain bound. A finite `max_blob_replica_count` must admit the
+durable catalog's full store bound. Disabling reconciliation requires an
+unbounded nudge buffer. `repository_watch_webhook_retention` must be positive
 and finite and governs authenticated webhook `expires_at` and
 merged-pull-request baseline retention as described in
 [repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
@@ -734,6 +737,8 @@ The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
 true; false disables module polling, webhook listening, and command dispatch,
 including convergence-sweep target enrollment and session commissioning.
+Repository-watch duration fields accept integer seconds or Jiff's friendly
+unsigned-duration strings; rule cooldowns retain whole-second precision.
 
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its

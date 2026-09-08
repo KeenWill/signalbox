@@ -294,6 +294,8 @@ impl FileMediaRegistry {
 
         if let Ok(declared) = request.source.declared_media_type().canonical_essence()
             && let Some(reader) = self.media_readers.get(&declared)
+            && (declared.as_str() != "text/plain"
+                || self.streaming_text_reader.as_ref() != Some(reader))
         {
             let inspection = self
                 .validate_candidate(
