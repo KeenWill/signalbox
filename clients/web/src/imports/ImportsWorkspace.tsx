@@ -742,7 +742,7 @@ export function ImportsWorkspace({
                   )}
                   {retainedCommandNeedsAction && pendingCommand && (
                     <p role="alert">
-                      The exact command for import{' '}
+                      The continuation outcome is unresolved. The exact command for import{' '}
                       {pendingCommand.frontier.imported_conversation_id}, position{' '}
                       {pendingCommand.frontier.position.toLocaleString()}, is retained for retry.
                       Abandon it before selecting another import or frontier.

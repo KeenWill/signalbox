@@ -1373,6 +1373,51 @@ test('locks product navigation while an ambiguous continuation command is retain
   expect(problems.consoleErrors.every((error) => error === expectedResourceError)).toBe(true)
 })
 
+test('retains exact retry after a lost acknowledgement and corrupt continuation receipt', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  const requests: string[] = []
+  await page.route('**/api/imports/*/continuations', (route) => {
+    requests.push(route.request().postData() ?? '')
+    if (requests.length === 1) return route.abort('failed')
+    if (requests.length > 2) return route.fallback()
+    return route.fulfill({
+      status: 500,
+      json: {
+        error: { kind: 'application', code: 'continuation_corrupt', message: 'Corrupt evidence.' },
+      },
+    })
+  })
+  await page.goto(importsProductFixture.path)
+  await page
+    .getByRole('textbox', { name: 'Initial model selection UUID' })
+    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  const corruptReceipt = page.waitForResponse((response) => response.status() === 500)
+  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await corruptReceipt
+  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Settings/ })).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  )
+  await page.getByRole('link', { name: /Settings/ }).click({ force: true })
+  await expect(page).toHaveURL(/\/imports$/)
+  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await expect(page.getByText('Session created:', { exact: false })).toBeVisible()
+  expect(requests).toHaveLength(3)
+  expect(requests[1]).toBe(requests[0])
+  expect(requests[2]).toBe(requests[0])
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toHaveCount(0)
+  expect(problems.pageErrors).toEqual([])
+})
+
 test('runs advertised product navigation sequences', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)

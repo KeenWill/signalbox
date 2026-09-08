@@ -2558,7 +2558,7 @@ impl RunnerProtocolStore {
                  replacement_turn_id, replacement_issuing_turn_attempt_id,
                  replacement_request_id, replacement_dispatch_generation)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             ON CONFLICT (source_lease_id, source_generation) DO NOTHING",
+             ON CONFLICT DO NOTHING",
         )
         .bind(source.lease.into_uuid())
         .bind(Decimal::from(source.generation.get()))
