@@ -48,6 +48,7 @@ pub(crate) enum ClientError {
     Encode(FrameEncodeError),
     Decode(FrameDecodeError),
     Protocol(&'static str),
+    ConnectionClosed,
     Remote {
         code: ErrorCode,
         message: String,
@@ -151,6 +152,7 @@ impl ClientError {
             | Self::ScanIncomplete { .. }
             | Self::Encode(_)
             | Self::Decode(_)
+            | Self::ConnectionClosed
             | Self::Protocol(_)
             | Self::AmbiguousMutation
             | Self::Input(_)
@@ -172,6 +174,7 @@ impl ClientError {
 impl fmt::Display for ClientError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ConnectionClosed => formatter.write_str("the daemon connection closed"),
             Self::Io(_) => formatter.write_str("local process communication failed"),
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
@@ -287,7 +290,8 @@ impl Error for ClientError {
             Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
-            Self::Protocol(_)
+            Self::ConnectionClosed
+            | Self::Protocol(_)
             | Self::Remote { .. }
             | Self::AmbiguousMutation
             | Self::Input(_)
