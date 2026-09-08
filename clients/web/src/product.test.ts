@@ -239,12 +239,13 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
-  it('rejects a bootstrap response beyond the fixed JSON byte bound', async () => {
+  it('preserves the bootstrap size error when body cancellation fails', async () => {
+    const cancel = vi.fn().mockRejectedValue(new Error('cancellation failed'))
     vi.stubGlobal(
       'fetch',
       vi.fn(
         async () =>
-          new Response(JSON.stringify(bootstrapFixture), {
+          new Response(new ReadableStream({ cancel }), {
             headers: { 'content-length': '65537' },
           }),
       ),
@@ -257,6 +258,7 @@ describe('SameOriginProductTransport', () => {
     expect((failure as ProductContractError).cause).toMatchObject({
       message: expect.stringContaining('response exceeded the product JSON byte limit'),
     })
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('reports an unsuccessful HTTP response without decoding its body', async () => {

@@ -373,6 +373,26 @@ describe('command registry', () => {
     )
   })
 
+  it('reveals filtered records by changing detail on a loaded empty projection', () => {
+    store.dispatch(actions.detailSet('results'))
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      timelineWindowAvailable: true,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+    }
+
+    invokeCommand('detail.full', context)
+    expect(selectApp(store.getState()).detail).toBe('full')
+    invokeCommand('detail.condensed', context)
+    expect(selectApp(store.getState()).detail).toBe('condensed')
+    invokeCommand('detail.results', context)
+    expect(selectApp(store.getState()).detail).toBe('results')
+  })
+
   it('previews pane sizes without writing preferences until commit', () => {
     const setItem = vi.fn()
     vi.stubGlobal('localStorage', { setItem })

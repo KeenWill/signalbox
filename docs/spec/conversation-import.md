@@ -238,3 +238,6 @@ store I/O is owned by [persistence-protocol](persistence-protocol.md).
 - Blob-backed source conversion that streams from the blob substrate without
   materializing the whole source:
   [conversation-import design](../design/conversation-import.md).
+- Sidecar and subagent grouping with null-lineage fallback receipts, held until
+  production import:
+  [conversation-import design](../design/conversation-import.md).

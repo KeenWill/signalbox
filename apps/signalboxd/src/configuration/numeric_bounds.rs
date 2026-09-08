@@ -256,6 +256,38 @@ impl NumericBoundsConfiguration {
                 field: "repository_watch_webhook_retention",
             });
         }
+        let field = "max_review_findings_per_run";
+        if configuration
+            .integer(field)
+            .flatten()
+            .is_none_or(|value| value > signalbox_domain::ReviewProducedFindings::MAXIMUM as u64)
+        {
+            return Err(HubModelConfigurationError::InvalidNumericBound { field });
+        }
+        // Replica registration already bounds distinct stores globally. A smaller
+        // read policy cannot be maintained by that durable write boundary.
+        if configuration
+            .integer("max_blob_replica_count")
+            .flatten()
+            .is_some_and(|value| value < signalbox_blob_store::MAX_BLOB_STORES as u64)
+        {
+            return Err(HubModelConfigurationError::InvalidNumericBound {
+                field: "max_blob_replica_count",
+            });
+        }
+        if configuration
+            .duration("reconciliation_sweep_interval")
+            .flatten()
+            .is_none()
+            && configuration
+                .integer("nudge_buffer_capacity")
+                .flatten()
+                .is_some()
+        {
+            return Err(HubModelConfigurationError::InvalidNumericBound {
+                field: "nudge_buffer_capacity",
+            });
+        }
         Ok(configuration)
     }
 

@@ -454,7 +454,7 @@ fn branch_switch_preserves_a_prepared_target_replaced_before_publication() {
         .expect_err("prepared target replacement rejects publication");
     let retained_foreign = cleanup_file(fixture.root(), Path::new("src"));
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(retained_foreign).expect("foreign prepared target reads"),
         foreign_content
@@ -508,7 +508,7 @@ fn branch_switch_preserves_a_prepared_target_rewritten_before_publication() {
         .expect_err("in-place prepared target rewrite rejects publication");
     let retained_foreign = cleanup_file(fixture.root(), Path::new("src"));
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(retained_foreign).expect("foreign prepared target reads"),
         foreign_content
@@ -636,7 +636,7 @@ fn failed_branch_switch_retains_every_obstructed_directory_quarantine() {
         .first()
         .expect("obstructed alpha quarantine remains");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(fixture.root().join("alpha")).expect("foreign alpha obstruction reads"),
         foreign_content
@@ -723,7 +723,7 @@ fn failed_branch_switch_preserves_a_foreign_entry_in_a_restored_quarantine() {
         .find(|path| path.is_file())
         .expect("foreign quarantine entry remains");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(fixture.root().join("src/main.txt")).expect("restored source fixture reads"),
         original_content
@@ -784,7 +784,7 @@ fn branch_switch_excludes_a_foreign_entry_from_source_quarantine_cleanup_capture
         .expect_err("foreign source quarantine addition rejects cleanup capture");
     let retained_foreign = cleanup_file(fixture.root(), Path::new("foreign.txt"));
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(fixture.root().join("src/main.txt")).expect("restored source fixture reads"),
         original_content

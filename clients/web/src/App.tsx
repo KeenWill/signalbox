@@ -121,6 +121,7 @@ export function Workspace({
       dispatch,
       getState: store.getState,
       timelineIds,
+      timelineWindowAvailable: timeline !== undefined,
       artifactPreviewIds: knownId === 'blobs' ? artifactPreviewIds : [],
       artifactOriginalIds: knownId === 'blobs' ? artifactOriginalIds : [],
       navigate: (path) => {
@@ -146,7 +147,7 @@ export function Workspace({
       searchAvailable: knownId === 'search-usage',
       focusSearch: () => document.querySelector<HTMLInputElement>('#lexical-search-input')?.focus(),
     }),
-    [dispatch, knownId, navigate, timelineIds],
+    [dispatch, knownId, navigate, timeline, timelineIds],
   )
   useCommandHotkeys(commandContext)
 
