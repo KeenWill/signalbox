@@ -434,9 +434,12 @@ occupancy bound and drains under that window: after its in-flight operation
 reaches a durable boundary, it checkpoints the active turn and returns without
 issuing another, and a successor resumes from that boundary.
 
+Abandonment with an active turn records `ExistingControlRequired`, except for a
+terminal delegated runtime, and creates no cancellation.
+
 ## Planned
 
-- Runner-loss recovery: replacement and abandonment of a lost runner, and the
+- Runner-loss recovery: active-turn replacement of a lost runner, and the
   runner-loss projection's effect on queued activation and runner execution;
   design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).

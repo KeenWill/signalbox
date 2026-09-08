@@ -6,10 +6,10 @@ This design is not built; it extends
 ## Goal
 
 This design adds four capabilities. A turn parks durably while no credential in
-its pool is available and resumes when one is. A session whose runner is lost is
-recovered on a replacement runner or abandoned, and a restart reconciles
-retained runner work before the generic scan can end it. Activation freezes the
-session's instruction eligibility for the turn.
+its pool is available and resumes when one is. An active turn whose runner is
+lost admits staged replacement, and a restart reconciles retained runner work
+before the generic scan can end it. Activation freezes the session's instruction
+eligibility for the turn.
 
 ## Design
 
@@ -86,13 +86,10 @@ otherwise to the phase the retained tool attempt justifies. A staged call that
 completed, refused, failed, cancelled, or ended ambiguous leaves the turn in the
 state that outcome produced. A call that ends known-failed, refused, cancelled,
 or ambiguous reaches an observation boundary too, so staging never waits
-indefinitely. Abandonment requires no active turn; with a turn active it records
-that the turn needs existing control, and the user empties the slot through the
-stop, approval, or reconciliation flow first. A queued turn remains queued and
-cannot activate while its placement is lost. Both commands are administrative
-recovery: they neither widen the interrupt delivery nor create a standalone
-cancellation path, and no case turns ambiguous effect evidence into known
-failure.
+indefinitely. A queued turn remains queued and cannot activate while its
+placement is lost. Both commands are administrative recovery: they neither widen
+the interrupt delivery nor create a standalone cancellation path, and no case
+turns ambiguous effect evidence into known failure.
 
 Recovery-only startup binds the runner socket in recovery-only mode after
 migrations, reconciles retained runner inventory, evidence, and nonterminal
@@ -133,11 +130,10 @@ authority that retained runner evidence resolves. The present order, generic
 scan before runner-socket bind, stays compatible with inserting a runner
 reconciliation phase before the scan.
 
-No present surface performs retained runner reconnect or replacement recovery,
-and no runner execution surface depends on the projected loss state. The present
-loss projection, which marks the placement lost and moves an active turn at a
-runner boundary to the runner-recovery wait, remains the only producer of that
-state.
+No present surface performs retained runner reconnect, and no runner execution
+surface depends on the projected loss state. The present loss projection, which
+marks the placement lost and moves an active turn at a runner boundary to the
+runner-recovery wait, remains the only producer of that state.
 
 Only the path that prepares the turn's initial model call inside the activation
 transaction records the manifest there. The ordinary path records it after
@@ -167,9 +163,6 @@ A pinned-loss replacement command issued while a call is in flight is accepted,
 and its placement boundary commits after that call's observation boundary. A
 commit that places the replacement boundary before the call's observation
 boundary is rejected.
-
-An abandonment command against a session with an active turn is rejected with
-the existing-control result and creates no cancellation.
 
 A queued turn whose placement is lost is not activated by any pass or sweep.
 
