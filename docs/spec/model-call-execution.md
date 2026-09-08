@@ -284,7 +284,9 @@ substitution provenance it would have to record does not exist; a substituted
 call is therefore classified `Ambiguous` by restart rather than `KnownFailed`
 live. The runtime's exhaustive provider-error classification is carried verbatim
 into the operator cause codes rather than restated, so the adapter taxonomy and
-the operator vocabulary cannot drift apart.
+the operator vocabulary cannot drift apart. The bridge includes a retained
+response-envelope rejection stage in its correlated terminal warning, without
+provider-authored detail.
 
 Every model-call transaction issues the session-scheduler row lock as its first
 statement, so per-session serialization is total and lock-order cycles on one
