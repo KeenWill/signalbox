@@ -26,6 +26,7 @@ use signalbox_domain::{
 use sqlx::postgres::PgRow;
 use sqlx::types::Uuid;
 use sqlx::{Postgres, Row, Transaction};
+use std::collections::HashMap;
 
 pub(super) async fn load_process_session_placement(
     transaction: &mut Transaction<'static, Postgres>,
@@ -110,8 +111,20 @@ pub(crate) async fn load_process_runner_projection(
     transaction: &mut Transaction<'static, Postgres>,
     session: SessionId,
 ) -> Result<Option<ProcessRunnerProjection>, ProcessReadError> {
-    let row = sqlx::query(
-        "SELECT placement.selector_kind, placement.selector_runner_id,
+    Ok(
+        load_process_runner_projection_batch(transaction, &[session])
+            .await?
+            .remove(&session.into_uuid()),
+    )
+}
+
+pub(super) async fn load_process_runner_projection_batch(
+    transaction: &mut Transaction<'static, Postgres>,
+    sessions: &[SessionId],
+) -> Result<HashMap<Uuid, ProcessRunnerProjection>, ProcessReadError> {
+    let sessions: Vec<_> = sessions.iter().map(|session| session.into_uuid()).collect();
+    let rows = sqlx::query(
+        "SELECT placement.session_id, placement.selector_kind, placement.selector_runner_id,
                 placement.selector_capability_class,
                 placement.directory_selection_kind,
                 placement.requested_working_directory,
@@ -134,16 +147,25 @@ pub(crate) async fn load_process_runner_projection(
                  ORDER BY connection_epoch DESC, event_ordinal DESC
                  LIMIT 1
            ) AS connection ON placement.state_kind = 'pinned'
-          WHERE current_placement.session_id = $1",
+          WHERE current_placement.session_id = ANY($1)",
     )
-    .bind(session.into_uuid())
-    .fetch_optional(&mut **transaction)
+    .bind(sessions)
+    .fetch_all(&mut **transaction)
     .await?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
+    rows.iter()
+        .map(|row| {
+            Ok((
+                required(row, "session_id")?,
+                decode_process_runner_projection(row)?,
+            ))
+        })
+        .collect()
+}
 
-    let selector_kind: String = required(&row, "selector_kind")?;
+fn decode_process_runner_projection(
+    row: &PgRow,
+) -> Result<ProcessRunnerProjection, ProcessReadError> {
+    let selector_kind: String = required(row, "selector_kind")?;
     let selector_runner: Option<Uuid> = row.try_get("selector_runner_id")?;
     let selector_capability: Option<String> = row.try_get("selector_capability_class")?;
     let selector = match (selector_kind.as_str(), selector_runner, selector_capability) {
@@ -155,7 +177,7 @@ pub(crate) async fn load_process_runner_projection(
         _ => return Err(ProcessReadCorruption::Inconsistent("runner selector").into()),
     };
 
-    let directory_kind: String = required(&row, "directory_selection_kind")?;
+    let directory_kind: String = required(row, "directory_selection_kind")?;
     let requested_directory: Option<String> = row.try_get("requested_working_directory")?;
     let working_directory = match (directory_kind.as_str(), requested_directory) {
         ("runner_default", None) => None,
@@ -170,7 +192,7 @@ pub(crate) async fn load_process_runner_projection(
         }
     };
 
-    let workspace_kind: String = required(&row, "workspace_requirement_kind")?;
+    let workspace_kind: String = required(row, "workspace_requirement_kind")?;
     let requested_repository: Option<String> = row.try_get("requested_repository_key")?;
     let repository = match (workspace_kind.as_str(), requested_repository) {
         ("none", None) => None,
@@ -186,21 +208,21 @@ pub(crate) async fn load_process_runner_projection(
         .map(CredentialProfileName::try_new)
         .transpose()
         .map_err(|_| ProcessReadCorruption::Inconsistent("runner credential profile"))?;
-    let sandbox_name: String = required(&row, "requested_sandbox_profile")?;
+    let sandbox_name: String = required(row, "requested_sandbox_profile")?;
     let sandbox =
         runner_sandbox_from_str(&sandbox_name).ok_or(ProcessReadCorruption::Unsupported {
             field: "runner sandbox profile",
             value: sandbox_name,
         })?;
     let placement_revision = RunnerGeneration::try_from_u64(decode_positive(
-        required(&row, "placement_revision")?,
+        required(row, "placement_revision")?,
         "runner placement revision",
     )?)
     .ok_or(ProcessReadCorruption::InvalidOrdinal(
         "runner placement revision",
     ))?;
 
-    let state_kind: String = required(&row, "state_kind")?;
+    let state_kind: String = required(row, "state_kind")?;
     let pinned_runner = row
         .try_get::<Option<Uuid>, _>("pinned_runner_id")?
         .map(RunnerId::from_uuid);
@@ -261,7 +283,7 @@ pub(crate) async fn load_process_runner_projection(
         _ => return Err(ProcessReadCorruption::Inconsistent("runner connection health").into()),
     };
 
-    Ok(Some(ProcessRunnerProjection {
+    Ok(ProcessRunnerProjection {
         selector,
         runner,
         placement_revision,
@@ -271,7 +293,7 @@ pub(crate) async fn load_process_runner_projection(
         working_directory,
         connection_health,
         state,
-    }))
+    })
 }
 
 pub(super) fn decode_process_session_ancestry(

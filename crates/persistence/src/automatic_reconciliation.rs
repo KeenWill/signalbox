@@ -866,7 +866,7 @@ async fn mark_exhausted_recoveries(
 ) -> Result<Vec<sqlx::postgres::PgRow>, AutomaticReconciliationRepositoryError> {
     let rows = sqlx::query(
         "WITH spent AS MATERIALIZED (
-            SELECT turn_id
+            SELECT turn_id, attempt_count
               FROM automatic_reconciliation
              WHERE $1::integer IS NOT NULL
                AND state_kind IN ('scheduled', 'attempting')
@@ -877,6 +877,14 @@ async fn mark_exhausted_recoveries(
                )
              ORDER BY next_attempt_at, turn_id
              LIMIT $2
+         ), attempts AS (
+            UPDATE automatic_reconciliation_attempt AS attempt
+               SET outcome_kind = 'infrastructure_failure',
+                   finished_at = statement_timestamp()
+              FROM spent
+             WHERE attempt.turn_id = spent.turn_id
+               AND attempt.attempt_ordinal = spent.attempt_count
+               AND attempt.outcome_kind = 'attempting'
          )
          UPDATE automatic_reconciliation AS recovery
             SET state_kind = 'exhausted', exhausted_at = statement_timestamp()

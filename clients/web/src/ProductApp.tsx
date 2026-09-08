@@ -1,7 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog'
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useNavigate } from '@tanstack/react-router'
+import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import {
   AlertTriangle,
   Command,
@@ -61,6 +61,12 @@ import { type SessionSelectionEvidence, SessionWorkspaceSurface } from './Sessio
 import { SettingsSurface } from './SettingsSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
+
+declare module '@tanstack/react-router' {
+  interface HistoryState {
+    catalogSessionOpenedHere?: boolean
+  }
+}
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
@@ -520,7 +526,7 @@ function SelectionInspector({
       <p>
         {surface === 'settings'
           ? 'Presentation preferences are stored locally in this browser and do not represent server evidence.'
-          : selectionEvidence === null
+          : surface !== 'sessions' || selectionEvidence === null
             ? 'Select an available operational record to inspect its server-provided evidence.'
             : 'Bounded server-provided timeline projection for the selected record.'}
       </p>
@@ -583,8 +589,15 @@ export function ProductApp({
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const bootstrapStatusRef = useRef<HTMLSpanElement>(null)
   const sessionState = useMemo(() => readProductSessionState({ ...search }), [search])
-  const catalogSessionOpenedHere = useRef(false)
+  const catalogSessionOpenedHere = useLocation({
+    select: (location) => location.state.catalogSessionOpenedHere === true,
+  })
   const currentCatalogSession = useRef(sessionState.session)
+  useEffect(() => {
+    if (currentCatalogSession.current !== sessionState.session || surface !== 'sessions') {
+      currentCatalogSession.current = sessionState.session
+    }
+  }, [sessionState.session, surface])
   const artifactSideWasOpen = useRef(false)
   const inspectorWasInSheet = useRef(false)
   const surfaceEscapeRef = useRef<(() => boolean) | null>(null)
@@ -622,11 +635,10 @@ export function ProductApp({
   )
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const updateSessionSearch = useCallback(
-    (next: ProductSessionState, mode: 'push' | 'close' = 'push') => {
+    (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
       if (mode === 'close') {
         currentCatalogSession.current = next.session
-        if (catalogSessionOpenedHere.current) {
-          catalogSessionOpenedHere.current = false
+        if (catalogSessionOpenedHere) {
           window.history.back()
           return
         }
@@ -634,7 +646,6 @@ export function ProductApp({
         return
       }
       const previousSession = currentCatalogSession.current
-      if (!previousSession && next.session) catalogSessionOpenedHere.current = true
       const switchesSelectedSession =
         previousSession !== undefined &&
         next.session !== undefined &&
@@ -644,10 +655,15 @@ export function ProductApp({
         to: '/$surface',
         params: { surface },
         search: next,
-        replace: switchesSelectedSession,
+        replace: mode === 'replace' || switchesSelectedSession,
+        state: {
+          catalogSessionOpenedHere:
+            next.session !== undefined &&
+            (catalogSessionOpenedHere || (mode === 'push' && previousSession === undefined)),
+        },
       })
     },
-    [navigate, surface],
+    [catalogSessionOpenedHere, navigate, surface],
   )
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
@@ -752,60 +768,72 @@ export function ProductApp({
   ])
   const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
-    productHotkeyBindings.map((binding) => ({
-      hotkey: binding.hotkey,
-      // Product surfaces own text fields, so the palette binding must never steal a keystroke the
-      // field is editing.
-      options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
-      callback: (event) => {
-        if (artifactSheetOwnsFocus) return
-        if (
-          (binding.commandId === 'palette.open' || binding.commandId === 'surface.escape') &&
-          isEditableTarget(event.target)
-        ) {
-          return
-        }
-        if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
-          if (binding.commandId === 'help.open') {
-            const activeElement = document.activeElement
-            helpOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
-          }
-          if (binding.commandId === 'palette.open') {
-            const activeElement = document.activeElement
-            paletteOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
-          }
+    productHotkeyBindings
+      .filter(
+        (binding) =>
+          !binding.commandId.startsWith('imports.') ||
+          (app.overlay === null && !navigationDisabled),
+      )
+      .map((binding) => ({
+        hotkey: binding.hotkey,
+        // Product surfaces own text fields, so the palette binding must never steal a keystroke the
+        // field is editing.
+        options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
+        callback: (event) => {
+          if (artifactSheetOwnsFocus) return
           if (
-            binding.commandId.startsWith('selection.') &&
-            productCommandAvailable(binding.commandId, context)
+            (binding.commandId === 'palette.open' || binding.commandId === 'surface.escape') &&
+            isEditableTarget(event.target)
           ) {
-            context.focusTimeline()
+            return
           }
-          if (binding.commandId === 'layout.toggle' && app.layout === 'workbench') {
-            // Focus leaves the navigation pane before the focus layout hides it.
-            mainRef.current?.focus()
+          if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
+            if (binding.commandId === 'help.open') {
+              const activeElement = document.activeElement
+              helpOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
+            }
+            if (binding.commandId === 'palette.open') {
+              const activeElement = document.activeElement
+              paletteOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
+            }
+            if (
+              binding.commandId.startsWith('selection.') &&
+              productCommandAvailable(binding.commandId, context)
+            ) {
+              context.focusTimeline()
+            }
+            if (binding.commandId === 'layout.toggle' && app.layout === 'workbench') {
+              // Focus leaves the navigation pane before the focus layout hides it.
+              mainRef.current?.focus()
+            }
+            invokeProductCommand(binding.commandId, context)
           }
-          invokeProductCommand(binding.commandId, context)
-        }
-      },
-    })),
+        },
+      })),
   )
   useHotkeySequences(
-    productHotkeySequenceBindings.map((binding) => ({
-      sequence: binding.sequence,
-      callback: (event) => {
-        if (artifactSheetOwnsFocus) return
-        if (isEditableTarget(event.target)) return
-        if (store.getState().app.overlay === null) {
-          if (
-            binding.commandId.startsWith('selection.') &&
-            productCommandAvailable(binding.commandId, context)
-          ) {
-            context.focusTimeline()
+    productHotkeySequenceBindings
+      .filter(
+        (binding) =>
+          !binding.commandId.startsWith('imports.') ||
+          (app.overlay === null && !navigationDisabled),
+      )
+      .map((binding) => ({
+        sequence: binding.sequence,
+        callback: (event) => {
+          if (artifactSheetOwnsFocus) return
+          if (isEditableTarget(event.target)) return
+          if (store.getState().app.overlay === null) {
+            if (
+              binding.commandId.startsWith('selection.') &&
+              productCommandAvailable(binding.commandId, context)
+            ) {
+              context.focusTimeline()
+            }
+            invokeProductCommand(binding.commandId, context)
           }
-          invokeProductCommand(binding.commandId, context)
-        }
-      },
-    })),
+        },
+      })),
   )
 
   useEffect(() => {
@@ -913,6 +941,10 @@ export function ProductApp({
       </div>
     ) : surface === 'sessions' && bootstrap.isSuccess && sessionState.workspace ? (
       <SessionWorkspaceSurface
+        key={sessionState.session ?? 'unselected'}
+        onSessionOpen={(session) =>
+          updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
+        }
         initialSessionId={sessionState.session}
         onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}
