@@ -1,0 +1,43 @@
+name: devenv smoke
+
+on:
+  pull_request:
+    paths:
+      - "devenv.*"
+      - "rust-toolchain.toml"
+      - "tooling/requirements-mdformat.txt"
+      - "scripts/test_devenv_scripts.py"
+      - ".github/workflows/devenv-smoke.yml"
+  push:
+    branches: [main]
+    paths:
+      - "devenv.*"
+      - "rust-toolchain.toml"
+      - "tooling/requirements-mdformat.txt"
+      - "scripts/test_devenv_scripts.py"
+      - ".github/workflows/devenv-smoke.yml"
+  schedule:
+    - cron: "41 7 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux committed-lock smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the requested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
+      - name: Evaluate the committed environment and exercise its scripts
+        run: devenv shell -- python3 scripts/test_devenv_scripts.py
+      - name: Check that evaluation preserved the committed lock
+        run: git diff --exit-code -- devenv.lock
