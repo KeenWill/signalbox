@@ -2,6 +2,348 @@
 
 use super::*;
 
+/// Records a failed exec, restarts with its continuation prepared, and parks
+/// the same command in the next round with the supplied approval posture.
+pub(super) async fn park_after_failed_exec(
+    runtime: &mut RunningRuntime,
+    session_id: CanonicalUuid,
+    approval: InitialToolApproval,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
+    use signalbox_domain::{
+        DecideToolRequest, ToolApprovalDecision, ToolAttemptId, ToolAttemptObservation,
+        ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, TurnAttemptId,
+    };
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let (calls, authorized, producing_call) =
+        authorize_issued_model_call(&runtime.pool, session_id).await?;
+    let first = ToolRequestId::from_uuid(Uuid::now_v7());
+    let second = ToolRequestId::from_uuid(Uuid::now_v7());
+    let mut authorized = authorized;
+    for (request, posture) in [(first, InitialToolApproval::Confirm), (second, approval)] {
+        let response = ToolUsingAssistantResponse::try_from_parts(vec![
+            AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                ToolName::try_new("unsandboxed_exec".to_owned()).expect("exec tool name"),
+                NormalizedToolArguments::try_from_provider_text(
+                    r#"{"program":"npm","arguments":["install","--package-lock-only","--ignore-scripts"],"working_directory":"clients/web"}"#.to_owned(),
+                ).expect("exec arguments"),
+            )),
+        ]).expect("exec response");
+        calls
+            .apply_terminal_observation(
+                session,
+                authorized
+                    .observation_correlation()
+                    .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                        response,
+                        retained_input_tokens: None,
+                        retained_output_tokens: None,
+                    }),
+                ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                    vec![ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                        request,
+                        posture,
+                    )],
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    None,
+                )),
+                |_| panic!("no pending steering"),
+            )
+            .await?;
+        if request == second {
+            break;
+        }
+        let tools = calls.tool_loop_repository();
+        tools
+            .decide(
+                DecideToolRequest::try_new(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    first,
+                    ToolApprovalDecision::Approve,
+                )
+                .expect("decision command"),
+                || TurnAttemptId::from_uuid(Uuid::now_v7()),
+            )
+            .await?;
+        let turn: Uuid =
+            sqlx::query_scalar("SELECT turn_id FROM tool_request WHERE request_id = $1")
+                .bind(first.into_uuid())
+                .fetch_one(&runtime.pool)
+                .await?;
+        let turn = TurnId::from_uuid(turn);
+        let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+        tools
+            .prepare_next_attempt(session, turn, attempt, ToolEffectClass::ExternalEffect)
+            .await?;
+        let authority = tools.authorize_attempt(session, turn, attempt).await?;
+        tools
+            .commit_observation(authority.executor_fence().bind(
+                ToolAttemptObservation::KnownFailed {
+                    error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+                },
+            ))
+            .await?;
+        let next_call = ModelCallId::from_uuid(Uuid::now_v7());
+        tools
+            .prepare_continuation(
+                session,
+                turn,
+                producing_call,
+                signalbox_application::ToolContinuationIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    next_call,
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                        ContextFrontierId::from_uuid(Uuid::now_v7()),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                |_| panic!("no pending steering"),
+            )
+            .await?;
+        assert_eq!(runtime.restart().await?, 0);
+        let AuthorizeModelCallOutcome::Authorized(next) =
+            calls.authorize_send(session, next_call).await?
+        else {
+            panic!("continuation call must authorize");
+        };
+        authorized = next;
+    }
+    Ok(CanonicalUuid::from_uuid(second.into_uuid()))
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn approve_exec_after_failed_predecessor() -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(
+        &mut connection,
+        session_id,
+        "retry the exec command".to_owned(),
+    )
+    .await?;
+    drop(connection);
+    let tool_request_id =
+        park_after_failed_exec(&mut runtime, session_id, InitialToolApproval::Human).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(
+            3,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (tool_request_id, ToolDecision::Approve {})
+    );
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn delegated_exec_without_judge_returns_a_replayable_rejection() -> Result<(), Box<dyn Error>>
+{
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    submit_first_input(
+        &mut connection,
+        session_id,
+        "retry the exec command".to_owned(),
+    )
+    .await?;
+    drop(connection);
+    let tool_request_id =
+        park_after_failed_exec(&mut runtime, session_id, InitialToolApproval::Delegated).await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let decision = ClientRequest::DecideToolRequest {
+        command_id: command()?,
+        session_id,
+        tool_request_id,
+        decision: ToolDecision::Approve {},
+    };
+    connection.request(3, decision.clone()).await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ToolRequestAwaitingApprovalJudge { tool_request_id }
+    );
+    let (judge, prepared) = prepare_exec_judge(&runtime, session_id).await?;
+    let denial = ClientRequest::DecideToolRequest {
+        command_id: command()?,
+        session_id,
+        tool_request_id,
+        decision: ToolDecision::Deny {
+            reason: "stop the retry".to_owned(),
+        },
+    };
+    connection.request(4, denial).await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ToolRequestAwaitingApprovalJudge { tool_request_id }
+    );
+    assert!(matches!(
+        judge.authorize(&prepared).await?,
+        signalbox_persistence::approval_judge::AuthorizeApprovalJudgeOutcome::Authorized(_)
+    ));
+    connection
+        .request(
+            5,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ToolRequestAwaitingApprovalJudge { tool_request_id }
+    );
+    judge
+        .fail(
+            &prepared,
+            signalbox_persistence::approval_judge::FailedApprovalJudgeDisposition::KnownFailed,
+            signalbox_domain::ProviderReportedTokenUsage::unreported(),
+        )
+        .await?;
+    connection.request(6, decision).await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::ToolRequestAwaitingApprovalJudge { tool_request_id }
+    );
+    connection
+        .request(
+            7,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id,
+                decision: ToolDecision::Approve {},
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (tool_request_id, ToolDecision::Approve {})
+    );
+    drop(connection);
+    runtime.stop().await
+}
+
+async fn prepare_exec_judge(
+    runtime: &RunningRuntime,
+    session_id: CanonicalUuid,
+) -> Result<
+    (
+        signalbox_persistence::approval_judge::PostgresApprovalJudgeRepository,
+        Box<signalbox_persistence::approval_judge::PreparedApprovalJudge>,
+    ),
+    Box<dyn Error>,
+> {
+    use signalbox_persistence::approval_judge::PrepareApprovalJudgeOutcome;
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let turn: Uuid = sqlx::query_scalar(
+        "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active'",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    let calls = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog(),
+        ModelCallCredentialReference::new("approval-fixture"),
+    );
+    let judge = calls.approval_judge_repository();
+    let PrepareApprovalJudgeOutcome::Ready(prepared) = judge
+        .prepare(
+            session,
+            TurnId::from_uuid(turn),
+            ModelCallId::from_uuid(Uuid::now_v7()),
+            None,
+        )
+        .await?
+    else {
+        panic!("delegated request must prepare its judge")
+    };
+    Ok((judge, prepared))
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn deny_exec_after_failed_predecessor_and_judge() -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, turn_id) = submit_first_input(
+        &mut connection,
+        session_id,
+        "retry the exec command".to_owned(),
+    )
+    .await?;
+    drop(connection);
+    let tool_request_id =
+        park_after_failed_exec(&mut runtime, session_id, InitialToolApproval::Delegated).await?;
+    let (judge, prepared) = prepare_exec_judge(&runtime, session_id).await?;
+    judge
+        .fail(
+            &prepared,
+            signalbox_persistence::approval_judge::FailedApprovalJudgeDisposition::KnownFailed,
+            signalbox_domain::ProviderReportedTokenUsage::unreported(),
+        )
+        .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let decision = ToolDecision::Deny {
+        reason: "stop the retry".to_owned(),
+    };
+    connection
+        .request(
+            3,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id,
+                decision: decision.clone(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()),
+        (tool_request_id, decision)
+    );
+    connection
+        .request(
+            4,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: turn_id,
+                content: UserInputContent::text("continue after stop".to_owned()),
+                expected_defaults_version: CanonicalU64::new(1),
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                model_settings: ModelSettingsOverlay::inherit_all(),
+            },
+        )
+        .await?;
+    accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let messages = read_transcript_messages(&mut connection, 5, session_id).await?;
+    assert!(matches!(
+        turn_state_of(&messages, turn_id),
+        TurnState::Cancelled { .. }
+    ));
+    drop(connection);
+    runtime.stop().await
+}
+
 /// a decision naming a later request while an earlier one is undecided records the exact
 /// proposal-order rejection.
 #[tokio::test]

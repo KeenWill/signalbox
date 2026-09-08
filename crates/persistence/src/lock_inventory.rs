@@ -50,6 +50,8 @@
 //!   `pg_advisory_lock_shared` on the pool generation for each connection's lifetime;
 //!   `retire_hub_fence_generation` takes exclusive `pg_advisory_lock` on it.
 //! - The following use exclusive `pg_advisory_xact_lock` with `hashtextextended(key, 0)`:
+//!   - `model_execution::reserve_frontier_write_identities`: candidate identity keys
+//!     in sorted lock-key order, before the frontier writer's ordering guard.
 //!   - `model_execution::acquire_model_call_outbox_order_guard`: the
 //!     `MODEL_CALL_OUTBOX_ORDER_GUARD` key before credential or outbox locks;
 //!     `lock_credential_pool_action_head`: `credential_pool_action_head:` plus profile reference,
@@ -58,6 +60,10 @@
 //!     and pull-request number, before target admission or release.
 //!   - `search::SearchRepository::publish`: source kind and artifact identity joined with
 //!     `chr(31)`, before identity checks/write.
+//!
+//! - `credential_invocations::lock_profiles`: capacity rows `FOR UPDATE` in profile byte order,
+//!   after credential action heads. `release_credential_invocation` and
+//!   `guard_credential_invocation_reservation`: the selected profile capacity row `FOR UPDATE`.
 //!
 //! SQL lock sites below name functions in migration files, grouped by family.
 //! Arrows describe acquisition within a function; row sets name their SQL sort
@@ -1066,6 +1072,9 @@ pub(crate) const SEARCH_ARTIFACT_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
                      0
                  )
              )";
+
+/// Capacity rows follow all credential action heads in profile byte order.
+pub(crate) const CREDENTIAL_INVOCATION_CAPACITY_LOCK: &str = "SELECT profile FROM credential_invocation_capacity WHERE profile = ANY($1) ORDER BY profile COLLATE \"C\" FOR UPDATE";
 
 pub(crate) const OAUTH_CREDENTIAL_PROFILE_GENERATION: &str =
     "SELECT generation FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE";

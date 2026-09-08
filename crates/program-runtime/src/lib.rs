@@ -30,6 +30,7 @@ use signalbox_domain::{
 use signalbox_persistence::program_journal::{
     ProgramJournalRepository, ProgramJournalRepositoryError,
 };
+use signalbox_persistence::program_registration::ProgramRegistrationError;
 use tokio::sync::{mpsc, oneshot};
 
 /// Canonical module specifier exposed to frame-contract-v1 artifacts.
@@ -106,6 +107,7 @@ pub enum ProgramExecutionOutcome {
 #[derive(Debug)]
 pub enum ProgramHostError {
     Journal(ProgramJournalRepositoryError),
+    Registration(ProgramRegistrationError),
     JournalMissing(ProgramRunId),
     Isolate(deno_core::error::CoreError),
     LiveDelivery(LiveDeliveryFailure),
@@ -120,6 +122,7 @@ pub enum ProgramHostError {
 impl fmt::Display for ProgramHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Registration(error) => write!(formatter, "program registration failed: {error}"),
             Self::Journal(error) => write!(formatter, "program journal failed: {error}"),
             Self::JournalMissing(run) => {
                 write!(
@@ -144,12 +147,19 @@ impl fmt::Display for ProgramHostError {
 impl Error for ProgramHostError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Registration(error) => Some(error),
             Self::Journal(error) => Some(error),
             Self::Isolate(error) => Some(error),
             Self::LiveDelivery(error) => Some(error),
             Self::Protocol(error) => Some(error),
             Self::JournalMissing(_) | Self::Nondeterminism { .. } => None,
         }
+    }
+}
+
+impl From<ProgramRegistrationError> for ProgramHostError {
+    fn from(error: ProgramRegistrationError) -> Self {
+        Self::Registration(error)
     }
 }
 
@@ -231,7 +241,7 @@ impl ProgramHost {
         run: ProgramRunId,
     ) -> Result<
         Option<signalbox_persistence::program_journal::ProgramSessionCapability>,
-        ProgramJournalRepositoryError,
+        signalbox_persistence::program_journal::ProgramSessionCapabilityError,
     > {
         signalbox_persistence::program_journal::ProgramSessionHost::new(self.journal.clone())
             .session_capability(run)
@@ -243,6 +253,33 @@ impl ProgramHost {
         reason = "The host retains its replay fault inline."
     )]
     pub async fn execute(
+        &self,
+        run: ProgramRunId,
+        live_deliveries: &mut impl LiveDeliverySource,
+    ) -> Result<ProgramExecutionOutcome, ProgramHostError> {
+        let journal = self
+            .journal
+            .load(run)
+            .await?
+            .ok_or(ProgramHostError::JournalMissing(run))?;
+        let registration = self.journal.registrations().for_run(run).await?.ok_or(
+            signalbox_persistence::program_registration::ProgramRegistrationError::RunMissing,
+        )?;
+        if let Some(outcome) = journal.terminal_delivery().and_then(terminal_outcome) {
+            return Ok(outcome);
+        }
+        let artifact = ProgramArtifact::new(registration.content.artifact);
+        self.execute_loaded(run, journal, &artifact, live_deliveries)
+            .await
+    }
+
+    /// Executes isolate fixtures without a registration.
+    #[cfg(feature = "postgres-integration")]
+    #[allow(
+        clippy::result_large_err,
+        reason = "The host retains its replay fault inline."
+    )]
+    pub async fn execute_unregistered(
         &self,
         run: ProgramRunId,
         artifact: &ProgramArtifact,

@@ -467,23 +467,16 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
 /// which is what lets the ceiling be enforced before the clone rather than
 /// after it.
 ///
-/// Sums the text a user-content part array carries.
-///
-/// Ordered user content holds text parts and attachment parts. Only the text
-/// parts carry bytes that scale with what the renderer clones; an attachment
-/// part carries a fixed-width digest, a bounded media-type declaration, and an
-/// optional bounded display filename, all of which sit outside this sum for the
-/// same reason the fixed-width identities do. Exactly one text part reduces
-/// this to the single-text length the ceiling counted before user content grew
-/// a part array, so the bound does not move for content that did not change
-/// shape.
-fn user_content_text_bytes(content: &UserContent) -> usize {
+/// Bounds rendered user content, charging every attachment occurrence its maximum stub size.
+pub(super) fn user_content_text_bytes(content: &UserContent) -> usize {
     content
         .parts()
         .iter()
         .fold(0_usize, |total, part| match part {
             UserContentPart::Text { value } => total.saturating_add(value.as_str().len()),
-            UserContentPart::Attachment { .. } => total,
+            UserContentPart::Attachment { .. } => {
+                total.saturating_add(MAX_RENDERED_ATTACHMENT_STUB_BYTES)
+            }
         })
 }
 

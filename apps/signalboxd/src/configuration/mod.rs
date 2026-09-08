@@ -958,6 +958,22 @@ impl HubModelConfiguration {
         self.credential_profiles.get(name)
     }
 
+    /// Codex home invocation bounds installed before startup recovery.
+    pub fn credential_invocation_registrations(
+        &self,
+    ) -> Vec<(String, Option<std::num::NonZeroU32>)> {
+        self.credential_profiles
+            .values()
+            .filter_map(|profile| match profile.delivery() {
+                CredentialDelivery::CodexHome {
+                    max_concurrent_invocations,
+                    ..
+                } => Some((profile.name().to_owned(), *max_concurrent_invocations)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Canonical OAuth registrations installed before model work starts.
     pub fn oauth_registrations(
         &self,

@@ -42,6 +42,13 @@ pub enum ObservationFact {
 
 ```rust
 pub trait ObservationSink<C> {
+    fn register_process(
+        &mut self,
+        _correlation: C,
+        _process_group: u32,
+    ) -> pin::Pin<boxed::Box<dyn future::Future<Output = bool> + marker::Send + '_>> {
+        /* provided */
+    }
     fn observe(&mut self, observation: Observation<C>);
     fn observe_rate_limits(&mut self, _correlation: C, _snapshot: RateLimitSnapshot) {
         /* provided */
