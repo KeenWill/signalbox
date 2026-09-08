@@ -126,15 +126,15 @@ kinds `goal_transition_applied`, `goal_history_start`, `goal_history_state`,
 `review_findings_end`, `review_orchestration_started`,
 `review_orchestration_advanced`, and `review_orchestration`.
 
-The durable event family itself is current: `session_created`, `input_accepted`,
+The durable event family decodes `session_created`, `input_accepted`,
 `turn_activated`, `model_call_transition`, `tool_batch_transition`,
 `tool_approval_decided`, `context_compacted`, `turn_completed`, `turn_failed`,
-`turn_refused`, `turn_cancelled`, `turn_reconciliation_required`, and
-`turn_tool_reconciliation_required` are all decoded. The current
-`goal_turn_retired` variant and future variants use native's generic
-unknown-event representation for forward compatibility. The gap was acceptance
-or presentation of newer nested/event content, covered by C03 and C07; a full
-goal-mode surface remains S09.
+`turn_refused`, `turn_cancelled`, `turn_reconciliation_required`,
+`turn_tool_reconciliation_required`, `goal_turn_retired`, `child_spawned`,
+`child_waiting`, `session_message`, `child_result`, and
+`child_lifecycle_disposition`. Delegation updates publish incrementally; a
+terminal cascade on the child stream requests its authoritative transcript. A
+full goal-mode surface remains S09.
 
 The non-text transcript family is `model_identity_changed`,
 `assistant_tool_use`, `tool_execution_result`, `tool_denied`, `tool_closed`,

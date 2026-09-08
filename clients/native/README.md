@@ -11,6 +11,7 @@ REST, WebSocket, or OpenAI-compatible surfaces.
 
 ## Live macOS surface
 
+- Present typed live delegation updates and remove retired goal turns from the queued inputs.
 - Page native and imported conversations through the unified conversation read;
   refresh the displayed page, open sessions by identity, and archive or unarchive
   native sessions.

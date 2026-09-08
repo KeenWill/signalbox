@@ -177,6 +177,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertThrowsError(try inventory.entries(in: 0..<(inventory.entryCount + 1)))
   }
 
+  @MainActor
+  func testLiveDelegationPublishesItsBoundedPresentation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    let child = try SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
+    viewModel.apply(.event(.init(cursor: .init(rawValue: 1), sessionID: session.id,
+      event: .sessionMessage(spawningRequestID: child, messageID: child, senderSessionID: child,
+        recipientSessionID: session.id, ordinal: .init(rawValue: 1), deliverySequence: .init(rawValue: 1), content: "Child update"))))
+    XCTAssertEqual(viewModel.delegationUpdate?.detail, "Child update")
+    XCTAssertTrue(viewModel.timeline.isEmpty)
+  }
+
   /// An imported transcript frontier creates an independent native session.
   func testImportedTranscriptCanContinueAsANativeSession() async throws {
     let service = makeService()
@@ -3526,6 +3539,36 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(viewModel.pendingInputs, try ProcessSubmissionFixture.livePendingInput())
     XCTAssertTrue(viewModel.timeline.isEmpty)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
+  }
+
+  @MainActor
+  func testRetiringTheLastQueuedGoalTurnClearsQueuedActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
+
+    viewModel.apply(.event(try ProcessProjectionFixture.goalTurnRetiredEvent()))
+
+    XCTAssertTrue(viewModel.pendingInputs.isEmpty)
+    XCTAssertTrue(viewModel.acceptedInputsAwaitingTranscript.isEmpty)
+    XCTAssertEqual(viewModel.activity, .unavailable)
+  }
+
+  @MainActor
+  func testRetiringAGoalTurnPreservesOtherQueuedActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
+    viewModel.apply(.event(try ProcessProjectionFixture.secondAcceptedEvent()))
+
+    viewModel.apply(.event(try ProcessProjectionFixture.goalTurnRetiredEvent()))
+
+    XCTAssertEqual(
+      viewModel.pendingInputs.map(\.id.rawValue), ProcessProjectionFixture.remainingPendingIDs)
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
   }
 
@@ -11389,6 +11432,17 @@ private enum ProcessProjectionFixture {
       }
       """,
       cursor: cursor
+    )
+  }
+
+  static func goalTurnRetiredEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"goal_turn_retired",
+        "turn_id":"\(ProcessDriverFixture.turn)"
+      }
+      """
     )
   }
 
