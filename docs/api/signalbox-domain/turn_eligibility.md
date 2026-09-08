@@ -1031,7 +1031,10 @@ impl ContinuationRoundReconstitutionInput {
 pub struct AcceptedInputSchedulingReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl AcceptedInputSchedulingReconstitutionInput {
-    pub fn with_inadmissible_requests(self, requests: vec::Vec<ToolRequest>) -> Self;
+    pub fn with_inadmissible_requests(
+        self,
+        requests: vec::Vec<ToolInadmissibleCorrelation>,
+    ) -> Self;
     pub fn with_runner_placement_frontiers(self, frontiers: vec::Vec<ContextFrontierId>) -> Self;
     pub fn new(
         session: Session,

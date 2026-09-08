@@ -68,7 +68,7 @@ fn maximum_checked_attachment_metadata_fits_the_named_stub_bound() {
     }])
     .expect("the maximum metadata fixture is valid");
 
-    let charged = super::super::render::user_content_text_bytes(&content);
+    let charged = super::super::render::user_content_retained_bytes(&content);
     let rendered = render_model_user_content(content, |_| Some(NonZeroU64::MAX))
         .expect("the derived bound covers maximum checked metadata");
     let stub = rendered.parts()[0].as_str();
@@ -90,8 +90,8 @@ fn repeated_attachment_occurrences_each_count_toward_rendered_content() {
     let single = UserContent::try_parts(vec![attachment.clone()]).expect("one occurrence");
     let repeated = UserContent::try_parts(vec![attachment.clone(), attachment])
         .expect("two occurrences of one digest");
-    let single_charge = super::super::render::user_content_text_bytes(&single);
-    let repeated_charge = super::super::render::user_content_text_bytes(&repeated);
+    let single_charge = super::super::render::user_content_retained_bytes(&single);
+    let repeated_charge = super::super::render::user_content_retained_bytes(&repeated);
     let rendered = render_model_user_content(repeated, |_| Some(NonZeroU64::MIN))
         .expect("catalog length is available");
 
