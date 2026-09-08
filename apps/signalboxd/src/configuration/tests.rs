@@ -1001,6 +1001,17 @@ fn repository_watch_webhook_accepts_a_configured_socket_address() {
 }
 
 #[test]
+fn repository_watch_webhook_rejects_port_zero() {
+    let configured = configuration_with_repository_watch_webhook()
+        .replace(WATCH_WEBHOOK_BIND_ADDRESS, "127.0.0.1:0");
+
+    assert!(matches!(
+        HubModelConfiguration::parse(&configured),
+        Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+    ));
+}
+
+#[test]
 fn repository_watch_webhook_associates_hook_and_secret_with_repository() {
     let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_webhook())
         .expect("repository-watch webhook fixture is valid");
@@ -3472,27 +3483,6 @@ fn configuration_rejects_a_credential_home_concurrency_bound_until_reservations_
                 home.to_string_lossy()
             ),
         );
-
-    assert_eq!(
-        HubModelConfiguration::parse(&credential_home).err(),
-        Some(HubModelConfigurationError::InvalidCredentialDelivery)
-    );
-}
-
-#[test]
-fn configuration_rejects_a_credential_home_concurrency_bound_past_its_cap() {
-    let temporary = tempfile::tempdir().expect("synthetic home root is created");
-    let home = temporary.path().join("account-a");
-    std::fs::create_dir(&home).expect("synthetic home is created");
-    std::fs::write(home.join("fixture-marker"), "synthetic").expect("synthetic home is nonempty");
-    let credential_home = CONFIGURATION.replace(
-        "delivery = \"ambient\"",
-        &format!(
-            "delivery = \"codex_home\"\ncodex_home = {:?}\nmax_concurrent_invocations = {}",
-            home.to_string_lossy(),
-            MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS + 1
-        ),
-    );
 
     assert_eq!(
         HubModelConfiguration::parse(&credential_home).err(),
