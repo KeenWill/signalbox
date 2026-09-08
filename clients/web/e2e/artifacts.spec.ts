@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import {
   artifactScenario,
   fallbackDescriptor,
@@ -12,6 +10,7 @@ import {
   jpegDescriptor,
   jpegOriginalView,
 } from '../src/features/artifacts/artifactScenario'
+import { expect, type Page, type TestInfo, test } from './fontTest'
 
 interface BrowserProblems {
   consoleErrors: string[]

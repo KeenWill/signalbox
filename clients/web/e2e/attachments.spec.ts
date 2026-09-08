@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { expect, type Page, type TestInfo, test } from './fontTest'
 
 interface BrowserProblems {
   consoleErrors: string[]

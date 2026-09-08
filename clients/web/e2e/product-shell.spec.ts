@@ -1,5 +1,5 @@
-import { expect, type Page, test } from '@playwright/test'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, test } from './fontTest'
 import { useDeterministicImportApi } from './import-api-fixture'
 
 const importsProductFixture = {
