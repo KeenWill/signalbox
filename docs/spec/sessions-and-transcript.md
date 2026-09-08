@@ -524,7 +524,8 @@ oversized text is a typed bounded excerpt carrying its total length and exact
 continuation, never a summary that appears complete. Detail bodies carry typed
 session and turn lifecycle facts, model settings and provider responses, tool
 arguments and execution evidence, approval decisions, goals, compaction, runner
-placement, and delegation; a retired turn remains a closed event fact. User
+placement, and delegation; a retired turn remains a closed event fact. Creation
+bodies retain the cause and its dispatch or spawning-request identity. User
 overrides retain the command and denied-request identities. Repeated tool and
 goal members continue by member index. Tool-transition members freeze attempt
 state and payloads when the transition commits. Transitions without frozen

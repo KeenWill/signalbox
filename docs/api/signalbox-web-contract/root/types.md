@@ -1172,6 +1172,18 @@ pub enum WebTimelineDelegationDetail {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebTimelineCreationCause
+
+```rust
+pub enum WebTimelineCreationCause {
+    Interactive {},
+    RepositoryWatch { dispatch_id: WebSessionId },
+    Commissioned { dispatch_id: WebSessionId },
+    Delegated { spawning_request_id: WebSessionId },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebTimelineImportedEvidence
 
 ```rust
@@ -1443,6 +1455,7 @@ pub enum WebSessionTimelineDetailBody {
         kind: WebSessionTimelineEventKind,
     },
     SessionCreated {
+        cause: WebTimelineCreationCause,
         imported_evidence: option::Option<WebTimelineImportedEvidence>,
     },
     ModelSettings {

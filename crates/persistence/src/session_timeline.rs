@@ -938,7 +938,7 @@ async fn project_detail_event(
                 DispatchedOutboxEventKind::InputAccepted { .. } => {
                     return Err(SessionTimelineCorruption::MissingDetailRecord.into());
                 }
-                DispatchedOutboxEventKind::SessionCreated(_) => {
+                DispatchedOutboxEventKind::SessionCreated(creation) => {
                     require_no_body_cursor(cursor)?;
                     let imported_evidence = load_imported_evidence(
                         transaction,
@@ -948,7 +948,10 @@ async fn project_detail_event(
                     )
                     .await?;
                     (
-                        SessionTimelineDetailBody::SessionCreated { imported_evidence },
+                        SessionTimelineDetailBody::SessionCreated {
+                            cause: creation.cause,
+                            imported_evidence,
+                        },
                         None,
                     )
                 }

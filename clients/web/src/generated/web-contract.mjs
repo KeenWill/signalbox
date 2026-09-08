@@ -3942,6 +3942,9 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "cause": {
+                "$ref": "#/$defs/WebTimelineCreationCause"
+              },
               "imported_evidence": {
                 "anyOf": [
                   {
@@ -3958,7 +3961,8 @@ const schemas = {
               }
             },
             "required": [
-              "type"
+              "type",
+              "cause"
             ],
             "type": "object"
           },
@@ -4540,6 +4544,75 @@ const schemas = {
           "flex"
         ],
         "type": "string"
+      },
+      "WebTimelineCreationCause": {
+        "description": "Durable cause and originating identity of session creation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "interactive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "repository_watch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "dispatch_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "commissioned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "dispatch_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "spawning_request_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "delegated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawning_request_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WebTimelineDelegationDetail": {
         "oneOf": [
@@ -7800,6 +7873,9 @@ function assertTimelineDetailPage(value) {
           }
           if (detail.child_session_id === detail.provenance.session_id) {
             fail(`${path}.body.detail.child_session_id`, "a session other than the relationship parent");
+          }
+          if (value.session_id !== detail.provenance.session_id && value.session_id !== detail.child_session_id) {
+            fail(`${path}.body.detail`, "a lifecycle disposition on the parent or child timeline");
           }
         }
         if (item.body.detail.type === "child_result") {

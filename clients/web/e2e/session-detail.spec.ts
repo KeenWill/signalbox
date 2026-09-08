@@ -1,4 +1,5 @@
 import { expect, type Page, test } from '@playwright/test'
+import type { WebTimelineCreationCause } from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture } from '../src/product.fixture'
 import {
   detailItems,
@@ -10,7 +11,35 @@ import {
   toolResultItem,
 } from './session-detail-fixture'
 
-async function openDetails(page: Page, mismatch = false, override = false) {
+async function openDetails(
+  page: Page,
+  mismatch = false,
+  override = false,
+  creation?: WebTimelineCreationCause,
+) {
+  const items = detailItems.map((item, index) =>
+    creation && index === 0
+      ? {
+          ...item,
+          kind: 'session_created' as const,
+          projected_body_bytes: 128,
+          body: { type: 'session_created' as const, cause: creation, imported_evidence: null },
+        }
+      : item,
+  )
+  const windowItems = detailWindow.items.map((item, index) => ({
+    ...item,
+    kind: items[index]?.kind ?? item.kind,
+  }))
+  const timelineWindow = {
+    ...detailWindow,
+    items: windowItems.map((item) => ({
+      ...item,
+      projected_structured_bytes: 64 + item.kind.length,
+    })),
+    projected_structured_bytes: windowItems.reduce((sum, item) => sum + 64 + item.kind.length, 0),
+  }
+
   const reads: URL[] = []
   await page.addInitScript(
     ({ sessionId }) => {
@@ -61,12 +90,12 @@ async function openDetails(page: Page, mismatch = false, override = false) {
   await page.route(`**/api/sessions/${detailSessionId}**`, (route) => {
     const url = new URL(route.request().url())
     if (url.pathname.endsWith('/live')) return route.fulfill({ json: detailLive })
-    if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: detailWindow })
+    if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: timelineWindow })
     if (url.pathname.endsWith('/timeline-detail')) {
       reads.push(url)
       if (url.searchParams.get('first') !== url.searchParams.get('through'))
-        return route.fulfill({ json: detailPage(detailItems.slice(0, 2), resultCursor) })
-      let selected = detailItems.find(
+        return route.fulfill({ json: detailPage(items.slice(0, 2), resultCursor) })
+      let selected = items.find(
         (item) => item.address.event_sequence === url.searchParams.get('first'),
       )
       if (!selected)
@@ -87,7 +116,7 @@ async function openDetails(page: Page, mismatch = false, override = false) {
           },
         }
       }
-      const terminal = detailItems[4]
+      const terminal = items[4]
       if (mismatch && selected.kind === 'tool_batch_transition' && terminal)
         return route.fulfill({
           json: detailPage([{ ...terminal, address: selected.address }]),
@@ -110,7 +139,7 @@ async function openDetails(page: Page, mismatch = false, override = false) {
         sizes: {
           item_count: '5',
           projected_text_bytes: '256',
-          projected_structured_bytes: String(detailWindow.projected_structured_bytes),
+          projected_structured_bytes: String(timelineWindow.projected_structured_bytes),
           referenced_blob_count: '0',
           referenced_blob_bytes: '0',
         },
@@ -193,3 +222,24 @@ test('captures sessions detail evidence', async ({ page, browserName }) => {
   await page.getByRole('region', { name: 'Approval rationale' }).scrollIntoViewIfNeeded()
   await expect.soft(page).toHaveScreenshot('sessions-detail-mobile-light.png')
 })
+
+for (const cause of [
+  { type: 'interactive' },
+  { type: 'repository_watch', dispatch_id: '00000000-0000-0000-0000-000000000551' },
+  { type: 'commissioned', dispatch_id: '00000000-0000-0000-0000-000000000552' },
+  { type: 'delegated', spawning_request_id: '00000000-0000-0000-0000-000000000553' },
+] as const) {
+  test(`shows the ${cause.type} creation cause and identity`, async ({ page }) => {
+    await openDetails(page, false, false, cause)
+    const row = page.getByRole('row').filter({ hasText: 'session created' })
+    await row.press('Enter')
+    await expect(row).toContainText(cause.type.replaceAll('_', ' '))
+    if (cause.type === 'delegated') {
+      await expect(row).toContainText('Spawning request')
+      await expect(row).toContainText(cause.spawning_request_id)
+    } else if (cause.type !== 'interactive') {
+      await expect(row).toContainText('Dispatch')
+      await expect(row).toContainText(cause.dispatch_id)
+    }
+  })
+}

@@ -156,6 +156,7 @@ async fn item_and_region_details_share_the_stable_creation_address() -> Result<(
     assert!(matches!(
         item.items[0].body,
         SessionTimelineDetailBody::SessionCreated {
+            cause: signalbox_domain::SessionCreationCause::Interactive,
             imported_evidence: None
         }
     ));

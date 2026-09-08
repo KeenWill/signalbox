@@ -75,7 +75,34 @@ const settings = {
 } as const
 const selection = { kind: 'direct', selection_id: detailSessionId } as const
 const variants: Array<[WebSessionTimelineDetail['kind'], WebSessionTimelineDetail['body']]> = [
-  ['session_created', { type: 'session_created', imported_evidence: null }],
+  [
+    'session_created',
+    { type: 'session_created', cause: { type: 'interactive' }, imported_evidence: null },
+  ],
+  [
+    'session_created',
+    {
+      type: 'session_created',
+      cause: { type: 'repository_watch', dispatch_id: detailSessionId },
+      imported_evidence: null,
+    },
+  ],
+  [
+    'session_created',
+    {
+      type: 'session_created',
+      cause: { type: 'commissioned', dispatch_id: detailSessionId },
+      imported_evidence: null,
+    },
+  ],
+  [
+    'session_created',
+    {
+      type: 'session_created',
+      cause: { type: 'delegated', spawning_request_id: detailSessionId },
+      imported_evidence: null,
+    },
+  ],
   ['session_state_changed', { type: 'session_state', state: 'parked' }],
   ['session_terminal', { type: 'session_terminal', outcome: 'achieved_declared' }],
   ['command_settled', { type: 'command_settlement', command_id: detailSessionId, rejection: null }],

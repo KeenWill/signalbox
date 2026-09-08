@@ -4,4 +4,4 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| root | 165 | 0 | 1 | [functions](root/functions.md), [types](root/types.md), [types-2](root/types-2.md) |
+| root | 166 | 0 | 1 | [functions](root/functions.md), [types](root/types.md), [types-2](root/types-2.md) |

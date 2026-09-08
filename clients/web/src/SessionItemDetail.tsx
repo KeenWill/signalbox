@@ -294,18 +294,26 @@ const detailContent = (body: DetailBody): ReactNode => {
       return <p>Turn retired before activation.</p>
 
     case 'session_created':
-      return body.imported_evidence ? (
+      return (
         <Facts
           facts={[
-            ['Origin', 'imported'],
-            ['Imported conversation', body.imported_evidence.imported_conversation_id],
-            ['Relationship', body.imported_evidence.relationship],
-            ['Imported entry', body.imported_evidence.imported_entry_id],
-            ['Imported position', body.imported_evidence.imported_position],
+            ['Cause', body.cause.type.replaceAll('_', ' ')],
+            ...(body.cause.type === 'delegated'
+              ? ([['Spawning request', body.cause.spawning_request_id]] as const)
+              : body.cause.type === 'interactive'
+                ? []
+                : ([['Dispatch', body.cause.dispatch_id]] as const)),
+            ...(body.imported_evidence
+              ? ([
+                  ['Origin', 'imported'],
+                  ['Imported conversation', body.imported_evidence.imported_conversation_id],
+                  ['Relationship', body.imported_evidence.relationship],
+                  ['Imported entry', body.imported_evidence.imported_entry_id],
+                  ['Imported position', body.imported_evidence.imported_position],
+                ] as const)
+              : []),
           ]}
         />
-      ) : (
-        <p className="session-detail-note">Native session creation.</p>
       )
     case 'model_settings':
       return (

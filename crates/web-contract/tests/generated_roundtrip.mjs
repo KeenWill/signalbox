@@ -3228,7 +3228,7 @@ test("injection settlements reject contradictory delivery evidence", () => {
   }
 });
 
-test("child lifecycle disposition permits both outboxes and rejects identical parent and child", () => {
+test("child lifecycle disposition permits only its parent and child outboxes", () => {
   const page = userInputDetailPage();
   page.items[0].kind = "delegation_update";
   page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
@@ -3242,7 +3242,30 @@ test("child lifecycle disposition permits both outboxes and rejects identical pa
   const parentSession = page.session_id;
   page.session_id = page.items[0].body.detail.child_session_id;
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.session_id = "00000000-0000-0000-0000-000000000993";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a lifecycle disposition on the parent or child timeline/);
   page.items[0].body.detail.child_session_id = parentSession;
   page.session_id = parentSession;
   assert.throws(() => decodeWebSessionTimelineDetailPage(page), /child_session_id must be a session other than the relationship parent/);
+});
+
+test("creation details retain typed causes and require their originating identity", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "session_created";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  for (const cause of [
+    { type: "interactive" },
+    { type: "repository_watch", dispatch_id: page.session_id },
+    { type: "commissioned", dispatch_id: page.session_id },
+    { type: "delegated", spawning_request_id: page.session_id },
+  ]) {
+    page.items[0].body = { type: "session_created", cause, imported_evidence: null };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+    if (cause.type !== "interactive") {
+      page.items[0].body.cause = { type: cause.type };
+      assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+    }
+  }
+  delete page.items[0].body.cause;
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page));
 });

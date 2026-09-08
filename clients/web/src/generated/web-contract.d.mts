@@ -352,6 +352,7 @@ export type WebSessionTimelineDetailBody = {
   readonly kind: WebSessionTimelineEventKind;
   readonly type: "event_fact";
 } | {
+  readonly cause: WebTimelineCreationCause;
   readonly imported_evidence?: WebTimelineImportedEvidence | null;
   readonly type: "session_created";
 } | {
@@ -485,6 +486,19 @@ export type WebTimelineBodyField = "input_text" | "model_response" | "tool_argum
 export type WebTimelineBoundChildAction = "keep_running" | "stop" | "cancel";
 
 export type WebTimelineCodexCliServiceTier = "default" | "priority" | "flex";
+
+export type WebTimelineCreationCause = {
+  readonly type: "interactive";
+} | {
+  readonly dispatch_id: WebSessionId;
+  readonly type: "repository_watch";
+} | {
+  readonly dispatch_id: WebSessionId;
+  readonly type: "commissioned";
+} | {
+  readonly spawning_request_id: WebSessionId;
+  readonly type: "delegated";
+};
 
 export type WebTimelineDelegationDetail = {
   readonly child_session_id: WebSessionId;

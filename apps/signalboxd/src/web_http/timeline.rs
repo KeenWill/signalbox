@@ -622,23 +622,44 @@ fn detail_body_dto(
         SessionTimelineDetailBody::EventFact { kind } => WebSessionTimelineDetailBody::EventFact {
             kind: event_kind_dto(kind),
         },
-        SessionTimelineDetailBody::SessionCreated { imported_evidence } => {
-            WebSessionTimelineDetailBody::SessionCreated {
-                imported_evidence: imported_evidence.map(|evidence| WebTimelineImportedEvidence {
-                    imported_conversation_id: web_uuid(
-                        evidence.imported_conversation_id.into_uuid(),
-                    ),
-                    imported_entry_id: web_uuid(evidence.imported_entry_id.into_uuid()),
-                    imported_position: WebU64::from_u64(evidence.imported_position),
-                    relationship: match evidence.relationship {
-                        ImportedSessionRelationship::Resume => {
-                            WebTimelineImportedRelationship::Resume
+        SessionTimelineDetailBody::SessionCreated {
+            cause,
+            imported_evidence,
+        } => WebSessionTimelineDetailBody::SessionCreated {
+            cause: match cause {
+                signalbox_domain::SessionCreationCause::Interactive => {
+                    signalbox_web_contract::WebTimelineCreationCause::Interactive {}
+                }
+                signalbox_domain::SessionCreationCause::ModuleDispatched { dispatch } => {
+                    match dispatch {
+                        signalbox_domain::ModuleDispatch::RepositoryWatch { dispatch } => {
+                            signalbox_web_contract::WebTimelineCreationCause::RepositoryWatch {
+                                dispatch_id: web_uuid(dispatch.into_uuid()),
+                            }
                         }
-                        ImportedSessionRelationship::Fork => WebTimelineImportedRelationship::Fork,
-                    },
-                }),
-            }
-        }
+                        signalbox_domain::ModuleDispatch::Commissioned { dispatch } => {
+                            signalbox_web_contract::WebTimelineCreationCause::Commissioned {
+                                dispatch_id: web_uuid(dispatch.into_uuid()),
+                            }
+                        }
+                    }
+                }
+                signalbox_domain::SessionCreationCause::Delegated { spawning_request } => {
+                    signalbox_web_contract::WebTimelineCreationCause::Delegated {
+                        spawning_request_id: web_uuid(spawning_request.into_uuid()),
+                    }
+                }
+            },
+            imported_evidence: imported_evidence.map(|evidence| WebTimelineImportedEvidence {
+                imported_conversation_id: web_uuid(evidence.imported_conversation_id.into_uuid()),
+                imported_entry_id: web_uuid(evidence.imported_entry_id.into_uuid()),
+                imported_position: WebU64::from_u64(evidence.imported_position),
+                relationship: match evidence.relationship {
+                    ImportedSessionRelationship::Resume => WebTimelineImportedRelationship::Resume,
+                    ImportedSessionRelationship::Fork => WebTimelineImportedRelationship::Fork,
+                },
+            }),
+        },
         SessionTimelineDetailBody::ModelSettings { detail } => {
             WebSessionTimelineDetailBody::ModelSettings {
                 detail: model_settings_detail_dto(detail),
@@ -1613,6 +1634,50 @@ mod tests {
     use super::*;
     use signalbox_domain::{ToolAttemptId, ToolName, ToolRequestId};
     use uuid::Uuid;
+
+    #[test]
+    fn detail_preserves_creation_cause_and_originating_identity() {
+        use signalbox_domain::{
+            CommissionedDispatchId, ModuleDispatch, RepoWatchDispatchId, SessionCreationCause,
+        };
+        let identity = Uuid::from_u128(0x991);
+        for (cause, expected) in [
+            (
+                SessionCreationCause::Interactive,
+                serde_json::json!({ "type": "interactive" }),
+            ),
+            (
+                SessionCreationCause::ModuleDispatched {
+                    dispatch: ModuleDispatch::RepositoryWatch {
+                        dispatch: RepoWatchDispatchId::from_uuid(identity),
+                    },
+                },
+                serde_json::json!({ "type": "repository_watch", "dispatch_id": identity.to_string() }),
+            ),
+            (
+                SessionCreationCause::ModuleDispatched {
+                    dispatch: ModuleDispatch::Commissioned {
+                        dispatch: CommissionedDispatchId::from_uuid(identity),
+                    },
+                },
+                serde_json::json!({ "type": "commissioned", "dispatch_id": identity.to_string() }),
+            ),
+            (
+                SessionCreationCause::Delegated {
+                    spawning_request: ToolRequestId::from_uuid(identity),
+                },
+                serde_json::json!({ "type": "delegated", "spawning_request_id": identity.to_string() }),
+            ),
+        ] {
+            let dto = detail_body_dto(SessionTimelineDetailBody::SessionCreated {
+                cause,
+                imported_evidence: None,
+            })
+            .expect("creation detail converts");
+            let json = serde_json::to_value(dto).expect("creation detail serializes");
+            assert_eq!(json["cause"], expected);
+        }
+    }
 
     #[test]
     fn detail_preserves_the_preauthorization_failure_cause() {

@@ -1432,6 +1432,16 @@ pub enum WebTimelineDelegationDetail {
     },
 }
 
+/// Durable cause and originating identity of session creation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineCreationCause {
+    Interactive {},
+    RepositoryWatch { dispatch_id: WebSessionId },
+    Commissioned { dispatch_id: WebSessionId },
+    Delegated { spawning_request_id: WebSessionId },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineImportedEvidence {
@@ -1669,6 +1679,7 @@ pub enum WebSessionTimelineDetailBody {
         kind: WebSessionTimelineEventKind,
     },
     SessionCreated {
+        cause: WebTimelineCreationCause,
         imported_evidence: Option<WebTimelineImportedEvidence>,
     },
     ModelSettings {
@@ -3865,6 +3876,9 @@ function assertTimelineDetailPage(value) {{
           }}
           if (detail.child_session_id === detail.provenance.session_id) {{
             fail(`${{path}}.body.detail.child_session_id`, "a session other than the relationship parent");
+          }}
+          if (value.session_id !== detail.provenance.session_id && value.session_id !== detail.child_session_id) {{
+            fail(`${{path}}.body.detail`, "a lifecycle disposition on the parent or child timeline");
           }}
         }}
         if (item.body.detail.type === "child_result") {{
