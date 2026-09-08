@@ -694,6 +694,117 @@ async fn fork_heads_are_fetched_without_the_watched_repository_credential()
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn dispatched_git_tools_accept_large_unrelated_loose_objects() -> Result<(), Box<dyn Error>> {
+    assert_dispatched_git_tools(ArchiveStorage::Loose).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatched_git_tools_accept_large_unrelated_packed_objects() -> Result<(), Box<dyn Error>>
+{
+    assert_dispatched_git_tools(ArchiveStorage::Packed).await
+}
+
+enum ArchiveStorage {
+    Loose,
+    Packed,
+}
+
+async fn assert_dispatched_git_tools(storage: ArchiveStorage) -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::TurnId;
+    let mut fixture = CheckoutFixture::new().await?;
+    let remote = git2::Repository::open_bare(&fixture.runner.bare)?;
+    // The current checkout is small; another branch exceeds the object-content read bound.
+    let blob = remote.blob(&vec![b'x'; 1024 * 1024 + 1])?;
+    let mut tree = remote.treebuilder(None)?;
+    tree.insert("archive.bin", blob, 0o100644)?;
+    let tree = remote.find_tree(tree.write()?)?;
+    let signature = git2::Signature::now("Checkout fixture", "checkout@example.test")?;
+    remote.commit(
+        Some("refs/heads/archive"),
+        &signature,
+        &signature,
+        "Archived data",
+        &tree,
+        &[],
+    )?;
+    if matches!(storage, ArchiveStorage::Packed) {
+        // The authority supports pack/index pairs without optional Git sidecar indexes.
+        let output = std::process::Command::new("git")
+            .args(["-c", "pack.writeReverseIndex=false"])
+            .arg("-C")
+            .arg(&fixture.runner.bare)
+            .args(["repack", "-ad", "--no-write-bitmap-index"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()?;
+        assert!(output.status.success(), "pack fixture: {output:?}");
+    }
+    let (catalog, executor) = fixture.daemon_tools()?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    assert!(!root.join("archive.bin").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("review.txt"))?,
+        "retained head\n"
+    );
+    let turn = TurnId::from_uuid(Uuid::now_v7());
+    let status = run_git_tool(&catalog, &executor, session, turn, "git_status", "{}").await;
+    assert_eq!(status["branch"], "review");
+    assert_eq!(status["head"], fixture.head.as_str());
+    let log = run_git_tool(&catalog, &executor, session, turn, "git_log", "{}").await;
+    assert_eq!(log["commits"][0]["commit"], fixture.head.as_str());
+    std::fs::write(root.join("review.txt"), "reviewed head\n")?;
+    let diff = run_git_tool(
+        &catalog,
+        &executor,
+        session,
+        turn,
+        "git_diff",
+        r#"{"scope":"worktree"}"#,
+    )
+    .await;
+    assert!(
+        diff["patch"]
+            .as_str()
+            .expect("patch")
+            .contains("+reviewed head")
+    );
+    let staged = run_git_tool(
+        &catalog,
+        &executor,
+        session,
+        turn,
+        "git_stage",
+        r#"{"paths":["review.txt"]}"#,
+    )
+    .await;
+    assert_eq!(staged["staged_paths"], 1);
+    let committed = run_git_tool(
+        &catalog,
+        &executor,
+        session,
+        turn,
+        "git_create_commit",
+        r#"{"message":"Review completed"}"#,
+    )
+    .await;
+    let next_turn = TurnId::from_uuid(Uuid::now_v7());
+    let status = run_git_tool(&catalog, &executor, session, next_turn, "git_status", "{}").await;
+    assert_eq!(status["head"], committed["commit"]);
+    assert_eq!(status["entries"], serde_json::json!([]));
+    drop(executor);
+    // Reconstruct the daemon composition against the persisted session checkout.
+    let (catalog, restarted) = fixture.daemon_tools()?;
+    let status = run_git_tool(&catalog, &restarted, session, next_turn, "git_status", "{}").await;
+    assert_eq!(status["head"], committed["commit"]);
+    assert_eq!(status["entries"], serde_json::json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn dispatch_provisions_the_retained_head_at_the_git_tools_root() -> Result<(), Box<dyn Error>>
 {
     let mut fixture = CheckoutFixture::new().await?;
@@ -2003,10 +2114,122 @@ async fn assert_git_status(
         .execute(batch.session(), batch.turn())
         .await
         .expect("execute git_status");
-    assert!(matches!(
-        recorded.take(),
-        Some(ToolExecutorEvidence::CompletedText(_))
-    ));
+    let evidence = recorded.take();
+    assert!(
+        matches!(evidence, Some(ToolExecutorEvidence::CompletedText(_))),
+        "git_status evidence: {evidence:?}"
+    );
+}
+
+impl CheckoutFixture {
+    fn daemon_tools(
+        &self,
+    ) -> Result<
+        (
+            signalboxd::DaemonToolCatalog,
+            impl signalbox_application::ToolExecutor<Error = signalboxd::DaemonToolExecutorError>
+            + Clone
+            + Send
+            + use<>,
+        ),
+        Box<dyn Error>,
+    > {
+        use signalbox_tools_code_host::{CodeHostNumericBounds, GitHubCodeHostTransport};
+        use signalboxd::{DaemonTools, FileCredentialAccess, MappedDaemonCredentialInputs};
+        let configuration = self.sink.models.daemon_tools().expect("tool configuration");
+        let unused_credentials = FileCredentialAccess::new(
+            self._files.path().join("unused-tool-credential"),
+            signalbox_model_runtime::CredentialReference::new("unused-checkout-tool-credential"),
+        );
+        let (nudge, _) =
+            InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(self.core.clone()));
+        let tools = DaemonTools::try_new_production(
+            signalbox_tools_basic::SystemCurrentTimeClock,
+            self.core.clone(),
+            nudge,
+            MappedDaemonCredentialInputs {
+                web_search: unused_credentials.clone(),
+                code_host: unused_credentials.clone(),
+                github: unused_credentials,
+            },
+            GitHubCodeHostTransport::try_new(CodeHostNumericBounds::new(
+                None, None, None, None, None, None,
+            ))?,
+            configuration.github_egress_policy(),
+            configuration.workspace_root(),
+            configuration.git_identity().clone(),
+            configuration.exec_supervisor_executable(),
+            configuration.cargo_registry_cache(),
+            self.sink.models.web_fetch_egress_policy(),
+        )?;
+        Ok(tools.into_parts())
+    }
+}
+
+async fn run_git_tool(
+    catalog: &signalboxd::DaemonToolCatalog,
+    executor: &(
+         impl signalbox_application::ToolExecutor<Error = signalboxd::DaemonToolExecutorError>
+         + Clone
+         + Send
+     ),
+    session: SessionId,
+    turn: signalbox_domain::TurnId,
+    name: &str,
+    arguments: &str,
+) -> serde_json::Value {
+    use signalbox_application::*;
+    use signalbox_domain::{
+        ContextFrontierId, ModelCallId, ToolAttemptId, ToolRequestId, TurnAttemptId,
+    };
+    let name = signalbox_domain::ToolName::try_new(name.to_owned()).expect("tool name");
+    let definition = catalog.definition(&name).expect("daemon Git declaration");
+    let batch = prepared_single_attempt_batch(
+        PreparedAttemptIdentities {
+            session,
+            turn,
+            producing_call: ModelCallId::from_uuid(Uuid::now_v7()),
+            request: ToolRequestId::from_uuid(Uuid::now_v7()),
+            attempt: ToolAttemptId::from_uuid(Uuid::now_v7()),
+            issuing_turn_attempt: TurnAttemptId::from_uuid(Uuid::now_v7()),
+            frontier: ContextFrontierId::from_uuid(Uuid::now_v7()),
+        },
+        PreparedAttemptProposal {
+            name: name.clone(),
+            arguments: signalbox_domain::NormalizedToolArguments::try_from_provider_text(
+                arguments.to_owned(),
+            )
+            .expect("arguments"),
+            effect_class: definition.effect_class(),
+            approval: PreparedAttemptApproval::UserConfirmation {
+                command: DurableCommandId::from_uuid(Uuid::now_v7()),
+            },
+        },
+    );
+    let (executor, recorded) = RecordingToolExecutor::new(executor.clone());
+    let mut service = ToolExecutionService::new(
+        UuidV7ToolLoopIdGenerator,
+        FixtureToolExecutionTransaction::new(
+            batch.clone(),
+            FixtureTransactionFailures {
+                domain_rejection: signalbox_tools_git::LocalGitExecutorError,
+                declined_crash_classification: signalbox_tools_git::LocalGitExecutorError,
+            },
+        ),
+        catalog.clone(),
+        executor,
+        InProcessToolDispatchGate::default(),
+    );
+    service
+        .execute(session, turn)
+        .await
+        .expect("execute daemon Git tool");
+    match recorded.take() {
+        Some(ToolExecutorEvidence::CompletedText(text)) => {
+            serde_json::from_str(&text).expect("Git result JSON")
+        }
+        evidence => panic!("{} evidence: {evidence:?}", name.as_str()),
+    }
 }
 
 #[tokio::test]

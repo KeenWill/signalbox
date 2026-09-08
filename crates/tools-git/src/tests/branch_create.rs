@@ -96,7 +96,7 @@ fn branch_create_rejects_an_alternates_fifo_planted_after_object_pinning() {
         .add_to(&object_database)
         .expect("pinned objects attach");
     repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .expect("pinned object database installs");
     let alternates = fixture.root().join(".git/objects/info/alternates");
     create_fifo(&alternates).expect("replacement alternates FIFO constructs");

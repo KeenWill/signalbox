@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use git2::{Delta, DiffFindOptions, Index, ObjectFormat, ObjectType, Repository};
+use git2::{Delta, DiffFindOptions, Index, ObjectFormat, ObjectType};
 use signalbox_tools_workspace::{
     WorkspaceEntryKind, WorkspaceFileSystem, WorkspacePathRejection, WorkspaceResolveError,
     WorkspaceRoot,
@@ -20,12 +20,12 @@ use crate::limits::{
     GITLINK_MODE, INDEX_ASSUME_VALID, INDEX_SKIP_WORKTREE, MAX_OBJECT_BYTES, MAX_STATUS_ENTRIES,
     MAX_STATUS_PATH_BYTES, MAX_WORKTREE_TOTAL_BYTES,
 };
-use crate::pinning::{PinnedRepository, repository_filemode};
+use crate::pinning::{PinnedRepository, RepositoryShell, repository_filemode};
 use crate::result::{StatusEntry, StatusResult};
 use crate::status_reference::StatusHeadSnapshot;
 
 pub(super) fn status<FileSystem: WorkspaceFileSystem>(
-    repository: &Repository,
+    repository: &RepositoryShell,
     authority: &PinnedRepository,
     filesystem: &FileSystem,
     root: &WorkspaceRoot,
