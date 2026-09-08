@@ -187,9 +187,12 @@ where
             packed_reference_exists(authority, &reference_name).is_ok_and(|exists| !exists);
         if !packed_still_absent {
             if pack_entry_is_owned(&directory, &leaf, &lock, identity) {
-                let _ = unlinkat(&directory, &leaf, AtFlags::empty());
+                return Err(LocalGitFailure::Operation.after_rollback(
+                    unlinkat(&directory, &leaf, AtFlags::empty())
+                        .map_err(|_| LocalGitFailure::Operation),
+                ));
             }
-            return Err(LocalGitFailure::Operation);
+            return Err(LocalGitFailure::Ambiguous);
         }
         Ok(())
     })();

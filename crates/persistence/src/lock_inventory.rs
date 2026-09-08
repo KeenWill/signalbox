@@ -106,6 +106,9 @@
 //!   UPDATE`.
 //!
 //! `runners`:
+//! - `RunnerProtocolStore::settle_replacement_at_boundary`,
+//!   `retire_replacement_for_terminal_batch`: caller-held session and scheduler locks ->
+//!   `runner_replacement_stage FOR UPDATE`; installation then takes runner authority locks.
 //! - `lock_replacement_enrollments`: loss identity locks in runner order -> the lost, candidate,
 //!   and candidate predecessor `runner_enrollment FOR UPDATE` in enrollment order -> their
 //!   `runner_connection_authority_head FOR SHARE` in enrollment order.

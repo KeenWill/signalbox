@@ -45,9 +45,10 @@ pub use registry::{
 pub use value::{
     AttachmentKind, BoundedMetadata, CanonicalJsonObjectSchema, CanonicalMediaType,
     DeclaredMediaType, DisplayFilename, FileDigest, FileReaderName, FileReaderProviderName,
-    FileReaderRevision, FileUse, JsonParseLimits, MediaTypeParseError, ReadContinuationCursor,
-    ReadViewName, ReaderIdentity, ReasonCode, RegistryValueError, VisiblePartSelector,
-    parse_json_without_duplicate_members, parse_json_without_duplicate_members_bounded,
+    FileReaderRevision, FileUse, JsonParseError, JsonParseLimits, MediaTypeParseError,
+    ReadContinuationCursor, ReadViewName, ReaderIdentity, ReasonCode, RegistryValueError,
+    VisiblePartSelector, parse_json_without_duplicate_members,
+    parse_json_without_duplicate_members_bounded,
 };
 
 /// Stable model-facing inspection tool name.

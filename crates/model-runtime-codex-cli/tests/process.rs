@@ -32,6 +32,108 @@ const CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 const RESOLVED_TARGET: &str = "gpt-offline-exact";
 const OFFLINE_HARNESS_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[cfg(unix)]
+#[tokio::test]
+async fn rejected_version_probes_kill_their_descendants() {
+    use signalbox_model_runtime_codex_cli::{
+        CodexCliVersionProbeError, SUPPORTED_CODEX_CLI_VERSION, verify_pinned_codex_cli_version,
+    };
+
+    for (name, output, expected) in [
+        (
+            "unsuccessful",
+            "exit 1".to_owned(),
+            CodexCliVersionProbeError::Unsuccessful,
+        ),
+        (
+            "invalid utf8",
+            "printf '\\377'".to_owned(),
+            CodexCliVersionProbeError::InvalidBanner,
+        ),
+        (
+            "invalid semver",
+            "printf 'codex-cli latest'".to_owned(),
+            CodexCliVersionProbeError::InvalidBanner,
+        ),
+        (
+            "wrong version",
+            "printf 'codex-cli 0.0.1'".to_owned(),
+            CodexCliVersionProbeError::VersionMismatch,
+        ),
+        (
+            "wrong digest",
+            format!("printf 'codex-cli {SUPPORTED_CODEX_CLI_VERSION}'"),
+            CodexCliVersionProbeError::VersionMismatch,
+        ),
+    ] {
+        let directory = tempfile::tempdir().expect("private version-probe fixture");
+        let executable = version_probe_with_descendant(directory.path(), &output);
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(5)).await;
+
+        assert_recorded_process_group_exited(directory.path().join("probe-group"));
+        assert_eq!(result, Err(expected), "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn version_probe_cleanup_uses_the_original_deadline() {
+    use signalbox_model_runtime_codex_cli::{
+        CodexCliVersionProbeError, verify_pinned_codex_cli_version,
+    };
+
+    let directory = tempfile::tempdir().expect("private version-probe fixture");
+    let executable = version_probe_with_descendant(directory.path(), "wait");
+    let group_record = directory.path().join("probe-group");
+    let readiness = wall_clock_record_watcher(group_record.clone());
+    let start = tokio::time::Instant::now();
+    let probe = tokio::spawn(async move {
+        verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await
+    });
+    readiness.await.expect("probe descendant is running");
+    let result = probe.await.expect("probe completes within its deadline");
+
+    assert_eq!(result, Err(CodexCliVersionProbeError::TimedOut));
+    assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(1));
+    assert_recorded_process_group_exited(group_record);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_version_probe_kills_its_descendants() {
+    use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
+
+    let directory = tempfile::tempdir().expect("private version-probe fixture");
+    let executable = version_probe_with_descendant(directory.path(), "wait");
+    let group_record = directory.path().join("probe-group");
+    let probe = tokio::spawn(async move {
+        verify_pinned_codex_cli_version(&executable, Duration::from_secs(30)).await
+    });
+    wait_for_record(group_record.clone()).await;
+    probe.abort();
+    assert!(probe.await.expect_err("probe was cancelled").is_cancelled());
+
+    assert_recorded_process_group_exited(group_record);
+}
+
+/// The background child closes the output pipe so validation can reject the
+/// exited leader while its descendant is still running in the owned group.
+#[cfg(unix)]
+fn version_probe_with_descendant(directory: &Path, output: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable = directory.join("version-probe");
+    let record = directory.join("probe-group");
+    let script = format!(
+        "#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\nprintf 'process_group=%s\\n' \"$$\" > '{}'\n{output}\n",
+        record.display()
+    );
+    std::fs::write(&executable, script).expect("version probe script is written");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+        .expect("version probe script is executable");
+    executable
+}
+
 #[derive(Debug)]
 struct OauthFixture;
 
@@ -422,7 +524,8 @@ fn collect_loss_cause(cause: &LossCause, material: &mut Vec<String>) {
                 StreamInterruption::TransportFailure(facts) | StreamInterruption::TimedOut(facts),
         } => material.push(facts.detail.clone()),
         LossCause::ResponseUnintelligible { detail }
-        | LossCause::StreamProtocolViolation { detail } => material.push(detail.clone()),
+        | LossCause::StreamProtocolViolation { detail }
+        | LossCause::ResponseEnvelopeRejected { detail, .. } => material.push(detail.clone()),
     }
 }
 
@@ -1347,6 +1450,13 @@ async fn duplicate_response_envelope_members_are_stream_protocol_violations() {
 
     let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
     assert!(detail.contains("response envelope"));
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,
+            ..
+        }
+    ));
 }
 
 /// a marker-bearing object field that sorts before a benign sibling
@@ -2036,6 +2146,13 @@ async fn credential_shaped_envelope_errors_are_content_silent() {
         detail,
         "last agent message does not match the response envelope"
     );
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::Shape,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -2051,6 +2168,13 @@ async fn deeply_nested_decoded_envelope_is_boundary_loss() {
     assert!(
         response_unintelligible(&boundary_loss(&result.evidence).cause).contains("JSON nesting")
     );
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::NestingBound,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -2764,7 +2888,10 @@ async fn completed_turn_without_an_envelope_is_boundary_loss() {
     .await;
     assert!(matches!(
         boundary_loss(&result.evidence).cause,
-        LossCause::ResponseUnintelligible { .. }
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::Missing,
+            ..
+        }
     ));
     assert_eq!(result.spawns, 1);
 }
@@ -5192,7 +5319,16 @@ fn linux_own_process_group_has_a_live_member() {
 /// operating-system child is still starting; only the readiness watchdog uses
 /// wall time, and completion of that barrier makes cancellation ready.
 fn cancel_after_wall_clock_record(path: std::path::PathBuf) -> CancellationSignal {
-    let watcher = tokio::task::spawn_blocking(move || {
+    let watcher = wall_clock_record_watcher(path);
+    CancellationSignal::when(async move {
+        watcher
+            .await
+            .expect("the wall-clock readiness barrier completes");
+    })
+}
+
+fn wall_clock_record_watcher(path: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
         let deadline = std::time::Instant::now() + OFFLINE_HARNESS_TIMEOUT;
         while std::fs::read_to_string(&path)
             .map(|content| content.lines().count())
@@ -5205,11 +5341,6 @@ fn cancel_after_wall_clock_record(path: std::path::PathBuf) -> CancellationSigna
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-    });
-    CancellationSignal::when(async move {
-        watcher
-            .await
-            .expect("the wall-clock readiness barrier completes");
     })
 }
 
@@ -5309,14 +5440,21 @@ fn transport_failed(cause: &LossCause) -> &signalbox_model_runtime::TransportFac
 }
 
 fn response_unintelligible(cause: &LossCause) -> &str {
-    let LossCause::ResponseUnintelligible { detail } = cause else {
+    let (LossCause::ResponseUnintelligible { detail }
+    | LossCause::ResponseEnvelopeRejected { detail, .. }) = cause
+    else {
         panic!("expected unintelligible-response loss, got {cause:?}");
     };
     detail
 }
 
 fn stream_protocol_violation(cause: &LossCause) -> &str {
-    let LossCause::StreamProtocolViolation { detail } = cause else {
+    let (LossCause::StreamProtocolViolation { detail }
+    | LossCause::ResponseEnvelopeRejected {
+        stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,
+        detail,
+    }) = cause
+    else {
         panic!("expected stream-protocol violation, got {cause:?}");
     };
     detail

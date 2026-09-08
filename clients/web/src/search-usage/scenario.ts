@@ -12,12 +12,14 @@ import type { SearchRequest, SearchUsageSource, UsageCallsRequest, UsageFilters 
 
 export const SEARCH_USAGE_SCENARIO_SESSION_ID = '00000000-0000-0000-0000-000000000994'
 export const SEARCH_USAGE_FAR_ADDRESS = '777777'
-const SEARCH_RESULT_COUNT = 72
+const SEARCH_RESULT_COUNT = 720
 const USAGE_CALL_COUNT = 240
 const MODEL_ALPHA = '00000000-0000-0000-0000-000000001001'
 const MODEL_BETA = '00000000-0000-0000-0000-000000001002'
-const PROFILE_ALPHA = 'profile-alpha'
-const PROFILE_BETA = 'profile-beta'
+const PROFILE_ALPHA = 'exact:profile-alpha'
+const PROFILE_BETA = 'mapped:profile-beta'
+const MODEL_UNCONFIGURED = '00000000-0000-0000-0000-000000001003'
+const PROFILE_UNCONFIGURED = 'exact:profile-unconfigured'
 
 export interface SearchUsageScenarioDiagnostics {
   searchReads: number
@@ -31,15 +33,14 @@ const uuidAt = (namespace: number, index: number): string =>
 
 const searchResult = (query: string, index: number): WebSearchPage['results'][number] => {
   // The contract orders a search page strictly descending by (address, projection id), so the
-  // scenario walks addresses down from the far address rather than up from it.
-  const address = String(Number(SEARCH_USAGE_FAR_ADDRESS) - index * 13)
+  // scenario walks addresses down from the far address with multiple projections per address.
+  const address = String(Number(SEARCH_USAGE_FAR_ADDRESS) - Math.floor(index / 2) * 13)
   const contentClass = index % 9 === 0 ? 'derived_text_artifact' : 'assistant_transcript'
   const snippet = `${query} — bounded lexical evidence at durable address ${address}`
   return {
     session_id: SEARCH_USAGE_SCENARIO_SESSION_ID,
-    // The contract anchors a search continuation to the final result's projection id, so the
-    // scenario numbers projections one past the index the pager slices on.
-    projection_id: String(index + 1),
+    // Projection identities descend within each shared address and anchor forward continuations.
+    projection_id: String(SEARCH_RESULT_COUNT - index),
     address: { event_sequence: address },
     source:
       contentClass === 'derived_text_artifact'
@@ -59,34 +60,40 @@ const tokenValue = (value: number | null): string | null => (value === null ? nu
 
 const usageCall = (index: number): WebUsageCallPage['calls'][number] => {
   const reported = index % 3 !== 1
-  const modelId = index % 2 === 0 ? MODEL_ALPHA : MODEL_BETA
+  const modelId = index % 5 === 0 ? MODEL_UNCONFIGURED : index % 2 === 0 ? MODEL_ALPHA : MODEL_BETA
   const missingOutput = index % 11 === 0
-  const meteredEquivalent = index % 4 === 3
-  const rateVersion = index % 5 === 0 ? 'rates-2026-08-b' : 'rates-2026-08-a'
+  const meteredEquivalent = modelId === MODEL_BETA
+  const rateVersion = modelId === MODEL_BETA ? 'rates-2026-08-b' : 'rates-2026-08-a'
   return {
     call_id: uuidAt(997, index + 1),
     call_kind: index % 7 === 0 ? 'approval_judge' : 'model_call',
     session_id: SEARCH_USAGE_SCENARIO_SESSION_ID,
     turn_id: uuidAt(998, Math.floor(index / 2) + 1),
     model_id: modelId,
-    profile_id: modelId === MODEL_ALPHA ? PROFILE_ALPHA : PROFILE_BETA,
+    profile_id:
+      modelId === MODEL_UNCONFIGURED
+        ? PROFILE_UNCONFIGURED
+        : modelId === MODEL_ALPHA
+          ? PROFILE_ALPHA
+          : PROFILE_BETA,
     recorded_at_micros: String(1_787_400_000_000_000 - index * 1_000_000),
     provenance: reported ? 'reported' : 'estimated',
     input_semantics: 'cache_exclusive',
     tokens: {
       input: String(800 + index),
       output: tokenValue(missingOutput ? null : 120 + (index % 31)),
-      cache_creation_input: null,
+      cache_creation_input: tokenValue(index % 6 === 0 ? 80 + index : null),
       cache_read_input: tokenValue(index % 4 === 0 ? 300 + index : null),
     },
-    cost: missingOutput
-      ? { status: 'unavailable', reason: 'configuration_unavailable' }
-      : {
-          status: 'derived',
-          amount_usd: index % 5 === 0 ? '0.031' : '0.017',
-          rate_version: rateVersion,
-          label: meteredEquivalent ? 'metered_equivalent' : 'real',
-        },
+    cost:
+      modelId === MODEL_UNCONFIGURED
+        ? { status: 'unavailable', reason: 'configuration_unavailable' }
+        : {
+            status: 'derived',
+            amount_usd: index % 5 === 0 ? '0.031' : '0.017',
+            rate_version: rateVersion,
+            label: meteredEquivalent ? 'metered_equivalent' : 'real',
+          },
   }
 }
 
@@ -145,8 +152,8 @@ const usageGroups = (): WebUsageSummary['groups'] => [
   },
   {
     call_kind: 'approval_judge',
-    model_id: MODEL_ALPHA,
-    profile_id: PROFILE_ALPHA,
+    model_id: MODEL_UNCONFIGURED,
+    profile_id: PROFILE_UNCONFIGURED,
     provenance: 'reported',
     input_semantics: 'cache_exclusive',
     coverage: {
@@ -201,7 +208,7 @@ export class SearchUsageScenarioSource implements SearchUsageSource {
 
   async search(request: SearchRequest): Promise<WebSearchPage> {
     this.counts.searchReads += 1
-    const start = Number(request.after?.projection_id ?? '0')
+    const start = request.after ? SEARCH_RESULT_COUNT - Number(request.after.projection_id) + 1 : 0
     const end = Math.min(start + request.maxItems, SEARCH_RESULT_COUNT)
     const results = Array.from({ length: end - start }, (_, offset) =>
       searchResult(request.text, start + offset),
@@ -212,7 +219,7 @@ export class SearchUsageScenarioSource implements SearchUsageSource {
         end < SEARCH_RESULT_COUNT
           ? {
               address: results.at(-1)?.address,
-              projection_id: String(end),
+              projection_id: results.at(-1)?.projection_id,
             }
           : null,
     })

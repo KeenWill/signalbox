@@ -1025,13 +1025,36 @@ async fn target_reenrollment_restores_its_commissioned_session_park() -> Result<
     .await?;
 
     let restored = store.reenroll_target(&repository, pull_request()).await?;
-    let lifecycle = SessionLifecycleRepository::new(pool)
+    let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(session)
         .await?
         .expect("the restored session retains its lifecycle row");
 
     assert_eq!(restored, Some(session));
     assert!(!lifecycle.state().is_parked());
+    let restarted = PostgresConvergenceSweepStore::new(pool);
+    assert_eq!(
+        restarted
+            .reenroll_target(&repository, pull_request())
+            .await?,
+        Some(session)
+    );
+    restarted
+        .acknowledge_reenrollment_nudge(&repository, pull_request(), session)
+        .await?;
+    assert_eq!(
+        restarted
+            .reenroll_target(&repository, pull_request())
+            .await?,
+        None
+    );
+    assert!(
+        !restarted
+            .load_target(&repository, pull_request())
+            .await?
+            .expect("target remains durable")
+            .is_parked()
+    );
     Ok(())
 }
 
@@ -1386,6 +1409,44 @@ async fn target_removal_restores_its_commissioned_session_park() -> Result<(), B
 
     assert_eq!(restored, vec![session]);
     assert!(!lifecycle.state().is_parked());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn target_removal_retains_a_handoff_until_acknowledgement() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let session = park_commissioned_session(
+        &pool,
+        &store,
+        &repository,
+        &observation,
+        0x89_266,
+        0x89_267,
+        0x89_268,
+    )
+    .await?;
+    assert_eq!(
+        store.reenroll_target(&repository, pull_request()).await?,
+        Some(session)
+    );
+    assert!(
+        !SessionLifecycleRepository::new(pool)
+            .load(session)
+            .await?
+            .expect("the restored session retains its lifecycle row")
+            .state()
+            .is_parked()
+    );
+    assert_eq!(
+        store.reconcile_configured_targets(&[]).await?,
+        vec![session]
+    );
+    store.acknowledge_removed_target_nudge(session).await?;
+    assert!(store.reconcile_configured_targets(&[]).await?.is_empty());
     Ok(())
 }
 
