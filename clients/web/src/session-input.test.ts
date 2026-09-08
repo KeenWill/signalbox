@@ -531,7 +531,7 @@ it.each([
     const held = await readExtendedSessionTranscript(
       window,
       null,
-      { ...limits, max_timeline_detail_bytes: budget },
+      { ...limits, max_timeline_detail_items: 8, max_timeline_detail_bytes: budget },
       null,
     )
     expect(fetch).toHaveBeenCalledTimes(1)
@@ -680,4 +680,33 @@ it('retains the paginated first page and continuation when the tail grows', asyn
   expect(extended.page.continuation).toEqual(page.continuation)
   expect(extended.through).toBe('10')
   expect(fetch).toHaveBeenCalledTimes(1)
+})
+
+it('stops a bookkeeping scan at the workspace record budget regardless of history length', async () => {
+  const fetch = vi.fn(async (url: string) => {
+    const query = new URL(url, 'http://localhost').searchParams
+    const first = Number(query.get('cursor_address') ?? '1')
+    const count = Number(query.get('max_items'))
+    return Response.json({
+      session_id: sessionId,
+      items: Array.from({ length: count }, (_, index) => ({
+        address: { event_sequence: String(first + index) },
+        kind: 'goal_turn_retired',
+        projected_body_bytes: 128,
+        body: { type: 'event_fact', kind: 'goal_turn_retired' },
+      })),
+      projected_body_bytes: count * 128,
+      continuation: { type: 'more_at', address: { event_sequence: String(first + count) } },
+    })
+  })
+  vi.stubGlobal('fetch', fetch)
+  const result = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '1000000' },
+    null,
+    limits,
+    null,
+  )
+  expect(fetch).toHaveBeenCalledTimes(10)
+  expect(result.page.items).toEqual([])
+  expect(result.page.continuation).toEqual({ type: 'more_at', address: { event_sequence: '81' } })
 })

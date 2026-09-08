@@ -503,11 +503,13 @@ pages of at most eight items and 65,536 projected bytes, clamped to the
 advertised limits, with exact byte accounting and continuation matching.
 Pagination resets when the session, window bounds, or observation cursor
 changes; the response bound includes their attachment references. Text pages
-advance past metadata-only detail records automatically within the item and
-projected-byte page budgets; discarded records consume both budgets. The
-continuation remains available when either budget is exhausted. The conversation
-shows user and assistant text, tool arguments and output, and unsuccessful turn
-outcomes in event order. Bookkeeping is hidden until Events is selected.
+advance past metadata-only detail records automatically within the workspace
+record budget and projected-byte page budget; discarded records consume both
+budgets. The scan and retained-content item budgets are clamped independently to
+the advertised limit. The continuation remains available when either budget is
+exhausted. The conversation shows user and assistant text, tool arguments and
+output, and unsuccessful turn outcomes in event order. Bookkeeping is hidden
+until Events is selected.
 
 The session timeline descriptor reports the first and latest addresses, the item
 and projected-size facts, the active and queued turn counts, and the observation

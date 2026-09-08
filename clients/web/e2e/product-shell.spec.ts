@@ -493,7 +493,8 @@ test('clears the session inspector description when navigating to Imports', asyn
   await useDeterministicSession(page)
   await useDeterministicImportApi(page)
   await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
-  await page.getByRole('option', { name: /43 turn completed/ }).click()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  await page.getByRole('row', { name: /43 turn completed/ }).click()
   const inspector = page.getByRole('complementary', { name: 'Inspector' })
   await expect(inspector).toContainText(
     'Bounded server-provided timeline projection for the selected record.',
@@ -514,6 +515,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
@@ -530,6 +532,8 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await latest.focus()
   await page.keyboard.press('Tab')
   await expect(reconnect).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(page.getByRole('checkbox', { name: 'Events', exact: true })).toBeFocused()
   await page.keyboard.press('Tab')
   await expect(timeline).toBeFocused()
   await latest.focus()
@@ -585,6 +589,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.locator('.session-item-summary small').first()).toBeHidden()
 
@@ -595,6 +600,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   const reopenedSessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await reopenedSessionId.fill(sessionWorkspaceFixture.id)
   await reopenedSessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
 
   await expect(page.locator('.session-item-summary small').first()).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -609,6 +615,7 @@ test('keeps palette selection commands focused on the Session timeline', async (
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   const timeline = page.getByRole('grid', { name: 'Session timeline' })
   await expect(timeline).toBeVisible()
 
@@ -633,6 +640,7 @@ test('preserves the saved row when reopening the current Session fails', async (
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await page.getByRole('row', { name: /43 turn completed/ }).click()
 
   failTimeline = true
@@ -671,6 +679,7 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await page.getByRole('row', { name: /43 turn completed/ }).click()
 
   await sessionId.fill(otherSessionId)
@@ -710,6 +719,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeVisible()
 
   failTimeline = true
@@ -743,6 +753,7 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('row', { name: /43 turn completed/ })).toBeVisible()
 
   contradictRetainedEvent = true

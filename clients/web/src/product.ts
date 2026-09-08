@@ -26,6 +26,7 @@ import {
 } from './generated/web-contract.mjs'
 import { hasConversationContent } from './session-timeline/conversation'
 import { validateDetailContinuation } from './session-timeline/model'
+import { SESSION_WINDOW_ITEMS } from './session-workspace'
 
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
@@ -1236,6 +1237,7 @@ async function readSessionTextPage(
   signal?: AbortSignal,
 ) {
   const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
+  const maxScannedItems = Math.min(SESSION_WINDOW_ITEMS, limits.max_timeline_detail_items)
   const maxBytes = Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
   const items: Array<Awaited<ReturnType<typeof readSessionTranscript>>['items'][number]> = []
   let bytes = 0
@@ -1250,7 +1252,10 @@ async function readSessionTextPage(
       through,
       cursor,
       {
-        max_timeline_detail_items: maxItems - scannedItems,
+        max_timeline_detail_items: Math.min(
+          maxItems - items.length,
+          maxScannedItems - scannedItems,
+        ),
         max_timeline_detail_bytes: maxBytes - scannedBytes,
       },
       signal,
@@ -1276,7 +1281,8 @@ async function readSessionTextPage(
   } while (
     (cursor?.type === 'more_at' ||
       (cursor?.type === 'more_body' && cursor.body.offset_bytes === '0')) &&
-    scannedItems < maxItems &&
+    scannedItems < maxScannedItems &&
+    items.length < maxItems &&
     maxBytes - scannedBytes >= MIN_SESSION_TRANSCRIPT_PAGE_BYTES
   )
   return { session_id: sessionId, items, projected_body_bytes: bytes, continuation: cursor }
