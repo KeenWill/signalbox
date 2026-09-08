@@ -1,3 +1,4 @@
+load("@rust_toolchain_pin//:defs.bzl", "RUSTUP_TOOLCHAIN")
 load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_proc_macro")
 load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
@@ -44,7 +45,10 @@ rust_integration_test(
         allow_empty = True,
         exclude = ["tests/**/*.rs"],
     ) + [],
-    env = {"SIGNALBOX_TEST_MANIFEST": "$(rootpath Cargo.toml)"},
+    env = {
+        "RUSTUP_TOOLCHAIN": RUSTUP_TOOLCHAIN,
+        "SIGNALBOX_TEST_MANIFEST": "$(rootpath Cargo.toml)",
+    },
     env_inherit = [
         "HOME",
         "PATH",
