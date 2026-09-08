@@ -463,14 +463,13 @@ impl Seek for ZipScanReader<'_> {
 
 fn with_zip<T>(
     bytes: &[u8],
+    remaining: &Cell<usize>,
     operation: impl FnOnce(&mut ZipArchive<ZipScanReader<'_>>) -> Result<T, ArchiveIssue>,
 ) -> Result<T, ArchiveIssue> {
-    let remaining =
-        Cell::new(usize::try_from(MAX_EXPANDED_BYTES).map_err(|_| ArchiveIssue::ZipScanWork)?);
     let exhausted = Cell::new(false);
     let reader = ZipScanReader {
         cursor: Cursor::new(bytes),
-        remaining: &remaining,
+        remaining,
         exhausted: &exhausted,
     };
     let result = match ZipArchive::new(reader) {
@@ -484,8 +483,21 @@ fn with_zip<T>(
     }
 }
 
+fn zip_scan_budget() -> Result<Cell<usize>, ArchiveIssue> {
+    Ok(Cell::new(
+        usize::try_from(MAX_EXPANDED_BYTES).map_err(|_| ArchiveIssue::ZipScanWork)?,
+    ))
+}
+
 fn structurally_valid_zip(bytes: &[u8]) -> Result<bool, ArchiveIssue> {
-    match with_zip(bytes, |_| Ok(())) {
+    structurally_valid_zip_with_budget(bytes, &zip_scan_budget()?)
+}
+
+fn structurally_valid_zip_with_budget(
+    bytes: &[u8],
+    budget: &Cell<usize>,
+) -> Result<bool, ArchiveIssue> {
+    match with_zip(bytes, budget, |_| Ok(())) {
         Ok(()) => Ok(true),
         Err(ArchiveIssue::Malformed) => Ok(false),
         Err(error) => Err(error),
@@ -493,7 +505,8 @@ fn structurally_valid_zip(bytes: &[u8]) -> Result<bool, ArchiveIssue> {
 }
 
 fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
-    with_zip(bytes, |archive| {
+    let scan_budget = zip_scan_budget()?;
+    with_zip(bytes, &scan_budget, |archive| {
         if zip_central_directory_records(bytes, archive.central_directory_start())? != archive.len()
         {
             return Err(ArchiveIssue::Malformed);
@@ -539,7 +552,7 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
             let mut file = archive
                 .by_index(index)
                 .map_err(|_| ArchiveIssue::Malformed)?;
-            let (expanded, recursive) = count_reader(&mut file, MAX_ENTRY_BYTES)?;
+            let (expanded, recursive) = count_reader(&mut file, MAX_ENTRY_BYTES, &scan_budget)?;
             if kind == "directory" && expanded != 0 {
                 return Err(ArchiveIssue::Special);
             }
@@ -602,6 +615,7 @@ fn zip_central_directory_records(bytes: &[u8], start: u64) -> Result<usize, Arch
 }
 
 fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
+    let scan_budget = zip_scan_budget()?;
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     archive.set_ignore_zeros(true);
     let mut entries = Vec::new();
@@ -638,7 +652,7 @@ fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         let (expanded, recursive) = if entry_type.is_dir() {
             (0, false)
         } else {
-            count_reader(&mut entry, MAX_ENTRY_BYTES)?
+            count_reader(&mut entry, MAX_ENTRY_BYTES, &scan_budget)?
         };
         if recursive {
             return Err(ArchiveIssue::Recursive);
@@ -660,6 +674,7 @@ fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
 }
 
 fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
+    let scan_budget = zip_scan_budget()?;
     let mut remaining = bytes;
     let mut first_name = None;
     let mut expanded = 0_u64;
@@ -691,7 +706,7 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         }
         remaining = remaining.get(consumed..).ok_or(ArchiveIssue::Malformed)?;
     }
-    if detector.detected()? {
+    if detector.detected(&scan_budget)? {
         return Err(ArchiveIssue::Recursive);
     }
     let name = first_name.ok_or(ArchiveIssue::Malformed)?;
@@ -699,8 +714,9 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
 }
 
 fn enumerate_zstd(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
+    let scan_budget = zip_scan_budget()?;
     let mut decoder = zstd_decoder(bytes)?;
-    let (expanded, recursive) = count_reader(&mut decoder, MAX_ENTRY_BYTES)?;
+    let (expanded, recursive) = count_reader(&mut decoder, MAX_ENTRY_BYTES, &scan_budget)?;
     if recursive {
         return Err(ArchiveIssue::Recursive);
     }
@@ -729,10 +745,14 @@ fn single_stream_summary(name: String, expanded: u64) -> ArchiveSummary {
     }
 }
 
-fn count_reader(reader: &mut dyn Read, maximum: u64) -> Result<(u64, bool), ArchiveIssue> {
+fn count_reader(
+    reader: &mut dyn Read,
+    maximum: u64,
+    scan_budget: &Cell<usize>,
+) -> Result<(u64, bool), ArchiveIssue> {
     let mut detector = RecursiveDetector::new();
     let total = count_reader_with_detector(reader, maximum, &mut detector)?;
-    Ok((total, detector.detected()?))
+    Ok((total, detector.detected(scan_budget)?))
 }
 
 fn count_reader_with_detector(
@@ -775,11 +795,13 @@ impl RecursiveDetector {
         self.complete.extend_from_slice(bytes);
     }
 
-    fn detected(&self) -> Result<bool, ArchiveIssue> {
-        Ok(structurally_valid_zip(&self.complete)?
-            || structurally_valid_gzip(&self.complete)
-            || structurally_valid_zstd(&self.complete)
-            || structurally_valid_tar(&self.complete))
+    fn detected(&self, scan_budget: &Cell<usize>) -> Result<bool, ArchiveIssue> {
+        Ok(
+            structurally_valid_zip_with_budget(&self.complete, scan_budget)?
+                || structurally_valid_gzip(&self.complete)
+                || structurally_valid_zstd(&self.complete)
+                || structurally_valid_tar(&self.complete),
+        )
     }
 }
 
@@ -1229,14 +1251,44 @@ mod tests {
                 enumerate_zip(&bytes),
                 Err(ArchiveIssue::ZipScanWork)
             ));
-            assert_eq!(detector.detected(), Err(ArchiveIssue::ZipScanWork));
+            assert_eq!(
+                detector.detected(&Cell::new(budget)),
+                Err(ArchiveIssue::ZipScanWork)
+            );
         } else {
             assert!(matches!(
                 enumerate_zip(&bytes),
                 Err(ArchiveIssue::Malformed)
             ));
-            assert_eq!(detector.detected(), Ok(false));
+            assert_eq!(detector.detected(&Cell::new(budget)), Ok(false));
         }
+    }
+
+    #[test]
+    fn recursive_entry_scans_share_the_archive_allowance() {
+        let payload = eocd_shaped_payload()[..32 + 512 * 22].to_vec();
+        let detector = RecursiveDetector {
+            complete: payload.clone(),
+        };
+        assert_eq!(
+            detector.detected(&super::zip_scan_budget().expect("compiled allowance")),
+            Ok(false)
+        );
+        let mut archive = tar::Builder::new(Vec::new());
+        for index in 0..64 {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("item-{index}.bin"), payload.as_slice())
+                .expect("fixture entry");
+        }
+        let archive = archive.into_inner().expect("fixture archive");
+        assert_eq!(
+            super::enumerate_tar(&archive),
+            Err(ArchiveIssue::ZipScanWork)
+        );
     }
 
     #[test]
