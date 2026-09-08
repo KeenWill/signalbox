@@ -64,6 +64,18 @@ pub enum ServerMessage {
         pool_policy_id: CanonicalUuid,
         policy_members: vec::Vec<string::String>,
     },
+    WorkspaceRegistered {
+        command_id: CommandId,
+        workspace_id: CanonicalUuid,
+    },
+    GitRemoteMinted {
+        command_id: CommandId,
+        mint_id: CanonicalUuid,
+    },
+    GitRemoteWithdrawn {
+        command_id: CommandId,
+        withdrawal_id: CanonicalUuid,
+    },
     ProgramRunCancellationReceipt {
         command_id: CommandId,
         run_id: CanonicalUuid,

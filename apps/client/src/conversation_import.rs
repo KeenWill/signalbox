@@ -144,6 +144,9 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::RunnerAbandonmentReceipt { .. }
         | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
+        | ServerMessage::WorkspaceRegistered { .. }
+        | ServerMessage::GitRemoteMinted { .. }
+        | ServerMessage::GitRemoteWithdrawn { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
         | ServerMessage::CredentialPoolPolicy { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
