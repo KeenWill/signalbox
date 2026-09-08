@@ -5730,7 +5730,8 @@ private actor AmbiguousThenUnsentSubmissionService: SignalboxProcessServiceProto
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) throws -> SignalboxPreparedInputSubmission {
     prepareCallCount += 1
     return SignalboxPreparedInputSubmission(
