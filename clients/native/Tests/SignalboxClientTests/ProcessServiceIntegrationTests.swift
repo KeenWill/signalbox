@@ -62,6 +62,47 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertNil(viewModel.errorMessage)
   }
 
+  @MainActor
+  func testImportedDefaultContinuationIncludesEntriesBeyondTheFirstDisplayPage() async throws {
+    let pageSize = SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize.rawValue
+    let total = pageSize + 1
+    let conversationID = MockProcessProtocolFixtures.importedConversationID
+    let summary = try SignalboxJSONCoding.decoder().decode(SignalboxConversationSummary.self,
+      from: Data(#"{"origin":"imported_conversation","imported_conversation_id":"\#(conversationID)","title":null,"entry_count":"\#(total)","source_format":"claude_code_session_jsonl_v1"}"#.utf8))
+    let conversation = SignalboxProcessConversation(summary: summary)
+    func frame(_ message: String) throws -> SignalboxProcessServerFrame {
+      try SignalboxProcessServerFrame.decode(from: Data(
+        #"{"version":1,"request_id":"1","message":\#(message)}"#.utf8))
+    }
+    var frames = [try ProcessDriverFixture.importedConversationStart(
+      conversationID: conversation.conversationID)]
+    for position in 1...total {
+      // Distinct deterministic identities for the contiguous imported positions.
+      let entryID = String(format: "11111111-1111-4111-8111-%012llx", position)
+      frames.append(try ProcessDriverFixture.importedConversationEntry(
+        position: .init(rawValue: position), entryID: entryID))
+    }
+    frames.append(try frame(
+      #"{"type":"imported_conversation_end","imported_conversation_id":"\#(conversationID)","entry_count":"\#(total)"}"#))
+    let requester = SequencedProcessRequester(pages: [frames, [
+      try frame(#"{"type":"model_aliases_start"}"#),
+      try frame(#"{"type":"model_aliases_end","alias_count":"0"}"#),
+    ]])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let viewModel = ProcessImportedConversationViewModel { service }
+    await viewModel.load(conversation: conversation)
+
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertEqual(viewModel.transcript?.entries.last?.position.rawValue, pageSize)
+    XCTAssertEqual(viewModel.defaultContinuationPosition?.rawValue, total)
+    viewModel.nextEntryPage()
+    XCTAssertEqual(viewModel.transcript?.entries.last?.position.rawValue, total)
+    viewModel.previousEntryPage()
+    XCTAssertEqual(viewModel.defaultContinuationPosition?.rawValue, total)
+    viewModel.replaceServiceProvider { nil }
+    XCTAssertNil(viewModel.defaultContinuationPosition)
+  }
+
   func testImportedInventoryDecodesOnlyTheSelectedEntryPage() async throws {
     let service = makeService()
     let conversations = try await service.listConversations(includeArchived: true).conversations

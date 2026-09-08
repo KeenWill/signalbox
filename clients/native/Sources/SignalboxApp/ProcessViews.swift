@@ -974,6 +974,12 @@ final class ProcessImportedConversationViewModel: ObservableObject {
   private var inventory: SignalboxImportedConversationInventory?
   private let entryPageSize = Int(SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize.rawValue)
 
+  var defaultContinuationPosition: SignalboxCanonicalUInt64? {
+    guard let inventory, inventory.entryCount > 0 else { return nil }
+    // The service validates contiguous, one-based positions through the end marker.
+    return SignalboxCanonicalUInt64(rawValue: UInt64(inventory.entryCount))
+  }
+
   var hasNextPage: Bool { entryOffset + (transcript?.entries.count ?? 0) < totalEntryCount }
 
   func showEntryPage(offset: Int) {
@@ -1266,7 +1272,7 @@ private struct ProcessImportedConversationScreen: View {
     .task(id: conversation.id) {
       viewModel.replaceServiceProvider { coordinator.processService }
       await viewModel.load(conversation: conversation)
-      selectedPosition = viewModel.transcript?.entries.last?.position
+      selectedPosition = viewModel.defaultContinuationPosition
     }
   }
 
