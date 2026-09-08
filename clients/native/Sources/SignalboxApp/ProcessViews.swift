@@ -970,6 +970,7 @@ private extension SignalboxProcessRequestOpenError {
 
 @MainActor
 final class ProcessImportedConversationViewModel: ObservableObject {
+  @Published private(set) var entryPageErrorMessage: String?
   @Published private(set) var transcript: SignalboxImportedConversationTranscript?
   @Published private(set) var entryOffset = 0
   @Published private(set) var totalEntryCount = 0
@@ -991,8 +992,8 @@ final class ProcessImportedConversationViewModel: ObservableObject {
       transcript = SignalboxImportedConversationTranscript(
         importedConversationID: inventory.importedConversationID, entries: entries)
       entryOffset = offset
-      errorMessage = nil
-    } catch { errorMessage = error.localizedDescription }
+      entryPageErrorMessage = nil
+    } catch { entryPageErrorMessage = error.localizedDescription }
   }
 
   func nextEntryPage() { if hasNextPage { showEntryPage(offset: entryOffset + entryPageSize) } }
@@ -1030,6 +1031,7 @@ final class ProcessImportedConversationViewModel: ObservableObject {
     serviceProvider = provider
     generation &+= 1
     transcript = nil
+    entryPageErrorMessage = nil
     inventory = nil
     entryOffset = 0
     totalEntryCount = 0
@@ -1201,7 +1203,7 @@ private struct ProcessImportedConversationScreen: View {
             LabeledContent("Source", value: sourceFormatLabel)
             LabeledContent("Entries", value: "\(viewModel.totalEntryCount)")
           }
-          if let errorMessage = viewModel.errorMessage {
+          if let errorMessage = viewModel.errorMessage ?? viewModel.entryPageErrorMessage {
             Section {
               Text(errorMessage)
                 .foregroundStyle(.red)

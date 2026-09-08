@@ -92,6 +92,48 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   func testImportedDefaultContinuationIncludesEntriesBeyondTheFirstDisplayPage() async throws {
     let pageSize = SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize.rawValue
     let total = pageSize + 1
+    let (service, conversation) = try importedPaginationService(aliasesFail: false)
+    let viewModel = ProcessImportedConversationViewModel { service }
+    await viewModel.load(conversation: conversation)
+
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertEqual(viewModel.transcript?.entries.last?.position.rawValue, pageSize)
+    XCTAssertEqual(viewModel.defaultContinuationPosition?.rawValue, total)
+    viewModel.nextEntryPage()
+    XCTAssertEqual(viewModel.transcript?.entries.last?.position.rawValue, total)
+    viewModel.previousEntryPage()
+    XCTAssertEqual(viewModel.defaultContinuationPosition?.rawValue, total)
+    viewModel.replaceServiceProvider { nil }
+    XCTAssertNil(viewModel.defaultContinuationPosition)
+  }
+
+  @MainActor
+  func testImportedEntryNavigationPreservesAliasCatalogFailure() async throws {
+    let (service, conversation) = try importedPaginationService(aliasesFail: true)
+    let viewModel = ProcessImportedConversationViewModel { service }
+    await viewModel.load(conversation: conversation)
+    let aliasError = try XCTUnwrap(viewModel.errorMessage)
+    XCTAssertTrue(aliasError.contains("Alias catalog unavailable."))
+    XCTAssertTrue(viewModel.hasNextPage)
+
+    viewModel.showEntryPage(offset: -1)
+    XCTAssertNotNil(viewModel.entryPageErrorMessage)
+    XCTAssertEqual(viewModel.errorMessage, aliasError)
+    viewModel.nextEntryPage()
+    XCTAssertNil(viewModel.entryPageErrorMessage)
+    XCTAssertEqual(viewModel.errorMessage, aliasError)
+    viewModel.previousEntryPage()
+    XCTAssertEqual(viewModel.errorMessage, aliasError)
+    viewModel.replaceServiceProvider { nil }
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertNil(viewModel.entryPageErrorMessage)
+  }
+
+  private func importedPaginationService(aliasesFail: Bool) throws
+    -> (SignalboxProcessService, SignalboxProcessConversation)
+  {
+    let pageSize = SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize.rawValue
+    let total = pageSize + 1
     let conversationID = MockProcessProtocolFixtures.importedConversationID
     let summary = try SignalboxJSONCoding.decoder().decode(SignalboxConversationSummary.self,
       from: Data(#"{"origin":"imported_conversation","imported_conversation_id":"\#(conversationID)","title":null,"entry_count":"\#(total)","source_format":"claude_code_session_jsonl_v1"}"#.utf8))
@@ -112,21 +154,12 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       #"{"type":"imported_conversation_end","imported_conversation_id":"\#(conversationID)","entry_count":"\#(total)"}"#))
     let requester = SequencedProcessRequester(pages: [frames, [
       try frame(#"{"type":"model_aliases_start"}"#),
-      try frame(#"{"type":"model_aliases_end","alias_count":"0"}"#),
+      try frame(aliasesFail
+        ? #"{"type":"error","code":"unavailable","message":"Alias catalog unavailable.","detail":null}"#
+        : #"{"type":"model_aliases_end","alias_count":"0"}"#),
     ]])
     let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
-    let viewModel = ProcessImportedConversationViewModel { service }
-    await viewModel.load(conversation: conversation)
-
-    XCTAssertNil(viewModel.errorMessage)
-    XCTAssertEqual(viewModel.transcript?.entries.last?.position.rawValue, pageSize)
-    XCTAssertEqual(viewModel.defaultContinuationPosition?.rawValue, total)
-    viewModel.nextEntryPage()
-    XCTAssertEqual(viewModel.transcript?.entries.last?.position.rawValue, total)
-    viewModel.previousEntryPage()
-    XCTAssertEqual(viewModel.defaultContinuationPosition?.rawValue, total)
-    viewModel.replaceServiceProvider { nil }
-    XCTAssertNil(viewModel.defaultContinuationPosition)
+    return (service, conversation)
   }
 
   func testImportedInventoryDecodesOnlyTheSelectedEntryPage() async throws {
