@@ -1834,7 +1834,13 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   var canSend: Bool {
-    canSubmit && activeTurnID == nil && !hasRetryableReconciliation
+    canSubmit && (activeTurnID == nil || hasRetryableSubmission) && !hasRetryableReconciliation
+  }
+
+  private var hasRetryableSubmission: Bool {
+    unresolvedSubmission.map {
+      $0.sessionID == session.id && hasExactUTF8($0.content, composerText)
+    } ?? false
   }
 
   private var hasRetryableReconciliation: Bool {
@@ -1844,7 +1850,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   var showsReconciliation: Bool {
-    recoverableTurnID != nil || hasRetryableReconciliation
+    unresolvedSubmission == nil && (recoverableTurnID != nil || hasRetryableReconciliation)
   }
 
   var canReconcileAndSend: Bool {

@@ -2953,6 +2953,32 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testRetainedSubmissionResolvesBeforeRecoveryCanPrepareAContinuation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+    await viewModel.send()
+    let unresolvedError = viewModel.errorMessage
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0, turnID: ProcessSubmissionFixture.acceptedTurnID)))
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+
+    XCTAssertFalse(viewModel.showsReconciliation)
+    XCTAssertFalse(viewModel.canReconcileAndSend)
+    XCTAssertTrue(viewModel.canSend)
+    await viewModel.reconcileAndSendSuccessor()
+    XCTAssertEqual(viewModel.errorMessage, unresolvedError)
+    await viewModel.send()
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+    XCTAssertEqual(viewModel.composerText, "")
+    XCTAssertTrue(viewModel.canReconcileAndSend)
+  }
+
+  @MainActor
   func testToolRecoveryDoesNotOfferModelCallReconciliation() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -7347,7 +7373,7 @@ private enum ProcessProjectionFixture {
   }
 
   static func snapshotWithKnownRecoveryTurn(
-    cursor: UInt64
+    cursor: UInt64, turnID: String = ProcessDriverFixture.turn
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -7362,7 +7388,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_turn",
-          "turn_id":"\(ProcessDriverFixture.turn)",
+          "turn_id":"\(turnID)",
           "acceptance_position":"1",
           "state":{
             "type":"active_awaiting_model_call_recovery",
@@ -7377,7 +7403,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_model_call_usage",
           "model_call_index":"0",
-          "turn_id":"\(ProcessDriverFixture.turn)",
+          "turn_id":"\(turnID)",
           "model_call_id":"\(ProcessDriverFixture.modelCall)",
           "usage_provenance":"reported",
           "usage":{
