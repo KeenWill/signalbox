@@ -3031,11 +3031,26 @@ public struct SignalboxTranscriptTurn: Decodable, Equatable, Sendable {
   public let turnID: SignalboxCanonicalUUID
   public let acceptancePosition: SignalboxCanonicalUInt64
   public let state: SignalboxTranscriptTurnState
+  public let settingsAdjustments: [SignalboxModelChangeAdjustment]?
 
-  private enum CodingKeys: String, CodingKey {
-    case turnID = "turn_id"
-    case acceptancePosition = "acceptance_position"
-    case state
+  public init(from decoder: Decoder) throws {
+    turnID = try decoder.decode("turn_id")
+    acceptancePosition = try decoder.decode("acceptance_position")
+    state = try decoder.decode("state")
+    let settings: SignalboxTurnModelSettingsEvidence? = try decoder.decodeIfPresent("model_settings")
+    if let settings {
+      let inputMatches: Bool
+      if case .queued(let acceptedInputID, _) = state {
+        inputMatches = acceptedInputID == settings.acceptedInputID
+      } else {
+        inputMatches = true
+      }
+      guard settings.turnID == turnID, inputMatches else {
+        throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+          debugDescription: "Turn model-settings evidence belongs to another origin."))
+      }
+    }
+    settingsAdjustments = settings?.adjustments
   }
 }
 
@@ -4239,20 +4254,27 @@ private struct SignalboxSessionModelSettingsChangedShape: Decodable {
   }
 }
 
-private struct SignalboxTurnModelSettingsResolvedShape: Decodable {
+private struct SignalboxTurnModelSettingsEvidence: Decodable {
+  let acceptedInputID: SignalboxCanonicalUUID
+  let turnID: SignalboxCanonicalUUID
   let adjustments: [SignalboxModelChangeAdjustment]
+
   init(from decoder: Decoder) throws {
-    let tagged = try SignalboxTaggedPayload(from: decoder)
-    try tagged.rejectUnadmittedFields(
-      [
-        "type", "accepted_input_id", "turn_id", "defaults_version", "requested_model",
+    try self.init(from: decoder, isEvent: false)
+  }
+
+  init(from decoder: Decoder, isEvent: Bool) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      Set([
+        "accepted_input_id", "turn_id", "defaults_version", "requested_model",
         "selected_direct_id", "per_call_override", "settings", "adjusted_from_selection_id",
         "adjustments",
-      ],
+      ] + (isEvent ? ["type"] : [])),
       decoder: decoder
     )
-    let _: SignalboxCanonicalUUID = try decoder.decode("accepted_input_id")
-    let _: SignalboxCanonicalUUID = try decoder.decode("turn_id")
+    acceptedInputID = try decoder.decode("accepted_input_id")
+    turnID = try decoder.decode("turn_id")
     let defaultsVersion: SignalboxCanonicalUInt64 = try decoder.decode("defaults_version")
     let requestedModel: SignalboxModelSelection = try decoder.decode("requested_model")
     let selectedDirectID: SignalboxCanonicalUUID = try decoder.decode("selected_direct_id")
@@ -4412,7 +4434,7 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
         let decoded = try SignalboxSessionModelSettingsChangedShape(from: decoder)
         self = .sessionModelSettingsChanged(adjustments: decoded.adjustments)
       case "turn_model_settings_resolved":
-        let decoded = try SignalboxTurnModelSettingsResolvedShape(from: decoder)
+        let decoded = try SignalboxTurnModelSettingsEvidence(from: decoder, isEvent: true)
         self = .turnModelSettingsResolved(adjustments: decoded.adjustments)
       case "input_accepted":
         try tagged.rejectUnadmittedFields(

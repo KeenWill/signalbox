@@ -2224,6 +2224,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         }.first
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = [:]
+        settingsAdjustments = snapshot.records.reversed().lazy.compactMap { record -> [SignalboxModelChangeAdjustment]? in
+          guard case .turn(let turn) = record else { return nil }
+          return turn.settingsAdjustments
+        }.first ?? []
         activity = projection.activity
         streamedText = nil
         errorMessage = nil

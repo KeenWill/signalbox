@@ -122,7 +122,9 @@ through the current alias catalog. Every setting offers inherit; reasoning and
 service tier also offer provider default. Untouched members remain inherit in
 session-defaults replacements and per-call overlays on input, reconciliation,
 and stop commands. The screen distinguishes inherited and explicit settings and
-shows automatic adjustments only from recorded settings events.
+shows automatic adjustments only from recorded settings events. Reopening a
+session restores the latest turn's recorded adjustments from its authoritative
+transcript snapshot.
 
 ## Planned
 

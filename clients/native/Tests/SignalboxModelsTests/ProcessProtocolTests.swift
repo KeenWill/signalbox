@@ -1302,6 +1302,32 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
   }
 
+  func testTranscriptTurnRejectsSettingsEvidenceForAnotherOrigin() throws {
+    let eventFrame = ProcessProtocolFixture.turnModelSettingsEventFrame(
+      sessionID: sessionID, turnID: turnID,
+      requestedModel: #"{"kind":"direct","selection_id":"\#(turnID)"}"#,
+      selectedDirectID: turnID)
+    let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: eventFrame) as? [String: Any])
+    let message = try XCTUnwrap(envelope["message"] as? [String: Any])
+    var evidence = try XCTUnwrap(message["event"] as? [String: Any])
+    evidence.removeValue(forKey: "type")
+    let turn: [String: Any] = ["type": "transcript_turn", "turn_id": turnID,
+      "acceptance_position": "1", "model_settings": evidence,
+      "state": ["type": "queued", "accepted_input_id": toolRequestID,
+        "content": [["type": "text", "text": "Fixture input"]]]]
+    XCTAssertNoThrow(try SignalboxJSONCoding.decoder().decode(SignalboxTranscriptTurn.self,
+      from: JSONSerialization.data(withJSONObject: turn)))
+
+    for identity in ["turn_id", "accepted_input_id"] {
+      var mismatchedEvidence = evidence
+      mismatchedEvidence[identity] = sessionID
+      var mismatchedTurn = turn
+      mismatchedTurn["model_settings"] = mismatchedEvidence
+      XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(SignalboxTranscriptTurn.self,
+        from: JSONSerialization.data(withJSONObject: mismatchedTurn)), identity)
+    }
+  }
+
   func testTurnSettingsSessionEventRejectsPerCallProvenanceMismatch() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.turnModelSettingsEventFrame(

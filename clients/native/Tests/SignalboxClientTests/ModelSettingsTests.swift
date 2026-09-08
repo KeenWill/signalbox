@@ -280,6 +280,38 @@ final class ModelSettingsTests: XCTestCase {
   }
 
   @MainActor
+  func testReopenedDetailRestoresTheLatestTurnsRecordedAdjustments() throws {
+    let session = try SettingsFixture.session()
+    let olderTurn = try SettingsFixture.turn(position: 1, adjustedFromReasoning: .max)
+    let latestTurn = try SettingsFixture.turn(position: 2, adjustedFromReasoning: .high)
+    let reopened = ProcessSessionDetailViewModel(session: session) { nil }
+
+    reopened.apply(.authoritativeSnapshot(.init(sessionID: session.id,
+      cursor: .init(rawValue: 10), records: [.turn(olderTurn), .turn(latestTurn)])))
+
+    XCTAssertNil(reopened.errorMessage)
+    XCTAssertEqual(reopened.settingsAdjustments, [.reasoningLevelClamped(from: .high, to: .low)])
+    XCTAssertEqual(reopened.settingsAdjustments.map(\.settingsLabel), ["Reasoning adjusted from high to low"])
+  }
+
+  @MainActor
+  func testAuthoritativeSnapshotClearsAdjustmentsWhenTheLatestTurnHasNone() throws {
+    let session = try SettingsFixture.session()
+    let olderTurn = try SettingsFixture.turn(position: 1, adjustedFromReasoning: .high)
+    let latestTurn = try SettingsFixture.turn(position: 2, adjustedFromReasoning: nil)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(.init(cursor: .init(rawValue: 1), sessionID: session.id,
+      event: .turnModelSettingsResolved(adjustments: [.fastModeDisabled]))))
+
+    viewModel.apply(.authoritativeSnapshot(.init(sessionID: session.id,
+      cursor: .init(rawValue: 10), records: [.turn(olderTurn), .turn(latestTurn)])))
+
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertEqual(latestTurn.settingsAdjustments, [])
+    XCTAssertEqual(viewModel.settingsAdjustments, [])
+  }
+
+  @MainActor
   func testSettingsPresentationUsesOnlyRecordedAdjustments() throws {
     let session = try SettingsFixture.session()
     let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
@@ -354,6 +386,36 @@ private enum SettingsFixture {
     }
     return .init(id: sessionID, defaults: defaults,
       metadata: .init(title: nil, tags: [], attributes: [:], archived: false))
+  }
+
+  /// Positions order the turns and supply arbitrary origin identities; settings are frozen at low reasoning.
+  static func turn(position: UInt64, adjustedFromReasoning: SignalboxReasoningLevel?) throws -> SignalboxTranscriptTurn {
+    let turnID = String(format: "00000000-0000-4000-8000-%012llx", position)
+    let inputID = String(format: "11111111-1111-4111-8111-%012llx", (UInt64.max - position) & 0xffffffffffff)
+    let inherited: [String: Any] = ["reasoning_level": ["kind": "inherit"],
+      "fast_mode": ["kind": "inherit"], "service_tier": ["kind": "inherit"]]
+    var session = inherited
+    session["reasoning_level"] = ["kind": "value", "value": "low"]
+    let adjustments = adjustedFromReasoning.map {
+      [["type": "reasoning_level_clamped", "from": $0.rawValue, "to": "low"]]
+    } ?? []
+    let fields: [String: Any] = [
+      "type": "transcript_turn", "turn_id": turnID, "acceptance_position": String(position),
+      "state": ["type": "queued", "accepted_input_id": inputID,
+        "content": [["type": "text", "text": input]]],
+      "model_settings": ["turn_id": turnID, "accepted_input_id": inputID, "defaults_version": "1",
+        "requested_model": ["kind": "direct", "selection_id": selectionID.rawValue],
+        "selected_direct_id": selectionID.rawValue, "per_call_override": inherited,
+        "settings": ["precedence": ["per_call": inherited, "session": session,
+          "profile": inherited, "global_default": inherited],
+          "effective": ["reasoning_level": "low", "fast_mode": "disabled", "service_tier": NSNull()],
+          "reasoning_source": "session", "fast_mode_source": NSNull(), "service_tier_source": NSNull(),
+          "validated_for_selection_id": selectionID.rawValue],
+        "adjusted_from_selection_id": adjustedFromReasoning == nil ? NSNull() : otherSelectionID.rawValue,
+        "adjustments": adjustments],
+    ]
+    return try SignalboxJSONCoding.decoder().decode(SignalboxTranscriptTurn.self,
+      from: JSONSerialization.data(withJSONObject: fields))
   }
 }
 
