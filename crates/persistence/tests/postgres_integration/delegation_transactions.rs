@@ -135,7 +135,7 @@ async fn process_wait_reports_prepared_attempt_without_ending_it() -> Result<(),
         "mode": "background",
     })
     .to_string();
-    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_is_append_only")
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_resolution_guard")
         .execute(&pool)
         .await?;
     sqlx::query("UPDATE tool_request SET arguments_text = $1 WHERE request_id = $2")
@@ -143,7 +143,7 @@ async fn process_wait_reports_prepared_attempt_without_ending_it() -> Result<(),
         .bind(fixture.awaiting_request.into_uuid())
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_is_append_only")
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_resolution_guard")
         .execute(&pool)
         .await?;
     prepare_repository_wait_attempt(&pool, fixture, seed).await?;
@@ -1814,7 +1814,7 @@ async fn process_message_absent_peer_terminalizes_attempt() -> Result<(), Box<dy
         "peer_session_id": absent_peer.as_uuid().to_string(),
     })
     .to_string();
-    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_is_append_only")
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_resolution_guard")
         .execute(&pool)
         .await?;
     sqlx::query("UPDATE tool_request SET arguments_text = $1 WHERE request_id = $2")
@@ -1822,7 +1822,7 @@ async fn process_message_absent_peer_terminalizes_attempt() -> Result<(), Box<dy
         .bind(fixture.message_request.into_uuid())
         .execute(&pool)
         .await?;
-    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_is_append_only")
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_resolution_guard")
         .execute(&pool)
         .await?;
     let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;

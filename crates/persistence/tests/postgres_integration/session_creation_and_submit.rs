@@ -3054,7 +3054,7 @@ const MULTIPART_REORDERED_TURN_ID: u128 = 0xa27;
 const MULTIPART_METADATA_ACCEPTED_INPUT_ID: u128 = 0x928;
 const MULTIPART_METADATA_TURN_ID: u128 = 0xa28;
 const MULTIPART_ATTACHMENT_PAYLOAD: &[u8] = b"multipart attachment";
-const MULTIPART_ATTACHMENT_MAXIMUM_BYTES: u64 = 1_024;
+const MULTIPART_ATTACHMENT_MAXIMUM_BYTES: u64 = MULTIPART_ATTACHMENT_PAYLOAD.len() as u64;
 const MULTIPART_BLOB_STORE_NAME: &str = "multipart_test";
 const MULTIPART_BLOB_OBJECT_KEY: &str = "multipart/object";
 
@@ -3301,11 +3301,13 @@ async fn changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dy
     let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
+    let kind = AttachmentKind::Document;
+    let media_type = DeclaredMediaType::try_new(String::from("application/pdf"))
+        .expect("the fixture media type is valid");
     let attachment = UserContentPart::Attachment {
         digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
+        kind,
+        media_type: media_type.clone(),
         display_filename: Some(
             AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
                 .expect("the fixture display filename is valid"),
@@ -3326,9 +3328,8 @@ async fn changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dy
     let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
     let changed_attachment = UserContentPart::Attachment {
         digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
+        kind,
+        media_type,
         display_filename: Some(
             AttachmentDisplayFilename::try_new(String::from("changed.pdf"))
                 .expect("the changed fixture filename is valid"),
