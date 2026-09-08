@@ -21,6 +21,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import tomllib
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -160,6 +161,117 @@ MARKED_START = re.compile(
 # rather than reaching into whatever precedes an unrecognized statement.
 CHAIN_LINE_LIMIT = 40
 
+def rust_module_sources(crate_root: Path) -> set[Path]:
+    """Follow a target's file and inline module declarations, including path attributes."""
+    token = re.compile(
+        r'\s+|//[^\n]*|/\*|(?:b|c)?r(?P<hashes>\#*)".*?"(?P=hashes)'
+        r'|(?:b|c)?"(?:\\.|[^"\\])*"|b?\'(?:\\.|[^\'\\])\'|\w+|.',
+        re.DOTALL,
+    )
+    sources = set()
+    pending = [(crate_root.resolve(), crate_root.resolve().parent)]
+    while pending:
+        source, module_directory = pending.pop()
+        if source in sources or not source.is_file():
+            continue
+        sources.add(source)
+        text = source.read_text()
+        tokens = []
+        position = 0
+        while position < len(text):
+            found = token.match(text, position)
+            value = found.group()
+            position = found.end()
+            if value == "/*":
+                depth = 1
+                while depth:
+                    delimiter = re.search(r'/\*|\*/', text[position:])
+                    if delimiter is None:
+                        position = len(text)
+                        break
+                    depth += 1 if delimiter.group() == "/*" else -1
+                    position += delimiter.end()
+            elif not value.isspace() and not value.startswith("//"):
+                tokens.append(value)
+        directories = [(module_directory, source.parent)]
+        explicit_path = None
+        index = 0
+        while index < len(tokens):
+            value = tokens[index]
+            if tokens[index:index + 2] == ["#", "["]:
+                end = index + 2
+                depth = 1
+                while end < len(tokens) and depth:
+                    depth += (tokens[end] == "[") - (tokens[end] == "]")
+                    end += 1
+                attribute = tokens[index + 2:end - 1]
+                if attribute[:2] == ["path", "="]:
+                    explicit_path = attribute[2].strip('"')
+                index = end
+                continue
+            directory, path_directory = directories[-1]
+            if value == "mod" and index + 2 < len(tokens):
+                name, delimiter = tokens[index + 1:index + 3]
+                if delimiter == ";":
+                    candidates = (
+                        [path_directory / explicit_path] if explicit_path is not None
+                        else [directory / f"{name}.rs", directory / name / "mod.rs"]
+                    )
+                    for child in candidates:
+                        child = child.resolve()
+                        child_directory = child.parent if child.name == "mod.rs" else child.with_suffix("")
+                        pending.append((child, child_directory))
+                    explicit_path = None
+                    index += 3
+                    continue
+                if delimiter == "{":
+                    nested = path_directory / explicit_path if explicit_path is not None else directory / name
+                    directories.append((nested, nested))
+                    explicit_path = None
+                    index += 3
+                    continue
+            if value == "{":
+                directories.append(directories[-1])
+            elif value == "}":
+                directories.pop()
+            if value in {";", "{", "}"}:
+                explicit_path = None
+            index += 1
+    return sources
+
+
+def persistence_library_sources() -> set[Path]:
+    """Return sources owned only by the persistence library Cargo target."""
+    package = REPOSITORY / "crates" / "persistence"
+    manifest = tomllib.loads((package / "Cargo.toml").read_text())
+    settings = manifest["package"]
+    library = package / manifest.get("lib", {}).get("path", "src/lib.rs")
+    other_roots = set()
+    for kind, folder, automatic in (
+        ("bin", "src/bin", "autobins"),
+        ("test", "tests", "autotests"),
+        ("bench", "benches", "autobenches"),
+        ("example", "examples", "autoexamples"),
+    ):
+        inferred = {path.stem: path for path in (package / folder).glob("*.rs")}
+        inferred.update({path.parent.name: path for path in (package / folder).glob("*/main.rs")})
+        if kind == "bin" and (package / "src/main.rs").is_file():
+            inferred[settings["name"]] = package / "src/main.rs"
+        targets = inferred.copy() if settings.get(automatic, True) else {}
+        for target in manifest.get(kind, []):
+            targets[target["name"]] = (
+                package / target["path"] if "path" in target else inferred[target["name"]]
+            )
+        other_roots.update(targets.values())
+    build = settings.get("build", "build.rs")
+    if build is not False:
+        other_roots.add(package / ("build.rs" if build is True else build))
+    sources = rust_module_sources(library)
+    for root in other_roots:
+        sources.difference_update(rust_module_sources(root))
+    return sources
+
+
 def container_start_sites() -> tuple[list[str], list[str]]:
     """Locate every testcontainers start in the tree, and those carrying no mark.
 
@@ -184,6 +296,7 @@ def container_start_sites() -> tuple[list[str], list[str]]:
             text=True,
             check=True,
         ).stdout.split("\0")
+    library_sources = persistence_library_sources()
     sites = []
     unmarked = []
     for name in filter(None, tracked):
@@ -230,11 +343,7 @@ def container_start_sites() -> tuple[list[str], list[str]]:
             marked = MARKED_START.search("\n".join(lines[head - 2 : number]))
             if marked is None or (
                 marked.group("qualifier") == "crate"
-                and (
-                    not name.startswith("crates/persistence/src/")
-                    or name.startswith("crates/persistence/src/bin/")
-                    or name == "crates/persistence/src/main.rs"
-                )
+                and (REPOSITORY / name).resolve() not in library_sources
             ):
                 unmarked.append(f"{name}:{number}")
     return sites, unmarked
@@ -478,6 +587,12 @@ class SweepTestContainersTest(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
+                package = root / "crates/persistence"
+                (package / "src").mkdir(parents=True)
+                (package / "Cargo.toml").write_text(
+                    '[package]\nname = "signalbox-persistence"\nversion = "0.0.0"\n'
+                )
+                (package / "src/lib.rs").write_text("mod fixture;")
                 source = root / case["file"]
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.write_text(
@@ -494,6 +609,48 @@ class SweepTestContainersTest(unittest.TestCase):
 
                 self.assertEqual(len(sites), 1)
                 self.assertEqual(len(unmarked), case["unmarked"])
+
+    def test_crate_labels_follow_cargo_target_modules(self) -> None:
+        chain = (
+            "use testcontainers::runners::AsyncRunner;\n"
+            "let container = Postgres::default()\n"
+            "    .with_labels(crate::disposable_test_container_labels())\n"
+            "    .start().await?;\n"
+        )
+        cases = [
+            ("library sibling", {"src/lib.rs": "mod fixture;", "src/fixture.rs": chain}, "", 0),
+            ("binary sibling", {"src/main.rs": "mod fixture;", "src/fixture.rs": chain}, "", 1),
+            ("shared sibling", {"src/lib.rs": "mod fixture;", "src/main.rs": "mod fixture;", "src/fixture.rs": chain}, "", 1),
+            ("explicit binary", {"src/runner.rs": "mod fixture;", "src/fixture.rs": chain}, '\n[[bin]]\nname = "runner"\npath = "src/runner.rs"\n', 1),
+            ("nested library", {"src/lib.rs": "mod nested;", "src/nested/mod.rs": "mod fixture;", "src/nested/fixture.rs": chain}, "", 0),
+            ("inline binary", {"src/main.rs": "mod nested { mod fixture; }", "src/nested/fixture.rs": chain}, "", 1),
+            ("library path", {"src/lib.rs": '#[path = "../support/fixture.rs"] mod fixture;', "support/fixture.rs": chain}, "", 0),
+            ("binary path", {"src/lib.rs": "mod fixture;", "src/main.rs": '#[path = "fixture.rs"] mod other;', "src/fixture.rs": chain}, "", 1),
+            ("comment", {"src/lib.rs": "/* mod fixture; */", "src/fixture.rs": chain}, "", 1),
+            ("string", {"src/lib.rs": 'const TEXT: &str = "mod fixture;";', "src/fixture.rs": chain}, "", 1),
+        ]
+        for name, files, targets, expected_unmarked in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                package = root / "crates/persistence"
+                (package / "src").mkdir(parents=True)
+                (package / "src/lib.rs").write_text("")
+                (package / "Cargo.toml").write_text(
+                    '[package]\nname = "signalbox-persistence"\nversion = "0.0.0"\n' + targets
+                )
+                for filename, content in files.items():
+                    source = package / filename
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text(content)
+                (root / "sources.json").write_text(json.dumps([
+                    str(source.relative_to(root)) for source in package.rglob("*.rs")
+                ]))
+                with mock.patch(f"{__name__}.REPOSITORY", root), mock.patch.dict(
+                    os.environ, {"SIGNALBOX_RUST_SOURCE_MANIFEST": "sources.json"}
+                ):
+                    sites, unmarked = container_start_sites()
+                self.assertEqual(len(sites), 1)
+                self.assertEqual(len(unmarked), expected_unmarked)
 
     def test_the_listing_asks_for_this_repository_s_disposable_label_alone(self) -> None:
         run = run_sweep(

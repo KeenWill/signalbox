@@ -49,6 +49,7 @@ py_test(
     data = [
         "tooling/sweep-test-containers.sh",
         ":rust_source_manifest",
+        "//crates/persistence:Cargo.toml",
     ],
     env = {"SIGNALBOX_RUST_SOURCE_MANIFEST": "$(rootpath :rust_source_manifest)"},
     main = "tooling/test_sweep_test_containers.py",
