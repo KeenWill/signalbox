@@ -645,8 +645,16 @@ export function ProductApp({
     [],
   )
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
+  const [catalogLifecycleFilter, setCatalogLifecycleFilter] = useState('all')
+  const [catalogPageOrder, setCatalogPageOrder] = useState('activity')
+  const catalogReturnSessionId = useRef<string | undefined>(undefined)
+  const consumeCatalogReturnFocus = useCallback(() => {
+    catalogReturnSessionId.current = undefined
+  }, [])
   const updateSessionSearch = useCallback(
     (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
+      if (mode === 'push' && next.workspace && next.session)
+        catalogReturnSessionId.current = next.session
       if (mode === 'close') {
         currentCatalogSession.current = next.session
         if (catalogSessionOpenedHere) {
@@ -732,21 +740,21 @@ export function ProductApp({
           if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
         }),
       unwindSurface: () => {
-        if (surface === 'sessions' && sessionState.workspace) {
-          updateSessionSearch({ ...sessionState, workspace: undefined }, 'close')
-          return true
-        }
-        if (surface === 'sessions' && sessionState.session) {
-          updateSessionSearch({ ...sessionState, session: undefined }, 'close')
+        if (surface === 'sessions' && (sessionState.workspace || sessionState.session)) {
+          updateSessionSearch(
+            { ...sessionState, workspace: undefined, session: undefined },
+            'close',
+          )
           return true
         }
         return surfaceEscapeRef.current?.() ?? false
       },
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
-      loadTimelineWindow: sessionState.workspace
-        ? (anchor) =>
-            setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
-        : undefined,
+      loadTimelineWindow:
+        sessionState.workspace || sessionState.session
+          ? (anchor) =>
+              setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
+          : undefined,
       navigate: (path) => {
         // A retained exact continuation command owns the surface until it is retried or abandoned.
         if (navigationDisabled) return
@@ -967,12 +975,15 @@ export function ProductApp({
           </div>
         </section>
       </div>
-    ) : surface === 'sessions' && bootstrap.isSuccess && sessionState.workspace ? (
+    ) : surface === 'sessions' &&
+      bootstrap.isSuccess &&
+      (sessionState.workspace || sessionState.session) ? (
       <SessionWorkspaceSurface
         key={sessionState.session ?? 'unselected'}
         onSessionOpen={(session) =>
           updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
         }
+        onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
         onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}
@@ -986,6 +997,12 @@ export function ProductApp({
       />
     ) : surface === 'sessions' && bootstrap.isSuccess ? (
       <SessionCatalogSurface
+        returnSessionId={catalogReturnSessionId.current}
+        onReturnFocusConsumed={consumeCatalogReturnFocus}
+        lifecycleFilter={catalogLifecycleFilter}
+        pageOrder={catalogPageOrder}
+        onLifecycleFilterChange={setCatalogLifecycleFilter}
+        onPageOrderChange={setCatalogPageOrder}
         state={sessionState}
         onStateChange={updateSessionSearch}
         onTimelineIds={setTimelineIds}
