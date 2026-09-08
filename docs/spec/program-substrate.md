@@ -42,7 +42,10 @@ Each registration carries explicit grants from `ProgramCapability`; identical
 bytes under distinct names or grant lists remain distinct programs. A run pins
 its registration, whose row records its artifact and grants. Program-initiated
 registration requires `register` and admits only a subset of the registrant's
-grants; user registration may widen grants under a new key.
+grants; user registration may widen grants under a new key. The host loads the
+artifact bound to the run, and session capability issuance requires a registered
+session grant. Run creation takes a caller-supplied run identity: an equal retry
+returns that run; a different registration binding conflicts.
 
 A journaled `run_cancel` delivery is terminal: the host returns the cancelled
 outcome and creates no isolate.

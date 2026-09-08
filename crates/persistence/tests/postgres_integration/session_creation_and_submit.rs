@@ -5440,15 +5440,34 @@ async fn missing_attachment_receipt_without_prefix_survives_migration() -> Resul
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn program_submit_records_its_run_and_conflicts_with_user_replay()
 -> Result<(), Box<dyn Error>> {
-    use signalbox_domain::{Actor, ProgramRunId};
+    use signalbox_domain::Actor;
     let (_container, pool, _database_url) = migrated_postgres().await?;
     // These values are arbitrary, independent fixture identities.
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x5701, 0x5702, direct(0x5703)))
         .await?;
-    let run = ProgramRunId::from_uuid(next_test_submit_uuid());
-    signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone())
-        .create_stream(run)
+    let registrations =
+        signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
+            pool.clone(),
+        );
+    let registration = registrations
+        .register_user(
+            signalbox_domain::program_registration::ProgramRegistrationRequest {
+                name: "program-submit-fixture".into(),
+                revision: "fixture-revision".into(),
+                source: Vec::new(),
+                artifact: String::new(),
+                grants: signalbox_domain::program_registration::ProgramGrants::new([
+                    signalbox_domain::ProgramCapability::Session,
+                ]),
+            },
+        )
+        .await?;
+    let run = registrations
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            registration.id,
+        )
         .await?;
     let capability = signalbox_persistence::program_journal::ProgramSessionHost::new(
         signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone()),

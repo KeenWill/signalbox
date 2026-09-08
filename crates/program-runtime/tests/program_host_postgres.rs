@@ -207,7 +207,7 @@ async fn isolate_replays_then_transitions_to_live_at_the_durable_tail() -> Resul
         ScriptedDeliveries::new([expected_concurrent_kind.clone(), expected_live_kind.clone()]);
 
     let first_outcome = host
-        .execute(run, &artifact, &mut live)
+        .execute_unregistered(run, &artifact, &mut live)
         .await
         .expect("partial-journal execution must reach live and complete");
 
@@ -256,7 +256,7 @@ async fn isolate_replays_then_transitions_to_live_at_the_durable_tail() -> Resul
     let mut replay_must_not_go_live = ScriptedDeliveries::new([]);
 
     let replay_outcome = host
-        .execute(run, &artifact, &mut replay_must_not_go_live)
+        .execute_unregistered(run, &artifact, &mut replay_must_not_go_live)
         .await
         .expect("complete-journal replay must complete");
 
@@ -291,7 +291,7 @@ async fn isolate_divergence_persists_and_replays_the_nondeterminism_fault()
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let failure = host
-        .execute(run, &artifact, &mut live_must_not_run)
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
         .await
         .expect_err("different request bytes must stop the isolate host");
     let ProgramHostError::Nondeterminism {
@@ -317,7 +317,7 @@ async fn isolate_divergence_persists_and_replays_the_nondeterminism_fault()
     let mut restarted_live_must_not_run = ScriptedDeliveries::new([]);
 
     let restarted = host
-        .execute(run, &artifact, &mut restarted_live_must_not_run)
+        .execute_unregistered(run, &artifact, &mut restarted_live_must_not_run)
         .await?;
 
     assert_eq!(
@@ -350,7 +350,9 @@ globalThis.__signalboxProgramRequest === undefined || (() => { throw new Error("
     let host = ProgramHost::new(repository);
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(outcome, ProgramExecutionOutcome::Completed);
     assert!(live_must_not_run.observed_outstanding.is_empty());
@@ -373,7 +375,7 @@ async fn unresolved_top_level_await_returns_stalled_promptly() -> Result<(), Box
 
     let failure = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        host.execute(run, &artifact, &mut live_must_not_run),
+        host.execute_unregistered(run, &artifact, &mut live_must_not_run),
     )
     .await
     .expect("a stalled artifact must return promptly")
@@ -414,7 +416,7 @@ now(new Uint8Array([{FIRST_LIVE_REQUEST_BYTE}]));
     }]);
     let host = ProgramHost::new(repository.clone());
 
-    let outcome = host.execute(run, &artifact, &mut live).await?;
+    let outcome = host.execute_unregistered(run, &artifact, &mut live).await?;
 
     assert_eq!(outcome, ProgramExecutionOutcome::Completed);
     assert_eq!(live.observed_outstanding, vec![vec![expected_request]]);
@@ -442,7 +444,7 @@ async fn a_module_that_throws_is_an_isolate_failure_not_a_completion() -> Result
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let failure = host
-        .execute(run, &artifact, &mut live_must_not_run)
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
         .await
         .expect_err("a module that throws must not report completion");
 
@@ -488,7 +490,9 @@ typeof localeSensitiveMethods === "undefined" || (() => { throw new Error("a boo
     let host = ProgramHost::new(repository);
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(outcome, ProgramExecutionOutcome::Completed);
     assert!(live_must_not_run.observed_outstanding.is_empty());
@@ -513,7 +517,9 @@ async fn a_journal_opening_with_a_run_cancel_replays_before_the_artifact_request
     let host = ProgramHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(
         outcome,
@@ -553,7 +559,9 @@ async fn a_recorded_terminal_outcome_behind_a_request_outranks_an_unloadable_art
     let host = ProgramHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(
         outcome,
@@ -594,7 +602,9 @@ async fn a_leading_run_cancel_outranks_an_artifact_that_cannot_load() -> Result<
     let host = ProgramHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(
         outcome,
@@ -643,7 +653,9 @@ async fn a_run_cancel_behind_a_recorded_answer_replays_before_the_next_request()
     let host = ProgramHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(
         outcome,
@@ -738,21 +750,100 @@ async fn stale_loaded_tail_cannot_append_or_mutate_the_journal() -> Result<(), B
     Ok(())
 }
 
+/// Fixture registration names are arbitrary and distinct.
+async fn registration_fixture(
+    pool: &PgPool,
+    grants: signalbox_domain::program_registration::ProgramGrants,
+    artifact: &str,
+) -> Result<ProgramRunId, Box<dyn Error>> {
+    use signalbox_domain::program_registration::ProgramRegistrationRequest;
+    use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+    let repository = ProgramRegistrationRepository::new(pool.clone());
+    let registration = repository
+        .register_user(ProgramRegistrationRequest {
+            name: Uuid::now_v7().to_string(),
+            revision: "fixture-revision".into(),
+            source: artifact.as_bytes().to_vec(),
+            artifact: artifact.into(),
+            grants,
+        })
+        .await?;
+    Ok(repository
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            registration.id,
+        )
+        .await?)
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_capability_requires_a_retained_program_run() -> Result<(), Box<dyn Error>> {
+async fn session_capability_requires_a_registered_run_with_the_session_grant()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ProgramCapability, program_registration::ProgramGrants};
     let (_container, pool) = migrated_postgres().await?;
-    let journal = ProgramJournalRepository::new(pool);
+    let journal = ProgramJournalRepository::new(pool.clone());
     let host = ProgramHost::new(journal.clone());
-    let run = ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID));
-    assert!(host.session_capability(run).await?.is_none());
-    journal.create_stream(run).await?;
+    let unregistered = run_id();
+    assert!(host.session_capability(unregistered).await?.is_none());
+    journal.create_stream(unregistered).await?;
+    assert!(host.session_capability(unregistered).await?.is_none());
+    let ungranted = registration_fixture(&pool, ProgramGrants::new([]), "export {};").await?;
+    assert!(host.session_capability(ungranted).await?.is_none());
+    let granted = registration_fixture(
+        &pool,
+        ProgramGrants::new([ProgramCapability::Session]),
+        "export {};",
+    )
+    .await?;
     let capability = host
-        .session_capability(run)
+        .session_capability(granted)
         .await?
-        .expect("run is retained");
+        .expect("registered session grant");
     assert!(
-        matches!(capability.actor(), signalbox_domain::Actor::Program { run: reference } if reference.run() == run)
+        matches!(capability.actor(), signalbox_domain::Actor::Program { run: reference } if reference.run() == granted)
     );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn registered_run_executes_its_stored_artifact() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ProgramCapability, program_registration::ProgramGrants};
+    let (_container, pool) = migrated_postgres().await?;
+    let artifact = immediately_requesting_artifact();
+    let run = registration_fixture(
+        &pool,
+        ProgramGrants::new([ProgramCapability::Time]),
+        artifact.source(),
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let expected_request = request(1, RequestKind::Now(payload(&[FIRST_LIVE_REQUEST_BYTE])));
+    let mut deliveries = ScriptedDeliveries::new([DeliveryKind::Answer {
+        resolves: expected_request.ordinal(),
+        payload: payload(&[FIRST_LIVE_ANSWER_BYTE]),
+    }]);
+    assert_eq!(
+        ProgramHost::new(journal.clone())
+            .execute(run, &mut deliveries)
+            .await?,
+        ProgramExecutionOutcome::Completed,
+    );
+    assert_eq!(
+        deliveries.observed_outstanding,
+        vec![vec![expected_request]]
+    );
+    assert_eq!(
+        journal
+            .load(run)
+            .await?
+            .expect("registered journal")
+            .entries()
+            .len(),
+        2
+    );
+    pool.close().await;
     Ok(())
 }

@@ -24,6 +24,8 @@ pub enum ProgramRegistrationError {
         source: sqlx::Error,
         commit_ambiguous: bool,
     },
+    #[error("program run is already bound differently")]
+    RunConflict { run: ProgramRunId },
     #[error("program registration corruption: {field_0}")]
     Corruption(&'static str),
     #[error("program registration grants exceed the registrant's grants")]
@@ -119,15 +121,29 @@ impl ProgramRegistrationRepository {
         Ok(registration)
     }
 
-    /// Creates one journal and its immutable registration binding atomically.
+    /// Creates one journal and its immutable binding, or returns an equal retry.
     pub async fn start_run(
         &self,
+        run: ProgramRunId,
         registration: ProgramRegistrationId,
     ) -> Result<ProgramRunId, ProgramRegistrationError> {
-        let run = ProgramRunId::from_uuid(Uuid::now_v7());
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("INSERT INTO program_run_journal_stream (run_id, frame_contract_version) VALUES ($1, $2)")
+        let inserted = sqlx::query("INSERT INTO program_run_journal_stream (run_id, frame_contract_version) VALUES ($1, $2) ON CONFLICT (run_id) DO NOTHING")
             .bind(run.into_uuid()).bind(FRAME_CONTRACT_VERSION).execute(&mut *transaction).await?;
+        if inserted.rows_affected() == 0 {
+            let bound: Option<Uuid> = sqlx::query_scalar(
+                "SELECT registration_id FROM program_run_registration WHERE run_id = $1",
+            )
+            .bind(run.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            transaction.rollback().await?;
+            return if bound == Some(registration.into_uuid()) {
+                Ok(run)
+            } else {
+                Err(ProgramRegistrationError::RunConflict { run })
+            };
+        }
         sqlx::query("INSERT INTO program_run_journal_sequence_state (run_id) VALUES ($1)")
             .bind(run.into_uuid())
             .execute(&mut *transaction)
