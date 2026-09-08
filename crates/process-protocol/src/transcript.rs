@@ -989,6 +989,8 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact provider-visible denial content.
         content: String,
+        /// Whether this denial already has its one permitted user override.
+        override_recorded: bool,
     },
     /// One logical tool request resolved before dispatch.
     ToolInadmissible {
@@ -1003,6 +1005,8 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact provider-visible terminal-closure content.
         content: String,
+        /// Whether an approval was recorded before the request closed.
+        approved_before_close: bool,
     },
     /// Explicit completed-turn marker.
     TurnCompleted {

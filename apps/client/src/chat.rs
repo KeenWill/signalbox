@@ -1,5 +1,5 @@
 //! The interactive terminal chat loop: reads stdin on a background thread,
-//! dispatches `:stop`, `:steer`, `:approve`, `:deny`, `:transcript`, `:model`,
+//! dispatches `:stop`, `:steer`, `:approve`, `:deny`, `:override`, `:transcript`, `:model`,
 //! and `:quit` commands, and renders the session's live turn and delegation
 //! events as they arrive over `ProcessClient`.
 
@@ -37,7 +37,7 @@ use crate::{
 
 const MAX_CHAT_LINE_BYTES: usize = MAX_INPUT_CONTENT_FRAME_BYTES + ":steer ".len();
 
-const COMMANDS: &str = ":stop TEXT | :steer TEXT | :approve ID | :deny ID REASON | \
+const COMMANDS: &str = ":stop TEXT | :steer TEXT | :approve ID | :deny ID REASON | :override ID | \
     :transcript | :model ALIAS-UUID | :quit";
 
 pub(crate) struct TerminalInput {
@@ -293,6 +293,7 @@ enum ChatInput {
     Stop(String),
     Steer(String),
     Approve(CanonicalUuid),
+    Override(CanonicalUuid),
     Deny {
         tool_request_id: CanonicalUuid,
         reason: String,
@@ -903,6 +904,24 @@ where
                                 RequestWait::Exit => return Ok(()),
                             }
                         }
+                        ChatInput::Override(tool_request_id) => {
+                            let (command_id, _) = command_identity(None)?;
+                            output.recovery_value(
+                                "command_id",
+                                &command_id.into_uuid().hyphenated().to_string(),
+                            )?;
+                            match await_request(
+                                output,
+                                &mut interrupts,
+                                turns.status(),
+                                RequestKind::Mutation,
+                                crate::turn::arm_override(client, command_id, session_id, tool_request_id),
+                            ).await? {
+                                RequestWait::Complete(Ok(())) => output.tool_denial_overridden(tool_request_id)?,
+                                RequestWait::Complete(Err(error)) => report_request_error(output, error)?,
+                                RequestWait::Exit => return Ok(()),
+                            }
+                        }
                         ChatInput::Approve(tool_request_id) => {
                             let decision = ToolDecision::Approve {};
                             let (command_id, _) = command_identity(None)?;
@@ -1477,6 +1496,10 @@ fn parse_line_with_limit(
         validate_content(content, ":steer requires text", max_message_utf8_bytes)?;
         return Ok(ChatInput::Steer(content.to_owned()));
     }
+    if let Some(value) = line.strip_prefix(":override ") {
+        return parse_uuid(value, ":override requires one canonical request UUID")
+            .map(ChatInput::Override);
+    }
     if let Some(value) = line.strip_prefix(":approve ") {
         return parse_uuid(value, ":approve requires one canonical request UUID")
             .map(ChatInput::Approve);
@@ -1720,6 +1743,11 @@ mod tests {
     #[test]
     fn chat_parser_maps_the_closed_control_set() {
         let request = CanonicalUuid::from_uuid(Uuid::parse_str(REQUEST).expect("fixture UUID"));
+
+        assert_eq!(
+            parse_line(format!(":override {REQUEST}")),
+            Ok(ChatInput::Override(request))
+        );
 
         assert_eq!(
             parse_line(String::from(":stop continue here")),
