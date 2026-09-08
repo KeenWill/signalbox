@@ -1,8 +1,9 @@
 # Credential availability design
 
-This design is not built; it extends
-[credential availability](../spec/credential-availability.md) with the wait
-endings a pool configured to park reaches and their release.
+The remaining design extends
+[credential availability](../spec/credential-availability.md) with contention,
+capacity reservations, and the terminal projection of a wait release after a
+predecessor call.
 
 ## Goal
 

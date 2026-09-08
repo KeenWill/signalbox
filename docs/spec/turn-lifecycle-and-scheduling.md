@@ -284,14 +284,15 @@ awaiting a recovery decision. A stop-requested attempt with a
 cancellation-requested call ends both and terminalizes reconciliation-required
 with that call as its exact ambiguity set. A turn already parked in the
 model-call recovery wait is not reclassified; the transaction rolls back and
-reports the session as awaiting a recovery decision. An approval wait remains
-parked unchanged. A running tool attempt follows its stored effect class:
-prepared or effect-free work closes known-failed and fails the turn, and
-in-flight external-effect work closes ambiguous and parks. A running tool batch
-whose requests are all resolved with no current tool attempt is returned as
-resumable work for a scheduler pass. In the two failing branches only, one
-failure entry is appended, preceded in the tool branch by one correlated result
-entry per request in proposal order. Identity collisions are retried with fresh
+reports the session as awaiting a recovery decision. Approval and
+credential-availability waits remain parked unchanged, including delegated
+turns. A running tool attempt follows its stored effect class: prepared or
+effect-free work closes known-failed and fails the turn, and in-flight
+external-effect work closes ambiguous and parks. A running tool batch whose
+requests are all resolved with no current tool attempt is returned as resumable
+work for a scheduler pass. In the two failing branches only, one failure entry
+is appended, preceded in the tool branch by one correlated result entry per
+request in proposal order. Identity collisions are retried with fresh
 candidates; infrastructure failures and fail-closed corruption stop startup
 visibly. The scan is idempotent: a rerun inventories only work still active, and
 a stale observation rolls back.
@@ -445,9 +446,6 @@ issuing another, and a successor resumes from that boundary.
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - Recovery-only startup: a runner reconciliation phase between migrations and
   the generic scan; design in
-  [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-- The credential-pool availability wait as a distinct active phase, with its
-  attempt yield, scheduler wake conditions, and release; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - The instruction-eligibility freeze in the activation transaction and the
   replacement command's lock order; design in
