@@ -210,11 +210,26 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
 })
 
 test('fetches fresh original bytes after browser decoding fails', async ({ page }) => {
+  await page.addInitScript(() => {
+    const request = window.fetch
+    const cacheModes: (RequestCache | undefined)[] = []
+    Object.defineProperty(window, 'originalImageCacheModes', { value: cacheModes })
+    window.fetch = (input, init) => {
+      if (String(input).endsWith('/content/image-jpeg')) cacheModes.push(init?.cache)
+      return request.call(window, input, init)
+    }
+  })
   const undecodable = Buffer.alloc(jpegOriginalFixture.byteLength)
   undecodable.set([0xff, 0xd8, 0xff])
   await page.route(
     `**${jpegOriginalPath}`,
-    (route) => route.fulfill({ status: 200, contentType: 'image/jpeg', body: undecodable }),
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'image/jpeg',
+        headers: { 'Cache-Control': 'public, max-age=31536000, immutable' },
+        body: undecodable,
+      }),
     { times: 1 },
   )
   await page.goto('/scenario/blobs')
@@ -227,6 +242,10 @@ test('fetches fresh original bytes after browser decoding fails', async ({ page 
   await artifact.getByRole('button', { name: 'Retry original' }).click()
   await freshRead
   await expect(artifact.getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  expect(await page.evaluate(() => Reflect.get(window, 'originalImageCacheModes'))).toEqual([
+    'reload',
+    'reload',
+  ])
 })
 
 test('restores a loaded original after leaving and reopening the scenario', async ({ page }) => {

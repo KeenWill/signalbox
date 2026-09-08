@@ -16,7 +16,11 @@ export const useVerifiedOriginalImage = (view: BlobView | undefined, requested: 
     queryKey,
     queryFn: ({ signal }) => {
       if (view === undefined) throw new Error('an admitted original view is required')
-      return fetchVerifiedSingleFrameJpeg(view, (input, init) => fetch(input, init), signal)
+      return fetchVerifiedSingleFrameJpeg(
+        view,
+        (input, init) => fetch(input, { ...init, cache: 'reload' }),
+        signal,
+      )
     },
     enabled: requested && view !== undefined,
     staleTime: Number.POSITIVE_INFINITY,
