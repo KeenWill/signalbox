@@ -692,3 +692,26 @@ for (const growth of [false, true]) {
     expect(textReads).toBe(1)
   })
 }
+
+for (const size of ['short viewport', 'expanded textarea']) {
+  test(`keeps send reachable with a ${size}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 1000 })
+    const api = await sessionApi(page)
+    await openSession(page)
+    const message = page.getByRole('textbox', { name: 'Message', exact: true })
+    await message.fill('Continue after resizing.')
+    if (size === 'short viewport') await page.setViewportSize({ width: 1440, height: 320 })
+    else
+      await message.evaluate((element) => {
+        element.style.height = '1100px'
+      })
+    await page.mouse.move(700, 150)
+    await page.mouse.wheel(0, 3000)
+    const send = page.getByRole('button', { name: 'Send message', exact: true })
+    await expect(send).toBeInViewport({ ratio: 1 })
+    await send.click()
+    await expect(page.getByRole('status').filter({ hasText: 'Message sent' })).toBeVisible()
+    expect(api.state.submissions).toHaveLength(1)
+    expect(api.state.submissions[0]?.message).toBe('Continue after resizing.')
+  })
+}

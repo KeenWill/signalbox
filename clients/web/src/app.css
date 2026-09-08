@@ -3131,9 +3131,12 @@ kbd {
   overflow-wrap: anywhere;
 }
 
+.product-main-sessions {
+  max-height: 100dvh;
+}
 .session-workspace-surface:has(> .session-composer) {
   grid-template-rows: auto minmax(0, 1fr) auto;
-  overflow: hidden;
+  overflow: auto;
 }
 .session-workspace-surface:has(> .session-composer) > .session-workspace {
   overflow: auto;
