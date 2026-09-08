@@ -1,3 +1,32 @@
+ALTER TABLE credential_exclusion DROP CONSTRAINT credential_exclusion_oauth_generation_check,
+    ADD CONSTRAINT credential_exclusion_oauth_generation_check CHECK (
+        oauth_generation IS NULL OR (oauth_generation > 0 AND origin IN ('codex_home', 'oauth_refresh')));
+
+CREATE OR REPLACE VIEW credential_exclusion_state AS
+SELECT exclusion.*,
+       EXISTS (SELECT 1 FROM clear_credential_exclusion_command AS command
+               WHERE command.outcome = 'cleared'
+                 AND command.cleared_generation = exclusion.record_generation) AS cleared,
+       NOT EXISTS (SELECT 1 FROM credential_exclusion AS newer
+                   WHERE newer.kind = exclusion.kind AND newer.profile = exclusion.profile
+                     AND newer.origin = exclusion.origin
+                     AND newer.pool_policy_id IS NOT DISTINCT FROM exclusion.pool_policy_id
+                     AND newer.session_id IS NOT DISTINCT FROM exclusion.session_id
+                     AND newer.record_generation > exclusion.record_generation)
+       AND (exclusion.oauth_generation IS NULL OR EXISTS (
+           SELECT 1 FROM oauth_credential_authorization oauth_auth
+             WHERE oauth_auth.profile = exclusion.profile
+               AND oauth_auth.generation = exclusion.oauth_generation
+               AND oauth_auth.quarantined
+               AND ((exclusion.origin = 'codex_home' AND oauth_auth.quarantine_cause = 'credential_home')
+                 OR (exclusion.origin = 'oauth_refresh' AND oauth_auth.quarantine_cause <> 'credential_home'))))
+       AND (exclusion.action_id IS NULL OR action.consumed_turn_id IS NULL)
+       AND NOT EXISTS (SELECT 1 FROM clear_credential_exclusion_command AS command
+                       WHERE command.outcome = 'cleared'
+                         AND command.cleared_generation = exclusion.record_generation) AS active
+  FROM credential_exclusion AS exclusion
+  LEFT JOIN credential_pool_member_action AS action ON action.action_id = exclusion.action_id;
+
 ALTER TABLE credential_pool_terminal_exhaustion
     ADD COLUMN pool_policy_id uuid REFERENCES credential_pool_policy,
     ADD CONSTRAINT credential_pool_exhaustion_policy_unique UNIQUE (terminal_attempt_id, pool_policy_id),
@@ -16,6 +45,7 @@ CREATE TABLE credential_pool_exhaustion_member (
     member_action_ids bigint[] NOT NULL,
     cleared_record_generations bigint[] NOT NULL,
     oauth_home_generation bigint,
+    oauth_refresh_generation bigint,
     transient_observation_model_call_ids uuid[] NOT NULL,
     capacity_windows jsonb CHECK (jsonb_typeof(capacity_windows) = 'array'),
     record_generation bigint GENERATED ALWAYS AS ((evidence->'exclusion'->>'record_generation')::bigint) STORED REFERENCES credential_exclusion,
@@ -38,6 +68,10 @@ BEGIN
       FROM oauth_credential_authorization oauth_auth
       WHERE oauth_auth.profile = NEW.profile AND oauth_auth.quarantined
         AND oauth_auth.quarantine_cause = 'credential_home';
+    SELECT oauth_auth.generation INTO NEW.oauth_refresh_generation
+      FROM oauth_credential_authorization oauth_auth
+      WHERE oauth_auth.profile = NEW.profile AND oauth_auth.quarantined
+        AND oauth_auth.quarantine_cause <> 'credential_home';
     SELECT COALESCE(array_agg(x.record_generation ORDER BY x.record_generation), '{}'::bigint[])
       INTO NEW.cleared_record_generations
       FROM credential_exclusion x
@@ -87,7 +121,9 @@ WITH context AS (
               AND newer.pool_policy_id IS NOT DISTINCT FROM x.pool_policy_id
               AND newer.session_id IS NOT DISTINCT FROM x.session_id)
         AND NOT (x.record_generation = ANY(e.cleared_record_generations))
-        AND (x.oauth_generation IS NULL OR x.oauth_generation = e.oauth_home_generation)
+        AND (x.oauth_generation IS NULL
+          OR (x.origin = 'codex_home' AND x.oauth_generation = e.oauth_home_generation)
+          OR (x.origin = 'oauth_refresh' AND x.oauth_generation = e.oauth_refresh_generation))
 ), windows AS (
     SELECT (capacity_window->>'remaining_percent')::bigint AS remaining,
            (capacity_window->>'resets_at')::numeric AS reset_nanos
