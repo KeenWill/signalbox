@@ -445,6 +445,23 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('clears the session inspector description when navigating to Imports', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await useDeterministicImportApi(page)
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('option', { name: /43 turn completed/ }).click()
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector).toContainText(
+    'Bounded server-provided timeline projection for the selected record.',
+  )
+  await page.getByRole('link', { name: /Imports/ }).click()
+  await expect(inspector).toContainText(
+    'Select an available operational record to inspect its server-provided evidence.',
+  )
+  await expect(inspector).not.toContainText('Bounded server-provided timeline projection')
+})
+
 test('opens and inspects a bounded production session without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
