@@ -9,9 +9,9 @@ deleted when the work lands.
 The daemon prices a call against dated rate windows, declares each model's input
 modalities and workspace-instruction capacity, records the workspace roots it
 derives, binds a session to its workspace before its first turn when a template
-asks for it. Credential exclusions expire, coalesce, and clear; sessions carry
-the complete pool policy they were created under; and a runner reads, injects,
-and scrubs a granted credential for the work it dispatches.
+asks for it. Credential exclusions expire and coalesce; sessions carry the
+complete pool policy they were created under; and a runner reads, injects, and
+scrubs a granted credential for the work it dispatches.
 
 ## Design
 
@@ -254,8 +254,7 @@ unsupported. Supplying a surface for any of them changes no grammar.
 The session credential record and entry rows are append-only behind a guarded
 head. Any update appends one complete event and advances the head by one.
 
-The workspace table and its constraints exist and nothing writes them; the
-per-session derivation must never start reading them.
+The per-session derivation must never read the workspace table to choose a root.
 
 Every durable action row is appended per observation under the profile's
 action-head lock and never updated, except the `switch_next_turn` displacement a
