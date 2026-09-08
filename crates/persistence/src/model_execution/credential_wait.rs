@@ -160,13 +160,37 @@ pub(crate) async fn load_phase(
     ))
 }
 
+pub(super) async fn retain_serving_target<'a>(
+    connection: &mut PgConnection,
+    attempt: TurnAttemptId,
+    families: Option<&'a crate::ModelCredentialFamilyCatalog>,
+    mut serving: super::credential_pool::PreparedServingEvidence<'a>,
+) -> Result<super::credential_pool::PreparedServingEvidence<'a>, ModelCallRepositoryError> {
+    let target: Option<Uuid> = sqlx::query_scalar(
+        "SELECT waiting.effective_target_id FROM credential_availability_wait_release release
+         JOIN credential_availability_wait waiting USING (wait_attempt_id)
+         WHERE release.turn_attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_optional(connection)
+    .await?;
+    if let Some(target) = target {
+        serving.effective_target = ResolvedProviderTarget::naming(
+            signalbox_domain::ProviderModelIdentity::from_uuid(target),
+        );
+        serving.credential_model_family =
+            families.and_then(|families| families.family(serving.effective_target));
+    }
+    Ok(serving)
+}
+
 pub(super) async fn prepare_release(
     connection: &mut PgConnection,
     repository: &PostgresModelCallRepository,
     session_id: SessionId,
     successor: TurnAttemptId,
 ) -> Result<Option<CredentialAvailabilityWait>, ModelCallRepositoryError> {
-    let waiting = sqlx::query("SELECT wait_attempt_id, turn_id, pool_policy_id, eligible FROM credential_availability_wait WHERE session_id = $1 AND consumed_by_attempt_id IS NULL")
+    let waiting = sqlx::query("SELECT wait_attempt_id, turn_id, pool_policy_id, effective_target_id, eligible FROM credential_availability_wait WHERE session_id = $1 AND consumed_by_attempt_id IS NULL")
         .bind(session_id.into_uuid()).fetch_optional(&mut *connection).await?;
     let Some(waiting) = waiting else {
         return Ok(None);
@@ -201,18 +225,28 @@ pub(super) async fn prepare_release(
         .targets
         .resolve(*execution.configuration().effective().model())
     else {
+        sqlx::query("ROLLBACK TO SAVEPOINT credential_wait_admission")
+            .execute(&mut *connection)
+            .await?;
         sqlx::query("RELEASE SAVEPOINT credential_wait_admission")
             .execute(&mut *connection)
             .await?;
-        return Ok(None);
+        return Ok(Some(wait));
     };
     let target = resolved.target();
-    let serving = super::credential_pool::prepared_serving_evidence(
+    let mut serving = super::credential_pool::prepared_serving_evidence(
         repository.credential_families.as_ref(),
         &repository.continuation_usage_limits,
         target,
         fast,
     );
+    serving.effective_target = ResolvedProviderTarget::naming(
+        signalbox_domain::ProviderModelIdentity::from_uuid(waiting.try_get("effective_target_id")?),
+    );
+    serving.credential_model_family = repository
+        .credential_families
+        .as_ref()
+        .and_then(|families| families.family(serving.effective_target));
     let selected = super::credential_pool::select_runtime_pool_credential(
         connection,
         session_id,
@@ -307,7 +341,7 @@ pub(super) async fn park_failed(
     let excluded =
         load_durable_pool_exclusions(connection, execution.session(), execution.turn(), policy)
             .await?;
-    let Some(mut snapshot) = exhaustion_snapshot(
+    let Some(snapshot) = exhaustion_snapshot(
         connection,
         execution.session(),
         execution.turn(),
@@ -337,18 +371,6 @@ pub(super) async fn park_failed(
         observation.usage(),
         cause,
         backoff,
-    )
-    .await?;
-    let refreshed =
-        load_durable_pool_exclusions(connection, execution.session(), execution.turn(), policy)
-            .await?;
-    snapshot.members = credential_pool_evidence::snapshot(
-        connection,
-        execution.session(),
-        execution.turn(),
-        policy,
-        refreshed.observed_at,
-        &refreshed.headroom,
     )
     .await?;
     let fresh = Box::pin(super::live_turn::require_live_execution(
