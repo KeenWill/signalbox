@@ -110,7 +110,6 @@ anchor, unless the anchor is a heading on the linking page.
 - [Model-call execution design](../design/model-call-execution.md)
 - [Tool loop design](../design/tool-loop.md)
 - [Model-runtime substrate design](../design/runtime-substrate.md)
-- [Model and session settings design](../design/model-session-settings.md)
 - [Configuration and credentials design](../design/configuration-and-credentials.md)
 - [Credential availability design](../design/credential-availability.md)
 - [Identity and commands design](../design/identity-and-commands.md)

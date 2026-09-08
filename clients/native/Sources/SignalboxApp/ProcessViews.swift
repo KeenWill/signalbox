@@ -880,7 +880,7 @@ final class ProcessImportedContinuationRetryStore {
   }
 }
 
-private extension SignalboxProcessServiceError {
+extension SignalboxProcessServiceError {
   var retainsPreparedMutationIdentity: Bool {
     switch self {
     case .mutationRetryExhausted, .remote(code: .unknown, message: _, detail: _):
@@ -1377,6 +1377,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   @Published private(set) var runnerTransition: ProcessRunnerTransition?
   @Published private(set) var isSubmitting = false
   @Published private(set) var isDecidingTool = false
+  @Published var perCallSettings: SignalboxModelSettingsOverlay = .inheritAll
+  @Published private(set) var settingsAdjustments: [SignalboxModelChangeAdjustment] = []
   @Published var composerText = ""
   @Published var errorMessage: String?
 
@@ -1461,6 +1463,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     self.serviceProvider = serviceProvider
   }
 
+  func installDefaults(_ defaults: SignalboxSessionDefaultsRead) {
+    guard defaults.sessionID == session.id else { return }
+    if session.modelSelection != defaults.modelSelection { perCallSettings = .inheritAll }
+    session = SignalboxProcessSession(session: session, defaults: defaults)
+  }
+
   func replaceServiceProvider(
     _ provider: @escaping () -> (any SignalboxProcessServiceProtocol)?
   ) {
@@ -1528,8 +1536,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     var preparedForAttempt: SignalboxPreparedInputSubmission?
     var reusedUnresolvedSubmission = false
     do {
-      let prepared: SignalboxPreparedInputSubmission
+      var prepared: SignalboxPreparedInputSubmission
       if let unresolvedSubmission,
+        unresolvedSubmission.modelSettings == perCallSettings,
         hasExactUTF8(unresolvedSubmission.content, content)
       {
         prepared = unresolvedSubmission
@@ -1540,6 +1549,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           session: session,
           content: content
         )
+        prepared.modelSettings = perCallSettings
       }
       preparedForAttempt = prepared
       guard serviceGeneration == generation else {
@@ -1569,6 +1579,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       if hasExactUTF8(composerText, prepared.content) {
         composerText = ""
       }
+      if perCallSettings == prepared.modelSettings { perCallSettings = .inheritAll }
       errorMessage = nil
     } catch {
       guard serviceGeneration == generation else {
@@ -1692,9 +1703,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     var preparedForAttempt: SignalboxPreparedTurnReconciliation?
     var reusedUnresolvedReconciliation = false
     do {
-      let prepared: SignalboxPreparedTurnReconciliation
+      var prepared: SignalboxPreparedTurnReconciliation
       if let unresolvedReconciliation,
         unresolvedReconciliation.sessionID == session.id,
+        unresolvedReconciliation.modelSettings == perCallSettings,
         hasExactUTF8(unresolvedReconciliation.content, content)
       {
         prepared = unresolvedReconciliation
@@ -1706,6 +1718,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           activeTurnID: activeTurnID,
           content: content
         )
+        prepared.modelSettings = perCallSettings
       }
       preparedForAttempt = prepared
       guard serviceGeneration == generation else {
@@ -1738,6 +1751,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       if hasExactUTF8(composerText, prepared.content) {
         composerText = ""
       }
+      if perCallSettings == prepared.modelSettings { perCallSettings = .inheritAll }
       errorMessage = nil
     } catch {
       guard serviceGeneration == generation else {
@@ -1790,9 +1804,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     var preparedForAttempt: SignalboxPreparedTurnStop?
     var reusedUnresolvedTurnStop = false
     do {
-      let prepared: SignalboxPreparedTurnStop
+      var prepared: SignalboxPreparedTurnStop
       if let unresolvedTurnStop,
         unresolvedTurnStop.sessionID == session.id,
+        unresolvedTurnStop.modelSettings == perCallSettings,
         hasExactUTF8(unresolvedTurnStop.content, content)
       {
         prepared = unresolvedTurnStop
@@ -1804,6 +1819,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           activeTurnID: activeTurnID,
           content: content
         )
+        prepared.modelSettings = perCallSettings
       }
       preparedForAttempt = prepared
       guard serviceGeneration == generation else {
@@ -1833,6 +1849,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       if hasExactUTF8(composerText, prepared.content) {
         composerText = ""
       }
+      if perCallSettings == prepared.modelSettings { perCallSettings = .inheritAll }
       errorMessage = nil
     } catch {
       guard serviceGeneration == generation else {
@@ -1880,13 +1897,15 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private var hasRetryableSubmission: Bool {
     unresolvedSubmission.map {
-      $0.sessionID == session.id && hasExactUTF8($0.content, composerText)
+      $0.sessionID == session.id && $0.modelSettings == perCallSettings
+        && hasExactUTF8($0.content, composerText)
     } ?? false
   }
 
   private var hasRetryableReconciliation: Bool {
     unresolvedReconciliation.map {
-      $0.sessionID == session.id && hasExactUTF8($0.content, composerText)
+      $0.sessionID == session.id && $0.modelSettings == perCallSettings
+        && hasExactUTF8($0.content, composerText)
     } ?? false
   }
 
@@ -2166,6 +2185,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   private func resetServiceOwnedPresentation() {
+    perCallSettings = .inheritAll
+    settingsAdjustments = []
     serviceGeneration &+= 1
     timeline = []
     delegationUpdate = nil
@@ -2364,8 +2385,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         diagnostic: decodingDiagnostic?.message,
         cursor: followed.cursor
       )
-    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
-      .contextCompacted:
+    case .sessionModelSettingsChanged(let adjustments), .turnModelSettingsResolved(let adjustments):
+      settingsAdjustments = adjustments
+    case .sessionCreated, .contextCompacted:
       break
     }
   }
@@ -2810,6 +2832,7 @@ struct ProcessSessionDetailScreen: View {
   @EnvironmentObject private var coordinator: AppCoordinator
   @StateObject private var viewModel: ProcessSessionDetailViewModel
   @State private var showArtifactGate = false
+  @State private var showModelSettings = false
   @State private var deniedToolRequest: SignalboxToolInvocationID?
   @State private var denialReason = ""
 
@@ -2928,12 +2951,20 @@ struct ProcessSessionDetailScreen: View {
       }
     }
     .onReceive(NotificationCenter.default.publisher(for: .processServiceChanged)) { _ in
+      showModelSettings = false
       Task {
         await viewModel.connect(replacingService: true)
       }
     }
     .onDisappear {
       viewModel.disconnect()
+    }
+    .sheet(isPresented: $showModelSettings) {
+      if let service = coordinator.processService {
+        ProcessModelSettingsScreen(session: viewModel.session, perCall: $viewModel.perCallSettings,
+          service: service, adjustments: viewModel.settingsAdjustments,
+          installed: viewModel.installDefaults)
+      }
     }
     .alert("Artifacts unavailable", isPresented: $showArtifactGate) {
       Button("OK", role: .cancel) {}
@@ -2989,6 +3020,9 @@ struct ProcessSessionDetailScreen: View {
         }
       }
       Spacer()
+      Button("Model settings", systemImage: "slider.horizontal.3") { showModelSettings = true }
+        .disabled(coordinator.processService == nil || viewModel.isSubmitting)
+        .accessibilityIdentifier("session-model-settings")
       Text(phaseLabel)
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
