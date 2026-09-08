@@ -56,8 +56,8 @@ export SIGNALBOX_SOCKET_PATH='/absolute/path/to/signalbox.sock'
 There is no maintainer-approved network transport reachable by a remote or
 mobile client. iPhone and iPad **Debug** builds run against the in-memory
 process-protocol harness. The harness is compiled out of Release builds, so a
-Release iPhone or iPad build has no backend at all — that configuration is not
-a supported way to run the app, and shipping one is gated on the same design
+Release iPhone or iPad build has no backend at all — that configuration is not a
+supported way to run the app, and shipping one is gated on the same design
 decision. Real remote/mobile connectivity remains a maintainer design gate
 recorded in
 [Protocols and persistence](../../docs/open-questions.md#protocols-and-persistence);
@@ -87,26 +87,26 @@ space-separated `xcodebuild` test identifiers and select which suites
 
 `Tests/SignalboxAppTests/LiveScreenSnapshotTests.swift` renders the screens
 `RootView` reaches, and its `+LegacyScreens` companion renders the kept screens
-that it no longer reaches. The 129 committed goldens under
+that it no longer reaches. The committed goldens under
 `Tests/SignalboxAppTests/__Snapshots__` cover four fixed screen canvases —
-iPhone and iPad, each in portrait and landscape — plus standalone sheet
-content. Rendering is in process, with one screen hosted in one window at a
-fixed canvas size, display scale, and safe area, so it sees no scene lifecycle
-or window chrome. A sheet presented by the hosted screen does reach its golden;
-sheet content is also snapshotted alone on its own canvas.
-`ScreenshotScenario` selects the fixtures.
+iPhone and iPad, each in portrait and landscape — plus standalone sheet content.
+Rendering is in process, with one screen hosted in one window at a fixed canvas
+size, display scale, and safe area, so it sees no scene lifecycle or window
+chrome. A sheet presented by the hosted screen does reach its golden; sheet
+content is also snapshotted alone on its own canvas. `ScreenshotScenario`
+selects the fixtures. Every canvas includes light and dark appearance at
+standard and accessibility text sizes.
 
 The canonical record and verification entry points are the two scripts below:
 `scripts/record-snapshots.sh` and `scripts/test-snapshots.sh` take the suite and
 the simulator from `scripts/lib/snapshots.sh`, which is what CI's snapshot step
 runs, while a bare `scripts/test-xcode.sh` resolves whichever compatible phone
-is booted.
-The phone-canvas goldens are byte-identical across the iPhone simulator models
-on which they were checked. The two iPad canvases and the sheet canvas are wider
-than the host phone's screen, so the window's corner mask and glass materials
-composite against the destination. Those wide-canvas goldens can legitimately
-fail on a destination other than CI's, and re-recording them there would commit
-a rendering the pinned simulator then rejects.
+is booted. The phone-canvas goldens are byte-identical across the iPhone
+simulator models on which they were checked. The two iPad canvases and the sheet
+canvas are wider than the host phone's screen, so the window's corner mask and
+glass materials composite against the destination. Those wide-canvas goldens can
+legitimately fail on a destination other than CI's, and re-recording them there
+would commit a rendering the pinned simulator then rejects.
 
 Reduce Transparency is refused rather than pinned. Every other appearance input
 these goldens depend on is a trait the canvas overrides, but that one is not a
@@ -116,14 +116,12 @@ switched on stops and names the setting instead of comparing against references
 recorded without it.
 
 In CI the suite is a report-only step that uploads the reference, the failed
-rendering, and their difference as an artifact when a comparison fails; the
-step is currently skipped while Swift client work is shelved, so no CI run
-checks these goldens or uploads diffs until the `if` in
-`.github/workflows/swift.yml` is deleted.
-Re-record the goldens after an intended visual change. Reviewing what you are
-about to bless is
-[rule 11](../../docs/agents/testing-style.md#expect-tests), which owns that
-rule for every snapshot in the repository and is the only place it is stated.
+rendering, and their difference as an artifact when a comparison fails; the step
+also uploads references, including newly recorded missing variants, for review
+and inclusion after intentional changes. Re-record the goldens after an intended
+visual change. Reviewing what you are about to bless is
+[rule 11](../../docs/agents/testing-style.md#expect-tests), which owns that rule
+for every snapshot in the repository and is the only place it is stated.
 
 ```bash
 scripts/record-snapshots.sh

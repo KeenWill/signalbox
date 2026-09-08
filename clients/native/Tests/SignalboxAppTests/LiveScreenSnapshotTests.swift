@@ -301,7 +301,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// The names no test on this class defines.
     /// The test a golden's file name belongs to, or `nil` if it names none.
     ///
-    /// A golden is written as `<test>.<canvas>.png`, so the first
+    /// A golden is written as `<test>.<canvas>[.<appearance>].png`, so the first
     /// dot-separated component is the method that recorded it. The `test`
     /// prefix is required because a directory holds other files —
     /// `MANIFEST.sha256` next door is one — and a name that cannot be a test
@@ -644,6 +644,10 @@ final class LiveScreenSnapshotTests: XCTestCase {
         XCTAssertEqual(
             Self.goldenIdentity(ofFileNamed: "testSessionCreationSheetContent.sheet.png")?.canvas,
             "sheet"
+        )
+        XCTAssertEqual(
+            Self.goldenIdentity(ofFileNamed: "testSessionList.iphone-portrait.dark-large-text.png")?.canvas,
+            "iphone-portrait"
         )
         XCTAssertNil(Self.goldenIdentity(ofFileNamed: "MANIFEST.sha256"))
         XCTAssertNil(Self.goldenIdentity(ofFileNamed: "notATestMethod.iphone-portrait.png"))

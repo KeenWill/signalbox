@@ -73,6 +73,28 @@ enum SnapshotCanvas: String, CaseIterable {
     var displayScale: CGFloat { 2 }
 }
 
+/// Explicit appearance axes keep references independent of host settings.
+enum SnapshotAppearance: String, CaseIterable {
+    case light
+    case dark
+    case largeText = "large-text"
+    case darkLargeText = "dark-large-text"
+
+    var userInterfaceStyle: UIUserInterfaceStyle {
+        switch self {
+        case .light, .largeText: return .light
+        case .dark, .darkLargeText: return .dark
+        }
+    }
+
+    var contentSizeCategory: UIContentSizeCategory {
+        switch self {
+        case .light, .dark: return .large
+        case .largeText, .darkLargeText: return .accessibilityExtraExtraExtraLarge
+        }
+    }
+}
+
 /// Everything a canvas pins that only UIKit can express.
 ///
 /// Split from the declaration above so the geometry can be extracted without
@@ -80,11 +102,6 @@ enum SnapshotCanvas: String, CaseIterable {
 /// reusable by an AppKit destination, and that is the whole reason for the
 /// seam.
 extension SnapshotCanvas {
-    /// Stated here for the same reason the scale is: a dynamic color resolves
-    /// against the trait collection of whatever it is set on, so an inherited
-    /// interface style would record a different golden on a dark-mode host.
-    static let userInterfaceStyle = UIUserInterfaceStyle.light
-
     /// The canvas is the whole safe area.
     ///
     /// A window takes its insets from the scene's device, and navigation and
@@ -109,14 +126,14 @@ extension SnapshotCanvas {
     /// worse, being device state rather than device geometry: a run on the
     /// pinned simulator model would still record a different golden with either
     /// switched on.
-    func overrideTraits(on controller: UIViewController) {
+    func overrideTraits(on controller: UIViewController, appearance: SnapshotAppearance = .light) {
         controller.traitOverrides.userInterfaceIdiom = userInterfaceIdiom
         controller.traitOverrides.horizontalSizeClass = horizontalSizeClass
         controller.traitOverrides.verticalSizeClass = verticalSizeClass
-        controller.traitOverrides.userInterfaceStyle = Self.userInterfaceStyle
+        controller.traitOverrides.userInterfaceStyle = appearance.userInterfaceStyle
         controller.traitOverrides.displayScale = displayScale
         controller.traitOverrides.layoutDirection = .leftToRight
-        controller.traitOverrides.preferredContentSizeCategory = .large
+        controller.traitOverrides.preferredContentSizeCategory = appearance.contentSizeCategory
         controller.traitOverrides.legibilityWeight = .regular
         controller.traitOverrides.accessibilityContrast = Self.accessibilityContrast
     }
@@ -129,8 +146,8 @@ extension SnapshotCanvas {
     /// navigation chrome's glass materials sample. Only the interface style is
     /// pinned here, along with the contrast that decides which system color it
     /// resolves to.
-    func overrideTraits(on window: UIWindow) {
-        window.overrideUserInterfaceStyle = Self.userInterfaceStyle
+    func overrideTraits(on window: UIWindow, appearance: SnapshotAppearance = .light) {
+        window.overrideUserInterfaceStyle = appearance.userInterfaceStyle
         window.traitOverrides.accessibilityContrast = Self.accessibilityContrast
     }
 
@@ -346,6 +363,7 @@ enum LiveScreenRenderer {
     static func render(
         _ view: some View,
         canvas: SnapshotCanvas,
+        appearance: SnapshotAppearance = .light,
         timeout: Duration = settleTimeout,
         file: StaticString = #filePath,
         line: UInt = #line
@@ -375,16 +393,16 @@ enum LiveScreenRenderer {
         // whatever the host happened to be showing. It extends past the canvas
         // by more than a blur radius on every side.
         let backdrop = UIWindow(windowScene: scene)
-        canvas.overrideTraits(on: backdrop)
+        canvas.overrideTraits(on: backdrop, appearance: appearance)
         backdrop.frame = CGRect(origin: .zero, size: canvas.size).insetBy(dx: -200, dy: -200)
         backdrop.backgroundColor = .systemBackground
         backdrop.isOpaque = true
         backdrop.windowLevel = .normal + 1
         backdrop.isHidden = false
         let window = UIWindow(windowScene: scene)
-        canvas.overrideTraits(on: window)
+        canvas.overrideTraits(on: window, appearance: appearance)
         window.windowLevel = .normal + 2
-        canvas.overrideTraits(on: content)
+        canvas.overrideTraits(on: content, appearance: appearance)
         host.view.backgroundColor = .systemBackground
         host.addChild(content)
         host.view.addSubview(content.view)
@@ -510,24 +528,26 @@ func assertLiveScreenSnapshot(
         XCTFail(unsupported, file: file, line: line)
         return
     }
-    let rendering = await LiveScreenRenderer.render(view, canvas: canvas, file: file, line: line)
-    // The record mode is passed per assertion rather than installed around the
-    // suite: `withSnapshotTesting` carries it in a task local, and XCTest runs
-    // an async test body in a task that does not inherit one.
-    assertSnapshot(
-        of: rendering,
-        as: .image(
-            precision: 1,
-            perceptualPrecision: 0.98,
-            scale: canvas.displayScale
-        ),
-        named: canvas.rawValue,
-        record: liveScreenSnapshotRecordMode(),
-        fileID: fileID,
-        file: file,
-        testName: testName,
-        line: line
-    )
+    for appearance in SnapshotAppearance.allCases {
+        let rendering = await LiveScreenRenderer.render(view, canvas: canvas, appearance: appearance, file: file, line: line)
+        // The record mode is passed per assertion rather than installed around the
+        // suite: `withSnapshotTesting` carries it in a task local, and XCTest runs
+        // an async test body in a task that does not inherit one.
+        assertSnapshot(
+            of: rendering,
+            as: .image(
+                precision: 1,
+                perceptualPrecision: 0.98,
+                scale: canvas.displayScale
+            ),
+            named: appearance == .light ? canvas.rawValue : "\(canvas.rawValue).\(appearance.rawValue)",
+            record: liveScreenSnapshotRecordMode(),
+            fileID: fileID,
+            file: file,
+            testName: testName,
+            line: line
+        )
+    }
 }
 
 /// The one appearance input these goldens depend on that no canvas can pin.
