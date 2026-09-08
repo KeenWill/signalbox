@@ -2154,3 +2154,55 @@ async fn blocked_publication_reconciles_with_attachment_pass() -> Result<(), Box
     assert_sqlstate(&replayed_attachment, "23514");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn external_observation_validation_waits_for_reservation_lock() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let pass = insert_fixture_pass(&fixture, 0x9a1, ReviewPassKind::ImportExternalContext).await;
+    let evidence = succeed_fixture_passes(&pool, &fixture.store, &[pass]).await;
+    let link = ReviewExternalLinkId::from_uuid(uuid(0x9a2));
+    let pending = ReviewExternalLink::try_reserve(
+        link,
+        ReviewExternalLinkAssociation::Target(fixture.target),
+        key("example-code-host"),
+        ReviewExternalObjectKind::ReviewComment,
+        &fixture.target_snapshot,
+    )
+    .expect("the pending reservation matches its target");
+    fixture.store.reserve_external_link(pending).await?;
+    let report = observation(
+        link,
+        ReviewEventOrdinal::one(),
+        evidence[0].clone(),
+        ReviewExternalObjectState::Current,
+    );
+    let mut holder = pool.begin().await?;
+    sqlx::query("SELECT external_link_id FROM review_external_link WHERE external_link_id = $1 FOR NO KEY UPDATE")
+        .bind(link.into_uuid())
+        .fetch_one(&mut *holder)
+        .await?;
+    let appending = tokio::spawn(async move {
+        fixture
+            .store
+            .append_external_observation(link, report)
+            .await
+    });
+    let waited = blocked_backends_reached(&pool, 1).await?;
+    holder.rollback().await?;
+    let rejected = appending
+        .await?
+        .expect_err("the locked reservation still has no attachment");
+
+    assert!(
+        waited,
+        "observation validation must wait for the reservation lock"
+    );
+    assert!(matches!(
+        rejected,
+        ReviewWorkflowStoreError::InvalidTransition(_)
+    ));
+    Ok(())
+}
