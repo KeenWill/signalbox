@@ -198,13 +198,19 @@ impl<P, E> GrantedDeliveries<'_, P, E> {
                 reason: RejectReason::UnsupportedOperation,
             });
         }
-        let input: RegisterInput = serde_json::from_slice(request.payload().as_bytes())
-            .map_err(|_| LiveDeliveryFailure::new("invalid registration request"))?;
-        let registration_id = input
-            .id
-            .parse()
-            .map(ProgramRegistrationId::from_uuid)
-            .map_err(|_| LiveDeliveryFailure::new("invalid registration identity"))?;
+        let Ok(input) = serde_json::from_slice::<RegisterInput>(request.payload().as_bytes())
+        else {
+            return Ok(DeliveryKind::Reject {
+                resolves: frame.ordinal(),
+                reason: RejectReason::UnsupportedOperation,
+            });
+        };
+        let Ok(registration_id) = input.id.parse().map(ProgramRegistrationId::from_uuid) else {
+            return Ok(DeliveryKind::Reject {
+                resolves: frame.ordinal(),
+                reason: RejectReason::UnsupportedOperation,
+            });
+        };
         let grants = ProgramGrants::new(input.grants.into_iter().map(Into::into));
         if !self.grants.permits_child(&grants) {
             return Ok(DeliveryKind::Reject {
