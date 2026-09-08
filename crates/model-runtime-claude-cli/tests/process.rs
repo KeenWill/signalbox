@@ -397,6 +397,16 @@ async fn tool_arguments_preserve_the_provider_json_lexeme() {
     assert_eq!(result.spawns, 1);
 }
 
+#[tokio::test]
+async fn tool_arguments_preserve_reserved_number_key_objects() {
+    let result = execute_scenario("reserved_key_tool_arguments", OperationShape::Tool).await;
+
+    assert_eq!(
+        tool_call(&completed(&result.evidence).content).arguments_json,
+        fixtures::RESERVED_KEY_TOOL_ARGUMENTS
+    );
+}
+
 /// A whole-object credential suppression remains typed and never emits an
 /// executable tool proposal or argument delta.
 #[tokio::test]
