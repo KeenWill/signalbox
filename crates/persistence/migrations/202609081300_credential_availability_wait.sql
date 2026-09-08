@@ -1,4 +1,4 @@
-ALTER TABLE credential_pool_availability_successor ADD COLUMN non_acceptance_proven boolean NOT NULL;
+ALTER TABLE credential_pool_availability_successor ADD COLUMN non_acceptance_proven boolean;
 
 CREATE TABLE credential_availability_wait (
     wait_attempt_id uuid PRIMARY KEY REFERENCES turn_attempt,
@@ -81,7 +81,7 @@ BEGIN
         JOIN model_call predecessor ON predecessor.model_call_id = successor.predecessor_model_call_id
         WHERE successor.successor_turn_attempt_id = waiting.wait_attempt_id
           AND successor.predecessor_model_call_id = waiting.predecessor_model_call_id
-          AND successor.non_acceptance_proven = waiting.predecessor_non_acceptance_proven
+          AND COALESCE(successor.non_acceptance_proven, false) = waiting.predecessor_non_acceptance_proven
           AND EXISTS (SELECT 1 FROM model_call_credential_pool_policy policy
               WHERE policy.model_call_id = predecessor.model_call_id
                 AND policy.pool_policy_id = waiting.pool_policy_id)

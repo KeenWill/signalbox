@@ -619,5 +619,3 @@ following that turn.
 
 - Runner creation and status requests, and the status read's failure evidence:
   [design](../design/process-protocol.md).
-- Typed projection of the credential-availability wait:
-  [design](../design/process-protocol.md).
