@@ -3,6 +3,19 @@ import XCTest
 @testable import SignalboxNative
 
 final class ProcessServiceIntegrationTests: XCTestCase {
+  func testMockUnifiedCursorKeepsImportedIdentityAfterItsNativePosition() async throws {
+    let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let identity = try SignalboxCanonicalUUID(validating: MockProcessProtocolFixtures.importedConversationID)
+    let afterNative = try await service.listConversations(includeArchived: true,
+      after: .init(origin: .nativeSession, conversationID: identity))
+
+    XCTAssertEqual(afterNative.conversations.first?.conversationID, identity)
+    XCTAssertEqual(afterNative.conversations.first?.origin, .imported)
+    let afterImported = try await service.listConversations(includeArchived: true,
+      after: .init(origin: .importedConversation, conversationID: identity))
+    XCTAssertFalse(afterImported.conversations.contains { $0.conversationID == identity })
+  }
+
   @MainActor
   func testRequestedNativeSessionDoesNotSelectAnImportedUUIDCollision() async throws {
     let sessionID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)

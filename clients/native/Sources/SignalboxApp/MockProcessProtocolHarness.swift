@@ -358,8 +358,9 @@ private actor MockProcessProtocolState {
         .filter { includeArchived || !$0.archived }
         .map { session in
           (
-            session.id,
-            [
+            identity: session.id,
+            originRank: 0,
+            message: [
               "type": "conversation_summary",
               "conversation": [
                 "origin": "native_session",
@@ -374,8 +375,9 @@ private actor MockProcessProtocolState {
       if scenario == nil {
         page.append(
           (
-            MockProcessProtocolFixtures.importedConversationID,
-            [
+            identity: MockProcessProtocolFixtures.importedConversationID,
+            originRank: 1,
+            message: [
               "type": "conversation_summary",
               "conversation": [
                 "origin": "imported_conversation",
@@ -388,19 +390,24 @@ private actor MockProcessProtocolState {
           )
         )
       }
-      page.sort { $0.0 < $1.0 }
-      if let after = request["after"] as? [String: Any], let id = after["conversation_id"] as? String {
-        page = page.filter { $0.0 > id }
+      // The unified order puts native (0) before imported (1) at an equal UUID.
+      page.sort { ($0.identity, $0.originRank) < ($1.identity, $1.originRank) }
+      if let after = request["after"] as? [String: Any],
+        let id = after["conversation_id"] as? String,
+        let origin = after["origin"] as? String
+      {
+        let originRank = origin == "native_session" ? 0 : 1
+        page = page.filter { ($0.identity, $0.originRank) > (id, originRank) }
       }
       let pageSize = Int(request["page_size"] as? String ?? "100") ?? 100
       let hasMore = page.count > pageSize
       page = Array(page.prefix(pageSize))
       var messages: [[String: Any]] = [["type": "conversation_page_start"]]
-      messages.append(contentsOf: page.map(\.1))
+      messages.append(contentsOf: page.map(\.message))
       let next: Any
       if hasMore, let last = page.last,
-        let summary = last.1["conversation"] as? [String: Any], let origin = summary["origin"] as? String {
-        next = ["origin": origin, "conversation_id": last.0]
+        let summary = last.message["conversation"] as? [String: Any], let origin = summary["origin"] as? String {
+        next = ["origin": origin, "conversation_id": last.identity]
       } else { next = NSNull() }
       messages.append([
         "type": "conversation_page_end",

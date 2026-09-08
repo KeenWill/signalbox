@@ -374,7 +374,10 @@ struct ProcessSessionsScreen: View {
     if viewModel.nativeConversation(sessionID: requested) == nil {
       await viewModel.revealSession(requested)
     }
-    guard let conversation = viewModel.nativeConversation(sessionID: requested) else { return }
+    guard selectedConversationID == nil,
+      (requestedLocalSessionID ?? coordinator.selectedProcessSessionID) == requested,
+      let conversation = viewModel.nativeConversation(sessionID: requested)
+    else { return }
     if requestedLocalSessionID == requested {
       requestedLocalSessionID = nil
     } else if coordinator.selectedProcessSessionID == requested {
