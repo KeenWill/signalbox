@@ -568,8 +568,8 @@ state only after those checks pass.
 
 Credential admission waits project the active turn state
 `active_awaiting_credential_availability`, carrying the call-free ended
-`wait_attempt_id` and the closed `exhausted` cause. The terminal client keeps
-following that turn.
+`wait_attempt_id` and the closed `contended` or `exhausted` cause. The terminal
+client keeps following that turn.
 
 ## Planned
 

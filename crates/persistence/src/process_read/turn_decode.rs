@@ -305,6 +305,7 @@ pub(super) fn decode_transcript_turn(
         let frontier = ContextFrontierId::from_uuid(required(row, "credential_wait_frontier_id")?);
         let cause = match required::<String>(row, "credential_wait_cause")?.as_str() {
             "exhausted" => signalbox_domain::CredentialAvailabilityWaitCause::Exhausted,
+            "contended" => signalbox_domain::CredentialAvailabilityWaitCause::Contended,
             _ => {
                 return Err(ProcessReadCorruption::Inconsistent(
                     "credential availability wait cause",

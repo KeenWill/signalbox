@@ -203,3 +203,62 @@ async fn pool_projection_parked_wait_stays_readable_and_followable() -> Result<(
     runtime.stop().await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn pool_projection_capacity_recovery_retains_live_groups_and_releases_ended_groups()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_model_provider_runtime::InvocationProcessObserver;
+    use signalbox_persistence::credential_invocations;
+    use signalboxd::credential_invocations::CredentialInvocationProcesses;
+    use std::num::NonZeroU32;
+    use std::process::Stdio;
+
+    let runtime = RunningRuntime::start().await?;
+    credential_invocations::replace_registrations(
+        &runtime.pool,
+        &[(String::from("turn-control-fixture"), NonZeroU32::new(1))],
+    )
+    .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session = create_alias_session(&mut connection).await?;
+    submit_first_input(
+        &mut connection,
+        session,
+        String::from("reserved invocation"),
+    )
+    .await?;
+    let (_, _, call) = authorize_issued_model_call(&runtime.pool, session).await?;
+    // This fixture process waits for EOF without descendants or provider access.
+    let mut child = tokio::process::Command::new("/bin/cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()?;
+    let group = child.id().expect("spawned child has an identity");
+    let observer = CredentialInvocationProcesses::new(runtime.pool.clone());
+    assert!(observer.register(call, group).await);
+    observer.finished(call, true).await;
+    observer.recover().await?;
+    assert_eq!(
+        credential_invocations::process_group(&runtime.pool, call).await?,
+        Some(group),
+        "completion and startup require proof that the invocation group ended"
+    );
+    drop(child.stdin.take());
+    assert!(child.wait().await?.success());
+    observer.recover().await?;
+    assert_eq!(
+        credential_invocations::process_group(&runtime.pool, call).await?,
+        None
+    );
+    let released: bool = sqlx::query_scalar("SELECT released_at IS NOT NULL FROM credential_invocation_reservation WHERE model_call_id = $1")
+        .bind(call.into_uuid()).fetch_one(&runtime.pool).await?;
+    assert!(
+        released,
+        "startup releases only the proven-ended invocation"
+    );
+    runtime.stop().await
+}

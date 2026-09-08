@@ -1,12 +1,13 @@
 # Credential availability design
 
-This design extends
+This design is not built; it extends
 [credential availability](../spec/credential-availability.md) with its typed
 terminal-client projection.
 
 ## Goal
 
-Preserve terminal failure evidence when a wait release ends a call-free successor.
+Preserve terminal failure evidence when a wait release ends a call-free
+successor.
 
 ## Design
 
@@ -24,8 +25,8 @@ a completed successor chain is shown to a client, stay undecided in
 
 ## Compatibility constraints
 
-A terminal release after a predecessor call retains that provider cause
-and correlates it with the fresh terminal attempt.
+A terminal release after a predecessor call retains that provider cause and
+correlates it with the fresh terminal attempt.
 
 ## Acceptance criteria
 

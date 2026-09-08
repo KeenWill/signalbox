@@ -131,6 +131,8 @@ impl<'a> Output<'a> {
                 self.stdout,
                 "turn={turn_id} position={position} state=active_awaiting_credential_availability attempt={wait_attempt_id} cause={}",
                 match cause {
+                    signalbox_process_protocol::CredentialAvailabilityWaitCause::Contended =>
+                        "contended",
                     signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted =>
                         "exhausted",
                 },

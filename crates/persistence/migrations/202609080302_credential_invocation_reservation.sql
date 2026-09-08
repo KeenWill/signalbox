@@ -1,3 +1,7 @@
+ALTER TABLE credential_availability_wait
+    DROP CONSTRAINT credential_availability_wait_cause_check,
+    ADD CONSTRAINT credential_availability_wait_cause_check CHECK (cause IN ('contended', 'exhausted'));
+
 CREATE TABLE credential_invocation_capacity (
     profile text PRIMARY KEY,
     max_concurrent_invocations integer CHECK (max_concurrent_invocations > 0),

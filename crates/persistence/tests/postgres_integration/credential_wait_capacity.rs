@@ -168,7 +168,7 @@ async fn credential_pool_contended_wait_rechecks_exhaustion_policy_when_member_i
         ended,
         (
             "terminal".to_owned(),
-            "failed".to_owned(),
+            "known_failure".to_owned(),
             wait.attempt().into_uuid()
         )
     );
