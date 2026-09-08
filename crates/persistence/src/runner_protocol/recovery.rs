@@ -270,6 +270,9 @@ impl RunnerProtocolStore {
             SessionRunnerPlacementState::RunnerLostBeforePin(lost) => (lost.runner(), true),
             _ => return Ok(rejected(RunnerRecoveryRejection::PlacementNotLost)),
         };
+        if has_runner_recovery_wait(transaction, session).await? {
+            return Ok(rejected(RunnerRecoveryRejection::ExistingControlRequired));
+        }
         let predecessor: Uuid =
             sqlx::query_scalar("SELECT enrollment_id FROM runner_enrollment WHERE runner_id = $1")
                 .bind(lost_runner.into_uuid())
@@ -630,6 +633,9 @@ impl RunnerProtocolStore {
             ),
             _ => return Ok(rejected(Rejection::PlacementNotLost)),
         };
+        if has_runner_recovery_wait(transaction, command.session).await? {
+            return Ok(rejected(Rejection::ExistingControlRequired));
+        }
         let staging: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM runner_replacement_stage WHERE session_id = $1)",
         )
@@ -1134,6 +1140,21 @@ async fn lock_recovery_identities(
             .await?;
     }
     Ok(())
+}
+
+async fn has_runner_recovery_wait(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, RunnerProtocolStoreError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM turn_lifecycle
+            WHERE session_id = $1 AND state_kind = 'active'
+                AND NOT delegation_runtime_terminal
+                AND active_phase_kind = 'awaiting_runner_recovery')",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(connection)
+    .await?)
 }
 
 async fn append_placement_boundary(

@@ -435,6 +435,8 @@ reaches a durable boundary, it checkpoints the active turn and returns without
 issuing another, and a successor resumes from that boundary.
 
 A runner replacement issued during a model call or tool batch remains staged.
+Replacement admission or installation for a turn parked in
+`awaiting_runner_recovery` rejects with `ExistingControlRequired`.
 After every request resolves, continuation appends all results, installs the
 replacement and appends one relocation boundary, then prepares the next call. An
 earlier boundary commit is rejected. Candidate recovery waits retain no
