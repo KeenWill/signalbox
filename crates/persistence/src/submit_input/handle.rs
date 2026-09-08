@@ -73,6 +73,13 @@ where
     NextClosureDecision: FnMut() -> DurableCommandId + Send,
     NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
 {
+    let issuer = match (command.actor(), principal) {
+        (signalbox_domain::Actor::Program { .. }, None) => ("program", None),
+        (signalbox_domain::Actor::Program { .. }, Some(_)) | (_, None) => {
+            return Err(SubmitInputCorruption::Inconsistent("actor and envelope principal").into());
+        }
+        (_, Some(principal)) => crate::command_registry::issuer_columns(principal),
+    };
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
         Some(CommandKind::SubmitInput) => {
@@ -126,13 +133,6 @@ where
         .into());
     }
 
-    let issuer = match (command.actor(), principal) {
-        (signalbox_domain::Actor::Program { .. }, None) => ("program", None),
-        (signalbox_domain::Actor::Program { .. }, Some(_)) | (_, None) => {
-            return Err(SubmitInputCorruption::Inconsistent("actor and envelope principal").into());
-        }
-        (_, Some(principal)) => crate::command_registry::issuer_columns(principal),
-    };
     let claimed = sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at,
