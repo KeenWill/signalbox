@@ -250,7 +250,8 @@ async fn template_creation_persists_copy_and_name_keyed_replay() -> Result<(), B
         original_provenance.content_digest().as_bytes()
     );
     assert_eq!(registry_storage_version, command_storage_version);
-    assert_eq!(command_storage_version, 7);
+    // Runner placement enters the creation payload at version eight.
+    assert!(command_storage_version >= 8);
 
     let loaded = LoadSessionService::new(SessionRepository::new(pool.clone()))
         .execute(winner)
@@ -5204,5 +5205,71 @@ async fn start_eligible_turn_survives_restart() -> Result<(), Box<dyn Error>> {
     drop(restarted_service);
     restarted_pool.close().await;
     drop(container);
+    Ok(())
+}
+
+fn creation_runner_placement() -> signalbox_domain::SessionRunnerPlacementRequest {
+    use signalbox_domain::*;
+    SessionRunnerPlacementRequest {
+        selector: RunnerSelector::Identity(RunnerId::from_uuid(next_test_submit_uuid())),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: None,
+        workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: RunnerToolPermissionOverrides::try_new([]).unwrap(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn creation_runner_placement_replay_compares_explicit_and_template_payloads()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _url) = migrated_postgres().await?;
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    let mut service = CreateSessionService::new(
+        signalbox_application::UuidV7SessionIdGenerator,
+        repository.clone(),
+    );
+    let defaults = SessionConfigurationDefaults::complete(
+        ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(next_test_submit_uuid())),
+        signalbox_domain::DangerousToolAutoApproval::Disabled,
+        Some(SessionSystemPrompt::try_new(
+            "placement fixture prompt".to_owned(),
+        )?),
+    );
+    // The digest is arbitrary; template name is the pre-existing template replay key.
+    let template = SessionTemplateProvenance::new(
+        SessionTemplateName::try_new("runner-placement".to_owned())?,
+        SessionTemplateContentDigest::from_bytes([0; 32]),
+    );
+    for placement in [None, Some(creation_runner_placement())] {
+        let requests = [
+            CreateSessionRequest::try_new(
+                DurableCommandId::from_uuid(next_test_submit_uuid()),
+                defaults.clone(),
+            )?,
+            CreateSessionRequest::try_new_from_template(
+                DurableCommandId::from_uuid(next_test_submit_uuid()),
+                template.clone(),
+                defaults.clone(),
+            )?,
+        ];
+        for request in requests {
+            let command_id = request.command_id();
+            let original = request.with_runner_placement(placement.clone());
+            let first = service.execute(original.clone()).await?;
+            assert_eq!(service.execute(original.clone()).await?, first);
+            let recorded = repository
+                .load(command_id)
+                .await?
+                .expect("creation receipt exists");
+            assert_eq!(recorded.command().runner_placement(), placement.as_ref());
+            let changed = original.with_runner_placement(Some(creation_runner_placement()));
+            assert_eq!(
+                service.execute(changed).await?,
+                CreateSessionOutcome::ConflictingReuse { command_id }
+            );
+        }
+    }
     Ok(())
 }
