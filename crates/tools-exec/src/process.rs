@@ -950,9 +950,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     .as_ref()
                     .map(CargoRegistryIdentity::descriptor),
                 #[cfg(target_os = "linux")]
-                git_administration_bind_descriptor: None,
-                #[cfg(target_os = "linux")]
-                git_administration_relative_path: None,
+                git_worktree: None,
                 #[cfg(not(target_os = "linux"))]
                 cargo_registry_bind_source: self.cargo_registry.as_deref(),
             },
@@ -1015,7 +1013,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 #[cfg(target_os = "linux")]
                 let git_administration =
                     working_directory_identity.as_ref().and_then(|directory| {
-                        pin_mapped_linked_worktree(
+                        pin_sandbox_linked_worktree(
                             &self.workspace_identity,
                             directory,
                             &arguments.working_directory,
@@ -1057,15 +1055,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                             .as_ref()
                             .map(CargoRegistryIdentity::descriptor),
                         #[cfg(target_os = "linux")]
-                        git_administration_bind_descriptor: git_administration.as_ref().map(
-                            |administration| {
-                                rustix::fd::AsRawFd::as_raw_fd(&administration.directory._directory)
-                            },
-                        ),
-                        #[cfg(target_os = "linux")]
-                        git_administration_relative_path: git_administration
-                            .as_ref()
-                            .map(|administration| administration.relative_path.as_path()),
+                        git_worktree: git_administration.as_ref(),
                         #[cfg(not(target_os = "linux"))]
                         working_directory_bind_source: None,
                         #[cfg(not(target_os = "linux"))]
@@ -1248,6 +1238,7 @@ struct PinnedLinkedWorktreeAdministration {
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct GitWorktreeIdentity {
+    relative_path: PathBuf,
     administration: PinnedLinkedWorktreeAdministration,
     worktree: WorkspaceDirectoryIdentity,
 }
@@ -1505,6 +1496,7 @@ fn pin_sandbox_linked_worktree(
             pin_linked_worktree_at_candidate(workspace, &worktree, &candidate)
         {
             return Some(GitWorktreeIdentity {
+                relative_path: candidate,
                 administration,
                 worktree,
             });
@@ -1517,30 +1509,6 @@ fn pin_sandbox_linked_worktree(
         }
         worktree = worktree.parent().ok()?;
     }
-}
-
-/// Pins the administration directory a sandbox launch maps below `/workspace`.
-///
-/// The sandbox binds that directory over its own workspace-relative path and
-/// names the requested working directory as the worktree, so only a marker at
-/// that directory is mapped: an ancestor worktree would leave `GIT_WORK_TREE`
-/// naming a subdirectory of its own repository. Recognition, suppression, and
-/// repository identity are the hardened ones the unsandboxed path applies —
-/// this only narrows which candidate is examined, so the single candidate is
-/// trivially the first `.git` entry.
-#[cfg(target_os = "linux")]
-fn pin_mapped_linked_worktree(
-    workspace: &WorkspaceIdentity,
-    working_directory_identity: &WorkspaceDirectoryIdentity,
-    working_directory: &str,
-    program: &str,
-    arguments: &[String],
-) -> Option<PinnedLinkedWorktreeAdministration> {
-    if Path::new(program).file_name()? != "git" || git_arguments_select_repository(arguments) {
-        return None;
-    }
-    let relative_worktree = normalized_relative_path(Path::new(working_directory))?;
-    pin_linked_worktree_at_candidate(workspace, working_directory_identity, &relative_worktree)
 }
 
 #[cfg(target_os = "linux")]
@@ -1693,6 +1661,14 @@ fn descriptor_uid(descriptor: &rustix::fd::OwnedFd) -> Option<u32> {
 }
 
 #[cfg(target_os = "linux")]
+fn linked_worktree_backlink_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut encoded = path.as_os_str().as_bytes().to_vec();
+    encoded.push(b'\n');
+    encoded
+}
+
+#[cfg(target_os = "linux")]
 fn repair_linked_worktree_backlink(
     administration: &WorkspaceDirectoryIdentity,
     relative_worktree: &Path,
@@ -1710,11 +1686,11 @@ fn repair_linked_worktree_backlink(
         .join(relative_worktree)
         .join(GIT_ADMINISTRATION_MARKER);
     let host_backlink = host_worktree.join(GIT_ADMINISTRATION_MARKER);
-    let encoded = format!("{}\n", host_backlink.display());
-    if backlink.bytes == encoded.as_bytes() {
+    let encoded = linked_worktree_backlink_bytes(&host_backlink);
+    if backlink.bytes == encoded {
         return Some(());
     }
-    if backlink.bytes != format!("{}\n", expected_sandbox_backlink.display()).as_bytes() {
+    if backlink.bytes != linked_worktree_backlink_bytes(&expected_sandbox_backlink) {
         return None;
     }
     let temporary_name = linked_worktree_backlink_temporary_name();
@@ -1735,7 +1711,7 @@ fn repair_linked_worktree_backlink(
     )
     .ok()?;
     let mut temporary = std::fs::File::from(descriptor);
-    if temporary.write_all(encoded.as_bytes()).is_err() || temporary.sync_all().is_err() {
+    if temporary.write_all(&encoded).is_err() || temporary.sync_all().is_err() {
         let _ = rustix::fs::unlinkat(
             &administration._directory,
             temporary_name.as_str(),
@@ -1861,9 +1837,7 @@ struct SandboxLaunchContext<'a> {
     #[cfg(target_os = "linux")]
     cargo_registry_bind_descriptor: Option<i32>,
     #[cfg(target_os = "linux")]
-    git_administration_bind_descriptor: Option<i32>,
-    #[cfg(target_os = "linux")]
-    git_administration_relative_path: Option<&'a Path>,
+    git_worktree: Option<&'a GitWorktreeIdentity>,
     #[cfg(not(target_os = "linux"))]
     cargo_registry_bind_source: Option<&'a Path>,
 }
@@ -1889,8 +1863,8 @@ fn bwrap_request(
     };
     #[cfg(target_os = "linux")]
     let sandbox_git_directory = context
-        .git_administration_relative_path
-        .map(|relative| format!("{SANDBOX_WORKSPACE}/{}", relative.display()));
+        .git_worktree
+        .map(|worktree| Path::new(SANDBOX_WORKSPACE).join(&worktree.administration.relative_path));
     // The leading flags are this profile's whole namespace isolation. A deletion
     // or reordering here fails
     // `sandboxed_request_opens_with_the_user_pid_ipc_uts_and_network_unshare_prefix`,
@@ -1988,6 +1962,19 @@ fn bwrap_request(
         OsString::from(SANDBOX_WORKSPACE),
     ]);
     #[cfg(target_os = "linux")]
+    if let Some(worktree) = context.git_worktree {
+        bwrap_arguments.extend([
+            OsString::from("--bind"),
+            descriptor_path(rustix::fd::AsRawFd::as_raw_fd(
+                &worktree.worktree._directory,
+            ))
+            .into_os_string(),
+            Path::new(SANDBOX_WORKSPACE)
+                .join(&worktree.relative_path)
+                .into_os_string(),
+        ]);
+    }
+    #[cfg(target_os = "linux")]
     if let Some(working_directory_bind_descriptor) = context.working_directory_bind_descriptor {
         bwrap_arguments.extend([
             OsString::from("--bind"),
@@ -1997,13 +1984,16 @@ fn bwrap_request(
     }
     #[cfg(target_os = "linux")]
     if let Some((administration_descriptor, administration_destination)) = context
-        .git_administration_bind_descriptor
+        .git_worktree
+        .map(|worktree| {
+            rustix::fd::AsRawFd::as_raw_fd(&worktree.administration.directory._directory)
+        })
         .zip(sandbox_git_directory.as_ref())
     {
         bwrap_arguments.extend([
             OsString::from("--bind"),
             descriptor_path(administration_descriptor).into_os_string(),
-            OsString::from(administration_destination),
+            administration_destination.as_os_str().to_owned(),
         ]);
     }
     #[cfg(not(target_os = "linux"))]
@@ -2065,14 +2055,16 @@ fn bwrap_request(
         ]);
     }
     #[cfg(target_os = "linux")]
-    if let Some(administration) = sandbox_git_directory {
+    if let Some((administration, worktree)) = sandbox_git_directory.zip(context.git_worktree) {
         bwrap_arguments.extend([
             OsString::from("--setenv"),
             OsString::from("GIT_DIR"),
-            OsString::from(administration),
+            administration.into_os_string(),
             OsString::from("--setenv"),
             OsString::from("GIT_WORK_TREE"),
-            OsString::from(&sandbox_directory),
+            Path::new(SANDBOX_WORKSPACE)
+                .join(&worktree.relative_path)
+                .into_os_string(),
         ]);
     }
     bwrap_arguments.extend([
@@ -4854,10 +4846,61 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn sandboxed_git_maps_a_host_linked_worktree_marker() -> Result<(), Box<dyn Error>> {
+        sandboxed_git_maps_worktree_at(SANDBOX_LINKED_WORKTREE_DIRECTORY).await
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backlink_repair_preserves_non_utf8_host_path_bytes() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let workspace = ReplacementWorkspace::new()?;
+        let administration_path = workspace.path.join("administration");
+        let host_worktree = workspace
+            .path
+            .join(OsString::from_vec(b"worktree-\xff".to_vec()));
+        std::fs::create_dir_all(&administration_path)?;
+        std::fs::create_dir_all(&host_worktree)?;
+        std::fs::write(
+            administration_path.join(GIT_WORKTREE_BACKLINK),
+            b"/workspace/linked/.git\n",
+        )?;
+        let identity = WorkspaceIdentity::capture(&workspace.path)?;
+        let administration =
+            identity
+                .pin_relative_directory("administration")
+                .map_err(|failure| {
+                    std::io::Error::other(format!("fixture administration: {failure:?}"))
+                })?;
+        assert_eq!(
+            repair_linked_worktree_backlink(&administration, Path::new("linked"), &host_worktree),
+            Some(())
+        );
+        let mut expected = host_worktree
+            .join(GIT_ADMINISTRATION_MARKER)
+            .as_os_str()
+            .as_bytes()
+            .to_vec();
+        expected.push(b'\n');
+        assert_eq!(
+            std::fs::read(administration_path.join(GIT_WORKTREE_BACKLINK))?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandboxed_git_preserves_a_cwd_below_the_pinned_worktree() -> Result<(), Box<dyn Error>>
+    {
+        sandboxed_git_maps_worktree_at(&format!("{SANDBOX_LINKED_WORKTREE_DIRECTORY}/src")).await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn sandboxed_git_maps_worktree_at(relative_cwd: &str) -> Result<(), Box<dyn Error>> {
         let workspace = ReplacementWorkspace::new()?;
         let worktree = workspace.path.join(SANDBOX_LINKED_WORKTREE_DIRECTORY);
         let administration = workspace.path.join(SANDBOX_LINKED_ADMINISTRATION_RELATIVE);
-        std::fs::create_dir_all(&worktree)?;
+        std::fs::create_dir_all(workspace.path.join(relative_cwd))?;
         std::fs::create_dir_all(&administration)?;
         std::fs::write(
             worktree.join(GIT_ADMINISTRATION_MARKER),
@@ -4880,7 +4923,7 @@ mod tests {
         let arguments = ExecArguments {
             program: String::from("/usr/bin/git"),
             arguments: vec![String::from("status")],
-            working_directory: String::from(SANDBOX_LINKED_WORKTREE_DIRECTORY),
+            working_directory: String::from(relative_cwd),
             timeout_seconds: 30,
         };
 
@@ -4890,6 +4933,22 @@ mod tests {
         let request = requests
             .last()
             .ok_or_else(|| std::io::Error::other("one sandbox process request"))?;
+        let requested_cwd = [
+            OsString::from("--chdir"),
+            OsString::from(format!("{SANDBOX_WORKSPACE}/{relative_cwd}")),
+        ];
+        assert!(
+            request
+                .arguments
+                .windows(requested_cwd.len())
+                .any(|part| part == requested_cwd)
+        );
+        let worktree_destination = OsString::from(format!(
+            "{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_WORKTREE_DIRECTORY}"
+        ));
+        assert!(request.arguments.windows(3).any(|part| part[0] == "--bind"
+            && Path::new(&part[1]).starts_with("/proc/self/fd")
+            && part[2] == worktree_destination));
         let administration_destination = OsString::from(format!(
             "{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_ADMINISTRATION_RELATIVE}"
         ));
@@ -5444,9 +5503,7 @@ mod tests {
             #[cfg(target_os = "linux")]
             cargo_registry_bind_descriptor: None,
             #[cfg(target_os = "linux")]
-            git_administration_bind_descriptor: None,
-            #[cfg(target_os = "linux")]
-            git_administration_relative_path: None,
+            git_worktree: None,
             #[cfg(not(target_os = "linux"))]
             cargo_registry_bind_source: None,
         }
