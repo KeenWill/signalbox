@@ -1,8 +1,8 @@
 # Tool loop design
 
 This design is not built; it extends [tool-loop](../spec/tool-loop.md) with
-lost-lease retry takeover, pre-approval admissibility, the instruction admission
-effect, and child creation by `spawn_session`.
+lost-lease retry takeover, pre-approval admissibility, and the instruction
+admission effect.
 
 ## Goal
 
@@ -14,9 +14,6 @@ The instruction admission effect makes a successful `instructions_read` admit a
 workspace-instruction bundle in the same transaction that commits the tool
 result, and commits the successor instruction manifest together with
 continuation.
-
-Child creation gives `spawn_session` one placement-owned transaction that
-creates a delegated child and its initial task work.
 
 ## Design
 
@@ -95,20 +92,6 @@ authenticated by the new `Prepared` model call. An idempotent replay receipt or
 an `already_admitted` receipt contributes no row and cannot duplicate a bundle
 or alter the successor manifest digest.
 
-`spawn_session` declares a task plus a relationship, either background or bound
-with separately labeled actions for the parent stopping and the parent being
-cancelled. The creation transaction atomically creates one delegated no-ancestry
-child and its initial task work, closes the spawning physical attempt with its
-matching receipt, derives the child's placement default from its parent's
-directory, and returns the child session identity as a durable completion. The
-child's initial task is not accepted user input: the spawn transition records a
-`DelegatedTask` origin bound to the spawning request and its parent session and
-turn, and the child's first turn starts from that entry with no accepted-input
-row or user actor invented. Equal physical replay returns that child and reuses
-the same semantic entry and turn origin; a second child cannot attach to the
-request. There is no fixed active-child-count limit; admission checks the
-complete locked relationship inventory for request and child uniqueness.
-
 The tool result delivered to the parent is copied from the child's terminal
 result record, and the executor never reads or returns the child transcript. The
 child's terminal completion concatenates the ordered assistant text entries from
@@ -130,9 +113,6 @@ by widening it.
 
 The daemon-local error kind set stays closed; the instruction family maps into
 `execution_failed` and `invalid_arguments` and adds no kind.
-
-The spawn port rejects execution unconditionally today. That rejection stays
-until the creation transaction exists, and no other surface creates the child.
 
 ## Acceptance criteria
 
@@ -166,9 +146,3 @@ commits the typed failure and leaves the admitted set untouched. Replay appends
 nothing and returns the recorded receipt and link. Continuation creates exactly
 one successor manifest with the `Prepared` call, and the five effects commit or
 roll back together.
-
-`spawn_session` creates one child and its task work, closes the spawning attempt
-with its receipt, and returns the child identity in one transaction. Equal
-replay returns the same child, semantic entry, and turn origin. A second child
-cannot attach to the request, and uniqueness is checked against the locked
-relationship inventory.

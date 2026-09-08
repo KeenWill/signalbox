@@ -249,13 +249,16 @@ pub(crate) struct ReconciliationWitness {
 }
 
 pub(crate) struct WitnessedEligibilitySweep<Sweep> {
-    pub(crate) inner: Sweep,
+    pub(crate) inner: Option<Sweep>,
     pub(crate) witness: ReconciliationWitness,
 }
 
 impl<Sweep> WitnessedEligibilitySweep<Sweep> {
     pub(crate) fn new(inner: Sweep, witness: ReconciliationWitness) -> Self {
-        Self { inner, witness }
+        Self {
+            inner: Some(inner),
+            witness,
+        }
     }
 }
 
@@ -270,7 +273,10 @@ where
     ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send {
         let witness = self.witness.clone();
         async move {
-            let batch = self.inner.find_sessions().await?;
+            let Some(inner) = self.inner.as_mut() else {
+                return pending().await;
+            };
+            let batch = inner.find_sessions().await?;
             let (sessions, continuation) = batch.clone().into_parts();
             witness.record_batch(&sessions, continuation);
             Ok(batch)
@@ -314,33 +320,52 @@ impl RunningRuntime {
     pub(crate) async fn start_with_optional_compaction(
         compaction_model: Option<ScriptedModel<ModelCallId>>,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_with_options(compaction_model, BlobStorageFixtureMode::Disabled, None).await
+        Self::start_with_options(
+            compaction_model,
+            BlobStorageFixtureMode::Disabled,
+            None,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn start_with_blob_storage() -> Result<Self, Box<dyn Error>> {
-        Self::start_with_options(None, BlobStorageFixtureMode::Enabled, None).await
+        Self::start_with_options(None, BlobStorageFixtureMode::Enabled, None, None).await
     }
 
     pub(crate) async fn start_with_model_configuration(
         configuration: &str,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_with_options(None, BlobStorageFixtureMode::Disabled, Some(configuration)).await
+        Self::start_with_options(
+            None,
+            BlobStorageFixtureMode::Disabled,
+            Some(configuration),
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn start_with_options(
         compaction_model: Option<ScriptedModel<ModelCallId>>,
         blob_storage: BlobStorageFixtureMode,
         configuration_override: Option<&str>,
+        nudge_capacity: Option<std::num::NonZeroUsize>,
     ) -> Result<Self, Box<dyn Error>> {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
         let listener = LocalProcessListener::bind(socket_directory.socket())?;
         let reconciliation_witness = ReconciliationWitness::new();
-        let sweep = WitnessedEligibilitySweep::new(
+        let mut sweep = WitnessedEligibilitySweep::new(
             PostgresEligibilitySweep::new(pool.clone()),
             reconciliation_witness.clone(),
         );
-        let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let (eligibility_nudge, work_source) = match nudge_capacity {
+            Some(capacity) => {
+                sweep.inner = None;
+                InProcessEligibilityWorkSource::with_options(sweep, None, Some(capacity))
+            }
+            None => InProcessEligibilityWorkSource::new(sweep),
+        };
         let blob_storage_root = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
             BlobStorageFixtureMode::Enabled => Some(BlobStorageFixture::create()?),

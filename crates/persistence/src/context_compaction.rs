@@ -1422,7 +1422,10 @@ fn range_closes_tool_exchanges(members: &[ProjectedFrontierMember]) -> bool {
     for member in members {
         match member.payload_kind.as_str() {
             "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
-            "tool_execution_result" | "tool_denied" | "tool_closed_by_turn_end" => {
+            "tool_execution_result"
+            | "tool_denied"
+            | "tool_inadmissible"
+            | "tool_closed_by_turn_end" => {
                 let Some(remaining) = open_requests.checked_sub(1) else {
                     return false;
                 };
@@ -1442,7 +1445,10 @@ fn preview_members(
     for member in members {
         match member.payload_kind.as_str() {
             "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
-            "tool_execution_result" | "tool_denied" | "tool_closed_by_turn_end" => {
+            "tool_execution_result"
+            | "tool_denied"
+            | "tool_inadmissible"
+            | "tool_closed_by_turn_end" => {
                 open_requests = open_requests.checked_sub(1).ok_or(
                     ContextCompactionCorruption::Inconsistent("context compaction tool exchange"),
                 )?;
@@ -1464,7 +1470,10 @@ fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
     for (index, member) in members.iter().enumerate() {
         match member.payload_kind.as_str() {
             "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
-            "tool_execution_result" | "tool_denied" | "tool_closed_by_turn_end" => {
+            "tool_execution_result"
+            | "tool_denied"
+            | "tool_inadmissible"
+            | "tool_closed_by_turn_end" => {
                 open_requests = open_requests.checked_sub(1)?;
             }
             _ => {}
@@ -1608,7 +1617,7 @@ impl From<ContextCompactionCorruption> for ContextCompactionRepositoryError {
 mod tests {
     use super::{
         ProjectedFrontierMember, Uuid, latest_safe_boundary, preview_members,
-        project_frontier_members,
+        project_frontier_members, range_closes_tool_exchanges,
     };
     use signalbox_domain::{SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId};
 
@@ -1733,6 +1742,43 @@ mod tests {
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].reference, successor_summary);
         assert_eq!(visible[0].position, 5);
+    }
+
+    #[test]
+    fn inadmissible_result_closes_compaction_exchange_before_the_next_request() {
+        let visible = vec![
+            ProjectedFrontierMember {
+                position: 1,
+                reference: entry(0x7041),
+                payload_kind: "assistant_tool_use".to_owned(),
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 2,
+                reference: entry(0x7042),
+                payload_kind: "tool_inadmissible".to_owned(),
+                summary_range: None,
+            },
+            ordinary(3, entry(0x7043)),
+            ProjectedFrontierMember {
+                position: 4,
+                reference: entry(0x7044),
+                payload_kind: "assistant_tool_use".to_owned(),
+                summary_range: None,
+            },
+        ];
+        assert!(range_closes_tool_exchanges(&visible[..3]));
+        assert!(!range_closes_tool_exchanges(&visible));
+        assert_eq!(latest_safe_boundary(&visible), Some(2));
+        let preview =
+            preview_members(&visible).expect("the inadmissible result closes its request");
+        assert_eq!(
+            preview
+                .iter()
+                .map(|member| member.is_safe_boundary())
+                .collect::<Vec<_>>(),
+            [false, true, true, false]
+        );
     }
 
     #[test]

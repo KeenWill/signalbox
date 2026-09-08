@@ -209,6 +209,7 @@ async fn s_goal_process_protocol_supersession_history_round_trips() -> Result<()
     assert_eq!(
         attached,
         ServerMessage::GoalTransitionApplied {
+            termination: None,
             session_id,
             event_ordinal: CanonicalU64::new(1),
             generation: CanonicalU64::new(1),
@@ -217,6 +218,7 @@ async fn s_goal_process_protocol_supersession_history_round_trips() -> Result<()
     assert_eq!(
         superseded,
         ServerMessage::GoalTransitionApplied {
+            termination: None,
             session_id,
             event_ordinal: CanonicalU64::new(2),
             generation: CanonicalU64::new(1),
@@ -225,6 +227,10 @@ async fn s_goal_process_protocol_supersession_history_round_trips() -> Result<()
     assert_eq!(
         stopped,
         ServerMessage::GoalTransitionApplied {
+            termination: Some(signalbox_process_protocol::TerminationReceipt {
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+                descendant_count: CanonicalU64::new(0),
+            }),
             session_id,
             event_ordinal: CanonicalU64::new(3),
             generation: CanonicalU64::new(2),
@@ -685,4 +691,59 @@ async fn reported_usage_preflight_counts_the_queued_input() -> Result<(), Box<dy
 
     drop(connection);
     runtime.stop().await
+}
+
+/// A cascading stop replays its stored zero-child choice after another goal command.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn cascading_goal_receipt_replays_recorded_scope_and_count() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    connection
+        .request(
+            2,
+            ClientRequest::AttachGoal {
+                command_id: command()?,
+                session_id,
+                statement: "complete the fixture task".into(),
+            },
+        )
+        .await?;
+    let attached = response_within(&mut connection).await?.message().clone();
+    assert!(
+        matches!(attached, ServerMessage::GoalTransitionApplied { .. }),
+        "{attached:?}"
+    );
+    let stop_command = command()?;
+    let stop = ClientRequest::StopGoal {
+        command_id: stop_command,
+        session_id,
+        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+    };
+    connection.request(3, stop.clone()).await?;
+    let recorded = response_within(&mut connection).await?.message().clone();
+    assert!(
+        matches!(&recorded, ServerMessage::GoalTransitionApplied {
+        termination: Some(signalbox_process_protocol::TerminationReceipt {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            descendant_count,
+        }), ..
+    } if descendant_count.value() == 0),
+        "{recorded:?}"
+    );
+    connection
+        .request(
+            4,
+            ClientRequest::ResumeGoal {
+                command_id: command()?,
+                session_id,
+                guidance: None,
+            },
+        )
+        .await?;
+    response_within(&mut connection).await?;
+    connection.request(5, stop).await?;
+    assert_eq!(response_within(&mut connection).await?.message(), &recorded);
+    Ok(())
 }

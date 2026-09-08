@@ -35,6 +35,9 @@ which [configuration and credentials](configuration-and-credentials.md) owns;
 the operator surface that clears them is on
 [process protocol](process-protocol.md).
 
+Pool policies have immutable identities; each clearable exclusion retains its
+generation and origin, and selection ignores cleared generations.
+
 A selection attempt reaches one of five endings: selected, pre-call fail,
 post-failure fail, successor and terminal. They split on whether selection
 admitted a member, whether the attempt that met exhaustion was call-free, and

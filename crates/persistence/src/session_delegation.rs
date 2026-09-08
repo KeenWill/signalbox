@@ -1,5 +1,8 @@
 //! Atomic delegated-session await and peer-message persistence.
 
+mod spawn;
+pub use spawn::{RecordDelegationSpawnOutcome, SpawnSessionCandidates};
+
 use std::num::NonZeroU64;
 
 use rust_decimal::Decimal;
@@ -231,6 +234,8 @@ pub enum SessionDelegationCorruption {
 /// Database or fail-closed delegated-session persistence failure.
 #[derive(Debug)]
 pub enum SessionDelegationRepositoryError {
+    #[error("delegated placement failure: {field_0}")]
+    Placement(#[source] crate::session_placement::SessionPlacementRepositoryError),
     #[error("delegation database failure: {field_0}")]
     Database(#[source] sqlx::Error),
     #[error("delegation commit is ambiguous: {field_0}")]
@@ -241,6 +246,14 @@ pub enum SessionDelegationRepositoryError {
     InvalidTransition(&'static str),
     #[error("delegation storage is corrupt: {field_0:?}")]
     Corruption(SessionDelegationCorruption),
+}
+
+impl From<crate::session_placement::SessionPlacementRepositoryError>
+    for SessionDelegationRepositoryError
+{
+    fn from(error: crate::session_placement::SessionPlacementRepositoryError) -> Self {
+        Self::Placement(error)
+    }
 }
 
 impl From<sqlx::Error> for SessionDelegationRepositoryError {

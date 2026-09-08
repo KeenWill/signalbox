@@ -145,8 +145,8 @@ impl GoalEventOrdinal {
 pub enum GoalTurnSource {
     /// A user event began or resumed pursuit.
     UserEvent(GoalEventOrdinal),
-    /// A successfully completed goal turn continued pursuit.
-    SuccessfulTurn(TurnId),
+    /// A terminal goal turn continued pursuit, including after context compaction.
+    PredecessorTurn(TurnId),
 }
 
 /// Durable user-command provenance for a goal transition.

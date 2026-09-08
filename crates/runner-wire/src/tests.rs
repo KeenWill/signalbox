@@ -14,7 +14,7 @@ const ARBITRARY_UUID_F: &str = "00000000-0000-4000-8000-000000000006";
 const ARBITRARY_UUID_G: &str = "00000000-0000-4000-8000-000000000007";
 const ARBITRARY_UUID_H: &str = "00000000-0000-4000-8000-000000000008";
 const EXPECTED_ADVERTISEMENT_DIGEST: &str =
-    "d2cfb8a873b962f27dab0882992b14e194bf441c7002e00a237d6ed0f32fd187";
+    "083656c2f2cc5b8ce6da8c6f0a93b2cfe0f837a1fae8dc7cb3e4d1bf48897c98";
 const EXPECTED_CLONE_URL_DIGEST: &str =
     "1a65f9f5977dc0dcfaae9165099f5639eaa3562991fa3242153f363c868ce930";
 const EXPECTED_MANIFEST_DIGEST: &str =
@@ -645,7 +645,7 @@ fn advertisement_digest_preimage_is_pinned() {
 }
 
 #[test]
-fn advertisement_binds_and_round_trips_the_runner_default_directory() {
+fn advertisement_digest_binds_and_round_trips_the_runner_default_directory() {
     let mut successor = advertisement();
     successor.default_working_directory = Some("/workspace/successor".to_owned());
     let domain = successor
@@ -657,6 +657,10 @@ fn advertisement_binds_and_round_trips_the_runner_default_directory() {
         successor
     );
     let digest = advertisement_digest(&successor).expect("checked directory digest");
+    assert_ne!(
+        advertisement_digest(&advertisement()).expect("absent directory digest"),
+        digest
+    );
     successor.default_working_directory = Some("/workspace/predecessor".to_owned());
     assert_ne!(
         advertisement_digest(&successor).expect("distinct directory digest"),

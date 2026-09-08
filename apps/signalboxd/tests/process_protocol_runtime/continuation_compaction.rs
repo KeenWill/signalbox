@@ -1,0 +1,1041 @@
+//! A repository-watch continuation terminalizes, compacts, and starts one successor.
+
+use super::*;
+use signalbox_domain::{
+    CreateSession, ModuleDispatch, ProviderReportedTokenUsage, RepoWatchDispatchId,
+    SessionCreationCause, SessionCreationProvenance, SessionOwnership, StartGate,
+    TranscriptAncestry,
+};
+use signalbox_persistence::{
+    create_session::CreateSessionRepository, model_execution::ToolContinuationUsageLimit,
+    submit_input::SubmitInputRepository,
+};
+
+#[derive(Clone, Copy)]
+enum ContinuationSession {
+    Interactive,
+    RepositoryWatch,
+    RepositoryWatchViaAlias,
+    /// Ordinary input submitted after an earlier goal was stopped.
+    RepositoryWatchWithStoppedGoal,
+    /// Created held with an external finish gate, commissioned before release.
+    CommissionedRepositoryWatch,
+    /// Commissioned with the fixture alias, which is removed before execution recovery.
+    CommissionedRepositoryWatchViaRemovedAlias,
+}
+
+async fn queued_continuation_session(
+    runtime: &RunningRuntime,
+    kind: ContinuationSession,
+) -> Result<(SessionId, TurnId), Box<dyn Error>> {
+    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let session = SessionId::from_uuid(Uuid::now_v7());
+    let provenance = if !matches!(kind, ContinuationSession::Interactive) {
+        SessionCreationProvenance::module_dispatched(ModuleDispatch::RepositoryWatch {
+            dispatch: RepoWatchDispatchId::from_uuid(Uuid::now_v7()),
+        })
+    } else {
+        SessionCreationProvenance::new(SessionCreationCause::Interactive, TranscriptAncestry::None)
+    };
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        provenance,
+        SessionConfigurationDefaults::new(match kind {
+            ContinuationSession::RepositoryWatchViaAlias
+            | ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias => {
+                ModelSelectionRequest::Alias(signalbox_domain::ModelAlias::from_uuid(
+                    Uuid::from_u128(2),
+                ))
+            }
+            _ => ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(1))),
+        }),
+    )
+    .with_lifecycle(
+        if matches!(
+            kind,
+            ContinuationSession::CommissionedRepositoryWatch
+                | ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias
+        ) {
+            StartGate::Held
+        } else {
+            StartGate::Open
+        },
+        SessionOwnership::Owned,
+        if matches!(
+            kind,
+            ContinuationSession::CommissionedRepositoryWatch
+                | ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias
+        ) {
+            Some(signalbox_domain::FinishCondition::ExternalGate)
+        } else {
+            None
+        },
+    )
+    .prepare(session)
+    .expect("the fixture creates a pathless owned session");
+    CreateSessionRepository::new(runtime.pool.clone(), configuration.session_credential_pin())
+        .handle(creation)
+        .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let wire_session = CanonicalUuid::from_uuid(session.into_uuid());
+    let turn = match kind {
+        ContinuationSession::CommissionedRepositoryWatch
+        | ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias => {
+            use signalbox_domain::{
+                AcceptedInputId, CommandPrincipal, GoalStatement, GoalUserAction, GoalUserCommand,
+                SessionLifecycleCommand, SessionLifecycleOperation,
+            };
+            use signalbox_persistence::{
+                goal::GoalRepository, goal_turn::GoalTurnCandidates,
+                session_lifecycle_command::SessionLifecycleCommandRepository,
+            };
+            let candidates = GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::now_v7()),
+                TurnId::from_uuid(Uuid::now_v7()),
+            );
+            let attached = GoalRepository::new(runtime.pool.clone())
+                .handle_user_command(
+                    GoalUserCommand::new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        session,
+                        GoalUserAction::Attach(GoalStatement::try_new(
+                            "Finish the repository change".to_owned(),
+                        )?),
+                    ),
+                    Some(candidates),
+                    |alias| configuration.resolve_alias(alias),
+                )
+                .await?;
+            assert!(matches!(
+                attached,
+                signalbox_persistence::goal::GoalCommandHandlingOutcome::Recorded(
+                    signalbox_domain::GoalCommandResult::Applied(_)
+                )
+            ));
+            SessionLifecycleCommandRepository::new(runtime.pool.clone())
+                .handle(
+                    SessionLifecycleCommand::new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        session,
+                        SessionLifecycleOperation::ReleaseStart,
+                    ),
+                    CommandPrincipal::Core,
+                )
+                .await?;
+            candidates.turn()
+        }
+        ContinuationSession::Interactive
+        | ContinuationSession::RepositoryWatch
+        | ContinuationSession::RepositoryWatchViaAlias
+        | ContinuationSession::RepositoryWatchWithStoppedGoal => {
+            if matches!(kind, ContinuationSession::RepositoryWatchWithStoppedGoal) {
+                use signalbox_domain::{
+                    AcceptedInputId, DescendantTerminationScope, GoalStatement, GoalUserAction,
+                    GoalUserCommand,
+                };
+                use signalbox_persistence::{goal::GoalRepository, goal_turn::GoalTurnCandidates};
+                let repository = GoalRepository::new(runtime.pool.clone());
+                let candidates = GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::now_v7()),
+                    TurnId::from_uuid(Uuid::now_v7()),
+                );
+                for (action, candidates) in [
+                    (
+                        GoalUserAction::Attach(GoalStatement::try_new(
+                            "Finish the earlier repository task".to_owned(),
+                        )?),
+                        Some(candidates),
+                    ),
+                    (
+                        GoalUserAction::Stop {
+                            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                        },
+                        None,
+                    ),
+                ] {
+                    let outcome = repository
+                        .handle_user_command(
+                            GoalUserCommand::new(
+                                DurableCommandId::from_uuid(Uuid::now_v7()),
+                                session,
+                                action,
+                            ),
+                            candidates,
+                            |alias| configuration.resolve_alias(alias),
+                        )
+                        .await?;
+                    assert!(matches!(
+                        outcome,
+                        signalbox_persistence::goal::GoalCommandHandlingOutcome::Recorded(
+                            signalbox_domain::GoalCommandResult::Applied(_)
+                        )
+                    ));
+                }
+            }
+            connection
+                .request(
+                    2,
+                    ClientRequest::SubmitInput {
+                        command_id: command()?,
+                        session_id: wire_session,
+                        content: UserInputContent::text(String::from(
+                            "Finish the repository change",
+                        )),
+                        expected_defaults_version: Some(CanonicalU64::new(1)),
+                        model_settings: ModelSettingsOverlay::inherit_all(),
+                        delivery: None,
+                    },
+                )
+                .await?;
+            let acceptance_position =
+                if matches!(kind, ContinuationSession::RepositoryWatchWithStoppedGoal) {
+                    2 // The historical goal already consumed the first position.
+                } else {
+                    1
+                };
+            let wire_turn =
+                accepted_successor_turn(&mut connection, wire_session, acceptance_position).await?;
+            TurnId::from_uuid(wire_turn.into_uuid())
+        }
+    };
+    Ok((session, turn))
+}
+
+async fn exhausted_continuation(
+    runtime: &RunningRuntime,
+    kind: ContinuationSession,
+) -> Result<(SessionId, TurnId), Box<dyn Error>> {
+    let (session, turn) = queued_continuation_session(runtime, kind).await?;
+    let wire_session = CanonicalUuid::from_uuid(session.into_uuid());
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let (calls, authorized, producing_call) =
+        Box::pin(authorize_issued_model_call(&runtime.pool, wire_session)).await?;
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("fixture_tool")).expect("fixture name"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("fixture arguments"),
+            ),
+        )])
+        .expect("one tool proposal");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation_with_usage(
+            ModelCallTerminalObservation::CompletedWithTools {
+                response,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
+            },
+            // More than MODEL_CONFIGURATION's context window, forcing the continuation guard.
+            ProviderReportedTokenUsage::unreported().with_input_tokens(Some(300_000)),
+        );
+    let request = ToolRequestId::from_uuid(Uuid::now_v7());
+    calls
+        .apply_terminal_observation(
+            session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    request,
+                    InitialToolApproval::Confirm,
+                )],
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                None,
+            )),
+            |_| panic!("no steering in this fixture"),
+        )
+        .await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            5,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id: wire_session,
+                tool_request_id: CanonicalUuid::from_uuid(request.into_uuid()),
+                decision: ToolDecision::Deny {
+                    reason: String::from("fixture denies execution"),
+                },
+            },
+        )
+        .await?;
+    let decision = response_within(&mut connection).await?;
+    assert!(!matches!(decision.message(), ServerMessage::Error { .. }));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(3)));
+    let calls = calls.with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        target,
+        signalbox_domain::FastMode::Disabled,
+        256,
+        200_000,
+    )]);
+    let outcome = calls
+        .tool_loop_repository()
+        .prepare_continuation(
+            session,
+            turn,
+            producing_call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ModelCallId::from_uuid(Uuid::now_v7()),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("no steering in this fixture"),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+    ));
+    Ok((session, turn))
+}
+
+fn continuation_compaction(
+    runtime: &RunningRuntime,
+    summary: ScriptedModel<ModelCallId>,
+) -> Result<ReportedUsageCompaction, Box<dyn Error>> {
+    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    continuation_compaction_with_configuration(runtime, summary, configuration)
+}
+
+fn continuation_compaction_with_configuration(
+    runtime: &RunningRuntime,
+    summary: ScriptedModel<ModelCallId>,
+    configuration: signalboxd::HubModelConfiguration,
+) -> Result<ReportedUsageCompaction, Box<dyn Error>> {
+    let runtime_models = configuration.runtime_model_catalog();
+    let calls = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("continuation-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog());
+    Ok(ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        calls,
+        NoToolCatalog,
+        runtime_models.clone(),
+        configuration,
+        Arc::new(RuntimeContextCompactionModel::new(summary, runtime_models)),
+    )
+    .with_repository_watch_continuation(
+        runtime.eligibility_nudge.clone(),
+        InProcessToolDispatchGate::default(),
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn durable_sweep_recovers_repository_watch_continuation_and_completes_one_successor()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let (session, original) =
+        exhausted_continuation(&runtime, ContinuationSession::RepositoryWatch).await?;
+    let summary = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "The repository change remains unfinished.",
+        TokenUsage::default(),
+    ));
+    let probe = summary.clone();
+    let compaction = continuation_compaction(&runtime, summary)?;
+    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let runtime_models = configuration.runtime_model_catalog();
+    let ordinary = compaction::RecordingCountedScriptedModel::following(
+        [completed_script(
+            "fixture-model",
+            "Repository task complete.",
+            TokenUsage::default(),
+        )],
+        [100],
+    );
+    let ordinary_probe = ordinary.clone();
+    let provider = RuntimeModelCallProvider::new(ordinary, runtime_models.clone(), None);
+    let calls = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("continuation-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog());
+    let execution = signalboxd::WorkspaceInstructionPreparedExecution::new(
+        PostgresProviderModelExecution::new(
+            calls.clone(),
+            InProcessAttemptDispatchGate::default(),
+            provider.clone(),
+            None,
+        ),
+        signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
+    );
+    let mut pass = ContextGuardedTurnPass::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        calls,
+        provider,
+        NoToolCatalog,
+        runtime_models.clone(),
+        configuration,
+        Arc::new(RuntimeContextCompactionModel::new(
+            ScriptedModel::following([]),
+            runtime_models,
+        )),
+        execution,
+    )
+    .with_reported_usage_compaction(compaction.clone())
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
+    // A new sweep has no in-process nudge from the committed terminalization.
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert_eq!(recovered, vec![session]);
+    for hint in recovered {
+        pass.run(hint).await?;
+    }
+    pass.run(session).await?;
+    let (remaining, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(remaining.is_empty(), "completed successors leave the sweep");
+    assert_eq!(ordinary_probe.prepared_operations().len(), 1);
+    assert_eq!(probe.received_operations().len(), 1);
+    let (successor, command): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT origin_turn_id, accepting_command_id FROM accepted_input WHERE session_id = $1 ORDER BY acceptance_position DESC LIMIT 1",
+    ).bind(session.into_uuid()).fetch_one(&runtime.pool).await?;
+    assert_ne!(successor, original.into_uuid());
+    let recorded = SubmitInputRepository::new(runtime.pool.clone())
+        .load(DurableCommandId::from_uuid(command))
+        .await?
+        .expect("the successor command reconstitutes");
+    assert_eq!(recorded.command().actor(), Actor::Core);
+    let states: Vec<(Uuid, String)> = sqlx::query_as("SELECT turn_id, terminal_disposition_kind FROM turn_lifecycle WHERE session_id = $1 ORDER BY acceptance_position")
+        .bind(session.into_uuid()).fetch_all(&runtime.pool).await?;
+    assert_eq!(
+        states,
+        vec![
+            (original.into_uuid(), String::from("failed")),
+            (successor, String::from("completed"))
+        ]
+    );
+    let summaries: i64 = sqlx::query_scalar("SELECT count(*) FROM compact_session_command WHERE session_id = $1 AND result_kind = 'applied'")
+        .bind(session.into_uuid()).fetch_one(&runtime.pool).await?;
+    assert_eq!(summaries, 1);
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn interactive_continuation_does_not_create_a_compaction_successor()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let (session, _) = exhausted_continuation(&runtime, ContinuationSession::Interactive).await?;
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(
+        recovered.is_empty(),
+        "interactive headroom failures stay terminal"
+    );
+    let summary = ScriptedModel::following([]);
+    let probe = summary.clone();
+    continuation_compaction(&runtime, summary)?
+        .compact_if_needed(session, None)
+        .await?;
+    assert!(probe.received_operations().is_empty());
+    let turns: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turn_lifecycle WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(turns, 1);
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn failed_continuation_compaction_closes_the_successor_without_retrying()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let (session, original) =
+        exhausted_continuation(&runtime, ContinuationSession::RepositoryWatch).await?;
+    let summary = ScriptedModel::single(Script::delivering(TerminalEvidence::ProviderError(
+        ProviderErrorEvidence {
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            kind: ProviderErrorKind::Unrecognized,
+            non_acceptance_proven: true,
+            native: NativeErrorFacts::default(),
+            usage: TokenUsage::unreported(),
+        },
+    )));
+    let probe = summary.clone();
+    let compaction = continuation_compaction(&runtime, summary)?;
+    assert!(matches!(
+        compaction.compact_if_needed(session, None).await,
+        Err(ReportedUsageCompactionError::Compaction {
+            cause_code: "context_compaction_model",
+            ..
+        })
+    ));
+    compaction.compact_if_needed(session, None).await?;
+    compaction.compact_if_needed(session, None).await?;
+    assert_eq!(probe.received_operations().len(), 1);
+    let states: Vec<(String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_model_call_id FROM turn_lifecycle WHERE session_id = $1 AND turn_id <> $2",
+    ).bind(session.into_uuid()).bind(original.into_uuid()).fetch_all(&runtime.pool).await?;
+    assert_eq!(states, vec![(String::from("failed"), None)]);
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(
+        recovered.is_empty(),
+        "failed compaction is not retried by the sweep"
+    );
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn held_repository_watch_compaction_successor_completes_its_commissioned_goal()
+-> Result<(), Box<dyn Error>> {
+    commissioned_compaction_completes_goal(ContinuationSession::CommissionedRepositoryWatch).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn a_removed_alias_does_not_block_commissioned_compaction_recovery()
+-> Result<(), Box<dyn Error>> {
+    commissioned_compaction_completes_goal(
+        ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias,
+    )
+    .await
+}
+
+async fn commissioned_compaction_completes_goal(
+    kind: ContinuationSession,
+) -> Result<(), Box<dyn Error>> {
+    let runtime = Box::pin(RunningRuntime::start()).await?;
+    let (session, original) = Box::pin(queued_continuation_session(&runtime, kind)).await?;
+    let summary = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "The repository change remains unfinished.",
+        TokenUsage::default(),
+    ));
+    let probe = summary.clone();
+    let configuration = match kind {
+        ContinuationSession::CommissionedRepositoryWatchViaRemovedAlias => {
+            // This is the alias frozen when the fixture commissions its goal.
+            let retired_alias = "[[aliases]]\nalias_id = \"00000000-0000-0000-0000-000000000002\"\nselection_id = \"00000000-0000-0000-0000-000000000001\"\n";
+            let configuration = support::parse_model_configuration(
+                &MODEL_CONFIGURATION.replace(retired_alias, ""),
+            )?;
+            assert!(
+                configuration
+                    .resolve_alias(signalbox_domain::ModelAlias::from_uuid(Uuid::from_u128(2)))
+                    .is_none()
+            );
+            configuration
+        }
+        _ => support::parse_model_configuration(MODEL_CONFIGURATION)?,
+    };
+    let compaction =
+        continuation_compaction_with_configuration(&runtime, summary, configuration.clone())?;
+    let runtime_models = configuration.runtime_model_catalog();
+    let ordinary = compaction::RecordingCountedScriptedModel::following(
+        [
+            Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: Some(ProviderReportedModel::new("fixture-model")),
+                finish: CompletionFinish::ToolUse,
+                content: vec![AssistantPart::ToolCall(
+                    signalbox_model_runtime::ToolCallProposal {
+                        id: signalbox_model_runtime::ToolCallId::new("exhaust-context"),
+                        // Missing report text makes this auto-approved call return
+                        // a tool failure without declaring the goal achieved.
+                        name: signalbox_model_runtime::ToolName::new("goal_declare"),
+                        arguments_json: r#"{"transition":"achieved"}"#.to_owned(),
+                    },
+                )],
+                usage: TokenUsage {
+                    input_tokens: Some(300_000),
+                    ..TokenUsage::unreported()
+                },
+            })),
+            Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: Some(ProviderReportedModel::new("fixture-model")),
+                finish: CompletionFinish::ToolUse,
+                content: vec![
+                    AssistantPart::Text("Repository task complete.".to_owned()),
+                    AssistantPart::ToolCall(signalbox_model_runtime::ToolCallProposal {
+                        id: signalbox_model_runtime::ToolCallId::new("goal-completion"),
+                        name: signalbox_model_runtime::ToolName::new("goal_declare"),
+                        arguments_json: r#"{"transition":"achieved"}"#.to_owned(),
+                    }),
+                ],
+                usage: TokenUsage::default(),
+            })),
+            completed_script(
+                "fixture-model",
+                "Repository task complete.",
+                TokenUsage::default(),
+            ),
+        ],
+        [100, 100],
+    );
+    let ordinary_probe = ordinary.clone();
+    let provider = RuntimeModelCallProvider::new(ordinary, runtime_models.clone(), None);
+    let calls = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("continuation-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog())
+    .with_continuation_usage_limits(configuration.tool_continuation_usage_limits());
+    let (catalog, executor) = signalboxd::goal_declaration_test_tools(runtime.pool.clone())?;
+    let execution = signalboxd::WorkspaceInstructionPreparedExecution::new(
+        PostgresProviderModelExecution::new(
+            calls.clone(),
+            InProcessAttemptDispatchGate::default(),
+            provider.clone(),
+            None,
+        )
+        .with_tool_loop(
+            InProcessToolDispatchGate::default(),
+            catalog.clone(),
+            executor,
+        ),
+        signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
+    );
+    let pass = ContextGuardedTurnPass::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        calls,
+        provider,
+        catalog,
+        runtime_models.clone(),
+        configuration.clone(),
+        Arc::new(RuntimeContextCompactionModel::new(
+            ScriptedModel::following([]),
+            runtime_models,
+        )),
+        HeapAllocatedExecution(execution),
+    )
+    .with_reported_usage_compaction(compaction.clone())
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
+    let disposition = signalboxd::PostgresGoalPassDisposition::new(
+        runtime.pool.clone(),
+        configuration,
+        runtime.eligibility_nudge.clone(),
+        signalboxd::GoalModeNumericBounds::new(None, None, None, None, None),
+    );
+    let mut pass = signalbox_application::GoalAwareEligibilityPass::new(pass, disposition);
+    tokio::spawn(pass.run(session)).await??;
+    let repository = signalbox_persistence::goal::GoalRepository::new(runtime.pool.clone());
+    let after_first = repository
+        .load_goal(session)
+        .await?
+        .expect("commissioned goal after first execution");
+    assert!(
+        matches!(
+            after_first.current().state(),
+            signalbox_domain::GoalState::Pursuing
+        ),
+        "{after_first:?}"
+    );
+    assert_ne!(
+        repository
+            .load_current_goal_turn(session, after_first.current().generation())
+            .await?
+            .expect("first pass queues the successor in the goal lineage"),
+        original
+    );
+    assert!(
+        probe.received_operations().is_empty(),
+        "compaction follows first-pass terminalization"
+    );
+    tokio::spawn(pass.run(session)).await??;
+    assert_eq!(ordinary_probe.prepared_operations().len(), 3);
+    assert_eq!(probe.received_operations().len(), 1);
+    assert_eq!(
+        probe.received_operations()[0].resolved_target.as_str(),
+        "fixture-model",
+        "compaction uses the direct model frozen by goal admission"
+    );
+    let repository = signalbox_persistence::goal::GoalRepository::new(runtime.pool.clone());
+    let goal = repository
+        .load_goal(session)
+        .await?
+        .expect("commissioned goal");
+    let successor = repository
+        .load_current_goal_turn(session, goal.current().generation())
+        .await?
+        .expect("the successor remains in the commissioned lineage");
+    assert_ne!(successor, original);
+    assert_eq!(
+        goal.events().len(),
+        2,
+        "commission followed directly by achievement"
+    );
+    assert!(
+        matches!(
+            goal.current().state(),
+            signalbox_domain::GoalState::Achieved { .. }
+        ),
+        "{goal:?}"
+    );
+    let lifecycle = signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(
+        runtime.pool.clone(),
+    )
+    .load(session)
+    .await?
+    .expect("held session lifecycle");
+    assert!(
+        matches!(
+            lifecycle.state(),
+            signalbox_domain::SessionLifecycleState::Terminal {
+                outcome: signalbox_domain::SessionTerminalOutcome::AchievedDeclared
+            }
+        ),
+        "{lifecycle:?}"
+    );
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn a_defaults_rejection_does_not_abandon_the_compaction_successor()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let (session, original) =
+        exhausted_continuation(&runtime, ContinuationSession::RepositoryWatch).await?;
+    let stale_request = signalboxd::repository_watch_continuation_test_request(
+        session,
+        original,
+        SessionConfigurationDefaultsVersion::first(),
+    )?;
+    let rejected_command = stale_request.command_id();
+    replace_continuation_defaults(runtime.socket(), session).await?;
+    let mut inputs = signalbox_application::SubmitInputService::new(
+        signalbox_application::UuidV7SubmitInputIdGenerator,
+        SubmitInputRepository::new(runtime.pool.clone()),
+        runtime.eligibility_nudge.clone(),
+        InProcessToolDispatchGate::default(),
+    );
+    assert!(matches!(
+        inputs.execute(stale_request).await?,
+        signalbox_application::SubmitInputOutcome::Recorded(
+            signalbox_domain::SubmitInputResult::Rejected(
+                signalbox_domain::SubmitInputRejectedResult::SessionDefaultsVersionMismatch { .. }
+            )
+        )
+    ));
+    let summary = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "Continue the repository task with the updated defaults.",
+        TokenUsage::default(),
+    ));
+    let probe = summary.clone();
+    let compaction = continuation_compaction(&runtime, summary)?;
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert_eq!(
+        recovered,
+        vec![session],
+        "the rejected admission remains discoverable"
+    );
+    for hint in recovered {
+        compaction.compact_if_needed(hint, None).await?;
+    }
+    compaction.compact_if_needed(session, None).await?;
+    assert_eq!(probe.received_operations().len(), 1);
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(successor) = activation.execute(session).await? else {
+        panic!("the defaults retry must admit a compaction successor");
+    };
+    assert_ne!(successor.turn(), original);
+    let rejected = SubmitInputRepository::new(runtime.pool.clone())
+        .load(rejected_command)
+        .await?
+        .expect("the original rejection remains durable");
+    assert!(matches!(
+        rejected.result(),
+        signalbox_domain::SubmitInputResult::Rejected(
+            signalbox_domain::SubmitInputRejectedResult::SessionDefaultsVersionMismatch { .. }
+        )
+    ));
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn a_stopped_historical_goal_does_not_suppress_an_ordinary_compaction_successor()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::{
+        goal::GoalRepository,
+        goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
+    };
+    let runtime = RunningRuntime::start().await?;
+    let (session, original) = exhausted_continuation(
+        &runtime,
+        ContinuationSession::RepositoryWatchWithStoppedGoal,
+    )
+    .await?;
+    let goals = GoalRepository::new(runtime.pool.clone());
+    let historical = goals
+        .load_goal(session)
+        .await?
+        .expect("stopped historical goal");
+    assert_eq!(
+        historical.current().state(),
+        &signalbox_domain::GoalState::UserStopped
+    );
+    let historical_turn = goals
+        .load_current_goal_turn(session, historical.current().generation())
+        .await?
+        .expect("historical goal turn");
+    assert_ne!(historical_turn, original);
+    assert_eq!(
+        goals
+            .continue_after_context_exhaustion(
+                session,
+                historical_turn,
+                GoalTurnCandidates::new(
+                    signalbox_domain::AcceptedInputId::from_uuid(Uuid::now_v7()),
+                    TurnId::from_uuid(Uuid::now_v7()),
+                ),
+                "Continue the unfinished repository-watch task from the compacted context.",
+                |_| None,
+            )
+            .await?,
+        GoalTurnContinuationOutcome::NotPursuing,
+        "the stopped goal's own turn cannot resume through ordinary admission"
+    );
+    let summary = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "Continue the ordinary repository task.",
+        TokenUsage::default(),
+    ));
+    let probe = summary.clone();
+    let compaction = continuation_compaction(&runtime, summary)?;
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert_eq!(recovered, vec![session]);
+    for hint in recovered {
+        compaction.compact_if_needed(hint, None).await?;
+    }
+    compaction.compact_if_needed(session, None).await?;
+    assert_eq!(probe.received_operations().len(), 1);
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(successor) = activation.execute(session).await? else {
+        panic!("the ordinary headroom failure must admit its successor");
+    };
+    assert_ne!(successor.turn(), original);
+    assert_eq!(goals.load_goal(session).await?, Some(historical));
+    runtime.stop().await
+}
+
+// The composed execution future is large in an unoptimized integration binary.
+#[derive(Clone)]
+struct HeapAllocatedExecution<E>(E);
+
+impl<E: signalboxd::ActivatedTurnExecution> signalboxd::ActivatedTurnExecution
+    for HeapAllocatedExecution<E>
+{
+    type Error = E::Error;
+
+    fn execute(
+        &self,
+        activated: Box<signalbox_domain::ActivatedTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        Box::pin(self.0.execute(activated))
+    }
+
+    fn resume_active_with_observer(
+        &self,
+        session: SessionId,
+        observe: Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        Box::pin(self.0.resume_active_with_observer(session, observe))
+    }
+}
+
+async fn replace_continuation_defaults(
+    socket: &std::path::Path,
+    session: SessionId,
+) -> Result<(), Box<dyn Error>> {
+    let mut connection = Connection::connect(socket).await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            1,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id: CanonicalUuid::from_uuid(session.into_uuid()),
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                },
+                dangerous_tool_auto_approval: false,
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    assert_eq!(
+        super::session_configuration::session_defaults_replaced_facts(
+            response_within(&mut connection).await?.message()
+        )
+        .defaults_version,
+        CanonicalU64::new(2)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn restoring_an_alias_retries_rejected_ordinary_continuation_admission()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let (session, original) =
+        exhausted_continuation(&runtime, ContinuationSession::RepositoryWatchViaAlias).await?;
+    let request = signalboxd::repository_watch_continuation_test_request(
+        session,
+        original,
+        SessionConfigurationDefaultsVersion::first(),
+    )?;
+    let rejected_command = request.command_id();
+    let retired_alias = "[[aliases]]\nalias_id = \"00000000-0000-0000-0000-000000000002\"\nselection_id = \"00000000-0000-0000-0000-000000000001\"\n";
+    let configuration =
+        support::parse_model_configuration(&MODEL_CONFIGURATION.replace(retired_alias, ""))?;
+    assert!(
+        configuration
+            .resolve_alias(signalbox_domain::ModelAlias::from_uuid(Uuid::from_u128(2)))
+            .is_none()
+    );
+    let summary = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "Continue the repository task after the alias is restored.",
+        TokenUsage::default(),
+    ));
+    let probe = summary.clone();
+    let missing_alias =
+        continuation_compaction_with_configuration(&runtime, summary.clone(), configuration)?;
+    assert!(
+        missing_alias
+            .compact_if_needed(session, None)
+            .await
+            .is_err()
+    );
+    assert!(probe.received_operations().is_empty());
+    let inputs = SubmitInputRepository::new(runtime.pool.clone());
+    let rejected = inputs
+        .load(rejected_command)
+        .await?
+        .expect("durable alias rejection");
+    assert!(matches!(
+        rejected.result(),
+        signalbox_domain::SubmitInputResult::Rejected(
+            signalbox_domain::SubmitInputRejectedResult::UnknownModelAlias { .. }
+        )
+    ));
+    let (recovered, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert_eq!(recovered, vec![session]);
+    let restored_alias = continuation_compaction(&runtime, summary)?;
+    for hint in recovered {
+        restored_alias.compact_if_needed(hint, None).await?;
+    }
+    restored_alias.compact_if_needed(session, None).await?;
+    assert_eq!(probe.received_operations().len(), 1);
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(successor) = activation.execute(session).await? else {
+        panic!("restoring the alias must admit an ordinary compaction successor");
+    };
+    assert_ne!(successor.turn(), original);
+    assert_eq!(
+        inputs
+            .load(rejected_command)
+            .await?
+            .expect("original rejection")
+            .result(),
+        rejected.result()
+    );
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn a_defaults_race_retries_compaction_without_closing_the_successor()
+-> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let runtime = RunningRuntime::start().await?;
+    let (session, original) =
+        exhausted_continuation(&runtime, ContinuationSession::RepositoryWatch).await?;
+    let summary = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "Continue the repository task after the defaults update.",
+        TokenUsage::default(),
+    ));
+    let probe = summary.clone();
+    let compaction = continuation_compaction(&runtime, summary)?;
+    let prepares = AtomicUsize::new(0);
+    let socket = runtime.socket().to_owned();
+    let replace_before_prepare = |_call: ModelCallId| {
+        if prepares.fetch_add(1, Ordering::SeqCst) == 0 {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    replace_continuation_defaults(&socket, session)
+                        .await
+                        .expect("replace defaults after preflight but before prepare commits");
+                });
+            });
+        }
+    };
+    compaction
+        .compact_if_needed(session, Some(&replace_before_prepare))
+        .await?;
+    assert_eq!(prepares.load(Ordering::SeqCst), 2);
+    compaction.compact_if_needed(session, None).await?;
+    assert_eq!(probe.received_operations().len(), 1);
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(successor) = activation.execute(session).await? else {
+        panic!("a stale preparation must leave the compacted successor runnable");
+    };
+    assert_ne!(successor.turn(), original);
+    runtime.stop().await
+}

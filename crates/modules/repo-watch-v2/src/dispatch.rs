@@ -8,10 +8,10 @@ use crate::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_ownership_seam::{
     CreateSessionOutcome, DescendantTerminationScope, DurableCommandId, GoalEventKind,
-    LifecycleEvent, LifecycleEventKind, OffsetDateTime, RepoWatchEvent, RepoWatchEventId,
-    RepoWatchEventTarget, RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchRule,
-    RepoWatchSingletonScope, RepositorySlug, SessionCommand, SessionId, SessionLifecycleCommand,
-    SessionLifecycleOperation, SessionTerminalOutcome, StopStickiness,
+    LifecycleEvent, LifecycleEventKind, LifecycleEventSource, OffsetDateTime, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventTarget, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchRule, RepoWatchSingletonScope, RepositorySlug, SessionCommand, SessionId,
+    SessionLifecycleCommand, SessionLifecycleOperation, SessionTerminalOutcome, StopStickiness,
 };
 use std::{collections::BTreeSet, future::Future};
 use uuid::Uuid;
@@ -154,8 +154,13 @@ impl RepoWatchStore {
         event: &LifecycleEvent,
         factory: &mut Factory,
         codec: &mut Codec,
+        source: &LifecycleEventSource,
     ) -> Result<(), StoreError> {
         self.apply_lifecycle_event(event).await?;
+        if matches!(event.kind(), LifecycleEventKind::SessionTerminal(_)) {
+            sqlx::query("UPDATE dispatch_ledger SET session_terminal_at = $2 WHERE created_session_id = $1 AND session_terminal_at IS NULL")
+                .bind(event.session().map(SessionId::into_uuid)).bind(event.recorded_at()).execute(&self.pool).await?;
+        }
         if let Some(session) = event.session() {
             if matches!(event.kind(), LifecycleEventKind::SessionTerminal(terminal)
                 if !matches!(terminal.outcome, SessionTerminalOutcome::Stopped { sticky: StopStickiness::Sticky }))
@@ -196,6 +201,8 @@ impl RepoWatchStore {
                 }
             }
         }
+        self.react_to_pull_request_lifecycle(factory, codec, source)
+            .await?;
         let prior: Decimal =
             sqlx::query_scalar("SELECT applied_through FROM core_event_cursor WHERE singleton")
                 .fetch_one(&self.pool)
@@ -210,11 +217,95 @@ impl RepoWatchStore {
         Ok(())
     }
 
+    /// Retains a parent-only stop for each live dispatched session whose pull request ended.
+    pub async fn react_to_pull_request_lifecycle<
+        Factory: LifecycleCommandFactory,
+        Codec: SessionCommandCodec,
+    >(
+        &self,
+        factory: &mut Factory,
+        codec: &mut Codec,
+        source: &LifecycleEventSource,
+    ) -> Result<(), StoreError> {
+        #[derive(sqlx::FromRow)]
+        struct Retirement {
+            command_id: Uuid,
+            created_session_id: Uuid,
+            terminal_event_id: Uuid,
+            reason: String,
+            recorded_at: OffsetDateTime,
+        }
+        let mut transaction = self.pool.begin().await?;
+        let retirements: Vec<Retirement> = sqlx::query_as(
+            "SELECT origin.command_id, origin.created_session_id,
+                    terminal.event_id AS terminal_event_id, terminal.event_kind AS reason,
+                    terminal.recorded_at
+             FROM dispatch_ledger AS origin
+             JOIN gh_event AS dispatched ON dispatched.event_id = origin.event_id
+             JOIN LATERAL (
+                 SELECT fact.event_id, fact.event_kind, fact.recorded_at
+                 FROM gh_event AS fact
+                 WHERE fact.repository = dispatched.repository
+                   AND fact.pull_request_number = dispatched.pull_request_number
+                   AND fact.repository_event_ordinal > dispatched.repository_event_ordinal
+                   AND fact.event_kind IN ('pull_request_closed', 'pull_request_merged')
+                 ORDER BY fact.repository_event_ordinal LIMIT 1
+             ) AS terminal ON true
+             WHERE origin.created_session_id IS NOT NULL AND origin.session_terminal_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM dispatch_ledger AS reaction
+                   WHERE reaction.dispatch_ref = origin.dispatch_ref
+                     AND reaction.action_ordinal = origin.action_ordinal
+                     AND reaction.retirement_event_id IS NOT NULL)
+             ORDER BY origin.command_id FOR UPDATE OF origin",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        for retirement in retirements {
+            if let Some(terminal_at) = source
+                .session_terminal_at(SessionId::from_uuid(retirement.created_session_id))
+                .await
+                .map_err(StoreError::Lifecycle)?
+            {
+                sqlx::query("UPDATE dispatch_ledger SET session_terminal_at = $2 WHERE created_session_id = $1 AND session_terminal_at IS NULL")
+                    .bind(retirement.created_session_id).bind(terminal_at)
+                    .execute(&mut *transaction).await?;
+                continue;
+            }
+            let command = SessionCommand::lifecycle(factory.lifecycle(
+                SessionId::from_uuid(retirement.created_session_id),
+                SessionLifecycleOperation::Stop {
+                    sticky: StopStickiness::Sticky,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ))
+            .map_err(|_| StoreError::InvalidDispatchBatch)?;
+            let payload = codec
+                .encode(&command)
+                .ok_or(StoreError::InvalidRetainedCommand)?;
+            sqlx::query(
+                "INSERT INTO dispatch_ledger (
+                    dispatch_ref, action_ordinal, command_id, repository, rule_id, rule_revision,
+                    event_id, command_kind, command_payload, status, issued_at,
+                    retirement_event_id, retirement_reason)
+                 SELECT dispatch_ref, action_ordinal, $2, repository, rule_id, rule_revision,
+                    event_id, 'lifecycle', $3, 'pending', $4, $5, $6
+                 FROM dispatch_ledger WHERE command_id = $1
+                 ON CONFLICT (dispatch_ref, action_ordinal) WHERE retirement_event_id IS NOT NULL DO NOTHING")
+                .bind(retirement.command_id).bind(command.command_id().into_uuid()).bind(payload)
+                .bind(retirement.recorded_at).bind(retirement.terminal_event_id).bind(retirement.reason)
+                .execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Resubmits the exact committed payloads, including actions of removed rules.
     pub async fn submit_pending<Codec: SessionCommandCodec, Sink: SessionCommandSink>(
         &self,
         codec: &mut Codec,
         sink: &mut Sink,
+        source: &LifecycleEventSource,
     ) -> Result<(), SubmissionError<Sink::Error>> {
         for planned in self
             .recover_pending_commands(codec)
@@ -222,6 +313,35 @@ impl RepoWatchStore {
             .map_err(SubmissionError::Store)?
         {
             let id = planned.command().command_id();
+            let retirement_session: Option<Uuid> = sqlx::query_scalar(
+                "SELECT origin.created_session_id FROM dispatch_ledger reaction
+                 JOIN dispatch_ledger origin ON origin.dispatch_ref = reaction.dispatch_ref
+                     AND origin.action_ordinal = reaction.action_ordinal
+                     AND origin.created_session_id IS NOT NULL
+                 WHERE reaction.command_id = $1 AND reaction.retirement_event_id IS NOT NULL",
+            )
+            .bind(id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::from)
+            .map_err(SubmissionError::Store)?;
+            if let Some(session) = retirement_session
+                && source
+                    .session_terminal_at(SessionId::from_uuid(session))
+                    .await
+                    .map_err(StoreError::Lifecycle)
+                    .map_err(SubmissionError::Store)?
+                    .is_some()
+            {
+                sqlx::query("UPDATE dispatch_ledger SET status = 'rejected', rejection_kind = 'session_already_terminal',
+                    settled_at = $2, submission_pending = false WHERE command_id = $1 AND status = 'pending'")
+                    .bind(id.into_uuid()).bind(OffsetDateTime::now_utc())
+                    .execute(&self.pool).await.map_err(StoreError::from).map_err(SubmissionError::Store)?;
+                self.set_submission_pending(id, false)
+                    .await
+                    .map_err(SubmissionError::Store)?;
+                continue;
+            }
             self.set_submission_pending(id, true)
                 .await
                 .map_err(SubmissionError::Store)?;

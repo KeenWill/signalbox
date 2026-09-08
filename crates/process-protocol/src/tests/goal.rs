@@ -4,6 +4,86 @@ use super::support::*;
 use crate::*;
 
 #[test]
+fn termination_metadata_may_be_absent_but_not_null() -> Result<(), Box<dyn std::error::Error>> {
+    for message in [
+        ServerMessage::InputSubmitted {
+            termination: None,
+            session_id: uuid(3),
+            accepted_input_id: uuid(4),
+            acceptance_position: CanonicalU64::new(1),
+            turn_id: uuid(5),
+            model_settings: settings_snapshot_fixture(),
+        },
+        ServerMessage::GoalTransitionApplied {
+            termination: None,
+            session_id: uuid(3),
+            event_ordinal: CanonicalU64::new(1),
+            generation: CanonicalU64::new(1),
+        },
+    ] {
+        let mut value = serde_json::to_value(&message)?;
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(value.clone())?,
+            message
+        );
+        value["termination"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<ServerMessage>(value.clone()).is_err(),
+            "{value}"
+        );
+        value["termination"] = serde_json::to_value(TerminationReceipt {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            descendant_count: CanonicalU64::new(u64::MAX),
+        })?;
+        assert!(serde_json::from_value::<ServerMessage>(value).is_ok());
+    }
+    Ok(())
+}
+
+#[test]
+fn parent_alone_receipt_rejects_descendant_dispositions() {
+    let receipt = ServerMessage::GoalTransitionApplied {
+        session_id: uuid(3),
+        event_ordinal: CanonicalU64::new(1),
+        generation: CanonicalU64::new(1),
+        termination: Some(TerminationReceipt {
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            descendant_count: CanonicalU64::new(1),
+        }),
+    };
+    assert_eq!(
+        ServerFrame::try_new(request(1).expect("fixture request"), receipt)
+            .expect_err("parent-alone never evaluates descendants"),
+        FrameValidationError::DelegationShape
+    );
+}
+
+#[test]
+fn cascade_receipt_preserves_full_width_count_and_rejects_extra_fields()
+-> Result<(), Box<dyn std::error::Error>> {
+    let receipt = TerminationReceipt {
+        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+        descendant_count: CanonicalU64::new(u64::MAX),
+    };
+    let encoded = serde_json::to_value(receipt)?;
+    assert_eq!(
+        encoded,
+        serde_json::json!({
+            "descendant_scope": "parent_and_descendants",
+            "descendant_count": "18446744073709551615",
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<TerminationReceipt>(encoded.clone())?,
+        receipt
+    );
+    let mut extra = encoded;
+    extra["unadmitted"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<TerminationReceipt>(extra).is_err());
+    Ok(())
+}
+
+#[test]
 fn goal_requests_and_history_round_trip_in_the_single_vocabulary()
 -> Result<(), Box<dyn std::error::Error>> {
     assert_client_request_round_trip(
@@ -146,6 +226,7 @@ fn goal_requests_and_history_round_trip_in_the_single_vocabulary()
     assert_server_message_round_trip(
         request(14)?,
         ServerMessage::GoalTransitionApplied {
+            termination: None,
             session_id: uuid(3),
             event_ordinal: CanonicalU64::new(4),
             generation: CanonicalU64::new(2),

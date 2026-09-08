@@ -80,7 +80,9 @@ use conversation_import::{
     PreparedImport, collect_import_paths, import_conversation_file, imported, open_import_source,
     read_imported_conversation, scan_conversations, write_single_import_outcome,
 };
+mod credential_exclusions;
 mod delegation;
+mod program;
 use delegation::session_delegation;
 #[cfg(test)]
 use delegation::{
@@ -290,6 +292,7 @@ async fn execute(
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Program(_)
         | Command::Credential(_)
         | Command::Imported { .. }
         | Command::Status
@@ -320,6 +323,7 @@ async fn execute(
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Program(_)
         | Command::Credential(_)
         | Command::Imported { .. }
         | Command::Status
@@ -359,6 +363,7 @@ async fn execute(
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Program(_)
         | Command::Credential(_)
         | Command::Status
         | Command::List
@@ -487,6 +492,7 @@ async fn execute(
             imported_conversation_id,
         } => imported(&mut client, &mut output, imported_conversation_id).await,
         Command::Session(command) => session_delegation(&mut client, &mut output, command).await,
+        Command::Program(command) => program::execute(&mut client, &mut output, command).await,
         Command::Credential(command) => {
             credential::credential(&mut client, &mut output, command).await
         }

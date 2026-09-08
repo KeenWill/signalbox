@@ -582,6 +582,7 @@ impl BlobChunk {
 ```rust
 pub enum FrameValidationError {
     OauthCredentialShape,
+    CredentialExclusionShape,
     UnsupportedVersion,
     UncorrelatedClientRequest,
     UncorrelatedSuccess,
