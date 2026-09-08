@@ -2102,6 +2102,23 @@ fn detail_cursors_require_closed_fields_and_canonical_addresses() {
 }
 
 #[test]
+fn detail_cursors_select_a_repeated_tool_member() {
+    let query = TimelineDetailQuery {
+        max_items: Some(String::from("1")),
+        max_bytes: Some(String::from("256")),
+        cursor_address: Some(String::from("7")),
+        cursor_field: Some(String::from("tool_result")),
+        cursor_member: Some(String::from("3")),
+        cursor_offset: Some(String::from("31")),
+    };
+    let (_, cursor) = parse_detail_query(&query).expect("a repeated member cursor is valid");
+    let cursor = cursor.expect("a body continuation is retained");
+    assert_eq!(cursor.field, Some(TimelineBodyField::ToolResult));
+    assert_eq!(cursor.member_index, 3);
+    assert_eq!(cursor.offset_bytes, 31);
+}
+
+#[test]
 fn detail_cursors_accept_address_only_item_continuations() {
     let query = TimelineDetailQuery {
         max_items: Some(String::from("1")),

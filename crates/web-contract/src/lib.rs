@@ -14,7 +14,7 @@ use signalbox_application::{
     max_search_snippet_bytes, max_session_live_queued_turns, max_timeline_detail_bytes,
     max_timeline_detail_items, max_timeline_window_bytes, max_timeline_window_items,
     max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
-    timeline_detail_envelope_bytes,
+    min_timeline_detail_bytes, timeline_detail_envelope_bytes,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -89,6 +89,8 @@ pub struct WebContractLimits {
     pub max_timeline_window_bytes: u32,
     /// Maximum detailed timeline records in one response.
     pub max_timeline_detail_items: u32,
+    /// Minimum projected typed-body byte budget accepted for a detail request.
+    pub min_timeline_detail_bytes: u32,
     /// Maximum projected typed-body bytes in one detail response.
     pub max_timeline_detail_bytes: u32,
     /// Maximum queued turn identities retained in one live snapshot.
@@ -153,6 +155,7 @@ impl WebContractBootstrap {
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
                 max_timeline_detail_items: u32::from(max_timeline_detail_items()),
+                min_timeline_detail_bytes: min_timeline_detail_bytes(),
                 max_timeline_detail_bytes: max_timeline_detail_bytes(),
                 max_session_live_queued_turns: u32::from(max_session_live_queued_turns()),
                 max_search_query_bytes: max_search_query_bytes() as u32,
@@ -979,6 +982,13 @@ pub struct WebSessionTimelineWindow {
 pub enum WebTimelineBodyField {
     InputText,
     ModelResponse,
+    ToolArguments,
+    ToolResult,
+    ToolFailure,
+    ApprovalRationale,
+    GoalText,
+    CompactionSummary,
+    DelegationContent,
 }
 
 /// Exact continuation within an oversized typed body.
@@ -1093,6 +1103,39 @@ pub struct WebTimelineModelUsage {
     pub cache_read_input_tokens: Option<WebU64>,
 }
 
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebToolName(
+    #[schemars(length(min = 1, max = 64), regex(pattern = r"^[A-Za-z0-9_-]+$"))] String,
+);
+
+impl WebToolName {
+    /// Converts an already checked application-boundary tool name.
+    #[must_use]
+    pub fn from_checked(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebToolName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let valid = !value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+        valid.then_some(Self(value)).ok_or_else(|| {
+            de::Error::custom(
+                "tool name must be 1-64 ASCII alphanumeric, underscore, or hyphen bytes",
+            )
+        })
+    }
+}
+
 /// Closed turn lifecycle boundary.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1101,10 +1144,554 @@ pub enum WebTimelineTurnLifecycleKind {
     Terminalized,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolState {
+    Prepared,
+    InFlight,
+    AwaitingChild,
+    Completed,
+    KnownFailed,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineToolBatchState {
+    Proposed { frontier_id: WebSessionId },
+    ResultsProjected { frontier_id: WebSessionId },
+    RecoveryRequired { tool_attempt_id: WebSessionId },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolEffectPosture {
+    EffectFree,
+    ExternalEffect,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolFailureCause {
+    PreauthorizationRejected,
+    UnknownTool,
+    InvalidArguments,
+    ExecutionFailed,
+    ResultTooLarge,
+    CrashLost,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "browser wire DTO variants preserve their direct contract shape without allocation-only indirection"
+)]
+pub enum WebTimelineToolAttemptEvidence {
+    RequestOnly {},
+    PhysicalAttempt {
+        attempt_id: WebSessionId,
+        result: Option<WebTimelineTextExcerpt>,
+        failure: Option<WebTimelineTextExcerpt>,
+        /// Whether the frozen transition snapshot recorded a result payload,
+        /// independent of which single field this page projected.
+        result_present: bool,
+        /// Whether the frozen transition snapshot recorded a failure payload,
+        /// independent of which single field this page projected.
+        failure_present: bool,
+        effect_posture: WebTimelineToolEffectPosture,
+        sandbox_posture: Option<WebTimelineToolSandboxPosture>,
+        state: WebTimelineToolState,
+        cause: Option<WebTimelineToolFailureCause>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineToolAttempt {
+    pub request_id: WebSessionId,
+    pub tool_name: WebToolName,
+    pub arguments: Option<WebTimelineTextExcerpt>,
+    pub approval_posture: WebTimelineToolApprovalPosture,
+    pub approval_judge_escalated: bool,
+    pub evidence: WebTimelineToolAttemptEvidence,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineApprovalDecision {
+    Approve,
+    Deny,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineApprovalActor {
+    Policy {},
+    User {
+        command_id: WebSessionId,
+    },
+    UserOverride {
+        command_id: WebSessionId,
+        denied_request_id: WebSessionId,
+    },
+    Delegate {
+        model_selection_id: WebSessionId,
+        model_call_id: WebSessionId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineRunnerSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineRunnerState {
+    Pinned,
+    Suspect,
+    Connected,
+    RunnerLostBeforePin,
+    RunnerLost,
+    Replaced,
+    WorkingDirectoryChanged,
+    Abandoned,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineGoalBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+    FinishCheckFailed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineGoalEvent {
+    Commissioned {
+        generation: WebPositiveU64,
+        text: WebTimelineTextExcerpt,
+    },
+    Blocked {
+        generation: WebPositiveU64,
+        reason: WebTimelineGoalBlockedReason,
+        text: WebTimelineTextExcerpt,
+    },
+    Resumed {
+        generation: WebPositiveU64,
+        text: Option<WebTimelineTextExcerpt>,
+    },
+    Achieved {
+        generation: WebPositiveU64,
+        text: WebTimelineTextExcerpt,
+    },
+    UserStopped {
+        generation: WebPositiveU64,
+    },
+    SessionClosed {
+        generation: WebPositiveU64,
+        outcome: WebTimelineSessionOutcome,
+    },
+    Superseded {
+        generation: WebPositiveU64,
+        text: WebTimelineTextExcerpt,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineBoundChildAction {
+    KeepRunning,
+    Stop,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDelegationPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: WebTimelineBoundChildAction,
+        on_parent_cancelled: WebTimelineBoundChildAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineDelegationWaitMode {
+    Foreground,
+    Background,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineDelegationOutcome {
+    ResultReturned,
+    ChildFailed,
+    ChildStopped,
+    ChildCancelled,
+    ContinueRunning,
+    AlreadyTerminal,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineDelegationReason {
+    ChildCompleted,
+    ChildExecutionFailed,
+    ChildResultUnavailable,
+    ChildCancelled,
+    ParentStoppedWithDescendants,
+    ParentCancelledWithDescendants,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDelegationProvenance {
+    ParentLifecycleCommand {
+        session_id: WebSessionId,
+        command_id: WebSessionId,
+    },
+    ChildTurn {
+        session_id: WebSessionId,
+        turn_id: WebSessionId,
+    },
+    ParentTurnCommand {
+        session_id: WebSessionId,
+        turn_id: WebSessionId,
+        command_id: WebSessionId,
+    },
+    ParentGoalCommand {
+        session_id: WebSessionId,
+        goal_generation: WebPositiveU64,
+        command_id: WebSessionId,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDelegationDetail {
+    ChildSpawned {
+        relationship_id: WebSessionId,
+        child_session_id: WebSessionId,
+        policy: WebTimelineDelegationPolicy,
+    },
+    ChildWaiting {
+        relationship_id: WebSessionId,
+        child_session_id: WebSessionId,
+        awaiting_request_id: WebSessionId,
+        mode: WebTimelineDelegationWaitMode,
+    },
+    ChildLifecycleDisposition {
+        relationship_id: WebSessionId,
+        child_session_id: WebSessionId,
+        event_ordinal: WebPositiveU64,
+        outcome: WebTimelineDelegationOutcome,
+        reason: WebTimelineDelegationReason,
+        provenance: WebTimelineDelegationProvenance,
+    },
+    ChildResult {
+        relationship_id: WebSessionId,
+        child_session_id: WebSessionId,
+        outcome: WebTimelineDelegationOutcome,
+        reason: WebTimelineDelegationReason,
+        provenance: WebTimelineDelegationProvenance,
+        content: Option<WebTimelineTextExcerpt>,
+    },
+    SessionMessage {
+        relationship_id: WebSessionId,
+        message_id: WebSessionId,
+        sender_session_id: WebSessionId,
+        recipient_session_id: WebSessionId,
+        message_ordinal: WebPositiveU64,
+        delivery_sequence: WebPositiveU64,
+        content: WebTimelineTextExcerpt,
+    },
+    ResultWake {
+        relationship_id: WebSessionId,
+        awaiting_request_id: Option<WebSessionId>,
+    },
+    MessageWake {
+        relationship_id: WebSessionId,
+        message_id: WebSessionId,
+    },
+}
+
+/// Durable cause and originating identity of session creation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineCreationCause {
+    Interactive {},
+    RepositoryWatch { dispatch_id: WebSessionId },
+    Commissioned { dispatch_id: WebSessionId },
+    Workflow { program_run_id: WebSessionId },
+    Delegated { spawning_request_id: WebSessionId },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineImportedEvidence {
+    pub imported_conversation_id: WebSessionId,
+    pub imported_entry_id: WebSessionId,
+    pub imported_position: WebU64,
+    pub relationship: WebTimelineImportedRelationship,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineImportedRelationship {
+    Resume,
+    Fork,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineReconciliationOperation {
+    ModelCall { model_call_id: WebSessionId },
+    ToolAttempt { tool_attempt_id: WebSessionId },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineReasoningLevel {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+    Ultra,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineFastMode {
+    Disabled,
+    Enabled,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineAnthropicServiceTier {
+    Auto,
+    StandardOnly,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineOpenAiServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+    Fast,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineCodexCliServiceTier {
+    Default,
+    Priority,
+    Flex,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "snake_case",
+    tag = "provider",
+    content = "value"
+)]
+pub enum WebTimelineServiceTier {
+    Anthropic(WebTimelineAnthropicServiceTier),
+    OpenAi(WebTimelineOpenAiServiceTier),
+    CodexCli(WebTimelineCodexCliServiceTier),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "snake_case",
+    tag = "kind",
+    content = "value"
+)]
+pub enum WebTimelineSettingOverlay<ValueT> {
+    Inherit,
+    ProviderDefault,
+    Value(ValueT),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "snake_case",
+    tag = "kind",
+    content = "value"
+)]
+pub enum WebTimelineFastModeOverlay {
+    Inherit,
+    Value(WebTimelineFastMode),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineModelSettingsOverlay {
+    pub reasoning_level: WebTimelineSettingOverlay<WebTimelineReasoningLevel>,
+    pub fast_mode: WebTimelineFastModeOverlay,
+    pub service_tier: WebTimelineSettingOverlay<WebTimelineServiceTier>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineModelSettingSource {
+    PerCall,
+    Session,
+    Profile,
+    GlobalDefault,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineModelSettingsPrecedence {
+    pub per_call: WebTimelineModelSettingsOverlay,
+    pub session: WebTimelineModelSettingsOverlay,
+    pub profile: WebTimelineModelSettingsOverlay,
+    pub global_default: WebTimelineModelSettingsOverlay,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineEffectiveModelSettings {
+    pub reasoning_level: Option<WebTimelineReasoningLevel>,
+    pub fast_mode: WebTimelineFastMode,
+    pub service_tier: Option<WebTimelineServiceTier>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineModelSettingsSnapshot {
+    pub precedence: WebTimelineModelSettingsPrecedence,
+    pub effective: WebTimelineEffectiveModelSettings,
+    pub reasoning_source: Option<WebTimelineModelSettingSource>,
+    pub fast_mode_source: Option<WebTimelineModelSettingSource>,
+    pub service_tier_source: Option<WebTimelineModelSettingSource>,
+    pub validated_for_selection_id: Option<WebSessionId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
+pub enum WebTimelineModelSelection {
+    Direct { selection_id: WebSessionId },
+    Alias { alias_id: WebSessionId },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineModelChangeAdjustment {
+    ReasoningLevelClamped {
+        from: WebTimelineReasoningLevel,
+        to: WebTimelineReasoningLevel,
+    },
+    ReasoningLevelCleared {
+        from: WebTimelineReasoningLevel,
+    },
+    FastModeDisabled {},
+    ServiceTierCleared {
+        from: WebTimelineServiceTier,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineModelSettingsDetail {
+    SessionDefaultsChanged {
+        command_id: WebSessionId,
+        prior_defaults_version: WebU64,
+        installed_defaults_version: WebU64,
+        prior_model: WebTimelineModelSelection,
+        installed_model: WebTimelineModelSelection,
+        prior_settings: WebTimelineModelSettingsSnapshot,
+        installed_settings: WebTimelineModelSettingsSnapshot,
+        caller_override: WebTimelineModelSettingsOverlay,
+        #[schemars(length(max = 3))]
+        adjustments: Vec<WebTimelineModelChangeAdjustment>,
+    },
+    TurnResolved {
+        accepted_input_id: WebSessionId,
+        turn_id: WebSessionId,
+        defaults_version: WebU64,
+        requested_model: WebTimelineModelSelection,
+        selected_direct_id: WebSessionId,
+        per_call_override: WebTimelineModelSettingsOverlay,
+        settings: WebTimelineModelSettingsSnapshot,
+        adjusted_from_selection_id: Option<WebSessionId>,
+        #[schemars(length(max = 3))]
+        adjustments: Vec<WebTimelineModelChangeAdjustment>,
+    },
+}
+
 /// Typed browser body, distinct from application and persistence projections.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebSessionTimelineDetailBody {
+    /// One session lifecycle transition.
+    SessionState {
+        state: WebTimelineSessionState,
+    },
+    /// The session's declared terminal outcome.
+    SessionTerminal {
+        outcome: WebTimelineSessionOutcome,
+    },
+    /// One settled command, with its recorded rejection when present.
+    CommandSettlement {
+        command_id: WebSessionId,
+        rejection: Option<String>,
+    },
+    /// Delivery or rejection of one accepted injection.
+    InjectionSettlement {
+        command_id: WebSessionId,
+        delivered: bool,
+        turn_id: Option<WebSessionId>,
+        rejection: Option<String>,
+    },
+    /// One durable ownership transition.
+    Ownership {
+        transition: WebTimelineOwnershipTransition,
+    },
+
+    EventFact {
+        kind: WebSessionTimelineEventKind,
+    },
+    SessionCreated {
+        cause: WebTimelineCreationCause,
+        imported_evidence: Option<WebTimelineImportedEvidence>,
+    },
+    ModelSettings {
+        detail: WebTimelineModelSettingsDetail,
+    },
     UserInput {
         turn_id: WebSessionId,
         text: WebTimelineTextExcerpt,
@@ -1121,13 +1708,56 @@ pub enum WebSessionTimelineDetailBody {
         usage: WebTimelineModelUsage,
         provider_failure_cause: Option<WebProviderModelCallFailureCause>,
     },
+    ToolBatch {
+        turn_id: WebSessionId,
+        producing_model_call_id: WebSessionId,
+        state: WebTimelineToolBatchState,
+        projected_member_index: Option<u32>,
+        #[schemars(length(max = 1))]
+        tools: Vec<WebTimelineToolAttempt>,
+        #[schemars(length(max = 1))]
+        goal_events: Vec<WebTimelineGoalEvent>,
+    },
+    ToolApprovalDecision {
+        turn_id: WebSessionId,
+        request_id: WebSessionId,
+        tool_name: WebToolName,
+        decision: WebTimelineApprovalDecision,
+        actor: WebTimelineApprovalActor,
+        rationale: Option<WebTimelineTextExcerpt>,
+        approval_judge_escalated: bool,
+    },
+    GoalEvent {
+        session_id: WebSessionId,
+        event: WebTimelineGoalEvent,
+    },
+    ContextCompaction {
+        compaction_id: WebSessionId,
+        model_call_id: WebSessionId,
+        through_position: WebU64,
+        summary_entry_id: WebSessionId,
+        result_frontier_id: WebSessionId,
+        summary: WebTimelineTextExcerpt,
+    },
     TurnLifecycle {
         turn_id: WebSessionId,
         lifecycle: WebTimelineTurnLifecycleKind,
         cause_code: String,
     },
-    EventFact {
-        kind: WebSessionTimelineEventKind,
+    Reconciliation {
+        turn_id: WebSessionId,
+        operation: WebTimelineReconciliationOperation,
+        terminal_frontier_id: WebSessionId,
+    },
+    Runner {
+        runner_id: WebSessionId,
+        placement_revision: WebPositiveU64,
+        sandbox_posture: WebTimelineRunnerSandboxPosture,
+        working_directory: Option<String>,
+        state: WebTimelineRunnerState,
+    },
+    Delegation {
+        detail: WebTimelineDelegationDetail,
     },
 }
 
@@ -2661,7 +3291,8 @@ function sameBodyContinuation(left, right) {{
   );
 }}
 
-function assertTimelineExcerpt(excerpt, address, field, path) {{
+function assertTimelineExcerpt(excerpt, address, field, path, memberIndex) {{
+  const expectedMemberIndex = memberIndex ?? 0;
   const offset = BigInt(excerpt.offset_bytes);
   const total = BigInt(excerpt.total_bytes);
   const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
@@ -2675,8 +3306,11 @@ function assertTimelineExcerpt(excerpt, address, field, path) {{
     return null;
   }}
   const continuation = excerpt.continuation;
-  if (continuation.member_index !== 0) {{
-    fail(`${{path}}.continuation.member_index`, "zero for a singular body field");
+  if (continuation.member_index !== expectedMemberIndex) {{
+    fail(
+      `${{path}}.continuation.member_index`,
+      "the projected member the excerpt belongs to",
+    );
   }}
   if (end >= total) {{
     fail(`${{path}}.continuation`, "present only before the declared body end");
@@ -2690,6 +3324,186 @@ function assertTimelineExcerpt(excerpt, address, field, path) {{
   return continuation;
 }}
 
+function pageToolContinuation(value, address, field, memberIndex, tool) {{
+  if (
+    value.continuation === undefined ||
+    value.continuation === null ||
+    value.continuation.type !== "more_body"
+  ) {{
+    return null;
+  }}
+  const continuation = value.continuation.body;
+  if (
+    !sameTimelineAddress(continuation.address, address) ||
+    BigInt(continuation.offset_bytes) !== 0n
+  ) {{
+    return null;
+  }}
+  const physical =
+    tool !== undefined && tool !== null && tool.evidence.type === "physical_attempt"
+      ? tool.evidence
+      : null;
+  const sameMemberField =
+    physical === null
+      ? null
+      : physical.state === "completed" && physical.result_present
+        ? "tool_result"
+        : physical.state === "known_failed" && physical.failure_present
+          ? "tool_failure"
+          : null;
+  const sameMember = continuation.member_index === memberIndex;
+  const nextMember = continuation.member_index === memberIndex + 1;
+  const valid = field === "tool_arguments"
+    ? (
+        (sameMemberField !== null && continuation.field === sameMemberField && sameMember) ||
+        (continuation.field === "tool_arguments" && nextMember) ||
+        (continuation.field === "goal_text" && continuation.member_index === 0)
+      )
+    : field === "tool_result" || field === "tool_failure"
+      ? (
+          (continuation.field === "tool_arguments" && nextMember) ||
+          (continuation.field === "goal_text" && continuation.member_index === 0)
+        )
+      : field === "goal_text"
+        ? continuation.field === "goal_text" && nextMember
+        : false;
+  return valid ? continuation : null;
+}}
+
+function sameSettingValue(left, right) {{
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}}
+
+function resolveModelSetting(layers, field, providerDefault) {{
+  for (const [source, layer] of layers) {{
+    const overlay = layer[field];
+    if (overlay.kind === "inherit") continue;
+    if (overlay.kind === "provider_default") return [providerDefault, source];
+    return [overlay.value, source];
+  }}
+  return [providerDefault, null];
+}}
+
+function assertModelSettingsSnapshot(snapshot, path) {{
+  const layers = [
+    ["per_call", snapshot.precedence.per_call],
+    ["session", snapshot.precedence.session],
+    ["profile", snapshot.precedence.profile],
+    ["global_default", snapshot.precedence.global_default],
+  ];
+  const [reasoning, reasoningSource] = resolveModelSetting(layers, "reasoning_level", null);
+  const [fastMode, fastModeSource] = resolveModelSetting(layers, "fast_mode", "disabled");
+  const [serviceTier, serviceTierSource] = resolveModelSetting(layers, "service_tier", null);
+  const valid =
+    sameSettingValue(snapshot.effective.reasoning_level, reasoning) &&
+    snapshot.effective.fast_mode === fastMode &&
+    sameSettingValue(snapshot.effective.service_tier, serviceTier) &&
+    (snapshot.reasoning_source ?? null) === reasoningSource &&
+    (snapshot.fast_mode_source ?? null) === fastModeSource &&
+    (snapshot.service_tier_source ?? null) === serviceTierSource;
+  if (!valid) {{
+    fail(path, "a precedence-resolved model-settings snapshot");
+  }}
+  const providerDefaults =
+    reasoning === null && reasoningSource === null &&
+    fastMode === "disabled" && fastModeSource === null &&
+    serviceTier === null && serviceTierSource === null;
+  const validationAbsent =
+    snapshot.validated_for_selection_id === undefined ||
+    snapshot.validated_for_selection_id === null;
+  if (validationAbsent !== providerDefaults) {{
+    fail(`${{path}}.validated_for_selection_id`, "absent exactly for provider defaults");
+  }}
+}}
+
+function assertAdjustedEffective(settings, adjustments, path) {{
+  const knobByType = {{
+    reasoning_level_clamped: 1,
+    reasoning_level_cleared: 1,
+    fast_mode_disabled: 2,
+    service_tier_cleared: 3,
+  }};
+  let lastKnob = 0;
+  adjustments.forEach((adjustment, index) => {{
+    const adjustmentPath = `${{path}}[${{index}}]`;
+    const knob = knobByType[adjustment.type];
+    if (knob === undefined || knob <= lastKnob) {{
+      fail(adjustmentPath, "one ordered adjustment per settings knob");
+    }}
+    lastKnob = knob;
+    if (
+      knob === 1 &&
+      (settings.reasoning_source ?? null) === "per_call"
+    ) {{
+      fail(adjustmentPath, "a non-per-call reasoning target");
+    }}
+    if (
+      knob === 2 &&
+      (settings.fast_mode_source ?? null) === "per_call"
+    ) {{
+      fail(adjustmentPath, "a non-per-call fast-mode target");
+    }}
+    if (
+      knob === 3 &&
+      (settings.service_tier_source ?? null) === "per_call"
+    ) {{
+      fail(adjustmentPath, "a non-per-call service-tier target");
+    }}
+    if (
+      adjustment.type === "fast_mode_disabled" &&
+      settings.effective.fast_mode !== "disabled"
+    ) {{
+      fail(adjustmentPath, "a disabled effective fast mode after the adjustment");
+    }}
+    if (
+      adjustment.type === "reasoning_level_clamped" &&
+      (settings.effective.reasoning_level !== adjustment.to ||
+        adjustment.from === adjustment.to)
+    ) {{
+      fail(adjustmentPath, "the clamped effective reasoning level");
+    }}
+    if (
+      adjustment.type === "reasoning_level_cleared" &&
+      settings.effective.reasoning_level !== undefined &&
+      settings.effective.reasoning_level !== null
+    ) {{
+      fail(adjustmentPath, "a cleared effective reasoning level");
+    }}
+    if (
+      adjustment.type === "service_tier_cleared" &&
+      settings.effective.service_tier !== undefined &&
+      settings.effective.service_tier !== null
+    ) {{
+      fail(adjustmentPath, "a cleared effective service tier");
+    }}
+  }});
+}}
+
+function assertAllInheritLayer(layer, path) {{
+  if (
+    layer.reasoning_level.kind !== "inherit" ||
+    layer.fast_mode.kind !== "inherit" ||
+    layer.service_tier.kind !== "inherit"
+  ) {{
+    fail(path, "an all-inherit per-call layer in a defaults snapshot");
+  }}
+}}
+
+function assertModelSnapshotIdentity(model, snapshot, path) {{
+  const validated = snapshot.validated_for_selection_id;
+  if (
+    model.kind === "direct" &&
+    validated !== undefined &&
+    validated !== null &&
+    validated !== model.selection_id
+  ) {{
+    fail(
+      `${{path}}.validated_for_selection_id`,
+      "the direct model that validated the snapshot",
+    );
+  }}
+}}
+
 function assertTimelineDetailPage(value) {{
   const maxProjectedBodyBytes = {max_detail_bytes};
   const detailEnvelopeBytes = {detail_envelope_bytes};
@@ -2698,13 +3512,6 @@ function assertTimelineDetailPage(value) {{
     "turn_completed",
     "turn_refused",
     "turn_cancelled",
-    "turn_reconciliation_required",
-  ]);
-  const bodyOwnedKinds = new Set([
-    "input_accepted",
-    "model_call_transition",
-    "turn_activated",
-    ...terminalKinds,
   ]);
   let expectedBodyContinuation = null;
   let computedProjectedBodyBytes = 0;
@@ -2793,6 +3600,501 @@ function assertTimelineDetailPage(value) {{
           }}
         }}
         break;
+      case "tool_batch": {{
+        if (item.kind !== "tool_batch_transition") {{
+          fail(`${{path}}.kind`, "tool_batch_transition for a tool_batch body");
+        }}
+        const tool = item.body.tools[0];
+        const goal = item.body.goal_events[0];
+        if (goal !== undefined && !(
+          goal.type === "achieved" ||
+          (goal.type === "blocked" && goal.reason !== "execution_failure")
+        )) {{
+          fail(`${{path}}.body.goal_events[0]`, "a tool-produced blocked or achieved goal event");
+        }}
+        const memberIndex = item.body.projected_member_index;
+        if ((tool !== undefined || goal !== undefined) && (memberIndex === undefined || memberIndex === null)) {{
+          fail(
+            `${{path}}.body.projected_member_index`,
+            "present for a projected tool-batch member",
+          );
+        }}
+        if (tool !== undefined && goal !== undefined) {{
+          fail(`${{path}}.body`, "one projected tool or goal member");
+        }}
+        if (tool !== undefined) {{
+          const physical = tool.evidence.type === "physical_attempt" ? tool.evidence : null;
+          if (
+            physical !== null &&
+            item.body.state.type === "recovery_required" &&
+            physical.attempt_id === item.body.state.tool_attempt_id &&
+            physical.state !== "ambiguous"
+          ) {{
+            fail(
+              `${{path}}.body.tools[0].evidence.state`,
+              "ambiguous for the recovery target attempt",
+            );
+          }}
+          if (physical !== null) {{
+            const terminalFailure = physical.state === "known_failed";
+            if (physical.result_present && physical.state !== "completed") {{
+              fail(
+                `${{path}}.body.tools[0].evidence.result_present`,
+                "set only for a completed attempt",
+              );
+            }}
+            if (physical.failure_present && !terminalFailure) {{
+              fail(
+                `${{path}}.body.tools[0].evidence.failure_present`,
+                "set only for a known_failed attempt",
+              );
+            }}
+            if (
+              physical.result !== undefined &&
+              physical.result !== null &&
+              !physical.result_present
+            ) {{
+              fail(
+                `${{path}}.body.tools[0].evidence.result_present`,
+                "set when the result payload is projected",
+              );
+            }}
+            if (
+              physical.failure !== undefined &&
+              physical.failure !== null &&
+              !physical.failure_present
+            ) {{
+              fail(
+                `${{path}}.body.tools[0].evidence.failure_present`,
+                "set when the failure payload is projected",
+              );
+            }}
+            if ((physical.cause !== undefined && physical.cause !== null) !== terminalFailure) {{
+              fail(
+                `${{path}}.body.tools[0].evidence.cause`,
+                "present exactly for a known_failed attempt",
+              );
+            }}
+            if (
+              physical.result !== undefined &&
+              physical.result !== null &&
+              physical.state !== "completed"
+            ) {{
+              fail(
+                `${{path}}.body.tools[0].evidence.result`,
+                "present only for a completed attempt",
+              );
+            }}
+            if (
+              physical.failure !== undefined &&
+              physical.failure !== null &&
+              !terminalFailure
+            ) {{
+              fail(
+                `${{path}}.body.tools[0].evidence.failure`,
+                "present only for a known_failed attempt",
+              );
+            }}
+            if (physical.state === "ambiguous" && physical.effect_posture !== "external_effect") {{
+              fail(
+                `${{path}}.body.tools[0].evidence.effect_posture`,
+                "external_effect for an ambiguous attempt",
+              );
+            }}
+          }}
+          const excerpts = [
+            [tool.arguments, "tool_arguments", `${{path}}.body.tools[0].arguments`],
+            [physical?.result, "tool_result", `${{path}}.body.tools[0].evidence.result`],
+            [physical?.failure, "tool_failure", `${{path}}.body.tools[0].evidence.failure`],
+          ].filter(([excerpt]) => excerpt !== undefined && excerpt !== null);
+          if (excerpts.length !== 1) {{
+            fail(`${{path}}.body.tools[0]`, "exactly one projected text field");
+          }}
+          const [excerpt, field, excerptPath] = excerpts[0];
+          continuation = assertTimelineExcerpt(
+            excerpt,
+            item.address,
+            field,
+            excerptPath,
+            item.body.projected_member_index,
+          );
+          if (continuation === null) {{
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              field,
+              item.body.projected_member_index,
+              tool,
+            );
+          }}
+          textBytes = new TextEncoder().encode(excerpt.text).byteLength;
+        }}
+        if (goal !== undefined && goal.text !== undefined && goal.text !== null) {{
+          continuation = assertTimelineExcerpt(
+            goal.text,
+            item.address,
+            "goal_text",
+            `${{path}}.body.goal_events[0].text`,
+            item.body.projected_member_index,
+          );
+          if (continuation === null) {{
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              "goal_text",
+              item.body.projected_member_index,
+              null,
+            );
+          }}
+          textBytes = new TextEncoder().encode(goal.text.text).byteLength;
+        }}
+        break;
+      }}
+      case "tool_approval_decision":
+        if (item.kind !== "tool_approval_decided") {{
+          fail(`${{path}}.kind`, "tool_approval_decided for a tool_approval_decision body");
+        }}
+        if (item.body.actor.type === "user_override" && item.body.decision !== "approve") {{
+          fail(`${{path}}.body.decision`, "approve for a user override");
+        }}
+        if (
+          item.body.approval_judge_escalated &&
+          !["user", "user_override"].includes(item.body.actor.type) &&
+          !(item.body.actor.type === "policy" && item.body.decision === "deny")
+        ) {{
+          fail(
+            `${{path}}.body.actor`,
+            "a user actor or policy denial when the approval judge escalated",
+          );
+        }}
+        if (
+          item.body.actor.type === "delegate" &&
+          (item.body.rationale === undefined || item.body.rationale === null)
+        ) {{
+          fail(
+            `${{path}}.body.rationale`,
+            "the checked rationale a delegate decision always carries",
+          );
+        }}
+        if (
+          item.body.actor.type === "policy" &&
+          item.body.decision === "approve" &&
+          item.body.rationale !== undefined && item.body.rationale !== null
+        ) {{
+          fail(
+            `${{path}}.body.actor`,
+            "no rationale for an automatic policy approval",
+          );
+        }}
+        if (item.body.rationale !== undefined && item.body.rationale !== null) {{
+          continuation = assertTimelineExcerpt(
+            item.body.rationale,
+            item.address,
+            "approval_rationale",
+            `${{path}}.body.rationale`,
+          );
+          textBytes = new TextEncoder().encode(item.body.rationale.text).byteLength;
+        }}
+        break;
+      case "goal_event":
+        if (item.kind !== "goal_changed") {{
+          fail(`${{path}}.kind`, "goal_changed for a goal_event body");
+        }}
+        if (item.body.session_id !== value.session_id) {{
+          fail(`${{path}}.body.session_id`, "the enclosing page session");
+        }}
+        if (item.body.event.type === "session_closed" && (
+          item.body.event.outcome === "achieved_verified" ||
+          item.body.event.outcome === "achieved_declared"
+        )) {{
+          fail(`${{path}}.body.event.outcome`, "a session closure outcome");
+        }}
+        if (item.body.event.text !== undefined && item.body.event.text !== null) {{
+          continuation = assertTimelineExcerpt(
+            item.body.event.text,
+            item.address,
+            "goal_text",
+            `${{path}}.body.event.text`,
+          );
+          textBytes = new TextEncoder().encode(item.body.event.text.text).byteLength;
+        }}
+        break;
+      case "context_compaction":
+        if (item.kind !== "context_compacted") {{
+          fail(`${{path}}.kind`, "context_compacted for a context_compaction body");
+        }}
+        continuation = assertTimelineExcerpt(
+          item.body.summary,
+          item.address,
+          "compaction_summary",
+          `${{path}}.body.summary`,
+        );
+        textBytes = new TextEncoder().encode(item.body.summary.text).byteLength;
+        break;
+      case "reconciliation":
+        if (item.kind !== "turn_reconciliation_required") {{
+          fail(`${{path}}.kind`, "turn_reconciliation_required for a reconciliation body");
+        }}
+        break;
+      case "runner":
+        if (item.kind !== "runner_state_transition") {{
+          fail(`${{path}}.kind`, "runner_state_transition for a runner body");
+        }}
+        if (
+          item.body.working_directory !== undefined &&
+          item.body.working_directory !== null &&
+          new TextEncoder().encode(item.body.working_directory).byteLength > 4096
+        ) {{
+          fail(
+            `${{path}}.body.working_directory`,
+            "at most 4096 UTF-8 bytes",
+          );
+        }}
+        break;
+      case "delegation": {{
+        const wake =
+          item.body.detail.type === "result_wake" ||
+          item.body.detail.type === "message_wake";
+        if (wake && item.kind !== "delegation_wake") {{
+          fail(`${{path}}.kind`, "delegation_wake for a delegation wake body");
+        }}
+        if (!wake && item.kind !== "delegation_update") {{
+          fail(`${{path}}.kind`, "delegation_update for a delegation update body");
+        }}
+        if (
+          item.body.detail.type === "session_message" &&
+          item.body.detail.recipient_session_id !== value.session_id
+        ) {{
+          fail(
+            `${{path}}.body.detail.recipient_session_id`,
+            "the enclosing page session",
+          );
+        }}
+        if (
+          item.body.detail.type === "session_message" &&
+          item.body.detail.sender_session_id === item.body.detail.recipient_session_id
+        ) {{
+          fail(`${{path}}.body.detail.sender_session_id`, "a session other than the recipient");
+        }}
+        if (
+          (item.body.detail.type === "child_spawned" ||
+            item.body.detail.type === "child_waiting" ||
+            item.body.detail.type === "child_result") &&
+          item.body.detail.child_session_id === value.session_id
+        ) {{
+          fail(
+            `${{path}}.body.detail.child_session_id`,
+            "a session other than the relationship parent",
+          );
+        }}
+        if (item.body.detail.type === "child_lifecycle_disposition") {{
+          const detail = item.body.detail;
+          const lifecycleValid =
+            (detail.provenance.type === "parent_turn_command" ||
+              detail.provenance.type === "parent_goal_command" || detail.provenance.type === "parent_lifecycle_command") &&
+            (detail.reason === "parent_stopped_with_descendants" ||
+              detail.reason === "parent_cancelled_with_descendants") &&
+            (detail.outcome === "already_terminal" ||
+              detail.outcome === "continue_running" ||
+              detail.outcome === "child_stopped" ||
+              detail.outcome === "child_cancelled");
+          if (!lifecycleValid) {{
+            fail(`${{path}}.body.detail`, "a durable lifecycle disposition shape");
+          }}
+          if (detail.child_session_id === detail.provenance.session_id) {{
+            fail(`${{path}}.body.detail.child_session_id`, "a session other than the relationship parent");
+          }}
+          if (value.session_id !== detail.provenance.session_id && value.session_id !== detail.child_session_id) {{
+            fail(`${{path}}.body.detail`, "a lifecycle disposition on the parent or child timeline");
+          }}
+        }}
+        if (item.body.detail.type === "child_result") {{
+          const detail = item.body.detail;
+          if (
+            detail.provenance.type === "child_turn" &&
+            detail.provenance.session_id !== detail.child_session_id
+          ) {{
+            fail(
+              `${{path}}.body.detail.provenance.session_id`,
+              "the relationship's child session",
+            );
+          }}
+          const childTurnValid =
+            detail.provenance.type === "child_turn" &&
+            ((detail.outcome === "result_returned" && detail.reason === "child_completed") ||
+              (detail.outcome === "child_failed" &&
+                (detail.reason === "child_execution_failed" ||
+                  detail.reason === "child_result_unavailable")) ||
+              (detail.outcome === "child_cancelled" && detail.reason === "child_cancelled"));
+          const parentCommandValid =
+            (detail.provenance.type === "parent_turn_command" ||
+              detail.provenance.type === "parent_goal_command" || detail.provenance.type === "parent_lifecycle_command") &&
+            detail.provenance.session_id === value.session_id &&
+            (detail.reason === "parent_stopped_with_descendants" ||
+              detail.reason === "parent_cancelled_with_descendants") &&
+            (detail.outcome === "child_stopped" ||
+              detail.outcome === "child_cancelled");
+          if (!childTurnValid && !parentCommandValid) {{
+            fail(`${{path}}.body.detail`, "a durable delegation outcome shape");
+          }}
+          const contentPresent = detail.content !== undefined && detail.content !== null;
+          if (contentPresent !== (detail.outcome === "result_returned")) {{
+            fail(
+              `${{path}}.body.detail.content`,
+              "present exactly for a returned child result",
+            );
+          }}
+        }}
+        const content =
+          item.body.detail.type === "child_result"
+            ? item.body.detail.content
+            : item.body.detail.type === "session_message"
+              ? item.body.detail.content
+              : null;
+        if (content !== undefined && content !== null) {{
+          continuation = assertTimelineExcerpt(
+            content,
+            item.address,
+            "delegation_content",
+            `${{path}}.body.detail.content`,
+          );
+          textBytes = new TextEncoder().encode(content.text).byteLength;
+        }}
+        break;
+      }}
+      case "session_created":
+        if (item.kind !== "session_created") {{
+          fail(`${{path}}.kind`, "session_created for a session_created body");
+        }}
+        break;
+      case "model_settings":
+        if (
+          item.body.detail.type === "session_defaults_changed" &&
+          item.kind !== "session_model_settings_changed"
+        ) {{
+          fail(
+            `${{path}}.kind`,
+            "session_model_settings_changed for session defaults detail",
+          );
+        }}
+        if (
+          item.body.detail.type === "turn_resolved" &&
+          item.kind !== "turn_model_settings_resolved"
+        ) {{
+          fail(
+            `${{path}}.kind`,
+            "turn_model_settings_resolved for resolved turn detail",
+          );
+        }}
+        if (item.body.detail.type === "session_defaults_changed") {{
+          assertModelSettingsSnapshot(
+            item.body.detail.prior_settings,
+            `${{path}}.body.detail.prior_settings`,
+          );
+          assertModelSettingsSnapshot(
+            item.body.detail.installed_settings,
+            `${{path}}.body.detail.installed_settings`,
+          );
+          if (
+            BigInt(item.body.detail.installed_defaults_version) !==
+            BigInt(item.body.detail.prior_defaults_version) + 1n
+          ) {{
+            fail(
+              `${{path}}.body.detail.installed_defaults_version`,
+              "the checked successor of the prior defaults version",
+            );
+          }}
+          const defaults = item.body.detail;
+          assertAllInheritLayer(
+            defaults.prior_settings.precedence.per_call,
+            `${{path}}.body.detail.prior_settings.precedence.per_call`,
+          );
+          assertAllInheritLayer(
+            defaults.installed_settings.precedence.per_call,
+            `${{path}}.body.detail.installed_settings.precedence.per_call`,
+          );
+          assertModelSnapshotIdentity(
+            defaults.prior_model,
+            defaults.prior_settings,
+            `${{path}}.body.detail.prior_settings`,
+          );
+          assertModelSnapshotIdentity(
+            defaults.installed_model,
+            defaults.installed_settings,
+            `${{path}}.body.detail.installed_settings`,
+          );
+          if (
+            JSON.stringify(defaults.prior_model) ===
+              JSON.stringify(defaults.installed_model) &&
+            JSON.stringify(defaults.prior_settings) ===
+              JSON.stringify(defaults.installed_settings)
+          ) {{
+            fail(
+              `${{path}}.body.detail`,
+              "a defaults change that changes the model or settings",
+            );
+          }}
+          assertAdjustedEffective(
+            defaults.installed_settings,
+            defaults.adjustments,
+            `${{path}}.body.detail.adjustments`,
+          );
+        }} else {{
+          assertModelSettingsSnapshot(
+            item.body.detail.settings,
+            `${{path}}.body.detail.settings`,
+          );
+          const resolved = item.body.detail;
+          if (
+            JSON.stringify(resolved.per_call_override) !==
+            JSON.stringify(resolved.settings.precedence.per_call)
+          ) {{
+            fail(
+              `${{path}}.body.detail.per_call_override`,
+              "the frozen per-call settings layer",
+            );
+          }}
+          assertAdjustedEffective(
+            resolved.settings,
+            resolved.adjustments,
+            `${{path}}.body.detail.adjustments`,
+          );
+          if (
+            resolved.requested_model.kind === "direct" &&
+            resolved.requested_model.selection_id !== resolved.selected_direct_id
+          ) {{
+            fail(
+              `${{path}}.body.detail.selected_direct_id`,
+              "the requested direct selection identity",
+            );
+          }}
+          const validatedFor = resolved.settings.validated_for_selection_id;
+          if (
+            validatedFor !== undefined &&
+            validatedFor !== null &&
+            validatedFor !== resolved.selected_direct_id
+          ) {{
+            fail(
+              `${{path}}.body.detail.settings.validated_for_selection_id`,
+              "the selected direct identity",
+            );
+          }}
+          const adjustedFrom = resolved.adjusted_from_selection_id;
+          const adjustedPresent = adjustedFrom !== undefined && adjustedFrom !== null;
+          if (adjustedPresent !== (resolved.adjustments.length > 0)) {{
+            fail(
+              `${{path}}.body.detail.adjusted_from_selection_id`,
+              "present exactly with recorded adjustments",
+            );
+          }}
+          if (adjustedPresent && adjustedFrom === resolved.selected_direct_id) {{
+            fail(
+              `${{path}}.body.detail.adjusted_from_selection_id`,
+              "a prior direct selection different from the selected identity",
+            );
+          }}
+        }}
+        break;
       case "turn_lifecycle":
         if (item.body.lifecycle === "activated" && item.kind !== "turn_activated") {{
           fail(`${{path}}.kind`, "turn_activated for an activated lifecycle");
@@ -2806,14 +4108,44 @@ function assertTimelineDetailPage(value) {{
           turn_completed: "completed",
           turn_refused: "refused",
           turn_cancelled: "cancelled",
-          turn_reconciliation_required: "reconciliation_required",
         }};
         if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {{
           fail(`${{path}}.body.cause_code`, `the cause for ${{item.kind}}`);
         }}
         break;
+      case "session_state":
+        if (item.kind !== "session_state_changed") {{
+          fail(`${{path}}.kind`, "session_state_changed for this body");
+        }}
+        break;
+      case "session_terminal":
+        if (item.kind !== "session_terminal") {{
+          fail(`${{path}}.kind`, "session_terminal for this body");
+        }}
+        break;
+      case "command_settlement":
+        if (item.kind !== "command_settled") {{
+          fail(`${{path}}.kind`, "command_settled for this body");
+        }}
+        break;
+      case "injection_settlement":
+        if (item.kind !== "injection_settled") {{
+          fail(`${{path}}.kind`, "injection_settled for this body");
+        }}
+        if (item.body.delivered && item.body.rejection !== undefined && item.body.rejection !== null) {{
+          fail(`${{path}}.body.rejection`, "absent for a delivered injection");
+        }}
+        if (!item.body.delivered && item.body.turn_id !== undefined && item.body.turn_id !== null) {{
+          fail(`${{path}}.body.turn_id`, "absent for an undelivered injection");
+        }}
+        break;
+      case "ownership":
+        if (item.kind !== "session_ownership_changed") {{
+          fail(`${{path}}.kind`, "session_ownership_changed for this body");
+        }}
+        break;
       case "event_fact":
-        if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {{
+        if (item.body.kind !== item.kind || !["goal_turn_retired"].includes(item.kind)) {{
           fail(`${{path}}.body.kind`, "the matching header-only event kind");
         }}
         break;
@@ -4163,4 +5495,40 @@ mod tests {
                 .is_ok()
         );
     }
+}
+
+/// Closed timeline lifecycle classification.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineSessionState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+}
+
+/// Closed timeline lifecycle classification.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineSessionOutcome {
+    AchievedVerified,
+    AchievedDeclared,
+    FailedRetryable,
+    FailedStructural,
+    FailedUnknown,
+    Stopped,
+    Superseded,
+    Abandoned,
+    Retired,
+}
+
+/// Closed timeline lifecycle classification.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineOwnershipTransition {
+    Adopted,
+    Released,
 }
