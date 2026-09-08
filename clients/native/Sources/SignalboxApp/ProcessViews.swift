@@ -25,6 +25,7 @@ final class ProcessSessionListViewModel: ObservableObject {
       guard oldValue != showArchived else { return }
       pageAfter = nil
       nextAfter = nil
+      hasEarlierConversations = false
       conversations = []
       activeRefreshID = UUID()
       publicationGeneration &+= 1
@@ -36,6 +37,7 @@ final class ProcessSessionListViewModel: ObservableObject {
   @Published private(set) var isLoading = false
 
   private let maximumMetadataPages: UInt
+  private var hasEarlierConversations = false
   private var requestedConversation: SignalboxProcessConversation?
   private var activeRevealID = UUID()
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
@@ -60,6 +62,7 @@ final class ProcessSessionListViewModel: ObservableObject {
     activeRefreshID = UUID()
     conversations = []
     requestedConversation = nil
+    hasEarlierConversations = false
     pageAfter = nil
     nextAfter = nil
     errorMessage = nil
@@ -77,6 +80,22 @@ final class ProcessSessionListViewModel: ObservableObject {
         || $0.conversationID.rawValue.localizedCaseInsensitiveContains(query)
         || $0.origin.rawValue.localizedCaseInsensitiveContains(query)
     }
+  }
+
+  var emptyState: (title: String, message: String) {
+    if nextAfter != nil {
+      return ("No matching conversations on these pages", "Choose Next page to continue looking.")
+    }
+    if hasEarlierConversations {
+      return (
+        showArchived ? "No more archived sessions" : "No more active sessions",
+        "Choose Start over to return to earlier conversations."
+      )
+    }
+    return (
+      showArchived ? "No archived sessions" : "No active sessions",
+      "Refresh after connecting to a local signalboxd Unix socket."
+    )
   }
 
   func conversation(id: String) -> SignalboxProcessConversation? {
@@ -161,12 +180,14 @@ final class ProcessSessionListViewModel: ObservableObject {
 
   func nextPage() async {
     guard !isLoading, let nextAfter else { return }
+    hasEarlierConversations = hasEarlierConversations || !conversations.isEmpty
     pageAfter = nextAfter
     await refresh()
   }
 
   func firstPage() async {
     guard !isLoading else { return }
+    hasEarlierConversations = false
     pageAfter = nil
     await refresh()
   }
@@ -334,12 +355,8 @@ struct ProcessSessionsScreen: View {
         if viewModel.visibleConversations.isEmpty && !viewModel.isLoading {
           EmptyStateView(
             systemImage: viewModel.showArchived ? "archivebox" : "bubble.left.and.bubble.right",
-            title: viewModel.nextAfter != nil
-              ? "No matching conversations on these pages"
-              : (viewModel.showArchived ? "No archived sessions" : "No active sessions"),
-            message: viewModel.nextAfter != nil
-              ? "Choose Next page to continue looking."
-              : "Refresh after connecting to a local signalboxd Unix socket."
+            title: viewModel.emptyState.title,
+            message: viewModel.emptyState.message
           )
         } else {
           List(viewModel.visibleConversations) { conversation in

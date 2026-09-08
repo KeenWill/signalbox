@@ -127,6 +127,48 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testArchivedPaginationDistinguishesAnExhaustedTail() async throws {
+    let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let viewModel = ProcessSessionListViewModel { service }
+    viewModel.showArchived = true
+    await viewModel.refresh()
+    XCTAssertFalse(viewModel.conversations.isEmpty)
+    XCTAssertNotNil(viewModel.nextAfter)
+
+    await viewModel.nextPage()
+
+    XCTAssertTrue(viewModel.conversations.isEmpty)
+    XCTAssertNil(viewModel.nextAfter)
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertEqual(viewModel.emptyState.title, "No more archived sessions")
+    XCTAssertEqual(viewModel.emptyState.message, "Choose Start over to return to earlier conversations.")
+
+    await viewModel.firstPage()
+    XCTAssertFalse(viewModel.conversations.isEmpty)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
+  func testArchivedFirstScanWithoutMatchesReportsAnEmptyInventory() async throws {
+    let requester = StaticProcessRequester(frames: [
+      try ProcessDriverFixture.conversationPageStart(),
+      try ProcessDriverFixture.importedConversationSummary(
+        sourceFormat: ProcessDriverFixture.unknownImportedSourceFormat),
+      try ProcessDriverFixture.conversationPageEnd(),
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    viewModel.showArchived = true
+
+    await viewModel.refresh()
+
+    XCTAssertTrue(viewModel.conversations.isEmpty)
+    XCTAssertNil(viewModel.nextAfter)
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertEqual(viewModel.emptyState.title, "No archived sessions")
+  }
+
+  @MainActor
   func testArchiveSelectionFindsMatchingRowsAcrossPages() async throws {
     let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
     let viewModel = ProcessSessionListViewModel { service }
