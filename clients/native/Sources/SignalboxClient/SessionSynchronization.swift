@@ -196,7 +196,6 @@ public enum SignalboxSessionSynchronizationInput: Sendable {
   )
   case sideTransportEnded(generation: UInt64, refreshID: UInt64, message: String)
   case projectionRejected(message: String)
-  case refreshRequested(generation: UInt64)
   case stop
 }
 
@@ -295,12 +294,6 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         refreshID: refreshID,
         message: message
       )
-    case .refreshRequested(let receivedGeneration):
-      guard case .steady = phase, receivedGeneration == generation, activeRefresh == nil else {
-        return []
-      }
-      let closing = stop()
-      return closing + start()
     case .projectionRejected(let message):
       switch phase {
       case .stopped, .recovery:

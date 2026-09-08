@@ -50,11 +50,6 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
   private var deadlineTask: Task<Void, Never>?
   private var deadlineToken: SignalboxSynchronizationDeadlineToken?
   private var reconnectTask: Task<Void, Never>?
-  // Exhaustion has no followed event. Pace rereads while automatic recovery remains pending.
-  static let automaticRecoveryRefreshInterval: Duration = .seconds(1)
-  private var automaticRecoveryRefreshTask: Task<Void, Never>?
-  private var automaticRecoveryRefreshGeneration: UInt64?
-
   private var queuedInputs: [QueuedInput] = []
   private var isProcessingInputs = false
   private var isStarted = false
@@ -164,7 +159,6 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       cancelDeadline(token)
     case .publishSnapshot(let snapshot):
       await updates(.authoritativeSnapshot(snapshot))
-      updateAutomaticRecoveryRefresh(snapshot)
     case .publishEvent(let event):
       await updates(.event(event))
     case .publishProviderTextDelta(let delta):
@@ -176,7 +170,6 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
     case .mergeSideSnapshot(let snapshot, let trigger):
       await closeSideTransport()
       await updates(.sideSnapshot(snapshot: snapshot, trigger: trigger))
-      updateAutomaticRecoveryRefresh(snapshot)
     case .scheduleReconnect(let generation, let delay):
       scheduleReconnect(generation: generation, delay: delay)
     case .cancelReconnect:
@@ -189,53 +182,6 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
     case .terminalFailure:
       await updates(.terminalFailure)
     }
-  }
-
-  private func updateAutomaticRecoveryRefresh(_ snapshot: SignalboxSynchronizationSnapshot) {
-    let pending = snapshot.records.contains { record in
-      guard case .turn(let turn) = record,
-        case .activeAwaitingModelCallRecovery(_, _, _, false) = turn.state
-      else { return false }
-      return true
-    }
-    guard pending else {
-      cancelAutomaticRecoveryRefresh()
-      return
-    }
-    switch machine.phase {
-    case .replay(let generation, _), .steady(let generation, _, _):
-      automaticRecoveryRefreshGeneration = generation
-      scheduleAutomaticRecoveryRefresh(generation: generation)
-    default:
-      cancelAutomaticRecoveryRefresh()
-    }
-  }
-
-  private func scheduleAutomaticRecoveryRefresh(generation: UInt64) {
-    guard automaticRecoveryRefreshTask == nil else { return }
-    automaticRecoveryRefreshTask = Task { [weak self] in
-      do {
-        try await Task.sleep(for: Self.automaticRecoveryRefreshInterval)
-      } catch { return }
-      guard !Task.isCancelled else { return }
-      await self?.automaticRecoveryRefreshReady(generation: generation)
-    }
-  }
-
-  private func automaticRecoveryRefreshReady(generation: UInt64) async {
-    guard isStarted, automaticRecoveryRefreshGeneration == generation else { return }
-    automaticRecoveryRefreshTask = nil
-    await process(.refreshRequested(generation: generation))
-    // A side read already in progress finishes before another follow can replace it.
-    if automaticRecoveryRefreshGeneration == generation {
-      scheduleAutomaticRecoveryRefresh(generation: generation)
-    }
-  }
-
-  private func cancelAutomaticRecoveryRefresh() {
-    automaticRecoveryRefreshTask?.cancel()
-    automaticRecoveryRefreshTask = nil
-    automaticRecoveryRefreshGeneration = nil
   }
 
   private func openFollow(generation: UInt64) {
@@ -417,7 +363,6 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
   }
 
   private func closeTransports() async {
-    cancelAutomaticRecoveryRefresh()
     primaryTask?.cancel()
     primaryTask = nil
     if let primaryExchange {

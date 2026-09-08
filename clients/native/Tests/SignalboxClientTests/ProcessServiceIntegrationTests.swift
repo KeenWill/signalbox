@@ -333,65 +333,6 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(viewModel.errorMessage, ProcessSubmissionFixture.failureMessage)
   }
 
-  @MainActor
-  func testAutomaticRecoveryExhaustionBecomesActionableWithoutAFollowedEvent() async throws {
-    try await exerciseAutomaticRecoveryRefresh(startFromSideSnapshot: false)
-  }
-
-  @MainActor
-  func testAutomaticRecoverySideSnapshotRefreshesAfterExhaustionWithoutAnotherEvent() async throws {
-    try await exerciseAutomaticRecoveryRefresh(startFromSideSnapshot: true)
-  }
-
-  @MainActor
-  private func exerciseAutomaticRecoveryRefresh(startFromSideSnapshot: Bool) async throws {
-    let sessions = try await makeService().listSessions(includeArchived: false)
-    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
-    let service = AmbiguousThenAcceptingReconciliationProcessService()
-    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
-    await viewModel.connect()
-    viewModel.composerText = ProcessSubmissionFixture.content
-    var snapshots = try [false, true].map { operatorActionRequired in
-      try ProcessProjectionFixture.knownRecoveryTurnMessages(
-        cursor: ProcessDriverFixture.triggerCursor, operatorActionRequired: operatorActionRequired
-      ).map { message in
-        try SignalboxProcessServerFrame.decode(from: Data(
-          #"{"version":1,"request_id":"1","message":\#(message)}"#.utf8))
-      }
-    }
-    var expectedRequests: [SignalboxProcessClientRequest] = [.followSession(sessionID: session.id)]
-    if startFromSideSnapshot {
-      snapshots.insert([
-        try ProcessDriverFixture.snapshotStart(cursor: ProcessDriverFixture.snapshotCursor),
-        try ProcessDriverFixture.modelCallsEnd(),
-        try ProcessDriverFixture.snapshotEnd(cursor: ProcessDriverFixture.snapshotCursor),
-        try ProcessDriverFixture.activatedEvent(cursor: ProcessDriverFixture.triggerCursor),
-      ], at: 0)
-      expectedRequests.append(.readTranscript(sessionID: session.id))
-    }
-    expectedRequests.append(.followSession(sessionID: session.id))
-    let requester = AutomaticRecoveryRequester(snapshots: snapshots)
-    let driver = SignalboxSessionSynchronizationDriver(
-      requester: requester, sessionID: session.id,
-      policy: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
-    ) { update in
-      await viewModel.apply(update)
-    }
-    await driver.start()
-    // Allow the one-second refresh cadence plus margin; exhaustion sends no live event.
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: .seconds(3))
-    while !viewModel.canReconcileAndSend, clock.now < deadline {
-      try await Task.sleep(for: .milliseconds(10))
-    }
-    let canReconcile = viewModel.canReconcileAndSend
-    await driver.stop()
-    let opened = await requester.openedRequests
-
-    XCTAssertTrue(canReconcile)
-    XCTAssertEqual(opened, expectedRequests)
-  }
-
   func testDriverSerializesSideMergeBeforeNewerPrimaryEvent() async throws {
     let requester = ControlledSynchronizationRequester()
     let recorder = OrderedProcessDriverUpdateRecorder()
@@ -5843,21 +5784,6 @@ private actor ControlledSynchronizationRequester: SignalboxProcessRequesting {
   }
 }
 
-private actor AutomaticRecoveryRequester: SignalboxProcessRequesting {
-  private var snapshots: [[SignalboxProcessServerFrame]]
-  private(set) var openedRequests: [SignalboxProcessClientRequest] = []
-
-  init(snapshots: [[SignalboxProcessServerFrame]]) { self.snapshots = snapshots }
-
-  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
-    openedRequests.append(request)
-    guard !snapshots.isEmpty else { throw ProcessDriverUpdateRecorderError.unexpectedRequest }
-    let exchange = ControlledProcessExchange()
-    for frame in snapshots.removeFirst() { await exchange.send(frame) }
-    return exchange
-  }
-}
-
 private actor ControlledProcessExchange: SignalboxProcessExchange {
   private var frames: [SignalboxProcessServerFrame] = []
   private var nextWaiter: CheckedContinuation<SignalboxProcessServerFrame?, Never>?
@@ -7520,15 +7446,8 @@ private enum ProcessProjectionFixture {
     cursor: UInt64, turnID: String = ProcessDriverFixture.turn,
     operatorActionRequired: Bool = false
   ) throws -> SignalboxSynchronizationSnapshot {
-    try snapshot(messages: knownRecoveryTurnMessages(
-      cursor: cursor, turnID: turnID, operatorActionRequired: operatorActionRequired))
-  }
-
-  static func knownRecoveryTurnMessages(
-    cursor: UInt64, turnID: String = ProcessDriverFixture.turn,
-    operatorActionRequired: Bool
-  ) -> [String] {
-    [
+    try snapshot(
+      messages: [
         """
         {
           "type":"transcript_snapshot_start",
@@ -7582,7 +7501,8 @@ private enum ProcessProjectionFixture {
           "entry_count":"0"
         }
         """,
-    ]
+      ]
+    )
   }
 
   static func snapshotWithUnknownEntryKind(
