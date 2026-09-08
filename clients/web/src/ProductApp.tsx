@@ -516,7 +516,7 @@ function SelectionInspector({
       <p>
         {surface === 'settings'
           ? 'Presentation preferences are stored locally in this browser and do not represent server evidence.'
-          : selectionEvidence === null
+          : surface !== 'sessions' || selectionEvidence === null
             ? 'Select an available operational record to inspect its server-provided evidence.'
             : 'Bounded server-provided timeline projection for the selected record.'}
       </p>
