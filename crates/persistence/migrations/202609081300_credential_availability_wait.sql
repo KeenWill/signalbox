@@ -137,8 +137,8 @@ CREATE TABLE credential_availability_wait_failure (
 CREATE TRIGGER credential_availability_wait_failure_immutable BEFORE UPDATE OR DELETE ON credential_availability_wait_failure
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
-ALTER FUNCTION assert_failed_terminal_execution_before_context_headroom(uuid) RENAME TO assert_failed_terminal_execution_before_credential_wait_release;
-CREATE FUNCTION assert_failed_terminal_execution_before_context_headroom(checked_turn_id uuid) RETURNS void LANGUAGE plpgsql AS $$
+ALTER FUNCTION assert_failed_terminal_execution_before_credential_pools(uuid) RENAME TO assert_failed_terminal_execution_before_credential_wait_release;
+CREATE FUNCTION assert_failed_terminal_execution_before_credential_pools(checked_turn_id uuid) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     IF EXISTS (SELECT 1 FROM credential_availability_wait_failure failure
         JOIN credential_availability_wait_release release USING (turn_attempt_id)
@@ -311,7 +311,7 @@ DECLARE function_name text; definition text;
 BEGIN
     FOREACH function_name IN ARRAY ARRAY[
         'assert_failed_terminal_execution_without_tool_loop(uuid)',
-        'assert_failed_terminal_execution_before_credential_pools(uuid)',
+        'assert_failed_terminal_execution_before_credential_wait_release(uuid)',
         'assert_cancelled_turn_final_state(uuid)'
     ] LOOP
         SELECT pg_get_functiondef(function_name::regprocedure) INTO definition;
