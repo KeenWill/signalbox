@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-const FRAME_CONTRACT_VERSION: i64 = 1;
+pub(crate) const FRAME_CONTRACT_VERSION: i64 = 1;
 
 const LOAD_JOURNAL: &str = r#"SELECT entry.journal_position, entry.frame_direction,
        entry.frame_kind, entry.request_ordinal, entry.delivery_ordinal,

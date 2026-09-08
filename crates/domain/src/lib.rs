@@ -24,6 +24,7 @@ mod model_call;
 mod model_execution;
 mod model_settings;
 mod program_journal;
+pub mod program_registration;
 /// Host-verified program session attribution.
 pub mod program_session;
 mod provider_evidence;
@@ -566,6 +567,11 @@ define_identity!(
 define_identity!(
     /// Identifies one command-bound runner workspace provisioning authorization.
     RunnerProvisioningAuthorizationId
+);
+
+define_identity!(
+    /// Identifies one immutable program registration.
+    ProgramRegistrationId
 );
 
 define_identity!(

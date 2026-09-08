@@ -13,21 +13,8 @@ stays thin coordination state.
 
 ## Design
 
-A registration is an immutable row keyed by program name and revision. It
-records the content digests of the program: one over the exact source bytes and
-one over the stripped artifact bytes. Program identity is name plus revision
-plus those digests. A repository path, a branch, or a file never identifies a
-program. A run records the registration it executes, and its authority resolves
-only from that row. Identical bytes registered under two names, or under two
-grant lists, are two programs.
-
-Every registration carries an explicit grant list drawn from the closed
-capability vocabulary, `ProgramCapability`. A capability outside the run's grant
-list does not exist for that run: the host journals a refusal of the request and
-exercises no authority. The `register` grant attenuates: a program holding it
-may request for a child only a subset of its own grants, so no chain of
-program-initiated registrations obtains a capability its root lacked; widening a
-grant list goes through a user-authorized registration.
+A capability outside the run's grant list does not exist for that run: the host
+journals a refusal of the request and exercises no authority.
 
 A capability declares, per operation, how recovery treats an `effect` request
 that has no answer after a crash. Recovery adopts the outcome when the
@@ -86,13 +73,8 @@ isolate receives only journaled answers.
 
 ## Acceptance criteria
 
-- Registering identical bytes under two names or two grant lists yields two
-  programs, and a run's grants are read from its registration row and from
-  nowhere else.
 - An effect request for an ungranted capability is refused and journaled before
   the executor performs any host action.
-- A program-initiated registration requesting a grant its registrant lacks is
-  refused.
 - After a crash between an external effect's request and its answer, recovery
   yields exactly one of an adopted outcome, a re-issue of a declared-idempotent
   operation, or a journaled ambiguous answer, and never a silent re-issue.
