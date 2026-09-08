@@ -474,37 +474,78 @@ it('reads only new transcript addresses and keeps appended text within the item 
   expect(fetch).toHaveBeenCalledTimes(2)
 })
 
-it('loads messages beyond metadata-only detail pages without spending the retained item budget', async () => {
-  const metadata = Array.from({ length: 8 }, (_, index) => ({
+it('loads messages beyond metadata-only detail pages within the scan budget', async () => {
+  const metadata = Array.from({ length: 4 }, (_, index) => ({
     address: { event_sequence: String(index + 1) },
     kind: 'injection_settled',
     projected_body_bytes: 128,
     body: { type: 'event_fact', kind: 'injection_settled' },
   }))
   const message = inputPage(1)
-  message.items = message.items.map((item) => ({ ...item, address: { event_sequence: '9' } }))
+  message.items = message.items.map((item) => ({ ...item, address: { event_sequence: '5' } }))
   const fetch = vi
     .fn()
     .mockResolvedValueOnce(
       Response.json({
         session_id: sessionId,
         items: metadata,
-        projected_body_bytes: 1024,
-        continuation: { type: 'more_at', address: { event_sequence: '9' } },
+        projected_body_bytes: 512,
+        continuation: { type: 'more_at', address: { event_sequence: '5' } },
       }),
     )
     .mockResolvedValueOnce(Response.json(message))
   vi.stubGlobal('fetch', fetch)
   const result = await readExtendedSessionTranscript(
-    { sessionId, first: '1', through: '9' },
+    { sessionId, first: '1', through: '5' },
     null,
     limits,
     null,
   )
   expect(result.page).toEqual(message)
   expect(fetch).toHaveBeenCalledTimes(2)
-  expect(fetch.mock.calls[1]?.[0]).toContain('cursor_address=9')
+  expect(fetch.mock.calls[1]?.[0]).toContain('cursor_address=5')
 })
+
+it.each([
+  { count: 8, bytes: 1024, budget: 65536, next: '9' },
+  { count: 1, bytes: 128, budget: 256, next: '2' },
+])(
+  'preserves incremental loading after scanning $count metadata records and $bytes bytes',
+  async ({ count, bytes, budget, next }) => {
+    const continuation = { type: 'more_at' as const, address: { event_sequence: next } }
+    const fetch = vi.fn().mockResolvedValueOnce(
+      Response.json({
+        session_id: sessionId,
+        items: Array.from({ length: count }, (_, index) => ({
+          address: { event_sequence: String(index + 1) },
+          kind: 'injection_settled',
+          projected_body_bytes: bytes / count,
+          body: { type: 'event_fact', kind: 'injection_settled' },
+        })),
+        projected_body_bytes: bytes,
+        continuation,
+      }),
+    )
+    vi.stubGlobal('fetch', fetch)
+    const window = { sessionId, first: '1', through: '1000000' }
+    const held = await readExtendedSessionTranscript(
+      window,
+      null,
+      { ...limits, max_timeline_detail_bytes: budget },
+      null,
+    )
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(held.page.items).toEqual([])
+    expect(held.page.continuation).toEqual(continuation)
+    const message = inputPage(1)
+    message.items[0]!.address.event_sequence = next
+    fetch.mockResolvedValueOnce(Response.json(message))
+    const loaded = await readExtendedSessionTranscript(window, continuation, limits, held)
+    expect(loaded.page).toEqual(message)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(fetch.mock.calls[1]?.[0]).toContain(`cursor_address=${next}`)
+  },
+)
 
 it('bounds appended transcript bytes even when the item count is small', async () => {
   const initial = inputPage(1, 60_000)
