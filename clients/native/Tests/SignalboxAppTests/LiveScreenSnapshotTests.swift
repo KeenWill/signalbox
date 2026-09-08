@@ -1236,8 +1236,8 @@ final class LiveScreenSnapshotTests: XCTestCase {
         )
     }
 
-    private func assertDirectSnapshot(
-        of view: some View,
+    private func assertDirectSnapshot<Content: View>(
+        of makeView: @autoclosure () -> Content,
         canvas: SnapshotCanvas,
         testName: String = #function,
         file: StaticString = #filePath,
@@ -1245,7 +1245,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     ) async {
         directRenderings.insert(canvas)
         await assertLiveScreenSnapshot(
-            of: view,
+            of: makeView(),
             canvas: canvas,
             file: file,
             testName: testName,
@@ -1260,8 +1260,8 @@ final class LiveScreenSnapshotTests: XCTestCase {
         rendered == declared
     }
 
-    func assertLegacySnapshot(
-        of view: some View,
+    func assertLegacySnapshot<Content: View>(
+        of makeView: @autoclosure () -> Content,
         canvas: SnapshotCanvas,
         testName: String = #function,
         file: StaticString = #filePath,
@@ -1269,7 +1269,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     ) async {
         legacyRenderings.insert(canvas)
         await assertLiveScreenSnapshot(
-            of: view,
+            of: makeView(),
             canvas: canvas,
             file: file,
             testName: testName,

@@ -510,8 +510,8 @@ enum LiveScreenRenderer {
 /// tolerance at 1.0 fails on drift no reader can see; a pixel precision below
 /// 1.0 would instead let a small region change entirely.
 @MainActor
-func assertLiveScreenSnapshot(
-    of view: some View,
+func assertLiveScreenSnapshot<Content: View>(
+    of makeView: @autoclosure () -> Content,
     canvas: SnapshotCanvas,
     fileID: StaticString = #fileID,
     file: StaticString = #filePath,
@@ -530,7 +530,7 @@ func assertLiveScreenSnapshot(
     for appearance in SnapshotAppearance.allCases {
         let name = appearance == .light ? canvas.rawValue : "\(canvas.rawValue)-\(appearance.rawValue)"
         let reference = liveScreenSnapshotReference(file: file, testName: testName, name: name)
-        let rendering = await LiveScreenRenderer.render(view, canvas: canvas, appearance: appearance, file: file, line: line)
+        let rendering = await LiveScreenRenderer.render(makeView(), canvas: canvas, appearance: appearance, file: file, line: line)
         if appearance != .light && recordMode == .never && !FileManager.default.fileExists(atPath: reference.path) {
             XCTContext.runActivity(named: "Snapshot coverage gap: \(reference.lastPathComponent)") { activity in
                 let gap = XCTAttachment(string: "Missing appearance reference: \(reference.lastPathComponent). Comparison skipped.")
