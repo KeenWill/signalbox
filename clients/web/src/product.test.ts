@@ -1773,6 +1773,17 @@ describe('product surface availability', () => {
     expect(productSurfaceCacheLabel('sessions')).toBe('Bounded query')
     expect(productSurfaceCacheLabel('imports')).toBe('Bounded query')
     expect(productSurfaceCacheLabel('settings')).toBe('Local settings')
-    expect(productSurfaceCacheLabel('search')).toBeNull()
+    expect(productSurfaceCacheLabel('search')).toBe('Bounded query')
   })
+})
+
+it('bounds malformed search deep links without admitting their prefixes', () => {
+  expect(readProductSearchState({ q: ['first', 'second'] })).toMatchObject({
+    queryParameterIsValid: false,
+  })
+  const state = readProductSearchState({ q: 'é'.repeat(10000), session: 'a'.repeat(10000) })
+  expect(state.queryParameterIsValid).toBe(false)
+  expect(state.sessionParameterIsValid).toBe(false)
+  expect(new TextEncoder().encode(state.q).length).toBeLessThanOrEqual(512)
+  expect(state.session?.length).toBeLessThanOrEqual(45)
 })
