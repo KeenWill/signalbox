@@ -188,6 +188,28 @@ async fn encrypted_mp4_is_terminal_without_a_key_channel() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+async fn encrypted_unrecognized_visual_format_remains_locked() -> Result<(), Box<dyn Error>> {
+    assert_locked(VideoFixture::encrypted_mp4_with_unrecognized_visual_format()).await
+}
+
+#[tokio::test]
+async fn next_track_id_exceeds_assigned_ids_or_uses_the_sentinel() -> Result<(), Box<dyn Error>> {
+    for next in [1, 2] {
+        assert_malformed(
+            VideoFixture::mp4_with_next_track_id(2, next),
+            "malformed_video",
+        )
+        .await?;
+    }
+    for (track, next) in [(2, 3), (2, u32::MAX), (u32::MAX, u32::MAX)] {
+        let source = VideoFixture::mp4_with_next_track_id(track, next).into_source()?;
+        let inspection = inspect(&DirectProcessor::new(), &source).await?;
+        assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn invalid_encrypted_mp4_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_with_invalid_encrypted_sample_entry(),

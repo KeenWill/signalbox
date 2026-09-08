@@ -77,6 +77,14 @@ impl VideoFixture {
         fixture
     }
 
+    pub fn mp4_with_next_track_id(track_id: u32, next_track_id: u32) -> Self {
+        let mut bytes = mp4_bytes_with_tracks(&[mp4_track(track_id, avc1_sample_entry())]);
+        if let Some(offset) = bytes.windows(4).position(|kind| kind == b"mvhd") {
+            bytes[offset + 100..offset + 104].copy_from_slice(&next_track_id.to_be_bytes());
+        }
+        Self::new(FixtureKind::Mp4, bytes)
+    }
+
     pub fn mp4_with_zero_frame_count() -> Self {
         let mut fixture = Self::ordinary_mp4();
         if let Some(offset) = fixture.bytes.windows(4).position(|kind| kind == b"avc1") {
@@ -120,6 +128,14 @@ impl VideoFixture {
                 encrypted_visual_sample_entry(),
             ),
         )
+    }
+
+    pub fn encrypted_mp4_with_unrecognized_visual_format() -> Self {
+        let mut fixture = Self::encrypted_mp4();
+        if let Some(offset) = fixture.bytes.windows(4).position(|kind| kind == b"frma") {
+            fixture.bytes[offset + 4..offset + 8].copy_from_slice(b"jpeg");
+        }
+        fixture
     }
 
     pub fn mp4_with_invalid_encrypted_sample_entry() -> Self {

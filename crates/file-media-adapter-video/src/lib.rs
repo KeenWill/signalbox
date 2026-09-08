@@ -655,7 +655,9 @@ fn parse_mp4(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssu
     {
         return Err(VideoIssue::Malformed);
     }
-    if state.next_track_id == 0 || state.track_ids.contains(&state.next_track_id) {
+    if state.next_track_id != u32::MAX
+        && (state.next_track_id == 0 || state.track_ids.iter().any(|id| *id >= state.next_track_id))
+    {
         return Err(VideoIssue::Malformed);
     }
     if state.video_tracks == 0 {
@@ -1403,7 +1405,7 @@ fn validate_protection_information(
                     return Err(VideoIssue::Malformed);
                 }
                 let original = <[u8; 4]>::try_from(child).map_err(|_| VideoIssue::Malformed)?;
-                if visual_sample_entry_configuration(original).is_some() != visual {
+                if !visual && visual_sample_entry_configuration(original).is_some() {
                     return Err(VideoIssue::Malformed);
                 }
                 original_format_seen = true;
