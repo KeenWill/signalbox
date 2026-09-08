@@ -22,7 +22,9 @@ from pathlib import Path
 CHECKER = Path(__file__).resolve().parent / "check_migration_versions.py"
 
 
-def check_migrations(*names: str) -> subprocess.CompletedProcess:
+def check_migrations(
+    *names: str, base_names: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess:
     """Run the checker over a synthetic migrations tree, outside test bodies.
 
     Builds `crates/persistence/migrations` holding exactly the named files in a
@@ -33,6 +35,19 @@ def check_migrations(*names: str) -> subprocess.CompletedProcess:
         root = Path(tmp)
         directory = root / "crates" / "persistence" / "migrations"
         directory.mkdir(parents=True)
+
+        def git(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+        git("init", "-q")
+        for name in base_names:
+            (directory / name).write_text("-- base\n")
+        git("add", ".")
+        git(
+            "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "--allow-empty", "-qm", "Base migrations",
+        )
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
         for name in names:
             (directory / name).write_text("-- synthetic\n")
         return subprocess.run(
@@ -44,6 +59,17 @@ def check_migrations(*names: str) -> subprocess.CompletedProcess:
 
 
 class MigrationVersionCheckerTests(unittest.TestCase):
+    def test_new_migration_below_main_is_rejected(self) -> None:
+        result = check_migrations("2_new.sql", base_names=("3_main.sql",))
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("2_new.sql must sort after origin/main version 3", result.stdout)
+
+    def test_new_migration_after_main_is_accepted(self) -> None:
+        result = check_migrations("4_new.sql", base_names=("1_old.sql", "3_main.sql"))
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_unique_versions_pass(self) -> None:
         result = check_migrations("1_a.sql", "2_b.sql")
 
