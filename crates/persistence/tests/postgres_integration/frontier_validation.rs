@@ -419,49 +419,68 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn context_compaction_validation_is_current_and_typed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let validator_shape: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct ValidatorFacts {
+        omits_unbounded_exchange_scan: bool,
+        omits_text_identity_conversion: bool,
+        retains_root_validation: bool,
+        materializes_visible_chain: bool,
+        checks_prefix: bool,
+        checks_member_position: bool,
+    }
+    let validator_shape: ValidatorFacts = sqlx::query_as(
         "SELECT
             position(
                 'stored compaction summary leaves a tool exchange open'
                 IN pg_get_functiondef(
                     'require_context_compaction_exact_evidence()'::regprocedure
                 )
-            ) = 0,
+            ) = 0 AS omits_unbounded_exchange_scan,
             position(
                 'entry.source_session_id::text'
                 IN pg_get_functiondef(
                     'require_context_compaction_exact_evidence()'::regprocedure
                 )
-            ) = 0,
+            ) = 0 AS omits_text_identity_conversion,
             position(
                 'IF NEW.predecessor_compaction_id IS NULL THEN'
                 IN pg_get_functiondef(
                     'require_context_compaction_exact_evidence()'::regprocedure
                 )
-            ) > 0,
+            ) > 0 AS retains_root_validation,
             position(
                 'WITH RECURSIVE visible_chain AS MATERIALIZED'
                 IN pg_get_functiondef(
                     'require_context_compaction_exact_evidence()'::regprocedure
                 )
-            ) > 0,
+            ) > 0 AS materializes_visible_chain,
             position(
                 'context_frontier_preserves_prefix'
                 IN pg_get_functiondef(
                     'require_context_compaction_exact_evidence()'::regprocedure
                 )
-            ) > 0,
+            ) > 0 AS checks_prefix,
             position(
                 'context_frontier_member_position'
                 IN pg_get_functiondef(
                     'require_context_compaction_exact_evidence()'::regprocedure
                 )
-            ) > 0",
+            ) > 0 AS checks_member_position",
     )
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(validator_shape, (true, true, true, true, true, true));
+    assert_eq!(
+        validator_shape,
+        ValidatorFacts {
+            omits_unbounded_exchange_scan: true,
+            omits_text_identity_conversion: true,
+            retains_root_validation: true,
+            materializes_visible_chain: true,
+            checks_prefix: true,
+            checks_member_position: true,
+        }
+    );
 
     pool.close().await;
     drop(container);
