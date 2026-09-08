@@ -1,7 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog'
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useNavigate } from '@tanstack/react-router'
+import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import {
   AlertTriangle,
   Command,
@@ -57,6 +57,12 @@ import { type SessionSelectionEvidence, SessionWorkspaceSurface } from './Sessio
 import { SettingsSurface } from './SettingsSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
+
+declare module '@tanstack/react-router' {
+  interface HistoryState {
+    catalogSessionOpenedHere?: boolean
+  }
+}
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
@@ -579,12 +585,13 @@ export function ProductApp({
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const bootstrapStatusRef = useRef<HTMLSpanElement>(null)
   const sessionState = useMemo(() => readProductSessionState({ ...search }), [search])
-  const catalogSessionOpenedHere = useRef(false)
+  const catalogSessionOpenedHere = useLocation({
+    select: (location) => location.state.catalogSessionOpenedHere === true,
+  })
   const currentCatalogSession = useRef(sessionState.session)
   useEffect(() => {
     if (currentCatalogSession.current !== sessionState.session || surface !== 'sessions') {
       currentCatalogSession.current = sessionState.session
-      catalogSessionOpenedHere.current = false
     }
   }, [sessionState.session, surface])
   const artifactSideWasOpen = useRef(false)
@@ -620,8 +627,7 @@ export function ProductApp({
     (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
       if (mode === 'close') {
         currentCatalogSession.current = next.session
-        if (catalogSessionOpenedHere.current) {
-          catalogSessionOpenedHere.current = false
+        if (catalogSessionOpenedHere) {
           window.history.back()
           return
         }
@@ -629,8 +635,6 @@ export function ProductApp({
         return
       }
       const previousSession = currentCatalogSession.current
-      if (mode === 'push' && !previousSession && next.session)
-        catalogSessionOpenedHere.current = true
       const switchesSelectedSession =
         previousSession !== undefined &&
         next.session !== undefined &&
@@ -641,9 +645,15 @@ export function ProductApp({
         params: { surface },
         search: next,
         replace: mode === 'replace' || switchesSelectedSession,
+        state: {
+          catalogSessionOpenedHere:
+            next.session !== undefined &&
+            !next.workspace &&
+            (catalogSessionOpenedHere || (mode === 'push' && previousSession === undefined)),
+        },
       })
     },
-    [navigate, surface],
+    [catalogSessionOpenedHere, navigate, surface],
   )
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],

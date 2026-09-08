@@ -712,6 +712,28 @@ test('replaces catalog continuation history instead of accumulating visited page
   await expect(page).toHaveURL(/\/attention$/)
 })
 
+test('closes an inspector restored by Back without leaving a duplicate catalog entry', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: 'Sessions' }).click()
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+  await page.getByRole('button', { name: 'Open timeline workspace' }).click()
+  const input = page.getByRole('textbox', { name: 'Exact session ID' })
+  await input.fill(secondSessionId)
+  await input.press('Enter')
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(secondSessionId)
+  await page.goBack()
+  await expect(
+    page.getByRole('dialog', { name: firstPage.summaries[0].title_summary }),
+  ).toBeVisible()
+  await page.getByRole('button', { name: 'Close session inspector' }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
+  await page.goBack()
+  await expect(page).toHaveURL(/\/attention$/)
+})
+
 test('keeps opened workspace identities in the URL and restores them on reload', async ({
   page,
 }) => {
