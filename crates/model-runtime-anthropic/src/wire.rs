@@ -516,3 +516,27 @@ pub(crate) enum MessageStopEvent {
     #[serde(rename = "message_stop")]
     MessageStop,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{WireResponseBlock, parse_response_block};
+
+    #[test]
+    fn tool_use_input_preserves_reserved_number_key_objects() {
+        let raw = serde_json::from_str(
+            r#"{"type":"tool_use","id":"call-fixture","name":"lookup","input":{"nested":{"$serde_json::private::Number":"1"}}}"#,
+        )
+        .expect("fixture is valid raw JSON");
+
+        let WireResponseBlock::ToolUse { input, .. } =
+            parse_response_block(raw).expect("tool input remains an ordinary JSON object")
+        else {
+            panic!("fixture is a tool use");
+        };
+
+        assert_eq!(
+            input.get(),
+            r#"{"nested":{"$serde_json::private::Number":"1"}}"#
+        );
+    }
+}
