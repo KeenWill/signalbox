@@ -674,7 +674,9 @@ may return after the parent has stopped or cancelled.
 copies no advertisement, workspace path, credential fact, or tool output. An
 idle pinned replacement appends one entry after the authoritative frontier, or
 establishes a one-entry root, and advances the session placement-frontier
-pointer. The next accepted-input origin extends that boundary. Missing,
+pointer. A staged replacement appends its boundary after the authorized model
+call's observation and, for a tool batch, after all results and before the next
+call. The next accepted-input origin extends that boundary. Missing,
 same-revision, cross-session, non-prefix, or duplicate boundary authority fails
 closed.
 

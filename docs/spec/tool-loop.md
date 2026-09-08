@@ -374,7 +374,8 @@ evidence commits as soon as execution ends, independently of semantic
 projection.
 
 Once every request in a running batch is resolved, one continuation transaction
-appends exactly one result entry per request in proposal order, consumes every
+appends exactly one result entry per request in proposal order, installs any
+staged runner replacement and appends its relocation boundary, consumes every
 pending steering input in ascending acceptance position and appends its entry
 after the results, derives the exact prefix-preserving frontier extension, and
 creates the next round's `Prepared` model call against that frontier. These

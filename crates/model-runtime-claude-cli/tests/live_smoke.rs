@@ -280,8 +280,7 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             reported_model: refused.reported_model,
             usage: refused.usage,
         },
-        // Adapter-produced evidence is already credential-shape redacted, so
-        // printing it here cannot surface credential material. Enumerated
+        // Enumerated
         // explicitly, per docs/style.md's owned-enum rule, so a future
         // `TerminalEvidence` variant fails to compile here instead of
         // silently inheriting this panic path — a new terminal classification
@@ -486,7 +485,7 @@ async fn assert_pinned_version(executable: &std::path::Path) {
         .stdout(Stdio::piped())
         // Discarded rather than reported: a version probe has no need to
         // surface provider-controlled diagnostics, and this text does not pass
-        // through the adapter's redaction.
+        // through the adapter.
         .stderr(Stdio::null())
         // Dropping the timed-out future kill-on-drops the direct launcher;
         // its own process group lets the timeout path signal a native

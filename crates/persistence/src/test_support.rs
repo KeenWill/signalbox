@@ -169,6 +169,7 @@ pub async fn inject_deadline_diagnostic_failure(pool: &PgPool) -> Result<(), sql
          CREATE VIEW session_deadline AS
          SELECT private_deadline_source() AS session_id,
                 'admission'::text AS deadline_kind,
+                false AS settled,
                 clock_timestamp() AS armed_at,
                 clock_timestamp() - INTERVAL '1 hour' AS expires_at;",
     )
@@ -225,4 +226,81 @@ pub async fn restore_module_park(
     .await?;
     transaction.commit().await?;
     Ok(restored)
+}
+
+/// Reads the complete accepted input queued by one exact goal resumption event.
+pub async fn goal_resumption_input(
+    pool: &PgPool,
+    session: SessionId,
+    event: signalbox_domain::GoalEventOrdinal,
+) -> Result<signalbox_domain::UserContent, crate::goal::GoalRepositoryError> {
+    let stored = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT accepted_input_content_parts_json(turn.accepted_input_id)
+           FROM goal_turn AS turn
+          WHERE turn.session_id = $1 AND turn.source_event_ordinal = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(event.get()))
+    .fetch_one(pool)
+    .await?;
+    decode_goal_resumption_input(stored).map_err(Into::into)
+}
+
+fn decode_goal_resumption_input(
+    stored: serde_json::Value,
+) -> Result<signalbox_domain::UserContent, crate::goal::GoalCorruption> {
+    use crate::{goal::GoalCorruption, user_content::StoredUserContentError};
+    crate::user_content::decode(stored).map_err(|error| match error {
+        StoredUserContentError::UnsupportedPartKind(value) => GoalCorruption::Unsupported {
+            field: "part_kind",
+            value,
+        },
+        StoredUserContentError::UnsupportedAttachmentKind(value) => GoalCorruption::Unsupported {
+            field: "attachment_kind",
+            value,
+        },
+        StoredUserContentError::Malformed => {
+            GoalCorruption::Inconsistent("resumption input content")
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::goal::GoalCorruption;
+
+    #[test]
+    fn goal_resumption_input_preserves_unsupported_content_discriminators() {
+        // These deliberately unsupported persisted spellings must survive decoding.
+        let unsupported = "unknown-stored-kind";
+        for (part_kind, attachment_kind, field) in [
+            (unsupported, "image", "part_kind"),
+            ("attachment", unsupported, "attachment_kind"),
+        ] {
+            let stored = serde_json::json!([{
+                "position": 0,
+                "part_kind": part_kind,
+                "text_value": null,
+                "blob_digest": signalbox_domain::BlobDigest::digest(b"attachment fixture").to_string(),
+                "attachment_kind": attachment_kind,
+                "declared_media_type": "image/png",
+                "display_filename": null,
+            }]);
+            assert_eq!(
+                super::decode_goal_resumption_input(stored),
+                Err(GoalCorruption::Unsupported {
+                    field,
+                    value: unsupported.to_owned()
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn goal_resumption_input_classifies_malformed_content_as_inconsistent() {
+        assert_eq!(
+            super::decode_goal_resumption_input(serde_json::json!([])),
+            Err(GoalCorruption::Inconsistent("resumption input content")),
+        );
+    }
 }

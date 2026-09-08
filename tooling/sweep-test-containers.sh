@@ -169,6 +169,8 @@ parent_of() {
 }
 
 cleanup() {
+	# A child signalled before Bash resets inherited traps still runs this handler.
+	[ "$BASHPID" = "$sweep_pid" ] || return 0
 	if [ -n "$bounded_worker" ]; then
 		# Asked, then told. A cancellation is already an abrupt end, and a call
 		# that ignores the request would otherwise hold this handler open.

@@ -562,7 +562,7 @@ where
             &mut interrupts,
             turns.status(),
             RequestKind::ReadOnly,
-            read_snapshot(&mut connection, session_id),
+            read_snapshot(client, &mut connection, session_id),
         )
         .await?
         {
@@ -587,6 +587,7 @@ where
                             if cursor.value() <= observed_cursor {
                                 continue;
                             }
+                            crate::credential_pool::validate_event(client, session_id, &event).await?;
                             observed_cursor = cursor.value();
                             output.event(observed_cursor, session_id, &event)?;
                             let turn_effect =
@@ -1285,6 +1286,7 @@ fn update_turns_from_event(
             }
         }
         SessionEvent::TurnCompleted { turn_id, .. }
+        | SessionEvent::TurnCredentialPoolExhausted { turn_id, .. }
         | SessionEvent::TurnFailed { turn_id, .. }
         | SessionEvent::TurnRefused { turn_id, .. }
         | SessionEvent::TurnCancelled { turn_id, .. }

@@ -146,8 +146,8 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 /// to a model dispatch.
 pub const SUPPORTED_CODEX_CLI_VERSION: &str = env!("SIGNALBOX_CODEX_CLI_VERSION");
 
+/// Structural bound on retained version-banner bytes.
 const MAX_VERSION_BANNER_BYTES: usize = 4096;
-const VERSION_PROBE_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 /// Why the configured Codex executable could not prove the adapter's pin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,21 +216,32 @@ pub async fn verify_pinned_codex_cli_version(
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
-    let mut child = spawn_version_probe(&mut command, deadline).await?;
-    let process_group = child.id();
-    let remaining = deadline
-        .checked_duration_since(tokio::time::Instant::now())
-        .ok_or(CodexCliVersionProbeError::TimedOut)?;
-    let output = match tokio::time::timeout(remaining, collect_version_output(&mut child)).await {
+    #[cfg(unix)]
+    let exits = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())
+        .map_err(|_| CodexCliVersionProbeError::OutputFailed)?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| CodexCliVersionProbeError::SpawnFailed)?;
+    let mut process_group = VersionProbeProcessGroup {
+        id: child.id(),
+        #[cfg(unix)]
+        exits,
+    };
+    let output = match tokio::time::timeout_at(
+        deadline,
+        collect_version_output(&mut child, &mut process_group),
+    )
+    .await
+    {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
-            kill_probe_process_group(process_group);
-            let _ = tokio::time::timeout(bound, child.wait()).await;
+            process_group.kill();
+            let _ = tokio::time::timeout_at(deadline, child.wait()).await;
             return Err(error);
         }
         Err(_) => {
-            kill_probe_process_group(process_group);
-            let _ = tokio::time::timeout(bound, child.wait()).await;
+            process_group.kill();
+            let _ = tokio::time::timeout_at(deadline, child.wait()).await;
             return Err(CodexCliVersionProbeError::TimedOut);
         }
     };
@@ -257,29 +268,85 @@ pub async fn verify_pinned_codex_cli_version(
         env!("SIGNALBOX_CODEX_CLI_SHA256"),
         deadline,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
-async fn spawn_version_probe(
-    command: &mut tokio::process::Command,
-    deadline: tokio::time::Instant,
-) -> Result<tokio::process::Child, CodexCliVersionProbeError> {
-    loop {
-        match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(error) if error.raw_os_error() == Some(26) => {
-                let remaining = deadline
-                    .checked_duration_since(tokio::time::Instant::now())
-                    .ok_or(CodexCliVersionProbeError::TimedOut)?;
-                tokio::time::sleep(VERSION_PROBE_SPAWN_RETRY_DELAY.min(remaining)).await;
+struct VersionProbeProcessGroup {
+    id: Option<u32>,
+    #[cfg(unix)]
+    exits: tokio::signal::unix::Signal,
+}
+
+impl VersionProbeProcessGroup {
+    async fn wait_for_exit(&mut self) -> Result<(), CodexCliVersionProbeError> {
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "cygwin",
+                target_os = "horizon",
+                target_os = "openbsd",
+                target_os = "redox",
+                target_os = "wasi",
+            ))
+        ))]
+        {
+            let pid = self
+                .id
+                .and_then(|raw| rustix::process::Pid::from_raw(raw as i32))
+                .ok_or(CodexCliVersionProbeError::OutputFailed)?;
+            loop {
+                match rustix::process::waitid(
+                    rustix::process::WaitId::Pid(pid),
+                    rustix::process::WaitIdOptions::EXITED
+                        | rustix::process::WaitIdOptions::NOWAIT
+                        | rustix::process::WaitIdOptions::NOHANG,
+                ) {
+                    Ok(Some(_)) => return Ok(()),
+                    Ok(None) => {
+                        self.exits
+                            .recv()
+                            .await
+                            .ok_or(CodexCliVersionProbeError::OutputFailed)?;
+                    }
+                    Err(rustix::io::Errno::INTR) => {}
+                    Err(_) => return Err(CodexCliVersionProbeError::OutputFailed),
+                }
             }
-            Err(_) => return Err(CodexCliVersionProbeError::SpawnFailed),
         }
+        #[cfg(all(
+            unix,
+            any(
+                target_os = "cygwin",
+                target_os = "horizon",
+                target_os = "openbsd",
+                target_os = "redox",
+                target_os = "wasi",
+            )
+        ))]
+        {
+            Err(CodexCliVersionProbeError::OutputFailed)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+
+    fn kill(&mut self) {
+        kill_probe_process_group(self.id.take());
+    }
+}
+
+impl Drop for VersionProbeProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
 async fn collect_version_output(
     child: &mut tokio::process::Child,
+    process_group: &mut VersionProbeProcessGroup,
 ) -> Result<std::process::Output, CodexCliVersionProbeError> {
     use tokio::io::AsyncReadExt;
 
@@ -300,12 +367,13 @@ async fn collect_version_output(
         filled += read;
     }
     if filled > MAX_VERSION_BANNER_BYTES {
-        kill_probe_process_group(child.id());
-        let _ = child.wait().await;
         return Err(CodexCliVersionProbeError::InvalidBanner);
     }
     bounded.truncate(filled);
     stdout.extend_from_slice(&bounded);
+    // Keep the exited leader unreaped until group cleanup relinquishes its ID.
+    process_group.wait_for_exit().await?;
+    process_group.kill();
     let status = child
         .wait()
         .await
@@ -1050,8 +1118,13 @@ mod tests {
 
     #[cfg(unix)]
     fn oversized_version_fixture() -> (tempfile::TempDir, PathBuf) {
-        let banner = "x".repeat(super::MAX_VERSION_BANNER_BYTES + 1);
+        let banner = "x".repeat(4097);
         version_fixture(&format!("#!/bin/sh\nprintf '%s' '{banner}'\n"))
+    }
+
+    #[test]
+    fn pinned_version_probe_retains_a_four_kibibyte_banner_bound() {
+        assert_eq!(super::MAX_VERSION_BANNER_BYTES, 4096);
     }
 
     #[cfg(unix)]
