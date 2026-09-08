@@ -2075,6 +2075,26 @@ async fn tool_call_arguments_remain_verbatim() {
 }
 
 #[tokio::test]
+async fn tool_arguments_preserve_reserved_number_key_objects() {
+    let result = execute_scenario(
+        "tool_call_reserved_key",
+        DeliveryMode::Streamed,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        tool_proposal(&completed(&result.evidence).content).arguments_json,
+        fixtures::RESERVED_KEY_TOOL_ARGUMENTS
+    );
+    assert_eq!(
+        observed_tool_arguments(&result.observations),
+        Some(fixtures::RESERVED_KEY_TOOL_ARGUMENTS)
+    );
+}
+
+#[tokio::test]
 async fn buffered_tool_call_retains_the_same_verbatim_arguments() {
     let result = execute_scenario(
         "tool_call",
