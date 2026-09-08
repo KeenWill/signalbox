@@ -640,8 +640,9 @@ async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), B
     let authorized = tool_repository
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
         .await?;
-    let result_text = String::from("2026-08-22T04:00:00Z");
-    let result_content_bytes = u64::try_from(result_text.len())?;
+    // Six three-byte characters exceed the remaining fifteen-byte allowance.
+    let result_text = String::from("界界界界界界");
+    let result_content_bytes = 18_u64;
     tool_repository
         .commit_observation(
             authorized
