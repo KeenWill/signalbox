@@ -715,7 +715,6 @@ impl GoalRepository {
                JOIN session_lifecycle AS lifecycle
                  ON lifecycle.session_id = event.session_id
                 AND lifecycle.owned
-                AND lifecycle.state_kind <> 'parked'
                 AND lifecycle.pending_terminal_outcome_kind IS NULL
               WHERE event.event_kind = 'blocked'
                 AND event.blocked_reason = 'execution_failure'
@@ -754,7 +753,7 @@ impl GoalRepository {
     ) -> Result<Option<GoalEventOrdinal>, GoalRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let exists = lock_session(&mut transaction, session).await?;
-        if !exists || !session_admits_automatic_resume(&mut transaction, session).await? {
+        if !exists {
             transaction.rollback().await?;
             return Ok(None);
         }
@@ -764,6 +763,10 @@ impl GoalRepository {
                LEFT JOIN goal_execution_failure_resumption_arm AS arm
                  ON arm.session_id = event.session_id
                 AND arm.event_ordinal = event.event_ordinal
+               JOIN session_lifecycle AS lifecycle
+                 ON lifecycle.session_id = event.session_id
+                AND lifecycle.owned
+                AND lifecycle.pending_terminal_outcome_kind IS NULL
               WHERE event.session_id = $1
                 AND event.event_kind = 'blocked'
                 AND event.blocked_reason = 'execution_failure'
