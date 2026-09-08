@@ -1436,7 +1436,7 @@ public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
   }
 }
 
-public enum SignalboxReasoningLevel: String, Codable, Hashable, Sendable {
+public enum SignalboxReasoningLevel: String, Codable, Hashable, CaseIterable, Sendable {
   case none, minimal, low, medium, high, xhigh, max, ultra
 }
 
@@ -1450,23 +1450,30 @@ public enum SignalboxModelSettingSource: String, Decodable, Equatable, Sendable 
   case globalDefault = "global_default"
 }
 
-public enum SignalboxAnthropicServiceTier: String, Codable, Hashable, Sendable {
+public enum SignalboxAnthropicServiceTier: String, Codable, Hashable, CaseIterable, Sendable {
   case auto
   case standardOnly = "standard_only"
 }
 
-public enum SignalboxOpenAIServiceTier: String, Codable, Hashable, Sendable {
+public enum SignalboxOpenAIServiceTier: String, Codable, Hashable, CaseIterable, Sendable {
   case auto, `default`, flex, scale, priority, fast
 }
 
-public enum SignalboxCodexCLIServiceTier: String, Codable, Hashable, Sendable {
+public enum SignalboxCodexCLIServiceTier: String, Codable, Hashable, CaseIterable, Sendable {
   case `default`, priority, flex
 }
 
-public enum SignalboxServiceTier: Codable, Hashable, Sendable {
+public enum SignalboxServiceTier: Codable, Hashable, CaseIterable, Sendable {
   case anthropic(SignalboxAnthropicServiceTier)
   case openAI(SignalboxOpenAIServiceTier)
   case codexCLI(SignalboxCodexCLIServiceTier)
+
+  // Canonical wire order follows the enum declarations in crates/process-protocol/src/settings.rs.
+  public static var allCases: [Self] {
+    SignalboxAnthropicServiceTier.allCases.map(Self.anthropic)
+      + SignalboxOpenAIServiceTier.allCases.map(Self.openAI)
+      + SignalboxCodexCLIServiceTier.allCases.map(Self.codexCLI)
+  }
 
   public init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
@@ -5467,11 +5474,11 @@ public struct SignalboxModelCapabilities: Decodable, Equatable, Sendable {
     reasoningLevels = try decoder.decode("reasoning_levels")
     fastModeSupported = try decoder.decode("fast_mode_supported")
     serviceTiers = try decoder.decode("service_tiers")
-    guard Set(reasoningLevels).count == reasoningLevels.count,
-      Set(serviceTiers).count == serviceTiers.count
+    guard SignalboxReasoningLevel.allCases.filter({ reasoningLevels.contains($0) }) == reasoningLevels,
+      SignalboxServiceTier.allCases.filter({ serviceTiers.contains($0) }) == serviceTiers
     else {
       throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
-        debugDescription: "Model capabilities contain duplicate values."))
+        debugDescription: "Model capabilities must contain unique values in canonical order."))
     }
   }
 

@@ -47,6 +47,32 @@ final class ProcessProtocolTests: XCTestCase {
       aliases: [.init(aliasID: aliasID, selectionID: directID)]))
   }
 
+  /// Canonical order is the declaration order in crates/process-protocol/src/settings.rs.
+  func testModelCapabilitiesAcceptCanonicalOrderRatherThanAlphabeticalOrder() throws {
+    let capabilities = try SignalboxJSONCoding.decoder().decode(SignalboxModelCapabilities.self,
+      from: Data(#"{"reasoning_levels":["none","high","max"],"fast_mode_supported":false,"service_tiers":[{"provider":"open_ai","value":"scale"},{"provider":"open_ai","value":"priority"},{"provider":"open_ai","value":"fast"},{"provider":"codex_cli","value":"priority"},{"provider":"codex_cli","value":"flex"}]}"#.utf8))
+    XCTAssertEqual(capabilities.reasoningLevels, [.none, .high, .max])
+    XCTAssertEqual(capabilities.serviceTiers,
+      [.openAI(.scale), .openAI(.priority), .openAI(.fast), .codexCLI(.priority), .codexCLI(.flex)])
+  }
+
+  func testModelCapabilitiesRejectUnsortedAndRepeatedValues() throws {
+    for reasoning in [#"["high","low"]"#, #"["high","high"]"#] {
+      XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(SignalboxModelCapabilities.self,
+        from: Data(#"{"reasoning_levels":\#(reasoning),"fast_mode_supported":false,"service_tiers":[]}"#.utf8)))
+    }
+    for tiers in [
+      #"[{"provider":"open_ai","value":"fast"},{"provider":"open_ai","value":"priority"}]"#,
+      #"[{"provider":"codex_cli","value":"flex"},{"provider":"codex_cli","value":"priority"}]"#,
+      #"[{"provider":"codex_cli","value":"priority"},{"provider":"open_ai","value":"priority"}]"#,
+      #"[{"provider":"anthropic","value":"standard_only"},{"provider":"anthropic","value":"auto"}]"#,
+      #"[{"provider":"open_ai","value":"priority"},{"provider":"open_ai","value":"priority"}]"#,
+    ] {
+      XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(SignalboxModelCapabilities.self,
+        from: Data(#"{"reasoning_levels":[],"fast_mode_supported":false,"service_tiers":\#(tiers)}"#.utf8)))
+    }
+  }
+
   func testToolInadmissibleDecodesItsRequestAndResult() throws {
     let content = "execution_failed: placement_lost"
     let entry = try SignalboxJSONCoding.decoder().decode(

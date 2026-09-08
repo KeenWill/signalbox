@@ -87,6 +87,50 @@ final class ModelSettingsTests: XCTestCase {
     }
   }
 
+  @MainActor
+  func testAliasRetargetClearsOnlyUnsupportedPerCallValues() async throws {
+    let requester = SettingsRequester(pages: [])
+    for target in [SettingsFixture.selectionID, SettingsFixture.otherSelectionID] {
+      let retargeted = target == SettingsFixture.otherSelectionID
+      await requester.append(pages: [
+        [try SettingsFixture.defaults(reasoning: .inherit, version: "1",
+          selectionID: target, aliasID: SettingsFixture.aliasID)],
+        [try SettingsFixture.frame(["type": "model_capabilities_start"]),
+          try SettingsFixture.frame(["type": "model_capability_item", "selection_id": target.rawValue,
+            "capabilities": ["reasoning_levels": retargeted ? ["low"] : ["low", "high"],
+              "fast_mode_supported": !retargeted,
+              "service_tiers": [["provider": "open_ai", "value": "priority"]]]]),
+          try SettingsFixture.frame(["type": "model_capabilities_end", "capability_count": "1"])],
+        [try SettingsFixture.frame(["type": "model_aliases_start"]),
+          try SettingsFixture.frame(["type": "model_alias_summary", "alias_id": SettingsFixture.aliasID.rawValue,
+            "selection_id": target.rawValue]),
+          try SettingsFixture.frame(["type": "model_aliases_end", "alias_count": "1"])],
+      ])
+    }
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let viewModel = ProcessModelSettingsViewModel(session: try SettingsFixture.session())
+    let perCall = SignalboxModelSettingsOverlay(reasoningLevel: .value(.high),
+      fastMode: .value(.enabled), serviceTier: .value(.openAI(.priority)))
+    await viewModel.load(using: service)
+    XCTAssertNil(viewModel.errorMessage)
+    let originalSelection = viewModel.defaults?.modelSelection
+    XCTAssertEqual(viewModel.supportedPerCallOverlay(perCall), perCall)
+
+    await viewModel.load(using: service)
+
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertEqual(viewModel.defaults?.modelSelection, originalSelection)
+    XCTAssertEqual(viewModel.supportedPerCallOverlay(perCall),
+      .init(reasoningLevel: .inherit, fastMode: .inherit, serviceTier: .value(.openAI(.priority))))
+    XCTAssertEqual(viewModel.supportedPerCallOverlay(.init(reasoningLevel: .value(.low),
+      fastMode: .inherit, serviceTier: .value(.openAI(.flex)))),
+      .init(reasoningLevel: .value(.low), fastMode: .inherit, serviceTier: .inherit))
+    let cleared = SignalboxModelSettingsOverlay(reasoningLevel: .providerDefault,
+      fastMode: .inherit, serviceTier: .providerDefault)
+    XCTAssertEqual(viewModel.supportedPerCallOverlay(cleared), cleared)
+    XCTAssertEqual(viewModel.supportedPerCallOverlay(.inheritAll), .inheritAll)
+  }
+
   func testCapabilityCatalogRejectsAnIncompleteSequence() async throws {
     let requester = SettingsRequester(pages: [[try SettingsFixture.frame(["type": "model_capabilities_start"]) ]])
     let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
@@ -177,6 +221,7 @@ private enum SettingsFixture {
   static let sessionID = try! SignalboxCanonicalUUID(validating: "11111111-1111-4111-8111-111111111111")
   static let selectionID = try! SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
   static let otherSelectionID = try! SignalboxCanonicalUUID(validating: "44444444-4444-4444-8444-444444444444")
+  static let aliasID = try! SignalboxCanonicalUUID(validating: "55555555-5555-4555-8555-555555555555")
   static let turnID = try! SignalboxCanonicalUUID(validating: "33333333-3333-4333-8333-333333333333")
   static let systemPrompt = "Preserve this session prompt."
   static let input = "Continue with these settings."
@@ -188,7 +233,8 @@ private enum SettingsFixture {
   }
 
   static func defaults(reasoning: SignalboxSettingOverlay<SignalboxReasoningLevel>, version: String,
-    type: String = "session_defaults", selectionID: SignalboxCanonicalUUID = SettingsFixture.selectionID) throws -> SignalboxProcessServerFrame {
+    type: String = "session_defaults", selectionID: SignalboxCanonicalUUID = SettingsFixture.selectionID,
+    aliasID: SignalboxCanonicalUUID? = nil) throws -> SignalboxProcessServerFrame {
     let inherit: [String: Any] = ["kind": "inherit"]
     let inheritedLayer: [String: Any] = ["reasoning_level": inherit, "fast_mode": inherit, "service_tier": inherit]
     let sessionLayer = try JSONSerialization.jsonObject(with: SignalboxJSONCoding.encoder().encode(
@@ -200,7 +246,8 @@ private enum SettingsFixture {
     }
     return try frame([
       "type": type, "session_id": sessionID.rawValue, "defaults_version": version,
-      "model_selection": ["kind": "direct", "selection_id": selectionID.rawValue],
+      "model_selection": aliasID.map { ["kind": "alias", "alias_id": $0.rawValue] }
+        ?? ["kind": "direct", "selection_id": selectionID.rawValue],
       "dangerous_tool_auto_approval": true, "system_prompt": systemPrompt,
       "model_settings": [
         "precedence": ["per_call": inheritedLayer, "session": sessionLayer,

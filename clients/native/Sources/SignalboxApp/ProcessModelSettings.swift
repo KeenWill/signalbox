@@ -32,6 +32,25 @@ final class ProcessModelSettingsViewModel: ObservableObject {
     return selections
   }
 
+  func supportedPerCallOverlay(_ overlay: SignalboxModelSettingsOverlay) -> SignalboxModelSettingsOverlay {
+    guard let defaults else { return overlay }
+    let capabilities = SignalboxModelCapabilities.selected(defaults.modelSelection,
+      catalog: catalog, aliases: aliases)
+    var supported = overlay
+    if case .value(let level) = overlay.reasoningLevel,
+      capabilities?.reasoningLevels.contains(level) != true {
+      supported.reasoningLevel = .inherit
+    }
+    if case .value = overlay.fastMode, capabilities?.fastModeSupported != true {
+      supported.fastMode = .inherit
+    }
+    if case .value(let tier) = overlay.serviceTier,
+      capabilities?.serviceTiers.contains(tier) != true {
+      supported.serviceTier = .inherit
+    }
+    return supported
+  }
+
   func load(using service: any SignalboxProcessServiceProtocol) async {
     isLoading = true
     defer { isLoading = false }
@@ -132,6 +151,7 @@ struct ProcessModelSettingsScreen: View {
               Task {
                 _ = await viewModel.save(using: service)
                 if let defaults = viewModel.defaults { installed(defaults) }
+                perCall = viewModel.supportedPerCallOverlay(perCall)
               }
             }
             .disabled(viewModel.isSaving)
@@ -163,6 +183,7 @@ struct ProcessModelSettingsScreen: View {
       .task {
         await viewModel.load(using: service)
         if let defaults = viewModel.defaults { installed(defaults) }
+        perCall = viewModel.supportedPerCallOverlay(perCall)
       }
       .onChange(of: viewModel.selection) { _, _ in viewModel.sessionOverlay = .inheritAll }
     }
