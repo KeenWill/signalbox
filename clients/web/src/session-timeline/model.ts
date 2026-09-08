@@ -751,7 +751,7 @@ const bodyFacts = (body: DetailBody) =>
 export const validateDetailContinuation = (
   page: WebSessionTimelineDetailPage,
   continuation: WebTimelineDetailContinuation | null,
-  previous?: WebSessionTimelineDetailPage,
+  previous?: Pick<WebSessionTimelineDetailPage, 'items'>,
 ): void => {
   for (const [index, item] of page.items.entries()) {
     const cursor = index === 0 && continuation?.type === 'more_body' ? continuation.body : null

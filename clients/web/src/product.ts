@@ -1163,7 +1163,7 @@ export async function readSessionTranscript(
   continuation: WebTimelineDetailContinuation | null,
   limits: SessionTranscriptLimits,
   signal?: AbortSignal,
-  previous?: WebSessionTimelineDetailPage,
+  previous?: Pick<WebSessionTimelineDetailPage, 'items'>,
 ) {
   if (
     !Number.isSafeInteger(limits.max_timeline_detail_items) ||
@@ -1217,11 +1217,18 @@ export async function readSessionTranscript(
   return page
 }
 
+// Filtered pages can exhaust their scan budget without retaining an item.
+export interface SessionTranscriptPage {
+  items: WebSessionTimelineDetailPage['items']
+  projected_body_bytes: number
+  continuation: WebTimelineDetailContinuation | null
+}
+
 export interface HeldSessionTranscript {
   sessionId: string
   first: string
   through: string
-  page: Awaited<ReturnType<typeof readSessionTranscript>>
+  page: SessionTranscriptPage
   continuation: WebTimelineDetailContinuation | null
   omittedThrough: string | null
 }
@@ -1233,13 +1240,13 @@ async function readSessionTextPage(
   continuation: WebTimelineDetailContinuation | null,
   limits: SessionTranscriptLimits,
   signal?: AbortSignal,
-  previous?: WebSessionTimelineDetailPage,
+  previous?: Pick<WebSessionTimelineDetailPage, 'items'>,
   retained: WebSessionTimelineDetailPage['items'] = [],
-) {
+): Promise<SessionTranscriptPage> {
   const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
   const maxScannedItems = Math.min(SESSION_WINDOW_ITEMS, limits.max_timeline_detail_items)
   const maxBytes = Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
-  const items: Array<Awaited<ReturnType<typeof readSessionTranscript>>['items'][number]> = []
+  const items: Array<SessionTranscriptPage['items'][number]> = []
   let bytes = 0
   let scannedItems = 0
   let scannedBytes = 0
@@ -1285,7 +1292,7 @@ async function readSessionTextPage(
     items.length < maxItems &&
     maxBytes - scannedBytes >= limits.min_timeline_detail_bytes
   )
-  return { session_id: sessionId, items, projected_body_bytes: bytes, continuation: cursor }
+  return { items, projected_body_bytes: bytes, continuation: cursor }
 }
 
 export async function readExtendedSessionTranscript(
