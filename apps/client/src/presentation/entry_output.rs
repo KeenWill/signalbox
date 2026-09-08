@@ -492,6 +492,7 @@ impl<'a> Output<'a> {
             SnapshotEntryKind::Marker(TranscriptEntry::ToolClosed {
                 tool_request_id,
                 content,
+                ..
             }) => writeln!(
                 self.stdout,
                 "tool_closed request={tool_request_id} content={} source={} entry={}",

@@ -777,6 +777,7 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
   public let arguments: String?
   public let output: String?
   public let status: SignalboxProcessToolStatus
+  public let approvedBeforeClose: Bool?
 
   public init(
     toolRequestID: SignalboxToolInvocationID,
@@ -789,7 +790,8 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
     toolName: String,
     arguments: String?,
     output: String?,
-    status: SignalboxProcessToolStatus
+    status: SignalboxProcessToolStatus,
+    approvedBeforeClose: Bool? = nil
   ) {
     self.kind = "process_tool"
     self.toolRequestID = toolRequestID
@@ -801,6 +803,7 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
     self.arguments = arguments
     self.output = output
     self.status = status
+    self.approvedBeforeClose = approvedBeforeClose
   }
 
   init(closedFrom decoder: Decoder) throws {
@@ -809,6 +812,7 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
       [
         "kind", "toolRequestID", "turnID", "sessionTurnAcceptancePositions", "toolAttemptID",
         "sessionToolRequestPositions", "toolName", "arguments", "output", "status",
+        "approvedBeforeClose",
       ],
       decoder: decoder
     )

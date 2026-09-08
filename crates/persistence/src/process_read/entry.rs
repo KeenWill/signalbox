@@ -591,6 +591,7 @@ pub(super) fn decode_transcript_entry(
                 entry,
                 request: ToolRequestId::from_uuid(request),
                 content: String::from(r#"{"error":{"detail":null,"kind":"closed_by_turn_end"}}"#),
+                approved_before_close: transcript_decision_kind.as_deref() == Some("approve"),
             }
         });
     }

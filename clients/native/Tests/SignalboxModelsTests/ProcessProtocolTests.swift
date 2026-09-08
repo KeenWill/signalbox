@@ -35,6 +35,32 @@ final class ProcessProtocolTests: XCTestCase {
     ))
   }
 
+  func testToolClosureDecodesApprovedAndUndecidedEvidence() throws {
+    for approvedBeforeClose in [true, false] {
+      let entry = try SignalboxJSONCoding.decoder().decode(
+        SignalboxTranscriptEntry.self,
+        from: Data(
+          #"{"type":"tool_closed","tool_request_id":"\#(toolRequestID)","content":"closed before execution","approved_before_close":\#(approvedBeforeClose)}"#.utf8)
+      )
+      XCTAssertEqual(entry, .toolClosed(
+        toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID),
+        content: "closed before execution", approvedBeforeClose: approvedBeforeClose
+      ))
+    }
+  }
+
+  func testToolClosureWithoutApprovalEvidenceIsNotProjectedAsAClosure() throws {
+    let entry = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptEntry.self,
+      from: Data(
+        #"{"type":"tool_closed","tool_request_id":"\#(toolRequestID)","content":"closed before execution"}"#.utf8)
+    )
+    guard case .unknown(_, _, let diagnostic) = entry else {
+      return XCTFail("A closure requires evidence distinguishing approval from no decision.")
+    }
+    XCTAssertNotNil(diagnostic)
+  }
+
   func testToolInadmissibleDecodesItsRequestAndResult() throws {
     let content = "execution_failed: placement_lost"
     let entry = try SignalboxJSONCoding.decoder().decode(

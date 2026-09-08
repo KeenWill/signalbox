@@ -290,9 +290,12 @@ values, and a client never infers the semantic arm by reparsing either string.
 The projection resolves the domain's reference-only tool entries before crossing
 the wire, so a client never needs private storage access. A physically ambiguous
 tool attempt never becomes an execution result; it projects as `tool_closed`,
-carrying the tool request identity and the closure content and omitting the
-attempt identity. `operator_action_required` is false while automatic recovery
-is scheduled or attempting and true only after the recovery budget in
+carrying the tool request identity, closure content, and required Boolean
+`approved_before_close`, and omitting the attempt identity.
+`approved_before_close` is true exactly when the request had a recorded approval
+before closure; an undecided request closed by turn end carries false.
+`operator_action_required` is false while automatic recovery is scheduled or
+attempting and true only after the recovery budget in
 [turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md) is
 exhausted.
 

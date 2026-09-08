@@ -134,6 +134,7 @@ pub enum ProcessTranscriptEntry {
         entry: signalbox_domain::SemanticTranscriptEntryId,
         request: signalbox_domain::ToolRequestId,
         content: string::String,
+        approved_before_close: bool,
     },
     TurnFailed {
         entry_index: u64,

@@ -298,6 +298,7 @@ pub enum TranscriptEntry {
     ToolClosed {
         tool_request_id: CanonicalUuid,
         content: string::String,
+        approved_before_close: bool,
     },
     TurnCompleted {
         turn_id: CanonicalUuid,

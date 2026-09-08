@@ -3531,7 +3531,9 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     toolRequestID: SignalboxCanonicalUUID, toolAttemptID: SignalboxCanonicalUUID, content: String)
   case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String)
   case toolInadmissible(toolRequestID: SignalboxCanonicalUUID, content: String)
-  case toolClosed(toolRequestID: SignalboxCanonicalUUID, content: String)
+  case toolClosed(
+    toolRequestID: SignalboxCanonicalUUID, content: String, approvedBeforeClose: Bool
+  )
   case turnCompleted(turnID: SignalboxCanonicalUUID)
   case turnFailed(turnID: SignalboxCanonicalUUID)
   case turnCancelled(turnID: SignalboxCanonicalUUID)
@@ -3707,12 +3709,13 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           content: try decoder.decode("content"))
       case "tool_closed":
         try tagged.rejectUnadmittedFields(
-          ["type", "tool_request_id", "content"],
+          ["type", "tool_request_id", "content", "approved_before_close"],
           decoder: decoder
         )
         self = .toolClosed(
           toolRequestID: try decoder.decode("tool_request_id"),
-          content: try decoder.decode("content"))
+          content: try decoder.decode("content"),
+          approvedBeforeClose: try decoder.decode("approved_before_close"))
       case "turn_completed":
         try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
         self = .turnCompleted(turnID: try decoder.decode("turn_id"))

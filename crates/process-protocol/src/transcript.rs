@@ -919,6 +919,8 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact provider-visible terminal-closure content.
         content: String,
+        /// Whether an approval was recorded before the request closed.
+        approved_before_close: bool,
     },
     /// Explicit completed-turn marker.
     TurnCompleted {

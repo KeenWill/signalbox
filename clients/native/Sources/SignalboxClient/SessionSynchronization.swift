@@ -1933,7 +1933,7 @@ extension SignalboxTranscriptEntry {
     case .toolExecutionResult(_, _, let content),
       .toolDenied(_, let content),
       .toolInadmissible(_, let content),
-      .toolClosed(_, let content):
+      .toolClosed(_, let content, _):
       return UInt(content.utf8.count)
     case .delegatedTask(_, _, _, let content),
       .delegationMessage(_, _, _, _, _, _, let content):

@@ -963,6 +963,7 @@ where
             entry,
             request,
             content,
+            approved_before_close,
         } => {
             write_message(
                 writer,
@@ -975,6 +976,7 @@ where
                     entry: TranscriptEntry::ToolClosed {
                         tool_request_id: wire_uuid(request.into_uuid()),
                         content: content.clone(),
+                        approved_before_close: *approved_before_close,
                     },
                 },
             )

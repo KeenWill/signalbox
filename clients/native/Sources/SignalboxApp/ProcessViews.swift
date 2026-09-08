@@ -2542,7 +2542,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     {
       return true
     }
-    return tool.status == .completed || tool.status == .closed
+    return tool.status == .completed
+      || (tool.status == .closed && tool.approvedBeforeClose == true)
   }
 
   private func approvalFollowsDenial(

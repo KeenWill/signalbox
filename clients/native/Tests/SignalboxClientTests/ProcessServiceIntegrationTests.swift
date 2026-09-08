@@ -3226,6 +3226,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
           "entry_id":"\(ProcessProjectionFixture.reconciliationClosedEntry)",
           "entry":{
             "type":"tool_closed",
+            "approved_before_close":true,
             "tool_request_id":"\(ProcessProjectionFixture.closedToolID)",
             "content":"Closed before execution"
           }
@@ -3235,6 +3236,41 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )))
     XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
     XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testLaterUndecidedClosurePreservesArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithLaterUserApproval(
+      approvalMember: "",
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessProjectionFixture.reconciliationClosedEntry)",
+          "entry":{
+            "type":"tool_closed",
+            "approved_before_close":false,
+            "tool_request_id":"\(ProcessProjectionFixture.closedToolID)",
+            "content":"Closed before execution"
+          }
+        }
+        """
+      ]
+    )))
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertFalse(viewModel.retiredToolDenials.contains(invocationID.rawValue))
   }
 
   @MainActor
@@ -10953,6 +10989,7 @@ private enum ProcessProjectionFixture {
           "entry_id":"\(reconciliationClosedEntry)",
           "entry":{
             "type":"tool_closed",
+            "approved_before_close":true,
             "tool_request_id":"\(proposedToolRequest)",
             "content":"\(reconciliationClosedOutput)"
           }
@@ -11066,6 +11103,7 @@ private enum ProcessProjectionFixture {
           "entry_id":"\(reconciliationSuffixResultEntry)",
           "entry":{
             "type":"tool_closed",
+            "approved_before_close":true,
             "tool_request_id":"\(reconciliationSuffixToolRequest)",
             "content":"\(reconciliationClosedOutput)"
           }
@@ -11152,6 +11190,7 @@ private enum ProcessProjectionFixture {
           "entry_id":"\(reconciliationClosedEntry)",
           "entry":{
             "type":"tool_closed",
+            "approved_before_close":true,
             "tool_request_id":"\(proposedToolRequest)",
             "content":"\(reconciliationClosedOutput)"
           }

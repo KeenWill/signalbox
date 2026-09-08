@@ -719,6 +719,8 @@ pub enum ProcessTranscriptEntry {
         request: ToolRequestId,
         /// Exact provider-visible terminal-closure content.
         content: String,
+        /// Whether an approval was recorded before the request closed.
+        approved_before_close: bool,
     },
     /// Explicit failed-turn marker.
     TurnFailed {
