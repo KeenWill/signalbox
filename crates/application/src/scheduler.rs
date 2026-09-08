@@ -539,9 +539,13 @@ impl EligibilityNudgeReceiver {
 
 impl InProcessEligibilityNudge {
     /// Waits for channel capacity instead of dropping a full-buffer hint.
+    /// Coalesces only with a hint already queued in the channel.
     pub async fn nudge_waiting_for_capacity(&self, session: SessionId) -> EligibilityNudgeOutcome {
         let outcome = self.nudge_session(session);
-        if outcome != EligibilityNudgeOutcome::DroppedAtCapacity {
+        if !matches!(
+            outcome,
+            EligibilityNudgeOutcome::DroppedAtCapacity | EligibilityNudgeOutcome::Coalesced
+        ) {
             return outcome;
         }
         let EligibilityNudgeSender::Bounded(sender) = &self.sender else {
@@ -549,7 +553,10 @@ impl InProcessEligibilityNudge {
         };
         {
             let mut pending = self.pending_hints();
-            if pending.contains_key(&session) {
+            if pending
+                .get(&session)
+                .is_some_and(|hint| hint.queued_channel_tokens > 0)
+            {
                 return EligibilityNudgeOutcome::Coalesced;
             }
             pending.insert(
@@ -567,6 +574,12 @@ impl InProcessEligibilityNudge {
             return EligibilityNudgeOutcome::WorkSourceClosed;
         };
         let mut pending = self.pending_hints();
+        if pending
+            .get(&session)
+            .is_some_and(|hint| hint.queued_channel_tokens > 0)
+        {
+            return EligibilityNudgeOutcome::Coalesced;
+        }
         pending.insert(
             session,
             PendingEligibilityHint {
@@ -1965,34 +1978,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn equal_nudges_coalesce_while_waiting_for_capacity() {
-        const OCCUPIED_SESSION: u128 = 330;
-        const WAITING_SESSION: u128 = 340;
-        let occupied = session(OCCUPIED_SESSION);
-        let waiting = session(WAITING_SESSION);
+    async fn capacity_waiters_coalesce_only_after_a_hint_is_queued() {
+        let occupied = session(330);
+        let also_occupied = session(331);
+        let waiting = session(340);
         let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
             FakeSweep::returning([Ok(vec![])]),
             None,
-            Some(NonZeroUsize::new(1).expect("the test capacity is nonzero")),
+            NonZeroUsize::new(2),
         );
         assert_eq!(nudge.nudge(occupied), EligibilityNudgeOutcome::Enqueued);
-        let reservation = nudge.nudge_waiting_for_capacity(waiting);
-        tokio::pin!(reservation);
+        assert_eq!(
+            nudge.nudge(also_occupied),
+            EligibilityNudgeOutcome::Enqueued
+        );
+        let first = nudge.nudge_waiting_for_capacity(waiting);
+        let second = nudge.nudge_waiting_for_capacity(waiting);
+        tokio::pin!(first, second);
         std::future::poll_fn(|cx| {
-            assert!(reservation.as_mut().poll(cx).is_pending());
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
 
-        assert_eq!(nudge.nudge(waiting), EligibilityNudgeOutcome::Coalesced);
-        assert_eq!(
-            nudge.nudge_waiting_for_capacity(waiting).await,
-            EligibilityNudgeOutcome::Coalesced
-        );
         assert_eq!(source.next().await, Ok(occupied));
-        assert_eq!(reservation.await, EligibilityNudgeOutcome::Enqueued);
+        assert_eq!(first.await, EligibilityNudgeOutcome::Enqueued);
+        assert_eq!(source.next().await, Ok(also_occupied));
+        assert_eq!(second.await, EligibilityNudgeOutcome::Coalesced);
         assert_eq!(source.next().await, Ok(waiting));
         assert!(timeout(Duration::ZERO, source.next()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_one_capacity_wait_does_not_release_another() {
+        let occupied = session(330);
+        let waiting = session(340);
+        let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
+            FakeSweep::returning([Ok(vec![])]),
+            None,
+            NonZeroUsize::new(1),
+        );
+        assert_eq!(nudge.nudge(occupied), EligibilityNudgeOutcome::Enqueued);
+        let mut first = Box::pin(nudge.nudge_waiting_for_capacity(waiting));
+        let second = nudge.nudge_waiting_for_capacity(waiting);
+        tokio::pin!(second);
+        std::future::poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(first);
+        std::future::poll_fn(|cx| {
+            assert!(second.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        assert_eq!(source.next().await, Ok(occupied));
+        assert_eq!(second.await, EligibilityNudgeOutcome::Enqueued);
+        assert_eq!(source.next().await, Ok(waiting));
     }
 
     #[tokio::test]
