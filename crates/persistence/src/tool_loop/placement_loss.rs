@@ -17,36 +17,12 @@ async fn close_lost_runner_requests_after_observation(
     producing_call: signalbox_domain::ModelCallId,
     observed_judge_request: Option<ToolRequestId>,
 ) -> Result<(), ToolLoopRepositoryError> {
-    let requests: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT request.request_id FROM tool_request AS request
-         JOIN runner_current_session_placement AS head ON head.session_id = request.session_id
-         JOIN runner_session_placement_record AS placement
-           ON placement.session_id = head.session_id AND placement.event_ordinal = head.event_ordinal
-         WHERE request.session_id = $1 AND request.producing_model_call_id = $2
-           AND request.inadmissible_reason IS NULL
-           AND placement.state_kind IN ('runner_lost', 'runner_lost_before_pin')
-           AND (EXISTS (SELECT 1 FROM runner_session_placement_tool AS declared
-                        WHERE declared.session_id = head.session_id AND declared.event_ordinal = head.event_ordinal
-                          AND declared.tool_name = request.tool_name AND declared.runner_required)
-                OR (placement.state_kind = 'runner_lost_before_pin' AND EXISTS (
-                    SELECT 1 FROM runner_enrollment AS enrollment
-                    JOIN runner_connection_loss_epoch AS loss ON loss.enrollment_id = enrollment.enrollment_id
-                        AND loss.loss_epoch = COALESCE(placement.observed_runner_loss_epoch, 0) + 1
-                    JOIN runner_registration_tool AS declared ON declared.enrollment_id = loss.enrollment_id
-                        AND declared.registration_revision = COALESCE(loss.registration_revision,
-                            (SELECT current.registration_revision FROM runner_current_registration AS current
-                             WHERE current.enrollment_id = loss.enrollment_id))
-                    WHERE enrollment.runner_id = placement.lost_runner_id
-                      AND declared.tool_name = request.tool_name AND declared.loci_kind = 'runner_only')))
-           AND NOT EXISTS (SELECT 1 FROM runner_tool_request_lease_binding AS lease WHERE lease.request_id = request.request_id)
-           AND NOT EXISTS (SELECT 1 FROM tool_attempt AS attempt WHERE attempt.request_id = request.request_id AND attempt.state_kind <> 'prepared')
-           AND (request.request_id = $3 OR NOT EXISTS (SELECT 1 FROM tool_approval_decision AS decision WHERE decision.request_id = request.request_id AND decision.decision_kind = 'deny'))
-           AND NOT EXISTS (SELECT 1 FROM tool_approval_judge_model_call AS judge WHERE judge.request_id = request.request_id AND judge.state_kind = 'in_flight')
-         ORDER BY request.request_ordinal FOR UPDATE OF request",
-    )
-    .bind(session.into_uuid()).bind(producing_call.into_uuid())
-    .bind(observed_judge_request.map(ToolRequestId::into_uuid))
-    .fetch_all(&mut *connection).await?;
+    let requests: Vec<Uuid> = sqlx::query_scalar(crate::lock_inventory::LOST_RUNNER_TOOL_REQUESTS)
+        .bind(session.into_uuid())
+        .bind(producing_call.into_uuid())
+        .bind(observed_judge_request.map(ToolRequestId::into_uuid))
+        .fetch_all(&mut *connection)
+        .await?;
     for request in requests {
         if let Some(row) = sqlx::query(
             "SELECT * FROM tool_attempt WHERE request_id = $1 AND state_kind = 'prepared'",
