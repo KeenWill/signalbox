@@ -173,23 +173,35 @@ impl PostgresModelCallRepository {
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         let effective_target =
             serving_pool_target(self.credential_families.as_ref(), target, fast_mode);
-        let (projected_members, uncommitted_content_bytes) = match prospective.into() {
-            ProspectiveModelInput::Committed(frontier) => {
-                let mut connection = self.pool.acquire().await?;
-                let members = crate::context_compaction::projected_frontier_membership(
-                    &mut connection,
-                    session,
-                    frontier,
-                )
-                .await
-                .map_err(map_projected_membership_error)?;
-                (members, 0)
-            }
-            ProspectiveModelInput::Preview {
-                projected_members,
-                uncommitted_content_bytes,
-            } => (projected_members.to_vec(), uncommitted_content_bytes),
-        };
+        let (projected_members, uncommitted_content_bytes, rendered_bytes) =
+            match prospective.into() {
+                ProspectiveModelInput::Rendered(entries) => (
+                    entries.keys().copied().collect::<Vec<_>>(),
+                    0,
+                    Some(
+                        entries
+                            .values()
+                            .copied()
+                            .map(Decimal::from)
+                            .collect::<Vec<_>>(),
+                    ),
+                ),
+                ProspectiveModelInput::Committed(frontier) => {
+                    let mut connection = self.pool.acquire().await?;
+                    let members = crate::context_compaction::projected_frontier_membership(
+                        &mut connection,
+                        session,
+                        frontier,
+                    )
+                    .await
+                    .map_err(map_projected_membership_error)?;
+                    (members, 0, None)
+                }
+                ProspectiveModelInput::Preview {
+                    projected_members,
+                    uncommitted_content_bytes,
+                } => (projected_members.to_vec(), uncommitted_content_bytes, None),
+            };
         let member_sessions = projected_members
             .iter()
             .map(|member| session_id_to_uuid(member.source_session()))
@@ -337,7 +349,9 @@ impl PostgresModelCallRepository {
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
                     usage_cache_read_input_tokens,
-                    COALESCE(latest_call.proven_unreported_content_bytes, 0)
+                    CASE WHEN $7::numeric[] IS NULL THEN
+                        COALESCE(latest_call.proven_unreported_content_bytes, 0)
+                    ELSE 0 END
                     -- Entries an uncommitted preview minted have no durable row
                     -- to score; the preview measured their content itself.
                     + $4::numeric
@@ -357,6 +371,8 @@ impl PostgresModelCallRepository {
                                          'assistant_tool_use'
                                      )
                                 THEN 0
+                                WHEN measured.content_bytes IS NOT NULL
+                                THEN measured.content_bytes
                                 -- The durable proof already measured every
                                 -- result the producing call's round projected,
                                 -- including a returning foreground delegation's
@@ -386,7 +402,7 @@ impl PostgresModelCallRepository {
                                     WHEN 'origin_accepted_input' THEN
                                         COALESCE((
                                             SELECT SUM(CASE part.part_kind
-                                                WHEN 'attachment' THEN $7::bigint
+                                                WHEN 'attachment' THEN $8::bigint
                                                 ELSE COALESCE(octet_length(part.text_value), 0)
                                             END)
                                               FROM accepted_input_content_part AS part
@@ -396,7 +412,7 @@ impl PostgresModelCallRepository {
                                     WHEN 'steering_accepted_input' THEN
                                         COALESCE((
                                             SELECT SUM(CASE part.part_kind
-                                                WHEN 'attachment' THEN $7::bigint
+                                                WHEN 'attachment' THEN $8::bigint
                                                 ELSE COALESCE(octet_length(part.text_value), 0)
                                             END)
                                               FROM accepted_input_content_part AS part
@@ -441,7 +457,11 @@ impl PostgresModelCallRepository {
                             END
                         ), 0)::numeric
                           FROM unreported_member AS prospective
-                          JOIN semantic_transcript_entry AS entry
+                          LEFT JOIN UNNEST($2::uuid[], $3::uuid[], $7::numeric[])
+                               AS measured(source_session_id, semantic_entry_id, content_bytes)
+                            ON measured.source_session_id = prospective.source_session_id
+                           AND measured.semantic_entry_id = prospective.semantic_entry_id
+                          LEFT JOIN semantic_transcript_entry AS entry
                             ON entry.source_session_id = prospective.source_session_id
                            AND entry.semantic_entry_id = prospective.semantic_entry_id
                           LEFT JOIN accepted_input AS input
@@ -477,7 +497,7 @@ impl PostgresModelCallRepository {
                           LEFT JOIN session_child_result AS child_result
                             ON child_result.spawning_tool_request_id =
                                entry.delegation_result_spawning_tool_request_id
-                         WHERE NOT (
+                         WHERE entry.semantic_entry_id IS NULL OR NOT (
                                    latest_call.usage_output_tokens IS NOT NULL
                                AND (
                                       (
@@ -507,6 +527,7 @@ impl PostgresModelCallRepository {
         .bind(Decimal::from(uncommitted_content_bytes))
         .bind(replays_provider_compaction)
         .bind(effective_target.identity().into_uuid())
+        .bind(rendered_bytes)
         .bind(
             i64::try_from(signalbox_application::MAX_RENDERED_ATTACHMENT_STUB_BYTES)
                 .unwrap_or(i64::MAX),
