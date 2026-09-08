@@ -61,6 +61,8 @@ CREATE TRIGGER credential_pool_exhaustion_member_immutable BEFORE UPDATE OR DELE
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 CREATE TRIGGER credential_pool_exhaustion_member_cannot_be_truncated BEFORE TRUNCATE ON credential_pool_exhaustion_member
     FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
+CREATE TRIGGER credential_pool_chain_exclusion_cannot_be_truncated BEFORE TRUNCATE ON credential_pool_chain_exclusion
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
 
 CREATE FUNCTION capture_credential_pool_exhaustion_reset_sources() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
