@@ -48,6 +48,7 @@ mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 mod workspace;
+mod workspace_command;
 mod workspace_instruction;
 
 pub use accepted_input::{
@@ -426,6 +427,7 @@ pub use user_content::{
     NonEmptyUnicodeTextFailure, UserContent, UserContentError, UserContentFailure, UserContentPart,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
+pub use workspace_command::{WorkspaceCommand, WorkspaceCommandResult, WorkspaceOperation};
 pub use workspace_instruction::{
     EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionBundleKind,
     InstructionBundleRegistration, InstructionBundleRegistrationInput, InstructionDigest,
