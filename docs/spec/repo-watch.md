@@ -88,7 +88,9 @@ predicate described in [review workflows](review-workflows.md). The sweep
 evaluates one revalidated snapshot and uses that verdict for its decision. After
 restoring a parked session, re-enrollment waits for scheduler nudge capacity.
 The target retains the session reference until that handoff is acknowledged, so
-restart retries an interrupted handoff.
+restart retries an interrupted handoff. Removed targets hand their restored
+sessions to a task that waits for nudge capacity without blocking startup
+recovery.
 
 The daemon composes the repository-watch module when `[repository_watch]` is
 configured and enabled. Dispatch actions and lifecycle reactions are retained in

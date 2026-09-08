@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use ring::rand::{SecureRandom, SystemRandom};
 use signalbox_application::{
-    EligibilityNudge, InProcessEligibilityNudge, InProcessToolDispatchGate,
+    EligibilityNudgeOutcome, InProcessEligibilityNudge, InProcessToolDispatchGate,
 };
 use signalbox_domain::RepositorySlug;
 use signalbox_module_repo_watch_v2::{
@@ -246,10 +246,18 @@ impl RepositoryWatchRuntime {
     }
 
     pub(crate) async fn nudge_restored(&self, sessions: Vec<signalbox_domain::SessionId>) {
-        let state = self.state.lock().await;
-        for session in sessions {
-            let _ = state.eligibility_nudge.nudge(session);
-        }
+        let nudge = self.state.lock().await.eligibility_nudge.clone();
+        // Startup recovery hands off before the scheduler drains the buffer.
+        // The target references remain durable if this task stops with the process.
+        tokio::spawn(async move {
+            for session in sessions {
+                if nudge.nudge_waiting_for_capacity(session).await
+                    == EligibilityNudgeOutcome::WorkSourceClosed
+                {
+                    break;
+                }
+            }
+        });
     }
 
     pub(crate) async fn activate_startup(
@@ -650,6 +658,73 @@ impl RuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EmptySweep;
+
+    impl signalbox_application::EligibilitySweep for EmptySweep {
+        type Error = std::convert::Infallible;
+
+        async fn find_sessions(
+            &mut self,
+        ) -> Result<signalbox_application::EligibilitySweepBatch, Self::Error> {
+            Ok(signalbox_application::EligibilitySweepBatch::new(
+                Vec::new(),
+                false,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn restored_sessions_survive_full_capacity_before_the_scheduler_starts() {
+        use signalbox_application::{EligibilityNudge, EligibilityWorkSource};
+        use signalbox_domain::SessionId;
+        use std::{num::NonZeroUsize, time::Duration};
+
+        const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
+        let filler = SessionId::from_uuid(uuid::Uuid::from_u128(0x58_300));
+        let restored = SessionId::from_uuid(uuid::Uuid::from_u128(0x58_301));
+        let next_restored = SessionId::from_uuid(uuid::Uuid::from_u128(0x58_302));
+        let (nudge, mut source) =
+            signalbox_application::InProcessEligibilityWorkSource::with_options(
+                EmptySweep,
+                None,
+                NonZeroUsize::new(1),
+            );
+        assert_eq!(nudge.nudge(filler), EligibilityNudgeOutcome::Enqueued);
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .expect("lazy pool");
+        let runtime = RepositoryWatchRuntime::unstarted(
+            pool.clone(),
+            RepositoryWatchServices {
+                core_pool: pool,
+                models: Arc::new(
+                    crate::configuration::checked_in_example_configuration().expect("models"),
+                ),
+                templates: Arc::new(SessionTemplateConfiguration::default()),
+                eligibility_nudge: nudge,
+                tool_dispatch_gate: InProcessToolDispatchGate::default(),
+            },
+        );
+        tokio::time::timeout(
+            DELIVERY_TIMEOUT,
+            runtime.nudge_restored(vec![restored, next_restored]),
+        )
+        .await
+        .expect("recovery returns before scheduler consumption starts");
+        assert_eq!(
+            tokio::time::timeout(DELIVERY_TIMEOUT, source.next()).await,
+            Ok(Ok(filler))
+        );
+        assert_eq!(
+            tokio::time::timeout(DELIVERY_TIMEOUT, source.next()).await,
+            Ok(Ok(restored))
+        );
+        assert_eq!(
+            tokio::time::timeout(DELIVERY_TIMEOUT, source.next()).await,
+            Ok(Ok(next_restored))
+        );
+    }
 
     #[tokio::test]
     async fn health_rejects_a_finished_convergence_sweep() {
