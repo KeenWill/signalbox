@@ -9,8 +9,9 @@ use signalbox_model_runtime::{
 };
 
 use crate::wire::{
-    ContextManagement, MessagesRequest, OutputConfig, WireKnownRequestBlock, WireMessage,
-    WireRequestBlock, WireResponseBlock, WireTool, WireToolChoice, parse_response_block,
+    CacheControl, ContextManagement, MessagesRequest, OutputConfig, WireKnownRequestBlock,
+    WireMessage, WireRequestBlock, WireResponseBlock, WireSystemBlock, WireTool, WireToolChoice,
+    parse_response_block,
 };
 
 /// Builds the wire request for one operation.
@@ -68,7 +69,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
     let replay_provider_compaction = provider_compaction_supported;
     let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
         && replay_provider_compaction;
-    let messages = operation
+    let mut messages = operation
         .messages
         .iter()
         .map(|message| wire_message(message, replay_provider_compaction))
@@ -82,11 +83,21 @@ pub(crate) fn build_request_with_fast_mode<C>(
                 .to_string(),
         });
     }
+    cache_conversation_prefix(&mut messages);
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
         max_tokens: operation.settings.max_output_tokens,
         messages,
-        system: plan.system_text(operation.system.as_deref()),
+        system: plan
+            .system_text(operation.system.as_deref())
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![WireSystemBlock {
+                    r#type: "text",
+                    text,
+                    cache_control: CacheControl::Ephemeral,
+                }]
+            }),
         stop_sequences: operation.settings.stop_sequences.clone(),
         output_config: effort.map(|effort| OutputConfig { effort }),
         service_tier,
@@ -96,6 +107,35 @@ pub(crate) fn build_request_with_fast_mode<C>(
         context_management: server_compaction.then_some(ContextManagement::compact()),
         stream: operation.delivery == DeliveryMode::Streamed,
     })
+}
+
+/// Anthropic permits cache breakpoints on text and tool blocks, but not thinking
+/// blocks: https://platform.claude.com/docs/en/build-with-claude/prompt-caching.
+/// Opaque compaction blocks stay verbatim rather than receiving new members.
+fn cache_conversation_prefix(messages: &mut [WireMessage]) {
+    let Some(index) = messages.len().checked_sub(2) else {
+        return;
+    };
+    for block in messages[index].content.iter_mut().rev() {
+        let cache_control = match block {
+            WireRequestBlock::Known(WireKnownRequestBlock::Text {
+                text,
+                cache_control,
+            }) if !text.is_empty() => cache_control,
+            WireRequestBlock::Known(
+                WireKnownRequestBlock::ToolUse { cache_control, .. }
+                | WireKnownRequestBlock::ToolResult { cache_control, .. },
+            ) => cache_control,
+            WireRequestBlock::Known(
+                WireKnownRequestBlock::Text { .. }
+                | WireKnownRequestBlock::Thinking { .. }
+                | WireKnownRequestBlock::RedactedThinking { .. },
+            )
+            | WireRequestBlock::ProviderCompaction(_) => continue,
+        };
+        *cache_control = Some(CacheControl::Ephemeral);
+        break;
+    }
 }
 
 /// Refuses a caller-set sampling control before any request is built.
@@ -475,6 +515,7 @@ fn wire_message(
         .map(|part| match part {
             MessagePart::Text(text) => Ok(WireRequestBlock::Known(WireKnownRequestBlock::Text {
                 text: text.clone(),
+                cache_control: None,
             })),
             MessagePart::ToolCall(proposal) => {
                 let input =
@@ -498,6 +539,7 @@ fn wire_message(
                     id: proposal.id.as_str().to_string(),
                     name: proposal.name.as_str().to_string(),
                     input,
+                    cache_control: None,
                 }))
             }
             MessagePart::ToolResult(result) => {
@@ -505,6 +547,7 @@ fn wire_message(
                     tool_use_id: result.tool_call_id.as_str().to_string(),
                     content: result.content.clone(),
                     is_error: result.is_error,
+                    cache_control: None,
                 }))
             }
             MessagePart::Thinking { text, signature } => match signature {
@@ -593,6 +636,143 @@ mod tests {
         let mut value = serde_json::to_value(&request).expect("wire request serializes");
         value.sort_all_objects();
         format!("{value:#}")
+    }
+
+    #[test]
+    fn cache_breakpoints_follow_the_previous_message_in_generation_and_token_counting() {
+        let mut operation = operation("cached-conversation");
+        operation.system = Some("Answer briefly.".to_string());
+        operation.messages = vec![
+            ConversationMessage::user_text("first question"),
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::Text("first answer".to_string())],
+            },
+            ConversationMessage::user_text("next question"),
+        ];
+        let request = build_request(&operation).expect("conversation translates");
+        let generation = serde_json::to_value(&request).expect("generation serializes");
+        let count = serde_json::to_value(crate::wire::CountTokensRequest::from(request))
+            .expect("token-count request serializes");
+
+        assert_eq!(
+            generation["system"][0]["cache_control"],
+            serde_json::json!({"type":"ephemeral"})
+        );
+        assert_eq!(
+            generation["messages"][1]["content"][0]["cache_control"],
+            serde_json::json!({"type":"ephemeral"})
+        );
+        assert!(
+            generation["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+        assert!(
+            generation["messages"][2]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+        assert_eq!(count["system"], generation["system"]);
+        assert_eq!(count["messages"], generation["messages"]);
+
+        operation.messages.extend([
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::Text("next answer".to_string())],
+            },
+            ConversationMessage::user_text("last question"),
+        ]);
+        let next = serde_json::to_value(
+            build_request(&operation).expect("extended conversation translates"),
+        )
+        .expect("extended generation serializes");
+        assert!(
+            next["messages"][1]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+        assert_eq!(
+            next["messages"][3]["content"][0]["cache_control"],
+            serde_json::json!({"type":"ephemeral"})
+        );
+        assert!(
+            next["messages"][4]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn thinking_only_prefix_has_no_explicit_cache_breakpoint() {
+        let mut operation = operation("thinking-cache-prefix");
+        operation.messages = vec![
+            ConversationMessage::user_text("question"),
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![
+                    MessagePart::Thinking {
+                        text: "thinking".to_string(),
+                        signature: Some("signature".to_string()),
+                    },
+                    MessagePart::RedactedThinking {
+                        data: "opaque".to_string(),
+                    },
+                ],
+            },
+            ConversationMessage::user_text("continue"),
+        ];
+        let request = request_json(&operation);
+
+        assert!(!request.contains("cache_control"));
+    }
+
+    #[test]
+    fn a_previous_tool_result_can_cache_the_conversation_prefix() {
+        let mut operation = operation("tool-result-cache-prefix");
+        let tool_call_id = ToolCallId::new("lookup-call");
+        operation.messages.extend([
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                    id: tool_call_id.clone(),
+                    name: ToolName::new("lookup"),
+                    arguments_json: "{}".to_string(),
+                })],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id,
+                    content: "found".to_string(),
+                    is_error: false,
+                })],
+            },
+            ConversationMessage::user_text("explain the result"),
+        ]);
+        let request =
+            serde_json::to_value(build_request(&operation).expect("tool history translates"))
+                .expect("request serializes");
+
+        assert_eq!(request["messages"][2]["content"][0]["type"], "tool_result");
+        assert_eq!(
+            request["messages"][2]["content"][0]["cache_control"],
+            serde_json::json!({"type":"ephemeral"})
+        );
+        assert!(
+            request["messages"][3]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_system_text_does_not_create_an_empty_cached_block() {
+        let mut operation = operation("empty-system-cache");
+        operation.system = Some(String::new());
+        let request = build_request(&operation).expect("empty system translates");
+
+        assert!(request.system.is_none());
     }
 
     #[test]
@@ -690,6 +870,9 @@ mod tests {
                       "type": "text"
                     },
                     {
+                      "cache_control": {
+                        "type": "ephemeral"
+                      },
                       "id": "toolu_1",
                       "input": {
                         "city": "Oslo"
@@ -717,7 +900,15 @@ mod tests {
                 "END"
               ],
               "stream": false,
-              "system": "Answer briefly.\n\nAnswer by calling the lookup tool rather than replying with text. Call no other tool.",
+              "system": [
+                {
+                  "cache_control": {
+                    "type": "ephemeral"
+                  },
+                  "text": "Answer briefly.\n\nAnswer by calling the lookup tool rather than replying with text. Call no other tool.",
+                  "type": "text"
+                }
+              ],
               "tool_choice": {
                 "type": "auto"
               },
@@ -942,7 +1133,7 @@ mod tests {
             Answer briefly.
 
             Answer by calling the verdict tool exactly once, passing the answer as its arguments. Call no other tool and add no other reply."#]]
-        .assert_eq(request.system.as_deref().expect("an instruction is stated"));
+        .assert_eq(request.system.as_ref().map(|blocks| blocks[0].text.as_str()).expect("an instruction is stated"));
     }
 
     #[test]
@@ -1022,7 +1213,13 @@ mod tests {
         expect![[
             "Answer by calling at least one of the declared tools rather than replying with text."
         ]]
-        .assert_eq(request.system.as_deref().expect("an instruction is stated"));
+        .assert_eq(
+            request
+                .system
+                .as_ref()
+                .map(|blocks| blocks[0].text.as_str())
+                .expect("an instruction is stated"),
+        );
     }
 
     #[test]
@@ -1046,7 +1243,13 @@ mod tests {
         expect![[
             "Answer by calling the lookup tool rather than replying with text. Call no other tool."
         ]]
-        .assert_eq(request.system.as_deref().expect("an instruction is stated"));
+        .assert_eq(
+            request
+                .system
+                .as_ref()
+                .map(|blocks| blocks[0].text.as_str())
+                .expect("an instruction is stated"),
+        );
     }
 
     #[test]
@@ -1064,7 +1267,13 @@ mod tests {
         let value = serde_json::to_value(&request).expect("wire request serializes");
 
         assert_eq!(value["tool_choice"], serde_json::json!({"type": "auto"}));
-        assert_eq!(request.system.as_deref(), Some("Answer briefly."));
+        assert_eq!(
+            request
+                .system
+                .as_ref()
+                .map(|blocks| blocks[0].text.as_str()),
+            Some("Answer briefly.")
+        );
     }
 
     #[test]
