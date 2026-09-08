@@ -42,6 +42,7 @@ pub use signalbox_domain::RunnerEnrollmentRequestId;
 
 mod provisioning;
 mod recovery;
+pub mod status;
 pub use recovery::{RunnerRecoveryError, RunnerRecoveryOutcome};
 
 use crate::lock_inventory::{

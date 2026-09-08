@@ -11,6 +11,7 @@ members = [
     "crates/blob-store-s3",
     "crates/cargo-bin-resolver",
     "crates/egress-transport",
+    "crates/github-transport",
     "crates/conversation-import-claude-code",
     "crates/conversation-import-codex",
     "crates/conversation-import-json",

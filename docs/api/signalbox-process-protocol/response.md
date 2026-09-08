@@ -60,6 +60,22 @@ pub fn validate_oauth_authorization(
 
 ```rust
 pub enum ServerMessage {
+    RunnerStatusStart {},
+    RunnerStatus {
+        status: RunnerStatusFact,
+    },
+    RunnerOperationFailure {
+        failure: RunnerOperationFailure,
+    },
+    RunnerWorkspaceLeak {
+        leak: RunnerWorkspaceLeak,
+    },
+    RunnerStatusEnd {
+        runner_count: CanonicalU64,
+        failure_count: CanonicalU64,
+        leak_count: CanonicalU64,
+        next_after: option::Option<RunnerStatusCursor>,
+    },
     WorkspaceRegistered {
         command_id: CommandId,
         workspace_id: CanonicalUuid,

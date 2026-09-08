@@ -1327,22 +1327,36 @@ pub(crate) async fn finish_projection(
     if distinct_bytes.len() != expected_by_digest.len() {
         return Err(ImportedConversationCorruption::Missing("raw blob bytes").into());
     }
-    let bytes_by_digest = expected_by_digest
+    let last_use_by_digest = projection
+        .raws
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| (raw.expected.digest(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut bytes_by_digest = expected_by_digest
         .into_keys()
         .zip(distinct_bytes)
         .collect::<BTreeMap<_, _>>();
     let raws = projection
         .raws
         .into_iter()
-        .map(|raw| {
-            let stored_bytes = bytes_by_digest
-                .get(&raw.expected.digest())
-                .ok_or(ImportedConversationCorruption::Missing("raw blob bytes"))?;
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(stored_bytes.len())
-                .map_err(|_| ImportedRawBlobStorageError::Unavailable)?;
-            bytes.extend_from_slice(stored_bytes);
+        .enumerate()
+        .map(|(index, raw)| {
+            let bytes = if last_use_by_digest.get(&raw.expected.digest()) == Some(&index) {
+                bytes_by_digest
+                    .remove(&raw.expected.digest())
+                    .ok_or(ImportedConversationCorruption::Missing("raw blob bytes"))?
+            } else {
+                let stored_bytes = bytes_by_digest
+                    .get(&raw.expected.digest())
+                    .ok_or(ImportedConversationCorruption::Missing("raw blob bytes"))?;
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(stored_bytes.len())
+                    .map_err(|_| ImportedRawBlobStorageError::Unavailable)?;
+                bytes.extend_from_slice(stored_bytes);
+                bytes
+            };
             Ok(ImportedRawSourceRecordReconstitutionInput::new(
                 raw.position,
                 raw.hash,
