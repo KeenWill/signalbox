@@ -4,14 +4,14 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use git2::{Index, Repository};
+use git2::Index;
 
 use crate::failure::LocalGitFailure;
 use crate::limits::{
     GITLINK_MODE, MAX_INDEX_ENTRIES, MAX_OBJECT_BYTES, MAX_TREE_BLOB_BYTES,
     MAX_WORKTREE_INSPECTIONS, MAX_WORKTREE_PATH_BYTES,
 };
-use crate::pinning::PinnedRepository;
+use crate::pinning::{PinnedRepository, RepositoryShell};
 use crate::reference_read::resolve_pinned_reference_chain_from;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -55,7 +55,7 @@ impl RevisionSnapshot {
 }
 
 pub(super) fn tree_files(
-    repository: &Repository,
+    repository: &RepositoryShell,
     root: &git2::Tree<'_>,
 ) -> Result<BTreeMap<PathBuf, (git2::Oid, u32)>, LocalGitFailure> {
     let mut pending = vec![(root.id(), PathBuf::new())];
@@ -84,33 +84,32 @@ pub(super) fn tree_files(
 }
 
 pub(super) fn validate_tree_discovery(
-    repository: &Repository,
+    repository: &RepositoryShell,
     root: &git2::Tree<'_>,
 ) -> Result<(), LocalGitFailure> {
     validate_tree_discovery_options(repository, root, true, true)
 }
 
 pub(super) fn validate_checkout_tree_discovery(
-    repository: &Repository,
+    repository: &RepositoryShell,
     root: &git2::Tree<'_>,
 ) -> Result<(), LocalGitFailure> {
     validate_tree_discovery_options(repository, root, false, false)
 }
 
 fn validate_tree_discovery_options(
-    repository: &Repository,
+    repository: &RepositoryShell,
     root: &git2::Tree<'_>,
     allow_symlinks: bool,
     allow_gitlinks: bool,
 ) -> Result<(), LocalGitFailure> {
-    let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
     let mut pending = vec![(root.id(), PathBuf::new())];
     let mut inspected = 0_usize;
     let mut inspected_path_bytes = 0_usize;
     let mut inspected_blob_bytes = 0_usize;
     while let Some((oid, prefix)) = pending.pop() {
-        let (size, kind) = object_database
-            .read_header(oid)
+        let (size, kind) = repository
+            .read_object_header(oid)
             .map_err(|_| LocalGitFailure::Operation)?;
         if kind != git2::ObjectType::Tree || size > MAX_OBJECT_BYTES {
             return Err(LocalGitFailure::Operation);
@@ -138,8 +137,8 @@ fn validate_tree_discovery_options(
                     {
                         return Err(LocalGitFailure::Operation);
                     }
-                    let (size, kind) = object_database
-                        .read_header(entry.id())
+                    let (size, kind) = repository
+                        .read_object_header(entry.id())
                         .map_err(|_| LocalGitFailure::Operation)?;
                     inspected_blob_bytes = inspected_blob_bytes.saturating_add(size);
                     if kind != git2::ObjectType::Blob
@@ -166,11 +165,10 @@ pub(super) fn validate_index_entry_count(index: &Index) -> Result<(), LocalGitFa
 }
 
 pub(super) fn validate_index_objects(
-    repository: &Repository,
+    repository: &RepositoryShell,
     index: &Index,
 ) -> Result<(), LocalGitFailure> {
     validate_index_entry_count(index)?;
-    let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
     let mut blob_bytes = 0_usize;
     for entry in index.iter() {
         validate_repository_data_path(&PathBuf::from(std::ffi::OsString::from_vec(
@@ -182,8 +180,8 @@ pub(super) fn validate_index_objects(
         if entry.mode == GITLINK_MODE {
             continue;
         }
-        let (size, kind) = object_database
-            .read_header(entry.id)
+        let (size, kind) = repository
+            .read_object_header(entry.id)
             .map_err(|_| LocalGitFailure::Operation)?;
         blob_bytes = blob_bytes.saturating_add(size);
         if kind != git2::ObjectType::Blob
@@ -213,12 +211,11 @@ fn validate_repository_data_path(path: &Path) -> Result<(), LocalGitFailure> {
 }
 
 pub(super) fn validate_object_header(
-    repository: &Repository,
+    repository: &RepositoryShell,
     oid: git2::Oid,
 ) -> Result<git2::ObjectType, LocalGitFailure> {
     let (size, kind) = repository
-        .odb()
-        .and_then(|object_database| object_database.read_header(oid))
+        .read_object_header(oid)
         .map_err(|_| LocalGitFailure::Operation)?;
     if size > MAX_OBJECT_BYTES {
         Err(LocalGitFailure::Operation)
@@ -228,7 +225,7 @@ pub(super) fn validate_object_header(
 }
 
 pub(super) fn find_bounded_commit(
-    repository: &Repository,
+    repository: &RepositoryShell,
     oid: git2::Oid,
 ) -> Result<git2::Commit<'_>, LocalGitFailure> {
     if validate_object_header(repository, oid)? != git2::ObjectType::Commit {
@@ -240,7 +237,7 @@ pub(super) fn find_bounded_commit(
 }
 
 pub(super) fn find_bounded_tree(
-    repository: &Repository,
+    repository: &RepositoryShell,
     oid: git2::Oid,
 ) -> Result<git2::Tree<'_>, LocalGitFailure> {
     if validate_object_header(repository, oid)? != git2::ObjectType::Tree {
@@ -252,7 +249,7 @@ pub(super) fn find_bounded_tree(
 }
 
 pub(super) fn tree_for_commit(
-    repository: &Repository,
+    repository: &RepositoryShell,
     oid: git2::Oid,
 ) -> Result<git2::Tree<'_>, LocalGitFailure> {
     let commit = find_bounded_commit(repository, oid)?;
@@ -260,7 +257,7 @@ pub(super) fn tree_for_commit(
 }
 
 pub(super) fn resolve_bounded_commit<'repository>(
-    repository: &'repository Repository,
+    repository: &'repository RepositoryShell,
     authority: &PinnedRepository,
     revision: &str,
 ) -> Result<(git2::Commit<'repository>, RevisionSnapshot), LocalGitFailure> {
@@ -284,7 +281,7 @@ pub(super) fn resolve_bounded_commit<'repository>(
 }
 
 pub(super) fn resolve_bounded_tree<'repository>(
-    repository: &'repository Repository,
+    repository: &'repository RepositoryShell,
     authority: &PinnedRepository,
     revision: &str,
 ) -> Result<(git2::Tree<'repository>, RevisionSnapshot), LocalGitFailure> {

@@ -408,7 +408,7 @@ fn commit_rejects_a_nonregular_merge_state_entry_before_publication() {
         .add_new_mempack_backend(1000)
         .expect("fixture mempack attaches");
     repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .expect("fixture repository uses pinned objects");
     let merge_mode = fixture.root().join(".git/MERGE_MODE");
     fs::remove_file(&merge_mode).expect("fixture merge mode file removes");

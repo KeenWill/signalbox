@@ -1250,7 +1250,9 @@ fn loose_object_content_limit_applies_when_the_blob_is_read() {
     let database = git2::Odb::new().expect("snapshot object database");
     snapshot.add_to(&database).expect("attach snapshot");
     let repository = authority.open_repository_shell().expect("repository shell");
-    repository.set_odb(&database).expect("bind snapshot");
+    repository
+        .set_odb(&database, &snapshot)
+        .expect("bind snapshot");
     let oid = git2::Oid::hash_object(ObjectType::Blob, &content).expect("blob id");
     let failure = crate::diff::diff_object_buffer(&repository, oid, 0o100644)
         .expect_err("oversized blob content read rejects");
@@ -1318,7 +1320,9 @@ fn packed_object_content_limit_applies_when_the_blob_is_read() {
     let database = git2::Odb::new().expect("snapshot object database");
     snapshot.add_to(&database).expect("attach snapshot");
     let repository = authority.open_repository_shell().expect("repository shell");
-    repository.set_odb(&database).expect("bind snapshot");
+    repository
+        .set_odb(&database, &snapshot)
+        .expect("bind snapshot");
     let oid = git2::Oid::hash_object(ObjectType::Blob, &content).expect("blob id");
     let failure = crate::diff::diff_object_buffer(&repository, oid, 0o100644)
         .expect_err("oversized blob content read rejects");

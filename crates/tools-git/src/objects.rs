@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fs, io::Write};
 
-use git2::{Buf, Indexer, Odb, PackBuilder, Repository};
+use git2::{Buf, Indexer, Odb, PackBuilder};
 
 use crate::bounded::find_bounded_commit;
 use crate::failure::LocalGitFailure;
@@ -10,7 +10,9 @@ use crate::limits::{
 use crate::pack_install::{
     ObjectPublicationLock, install_packed_object_pair, pack_installation_mode,
 };
-use crate::pinning::{PinnedObjectDatabase, PinnedRepository, live_object_database_bytes};
+use crate::pinning::{
+    PinnedObjectDatabase, PinnedRepository, RepositoryShell, live_object_database_bytes,
+};
 
 #[derive(Clone, Copy)]
 pub(super) enum PackRoot {
@@ -20,7 +22,7 @@ pub(super) enum PackRoot {
 
 pub(super) fn persist_objects(
     authority: &PinnedRepository,
-    repository: &Repository,
+    repository: &RepositoryShell,
     persistent_objects: &Odb<'_>,
     object_database: &Odb<'_>,
     pinned_objects: &PinnedObjectDatabase,
@@ -113,10 +115,13 @@ pub(super) struct PackTraversalBudget {
 }
 
 impl PackTraversalBudget {
-    fn charge(&mut self, repository: &Repository, oid: git2::Oid) -> Result<(), LocalGitFailure> {
+    fn charge(
+        &mut self,
+        repository: &RepositoryShell,
+        oid: git2::Oid,
+    ) -> Result<(), LocalGitFailure> {
         let (bytes, _) = repository
-            .odb()
-            .and_then(|object_database| object_database.read_header(oid))
+            .read_object_header(oid)
             .map_err(|_| LocalGitFailure::Operation)?;
         if bytes > MAX_OBJECT_BYTES {
             return Err(LocalGitFailure::Operation);
@@ -136,7 +141,7 @@ impl PackTraversalBudget {
 }
 
 pub(super) fn insert_missing_pack_object(
-    repository: &Repository,
+    repository: &RepositoryShell,
     persistent_objects: &Odb<'_>,
     builder: &mut PackBuilder<'_>,
     inserted: &mut HashSet<git2::Oid>,
@@ -154,7 +159,7 @@ pub(super) fn insert_missing_pack_object(
 }
 
 pub(super) fn insert_missing_commit_graph(
-    repository: &Repository,
+    repository: &RepositoryShell,
     persistent_objects: &Odb<'_>,
     builder: &mut PackBuilder<'_>,
     inserted: &mut HashSet<git2::Oid>,
@@ -193,7 +198,7 @@ pub(super) fn insert_missing_commit_graph(
 }
 
 pub(super) fn insert_missing_tree_graph(
-    repository: &Repository,
+    repository: &RepositoryShell,
     persistent_objects: &Odb<'_>,
     builder: &mut PackBuilder<'_>,
     inserted: &mut HashSet<git2::Oid>,

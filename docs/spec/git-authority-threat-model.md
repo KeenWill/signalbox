@@ -84,7 +84,8 @@ Bounded scans and bounded content limit Signalbox's own work and do not
 guarantee repository availability. Unsupported layouts and formats, exhausted
 bounds, allocation failure, and host I/O failure are rejected, and the tool does
 not repair a corrupt repository. Decoded object-content limits apply to the
-objects an operation reads, not to unrelated objects retained in its history.
+objects an operation reads, including packed delta bases, intermediate results,
+and delta instructions, not to unrelated objects retained in its history.
 
 Repository semantics outside the direct main-worktree subset are unsupported,
 not partially trusted. Linked worktrees, discovery, alternate object databases,

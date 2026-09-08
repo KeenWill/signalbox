@@ -123,7 +123,7 @@ fn object_publication_lock_serializes_budget_check_and_installation() {
         .repository()
         .expect("pinned fixture repository opens");
     repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .expect("fixture object database installs");
     let object = repository
         .blob(UNTRACKED_CONTENT.as_bytes())

@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use git2::{DiffFormat, DiffOptions, ErrorCode, Patch, Repository};
+use git2::{DiffFormat, DiffOptions, ErrorCode, Patch};
 use rustix::{
     fs::{Mode, OFlags, openat, readlinkat_raw},
     io::dup,
@@ -22,7 +22,7 @@ use crate::bounded::{
 use crate::executor::regular_file_mode;
 use crate::failure::LocalGitFailure;
 use crate::limits::{GITLINK_MODE, MAX_DIFF_BYTES, MAX_OBJECT_BYTES};
-use crate::pinning::{PinnedRepository, repository_filemode};
+use crate::pinning::{PinnedRepository, RepositoryShell, repository_filemode};
 use crate::result::DiffResult;
 use crate::status::{
     charge_worktree_bytes, conflicted_index_paths, index_backed_worktree_files, index_files,
@@ -30,7 +30,7 @@ use crate::status::{
 use crate::status_reference::StatusHeadSnapshot;
 
 pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
-    repository: &Repository,
+    repository: &RepositoryShell,
     authority: &PinnedRepository,
     arguments: GitDiffArguments,
     filesystem: &FileSystem,
@@ -56,7 +56,7 @@ pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
 }
 
 pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
-    repository: &Repository,
+    repository: &RepositoryShell,
     authority: &PinnedRepository,
     filesystem: &FileSystem,
     root: &WorkspaceRoot,
@@ -196,7 +196,7 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
 }
 
 pub(super) fn diff_object_buffer(
-    repository: &Repository,
+    repository: &RepositoryShell,
     oid: git2::Oid,
     mode: u32,
 ) -> Result<Vec<u8>, LocalGitFailure> {
