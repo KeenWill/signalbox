@@ -15,8 +15,10 @@ Bazel builds the workspace libraries and binaries on x86-64 Linux with all
 features enabled, including test-support surfaces and fixture binaries, matching
 Cargo's all-features CI build. These targets do not validate default-feature
 release artifacts. The ordinary suite covers workspace unit tests, integration
-binaries, and doctests. Cargo commands and CI cover the provisioned
-host-isolation gate. See [Build and test](spec/build-and-test.md).
+binaries, and doctests. A GitHub-hosted Bazel job runs the provisioned
+host-isolation gate. The required Rust `validate` job retains Cargo checks for
+the catalog workspace dependency boundary and Codex schema fixtures, including
+Rust lockfile-only updates. See [Build and test](spec/build-and-test.md).
 
 `crate_universe` reads the workspace Cargo manifests and `Cargo.lock` to
 generate third-party dependency targets. Change dependencies with Cargo as
@@ -91,11 +93,11 @@ shard its own matrix worker; each worker runs one partition per binary at a time
 with 16 test threads. The Rust workflow calls `bazel.yml` and binds its ordinary
 and PostgreSQL results to `validate` under the Rust change-scope gate.
 
-The checker job runs its eight Python suites with
+The checker job runs its Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
 `tooling/requirements-mdformat.txt`, and the shared Rustfmt toolchain. The Git
 fixture suite and two shell-script suites carry `external` because they execute
-host utilities; their results always run. The other five results are cacheable.
+host utilities; their results always run. The remaining results are cacheable.
 
 `bazel test //:markdown_format` checks repository Markdown with the same pinned
 mdformat and GFM plugin as devenv. Its inputs include the Markdown files and
@@ -116,7 +118,8 @@ PDF, SVG, video, and registry behavior. These fixture-based targets are included
 in `//:bazel_tests` and cache their results. The `//:host_integration_tests`
 targets cover the audio worker, process isolation, and real Bubblewrap checks
 with CI confinement requirements enabled. They need a delegated cgroup and the
-real sandbox; the provisioned Cargo workspace job retains that CI gate.
+real sandbox. The GitHub-hosted `bazel-host-integration` job provisions both and
+runs this group; the Rust workflow binds its result to `validate`.
 
 The importer conformance corpus runs in `//:rust_integration_tests`. Its JSONL
 inputs, golden files, and Cargo configuration are declared separately. Golden
@@ -151,3 +154,17 @@ non-PostgreSQL suite does not execute their ignored tests.
 and their modules, matching Cargo formatting. `//:rust_documentation` builds
 Cargo's documentation entrypoints with warnings denied. These actions use the
 declared Rust toolchain and remote cache.
+
+`coverage.yml` runs `bazel coverage` for the workspace and the persistence,
+daemon, and terminal-client PostgreSQL selections. It retains their named
+exclusions and reports each suite's outcome without gating merges. LCOV merges
+hits across binaries and declared subprocess fixtures; the report excludes
+dedicated test and benchmark files and marks region coverage unavailable.
+Instrumented binaries keep a relative path to the declared runtime libraries.
+
+`bazel test //clients/web/...` runs Biome, TypeScript, Vitest, the Vite build,
+and the existing Chromium, Firefox, and WebKit Playwright assertions. The npm
+lockfile supplies package versions; its pnpm translation is generated input. The
+browser runtime follows the locked Playwright package, with image checksums
+retained in the Bazel lockfile and declared DejaVu fonts. Browser evidence is
+retained in the test's undeclared outputs. The web CI job uses the shared cache.

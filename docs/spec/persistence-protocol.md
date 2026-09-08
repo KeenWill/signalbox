@@ -589,6 +589,20 @@ from the tool-loop continuation origin, and stores its predecessor call,
 qualifying cause, and non-acceptance evidence atomically. What these rows mean
 is owned by [credential-availability](credential-availability.md).
 
+Runner replacement and abandonment commit the placement move, terminal command
+result, and one runner-state-transition event per affected session atomically.
+Pinned replacement also appends its reference-only placement entry and checked
+frontier; pre-pin replacement returns to unpinned without an entry. The
+placement snapshot writer does not produce these recovery transitions. A
+same-runner replacement reports a working-directory change only when the
+successor interpreted directory differs from the lost pinned directory.
+Replacement provisioning retains its immutable authorization and ready receipt
+across transactions. A typed provisioning refusal and its exact detail commit
+with the command rejection before acknowledgement; equal replay rereads that
+evidence. Rejected staging workspaces retain exact manifest and connection-epoch
+cleanup authority, and a release receipt records completion only under that
+authority.
+
 OAuth provisioning locks its profile and every retained pool co-member in
 reference order, rereads membership, and retries acquisition if membership grew.
 Pool-policy insertion locks every member in the same order. Authorization
@@ -607,11 +621,9 @@ retaining registration and history.
 
 ## Planned
 
-- Runner replacement and abandonment transactions:
-  [persistence-protocol design](../design/persistence-protocol.md).
 - Retiring an unacknowledged workspace release:
   [persistence-protocol design](../design/persistence-protocol.md).
-- Runner operation-failure evidence stored before acknowledgement:
+- General runner operation-failure evidence stored before acknowledgement:
   [persistence-protocol design](../design/persistence-protocol.md).
 - Runner placement in imported-create command records, for which storage version
   4 is reserved:

@@ -102,6 +102,9 @@
 //!   UPDATE`.
 //!
 //! `runners`:
+//! - `lock_replacement_enrollments`: loss identity locks in runner order -> the lost, candidate,
+//!   and candidate predecessor `runner_enrollment FOR UPDATE` in enrollment order -> their
+//!   `runner_connection_authority_head FOR SHARE` in enrollment order.
 //! - `RunnerProtocolStore::record_replacement_workspace_released`: `session_lifecycle FOR NO
 //!   KEY UPDATE` -> `session_scheduler FOR UPDATE` -> `runner_enrollment FOR UPDATE` ->
 //!   `runner_connection_authority_head FOR SHARE`.

@@ -143,6 +143,7 @@ use uuid::Uuid;
 
 mod blob_objects;
 mod compaction;
+mod continuation_compaction;
 mod credential_exclusions;
 mod credential_pool;
 mod fixtures;

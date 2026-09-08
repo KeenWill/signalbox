@@ -80,19 +80,20 @@ An approval wait is a stored active-turn phase that names the earliest undecided
 request and survives restart.
 
 A runner-locus request whose placement is lost before a lease offer or executor
-dispatch records `closed_inadmissible` with reason `placement_lost`. The loss
-transaction closes every such unresolved request in the batch, including earlier
-approved requests in a parked batch, retires existing approvals, and resumes
-batch evaluation without creating an attempt or result entry. An existing
-`Prepared` attempt first terminalizes `KnownFailed` with `execution_failed` and
-detail `placement_lost`; a `Prepared` approval judge retires without
-authorization. An in-flight judge reaches its observation boundary before its
-resulting approval retires and the request closes in that same transaction.
-Continuation projects one reference-only `ToolInadmissible { request }` in
-proposal order, rendered as `execution_failed` with detail `placement_lost`; it
-counts toward batch completion and survives interrupt, crash-loss, and
-reconciliation materialization. Placement loss never rewrites or cancels
-dispatched work.
+dispatch records `closed_inadmissible` with reason `placement_lost`. Pre-pin
+closure uses the registration retained by the connection loss, or the current
+registration when that loss epoch has no retained revision. The loss transaction
+closes every such unresolved request in the batch, including earlier approved
+requests in a parked batch, retires existing approvals, and resumes batch
+evaluation without creating an attempt or result entry. An existing `Prepared`
+attempt first terminalizes `KnownFailed` with `execution_failed` and detail
+`placement_lost`; a `Prepared` approval judge retires without authorization. An
+in-flight judge reaches its observation boundary before its resulting approval
+retires and the request closes in that same transaction. Continuation projects
+one reference-only `ToolInadmissible { request }` in proposal order, rendered as
+`execution_failed` with detail `placement_lost`; it counts toward batch
+completion and survives interrupt, crash-loss, and reconciliation
+materialization. Placement loss never rewrites or cancels dispatched work.
 
 ## Design decisions
 
@@ -265,7 +266,8 @@ admissible stores the completed call but no decision and leaves the same request
 parked. A commissioned dispatch also keeps the request parked while its
 authority stands or when the turn has pending steering. Once that authority is
 withdrawn, an escalation with no pending steering terminalizes the unattended
-turn under the commissioned-dispatch audit. A `KnownFailed`, `Refused`,
+turn under the commissioned-dispatch audit, preserving `ToolInadmissible` for
+requests already closed by placement loss. A `KnownFailed`, `Refused`,
 `Cancelled`, or `Ambiguous` terminal judge call for an admissible request
 retains the attended park while immediately admitting a user decision.
 

@@ -757,16 +757,35 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
 -> Result<(), Box<dyn Error>> {
+    assert_judge_escalation_after_goal_stop(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_escalation_preserves_a_placement_loss_result() -> Result<(), Box<dyn Error>> {
+    assert_judge_escalation_after_goal_stop(true).await
+}
+
+async fn assert_judge_escalation_after_goal_stop(
+    headless_loss: bool,
+) -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7f60;
     let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
         &pool,
         seed,
-        APPROVAL_PROPOSAL,
+        if headless_loss {
+            &[
+                ("runner-only", "{}"),
+                (APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
+            ]
+        } else {
+            APPROVAL_PROPOSAL
+        },
         InitialToolApproval::Delegated,
     )
     .await?;
-    let request = requests[0];
+    let request = requests[usize::from(headless_loss)];
     let statement = commission_fixture_session_goal(&pool, fixture.session, seed + 0xf0).await?;
     // The checkpoint accepted the fixture turn's input as `seed + 9`; binding
     // that turn to the generation is the dispatch shape whose authority the
@@ -778,6 +797,29 @@ async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
         AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
     )
     .await?;
+    if headless_loss {
+        let mut transaction = pool.begin().await?;
+        sqlx::raw_sql("ALTER TABLE tool_request DISABLE TRIGGER ALL; ALTER TABLE commissioned_dispatch DISABLE TRIGGER ALL;")
+            .execute(&mut *transaction).await?;
+        sqlx::query(
+            "UPDATE tool_request SET resolution_kind = 'closed_inadmissible', inadmissible_reason = 'placement_lost' WHERE request_id = $1",
+        )
+        .bind(requests[0].into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("UPDATE turn_lifecycle SET approval_tool_request_id = $1 WHERE turn_id = $2")
+            .bind(request.into_uuid())
+            .bind(fixture.turn.into_uuid())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("INSERT INTO commissioned_dispatch (dispatch_id, session_id, create_command_id, template_name, template_content_digest, initial_content_digest, target_kind, repository, branch) VALUES ($1, $2, $3, 'approval-fixture', $4, $4, 'branch', 'keenwill/signalbox', 'main')")
+            .bind(Uuid::from_u128(seed + 0x1000)).bind(fixture.session.into_uuid())
+            .bind(Uuid::from_u128(seed + 0x1001)).bind(vec![0_u8; 32])
+            .execute(&mut *transaction).await?;
+        sqlx::raw_sql("ALTER TABLE tool_request ENABLE TRIGGER ALL; ALTER TABLE commissioned_dispatch ENABLE TRIGGER ALL;")
+            .execute(&mut *transaction).await?;
+        transaction.commit().await?;
+    }
     let repository = model_repository.approval_judge_repository();
     let prepared = ready_approval_judge(
         repository
@@ -802,6 +844,37 @@ async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
             approval_judge_closed_result_entry,
         )
         .await?;
+    if headless_loss {
+        assert_eq!(
+            outcome,
+            CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+        );
+        let results: Vec<String> = sqlx::query_scalar("SELECT entry.payload_kind FROM semantic_transcript_entry AS entry JOIN tool_request AS request ON request.request_id = entry.tool_result_request_id WHERE entry.source_session_id = $1 ORDER BY request.request_ordinal")
+            .bind(fixture.session.into_uuid()).fetch_all(&pool).await?;
+        assert_eq!(results, ["tool_inadmissible", "tool_closed_by_turn_end"]);
+        let terminal: String =
+            sqlx::query_scalar("SELECT terminal_cause_kind FROM turn_lifecycle WHERE turn_id = $1")
+                .bind(fixture.turn.into_uuid())
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(terminal, "headless_approval_escalation");
+        assert_eq!(
+            repository
+                .complete(
+                    &prepared,
+                    DelegateApprovalRecommendation::Approve,
+                    ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?,
+                    ProviderReportedTokenUsage::unreported(),
+                    approval_judge_completion_identities(seed, seed + 0xe1),
+                    |_| panic!("equal headless completion must not mint another result"),
+                )
+                .await?,
+            outcome
+        );
+        pool.close().await;
+        drop(container);
+        return Ok(());
+    }
     let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
         "SELECT judge.state_kind AS judge_state,
                 judge.recommendation_kind AS recommendation,

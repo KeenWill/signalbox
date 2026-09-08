@@ -2245,6 +2245,8 @@ pub enum ProcessRuntimeError {
     ConnectionTask(JoinError),
     /// The durable outbox dispatcher failed.
     Dispatch(OutboxDispatchError),
+    /// The shared runner-recovery notification listener failed.
+    RunnerRecoveryNotifications(sqlx::Error),
     /// The single dispatcher produced an impossible retry result.
     UnexpectedDispatcherRetry,
     /// The revalidated socket path could not be cleaned up.
@@ -2278,6 +2280,9 @@ impl fmt::Display for ProcessRuntimeError {
             }
             Self::ConnectionTask(_) => "a local process connection task failed",
             Self::Dispatch(_) => "the durable process-update dispatcher failed",
+            Self::RunnerRecoveryNotifications(_) => {
+                "the runner recovery notification listener failed"
+            }
             Self::UnexpectedDispatcherRetry => {
                 "the process-update dispatcher unexpectedly requested retry"
             }
@@ -2294,6 +2299,7 @@ impl Error for ProcessRuntimeError {
             Self::Encode(error) => Some(error),
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
+            Self::RunnerRecoveryNotifications(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
             Self::OauthRecovery(_)
             | Self::EncodeInvariant
