@@ -126,9 +126,13 @@ where
         .into());
     }
 
-    let issuer = principal
-        .map(crate::command_registry::issuer_columns)
-        .unwrap_or(("program", None));
+    let issuer = match (command.actor(), principal) {
+        (signalbox_domain::Actor::Program { .. }, None) => ("program", None),
+        (signalbox_domain::Actor::Program { .. }, Some(_)) | (_, None) => {
+            return Err(SubmitInputCorruption::Inconsistent("actor and envelope principal").into());
+        }
+        (_, Some(principal)) => crate::command_registry::issuer_columns(principal),
+    };
     let claimed = sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at,

@@ -5308,6 +5308,54 @@ async fn program_submit_records_its_run_and_conflicts_with_user_replay()
         capability,
     )?;
     let repository = SubmitInputRepository::new(pool.clone());
+    let program_command = SubmitInput::new_program(
+        user_command.command_id(),
+        user_command.session(),
+        user_command.content().clone(),
+        user_command.delivery(),
+        capability.reference(),
+    );
+    let core_command = SubmitInput::new_core_continuation(
+        user_command.command_id(),
+        user_command.session(),
+        user_command.content().clone(),
+        input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    );
+    for (command, principal) in [
+        (user_command.clone(), None),
+        (core_command, None),
+        (
+            program_command,
+            Some(signalbox_domain::CommandPrincipal::Core),
+        ),
+    ] {
+        let error = repository
+            .handle_with_candidates_alias_resolver_as(
+                command,
+                principal,
+                signalbox_domain::ParentTerminationKind::Cancelled,
+                AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                None,
+                CancelledModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                ),
+                |_| panic!("invalid issuer cannot allocate a turn"),
+                |_| panic!("invalid issuer cannot cancel a tool"),
+                || panic!("invalid issuer cannot settle a closure"),
+                || panic!("invalid issuer cannot settle a closure"),
+                |_| None,
+            )
+            .await
+            .expect_err("actor and envelope must agree on program provenance");
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+                "actor and envelope principal"
+            ))
+        ));
+        assert!(repository.load(user_command.command_id()).await?.is_none());
+    }
     let mut service = SubmitInputService::new(
         signalbox_application::UuidV7SubmitInputIdGenerator,
         repository.clone(),
