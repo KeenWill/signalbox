@@ -8,6 +8,12 @@
 pub const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize;
 ```
 
+## MAX_RETAINED_FRONTIER_CONTENT_BYTES
+
+```rust
+pub const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize;
+```
+
 ## ModelCallCredentialReference
 
 ```rust
@@ -289,6 +295,10 @@ pub enum PrepareModelCallOutcome {
     RetryBackoff(time::Duration),
     PoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
     Checkpointed(signalbox_domain::ModelCallId),
+    RetainedContentLimitExceeded {
+        turn: signalbox_domain::TurnId,
+        call: signalbox_domain::ModelCallId,
+    },
     Ready {
         request: boxed::Box<signalbox_domain::PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,
@@ -745,6 +755,34 @@ pub fn render_model_user_content(
         signalbox_domain::BlobDigest,
     ) -> option::Option<nonzero::NonZeroU64>,
 ) -> result::Result<ModelUserContent, ModelFrontierRenderingError>;
+```
+
+## projected_frontier_container_bytes
+
+```rust
+pub fn projected_frontier_container_bytes<'a>(
+    entries: impl collect::IntoIterator<Item = &'a signalbox_domain::SemanticTranscriptEntryPayload>,
+    origin_content: impl function::FnMut(
+        signalbox_domain::AcceptedInputId,
+    ) -> option::Option<&'a signalbox_domain::UserContent>,
+) -> usize;
+```
+
+## projected_frontier_content_bytes
+
+```rust
+pub fn projected_frontier_content_bytes<'a>(
+    entries: impl collect::IntoIterator<
+        Item = (
+            signalbox_domain::SemanticTranscriptEntryRef,
+            &'a signalbox_domain::SemanticTranscriptEntryPayload,
+        ),
+    >,
+    origin_content: impl function::FnMut(
+        signalbox_domain::AcceptedInputId,
+    ) -> option::Option<&'a signalbox_domain::UserContent>,
+    tool_entries: impl collect::IntoIterator<Item = &'a ResolvedToolConversationEntry>,
+) -> usize;
 ```
 
 ## ModelFrontierRenderingError

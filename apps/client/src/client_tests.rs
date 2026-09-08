@@ -5911,7 +5911,7 @@ async fn credential_wait_failure_event_requires_its_terminal_snapshot_frontier()
                 &ClientRequest::ReadTranscript { session_id }
             );
             for message in [
-                ServerMessage::TranscriptSnapshotStart { session_id, cursor: CanonicalU64::new(1), runner: None },
+                ServerMessage::TranscriptSnapshotStart { session_id, cursor: CanonicalU64::new(1), runner: None, repository_watch: None },
                 ServerMessage::TranscriptTurn {
                     turn_id, acceptance_position: CanonicalU64::new(1), model_settings: None,
                     state: TurnState::FailedAfterCredentialWait {

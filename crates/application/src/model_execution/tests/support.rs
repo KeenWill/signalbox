@@ -17,10 +17,11 @@ use super::{
     ModelCallReconstitutionState, ModelCallTerminalIdentityCandidates,
     ModelCallTerminalObservation, ModelConversationMessage, ModelSelectionOverride,
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, ModelToolResultContent,
-    ModelUserContent, NormalizedToolArguments, OperatorFailureClass, PerInputConfigurationChoices,
-    PinnedProviderTargetReconstitutionInput, PrepareModelCallOutcome, PrepareModelCallTransaction,
-    PreparedModelCallFailureCause, PreparedModelCallRequest, PreparedModelOperation,
-    ProviderModelIdentity, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
+    ModelUserContent, ModelUserContentPart, NonZeroU64, NormalizedToolArguments,
+    OperatorFailureClass, PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput,
+    PrepareModelCallOutcome, PrepareModelCallTransaction, PreparedModelCallFailureCause,
+    PreparedModelCallRequest, PreparedModelOperation, ProviderModelIdentity,
+    ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
     ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
     RetainedPreparedFailureStatus, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef,
@@ -32,8 +33,8 @@ use super::{
     SubmitInputTurnOriginReconstitutionInput, ToolApprovalDecision,
     ToolApprovalResolutionReconstitutionInput, ToolDenialReason, ToolName, ToolRequest,
     ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
-    TranscriptAncestry, TurnAttemptId, TurnId, UserContent, Uuid, VecDeque, Write, fmt, io,
-    projected_frontier_content_bytes, render_model_user_content,
+    TranscriptAncestry, TurnAttemptId, TurnId, UserContent, UserContentPart, Uuid, VecDeque, Write,
+    fmt, io, projected_frontier_content_bytes, render_model_user_content,
 };
 
 #[derive(Clone, Default)]
@@ -226,6 +227,26 @@ pub(super) fn failed_turn_fixture() -> FailedModelCallTurn {
 }
 
 pub(super) fn prepared_execution_fixture() -> signalbox_domain::ModelCallExecution {
+    prepared_execution_with_content_fixture(
+        UserContent::try_text(String::from("exact user request"))
+            .expect("fixture content is valid"),
+    )
+}
+
+pub(super) fn prepared_execution_with_content_fixture(
+    content: UserContent,
+) -> signalbox_domain::ModelCallExecution {
+    // Attachment fixtures use the widest byte-length spelling for exact stub accounting.
+    let attachment_blob_facts = content
+        .parts()
+        .iter()
+        .filter_map(|part| match part {
+            UserContentPart::Attachment { digest, .. } => Some(
+                signalbox_domain::AttachmentBlobFact::new(*digest, NonZeroU64::MAX),
+            ),
+            UserContentPart::Text { .. } => None,
+        })
+        .collect::<Vec<_>>();
     let session_id = identity(1, SessionId::from_uuid);
     let direct = identity(2, DirectModelSelection::from_uuid);
     let accepted_input = identity(3, AcceptedInputId::from_uuid);
@@ -258,8 +279,6 @@ pub(super) fn prepared_execution_fixture() -> signalbox_domain::ModelCallExecuti
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
         configuration: choices,
     };
-    let content = UserContent::try_text(String::from("exact user request"))
-        .expect("fixture content is valid");
     let command = SubmitInput::new(command_id, session_id, content.clone(), delivery);
     let position = SessionInputPosition::first();
     let order = AcceptedInputQueueOrder::ordinary(position);
@@ -360,6 +379,7 @@ pub(super) fn prepared_execution_fixture() -> signalbox_domain::ModelCallExecuti
         None,
         Vec::new(),
     )
+    .with_attachment_blob_facts(attachment_blob_facts.clone())
     .reconstitute()
     .expect("fixture activation reconstructs execution");
     let prepared = initial
@@ -385,6 +405,7 @@ pub(super) fn prepared_execution_fixture() -> signalbox_domain::ModelCallExecuti
             ModelCallReconstitutionState::Prepared,
         )],
     )
+    .with_attachment_blob_facts(attachment_blob_facts)
     .reconstitute()
     .expect("fixture Prepared facts reconstruct")
 }
@@ -758,7 +779,7 @@ pub(super) fn tool_round_saturated_fixture_with_assistant_text(
             ModelCallReconstitutionState::Prepared,
         )],
     )
-    .with_tool_denial_correlations(denials.clone())
+    .with_tool_denial_correlations(denials.iter().cloned().map(Into::into).collect())
     .with_call_snapshot(ResolvedContextFrontierReconstitutionInput::new(
         session_id,
         current_frontier,
@@ -1474,9 +1495,22 @@ pub(super) fn rendered_content_bytes(messages: &[ModelConversationMessage]) -> u
             ModelConversationMessage::ProviderCompaction { block, .. } => block.as_json().len(),
             ModelConversationMessage::ProviderReasoning { item, .. } => item.as_json().len(),
             ModelConversationMessage::User { content, .. } => {
-                content.parts().iter().fold(0_usize, |total, part| {
-                    total.saturating_add(part.as_str().len())
-                })
+                content
+                    .parts()
+                    .iter()
+                    .fold(0_usize, |total, part| match part {
+                        ModelUserContentPart::Text(value) => {
+                            total.saturating_add(value.as_str().len())
+                        }
+                        ModelUserContentPart::AttachmentStub(stub) => total
+                            .saturating_add(stub.rendered.len())
+                            .saturating_add(stub.media_type.as_str().len())
+                            .saturating_add(
+                                stub.display_filename
+                                    .as_ref()
+                                    .map_or(0, |name| name.as_str().len()),
+                            ),
+                    })
             }
             ModelConversationMessage::DelegatedTask { content, .. }
             | ModelConversationMessage::DelegationMessage { content, .. } => content.as_str().len(),
