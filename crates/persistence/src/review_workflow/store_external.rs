@@ -49,7 +49,7 @@ impl ReviewWorkflowStore {
                  finding_id, finding_producing_pass_id, provider_key,
                  object_kind)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             ON CONFLICT (external_link_id) DO NOTHING",
+             ON CONFLICT DO NOTHING",
         )
         .bind(requested.id().into_uuid())
         .bind(requested.association().target().into_uuid())

@@ -214,9 +214,12 @@ impl fmt::Display for ClientError {
             Self::ReviewInputFile(_) => {
                 formatter.write_str("the review JSON input file could not be read")
             }
-            Self::ReviewInputJson(_) => {
-                formatter.write_str("the review JSON input file is not an exact admitted shape")
-            }
+            Self::ReviewInputJson(source) => write!(
+                formatter,
+                "the review JSON input file is not an exact admitted shape at line {} column {}",
+                source.line(),
+                source.column()
+            ),
             Self::ReviewInputExceedsFrame => {
                 formatter.write_str("the review JSON input exceeds the process frame bound")
             }
@@ -978,6 +981,24 @@ mod tests {
                 "rejected: delegation message identity collision \
                  (delegation_message_identity_collision message={message_id})"
             )
+        );
+    }
+
+    #[test]
+    fn review_input_json_error_includes_location_without_caller_content() {
+        let source = serde_json::from_str::<u64>(r#""private-review-value""#)
+            .expect_err("a string is not an admitted integer");
+        let expected_source = source.to_string();
+        let expected_location = format!(" at line {} column {}", source.line(), source.column());
+        let error = ClientError::ReviewInputJson(source);
+
+        assert_eq!(
+            error.to_string(),
+            format!("the review JSON input file is not an exact admitted shape{expected_location}")
+        );
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            expected_source
         );
     }
 

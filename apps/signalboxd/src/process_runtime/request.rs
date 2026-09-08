@@ -482,6 +482,21 @@ where
             handle_cancel_program_run(writer, version, request_id, command_id, run_id, services)
                 .await
         }
+        ClientRequest::ReadRunnerStatus { page_size, after } => {
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            super::runner_status::handle_read_runner_status(
+                writer,
+                version,
+                request_id,
+                page_size,
+                after,
+                services,
+                snapshot_permit,
+            )
+            .await
+        }
         ClientRequest::ListCredentialExclusions { page_size, after } => {
             handle_list_credential_exclusions(
                 writer, version, request_id, page_size, after, services,
