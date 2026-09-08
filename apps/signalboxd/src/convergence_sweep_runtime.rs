@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, EligibilityNudge,
-    InProcessEligibilityNudge, UuidV7CommissionedDispatchIdGenerator, UuidV7SubmitInputIdGenerator,
+    EligibilityNudgeOutcome, InProcessEligibilityNudge, UuidV7CommissionedDispatchIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_convergence::{
     ConvergencePolicy, Evaluation, Verdict,
@@ -247,7 +248,20 @@ impl ConvergenceSweepRuntime {
                             {
                                 Ok(restored) => {
                                     if let Some(session) = restored {
-                                        let _ = runtime.eligibility_nudge.nudge(session);
+                                        select! {
+                                            outcome = runtime.eligibility_nudge.nudge_waiting_for_capacity(session) => {
+                                                if outcome == EligibilityNudgeOutcome::WorkSourceClosed {
+                                                    return;
+                                                }
+                                            }
+                                            _ = async {
+                                                loop {
+                                                    if shutdown.changed().await.is_err() || *shutdown.borrow() {
+                                                        return;
+                                                    }
+                                                }
+                                            } => return,
+                                        }
                                     }
                                     reenrolled = true;
                                 }
@@ -1000,7 +1014,10 @@ async fn sleep_for_policy(delay: Option<Duration>) {
 
 #[cfg(test)]
 mod tests {
-    use signalbox_application::InProcessEligibilityWorkSource;
+    use signalbox_application::{
+        EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource,
+        InProcessEligibilityWorkSource,
+    };
     use signalbox_persistence::{
         convergence_sweep::ConvergenceSweepFailureDisposition, disposable_postgres_server_args,
         disposable_postgres_state_tmpfs, disposable_test_container_labels,
@@ -1318,24 +1335,17 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires ephemeral PostgreSQL"]
-    async fn a_committed_dispatch_is_projected_before_any_census() -> Result<(), Box<dyn Error>> {
-        let (_container, pool) = migrated_postgres().await?;
-        let (runtime, _work_source) = fixture_runtime(&pool, Duration::from_secs(60))?;
+    async fn commission_fixture(
+        runtime: &ConvergenceSweepRuntime,
+        command: DurableCommandId,
+    ) -> Result<
+        (
+            signalbox_domain::CommissionedDispatchId,
+            signalbox_domain::SessionId,
+        ),
+        Box<dyn Error>,
+    > {
         let target = fixture_target();
-        let observation = fixture_observation();
-        let command = DurableCommandId::from_uuid(uuid::Uuid::from_u128(0x89_204));
-        runtime
-            .state
-            .begin_commission(
-                &target.repository,
-                target.pull_request,
-                &observation,
-                [17; 32],
-                command,
-            )
-            .await?;
         let request = CommissionDispatchRequest::try_new(
             command,
             signalbox_domain::SessionTemplateName::try_new(FIXTURE_TEMPLATE.to_owned())?,
@@ -1377,6 +1387,29 @@ mod tests {
             panic!("a fresh fixture must dispatch: {outcome:?}");
         };
 
+        Ok((dispatch, session))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_committed_dispatch_is_projected_before_any_census() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let (runtime, _work_source) = fixture_runtime(&pool, Duration::from_secs(60))?;
+        let target = fixture_target();
+        let observation = fixture_observation();
+        let command = DurableCommandId::from_uuid(uuid::Uuid::from_u128(0x89_204));
+        runtime
+            .state
+            .begin_commission(
+                &target.repository,
+                target.pull_request,
+                &observation,
+                [17; 32],
+                command,
+            )
+            .await?;
+        let (dispatch, session) = commission_fixture(&runtime, command).await?;
+
         runtime
             .reconcile_target(&target, Instant::now() + Duration::from_secs(30))
             .await;
@@ -1393,6 +1426,91 @@ mod tests {
         .await?;
         assert_eq!(projected, (dispatch.into_uuid(), session.into_uuid()));
         assert_eq!(target_state(&pool).await?, (String::from("observed"), 0));
+        Ok(())
+    }
+
+    struct EmptySweep;
+
+    const RESTORATION_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+    const RESTORATION_TEST_COOL_OFF: Duration = Duration::from_secs(60);
+
+    impl EligibilitySweep for EmptySweep {
+        type Error = std::convert::Infallible;
+
+        async fn find_sessions(&mut self) -> Result<EligibilitySweepBatch, Self::Error> {
+            Ok(EligibilitySweepBatch::new(Vec::new(), false))
+        }
+    }
+
+    async fn wait_for_retained_nudge(
+        nudge: &InProcessEligibilityNudge,
+        session: signalbox_domain::SessionId,
+    ) -> Result<(), tokio::time::error::Elapsed> {
+        tokio::time::timeout(RESTORATION_TEST_TIMEOUT, async {
+            while nudge.nudge(session) != EligibilityNudgeOutcome::Coalesced {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn restoration_waits_for_nudge_capacity_without_periodic_sweeps()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let (mut runtime, _unused_source) = fixture_runtime(&pool, RESTORATION_TEST_COOL_OFF)?;
+        let command = DurableCommandId::from_uuid(uuid::Uuid::now_v7());
+        let (dispatch, session) = commission_fixture(&runtime, command).await?;
+        let target = fixture_target();
+        let observation = fixture_observation();
+        runtime
+            .state
+            .record_dispatch_decision(
+                uuid::Uuid::now_v7(),
+                &target.repository,
+                target.pull_request,
+                &observation,
+                (dispatch.into_uuid(), session),
+                ConvergenceSweepDecision::LiveSession,
+            )
+            .await?;
+        assert_eq!(
+            runtime
+                .state
+                .record_no_model_activity_failure(
+                    uuid::Uuid::now_v7(),
+                    &target.repository,
+                    target.pull_request,
+                    &observation,
+                    session,
+                )
+                .await?,
+            ConvergenceSweepFailureDisposition::Parked
+        );
+        let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
+            EmptySweep,
+            None,
+            std::num::NonZeroUsize::new(1),
+        );
+        let occupying_session = signalbox_domain::SessionId::from_uuid(uuid::Uuid::now_v7());
+        assert_eq!(
+            nudge.nudge(occupying_session),
+            EligibilityNudgeOutcome::Enqueued
+        );
+        runtime.eligibility_nudge = nudge.clone();
+        let before = recorded_events(&pool).await?;
+        let (shutdown, receiver) = watch::channel(false);
+        let running = tokio::spawn(runtime.run(receiver));
+        wait_for_retained_nudge(&nudge, session).await?;
+        assert_eq!(recorded_events(&pool).await?, before);
+        assert_eq!(source.next().await?, occupying_session);
+        assert_eq!(
+            tokio::time::timeout(RESTORATION_TEST_TIMEOUT, source.next()).await??,
+            session
+        );
+        shutdown.send(true)?;
+        tokio::time::timeout(RESTORATION_TEST_TIMEOUT, running).await??;
         Ok(())
     }
 }
