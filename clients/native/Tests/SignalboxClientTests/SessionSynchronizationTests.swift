@@ -4,6 +4,44 @@ import XCTest
 @testable import SignalboxNative
 
 final class SessionSynchronizationTests: XCTestCase {
+  func testDelegationAndRetirementEventsPublishWithoutFullRefresh() throws {
+    let parent = try SynchronizationFixture.sessionID()
+    let child = try SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
+    let request = try SignalboxCanonicalUUID(validating: "33333333-3333-4333-8333-333333333333")
+    let events: [SignalboxProcessSessionEvent] = [
+      .goalTurnRetired(turnID: request),
+      .childSpawned(spawningRequestID: request, childSessionID: child, relationship: .background),
+      .childWaiting(awaitRequestID: request, spawningRequestID: request, childSessionID: child, mode: .background),
+      .sessionMessage(spawningRequestID: request, messageID: request, senderSessionID: child,
+        recipientSessionID: parent, ordinal: .init(rawValue: 1), deliverySequence: .init(rawValue: 1), content: "Update"),
+      .childResult(spawningRequestID: request, childSessionID: child, outcome: .returned, content: "Result",
+        reason: .childCompleted, provenance: .childTurn(childSessionID: child, childTurnID: request)),
+      .childLifecycleDisposition(spawningRequestID: request, childSessionID: child,
+        outcome: .cancelled, reason: .parentCancelled,
+        provenance: .parentTurnCommand(parentSessionID: parent, parentTurnID: request,
+          commandID: request, descendantScope: .parentAndDescendants)),
+    ]
+    for event in events {
+      var transport = try SynchronizationFixture.synchronizedTransport(cursor: SynchronizationFixture.initialCursor)
+      let effects = transport.send(.frame(generation: SynchronizationFixture.initialGeneration,
+        message: .sessionEvent(.init(cursor: .init(rawValue: SynchronizationFixture.unknownCursor), sessionID: parent, event: event))))
+      XCTAssertEqual(SynchronizationFixture.effectNames(effects), ["publish_event"], "\(event)")
+    }
+  }
+
+  func testChildTerminalCascadeRequestsAuthoritativeTranscript() throws {
+    let child = try SynchronizationFixture.sessionID()
+    let parent = try SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
+    var transport = try SynchronizationFixture.synchronizedTransport(cursor: SynchronizationFixture.initialCursor)
+    let event = SignalboxProcessSessionEvent.childLifecycleDisposition(
+      spawningRequestID: parent, childSessionID: child, outcome: .cancelled, reason: .parentCancelled,
+      provenance: .parentLifecycleCommand(parentSessionID: parent,
+        commandID: parent, descendantScope: .parentAndDescendants))
+    let effects = transport.send(.frame(generation: SynchronizationFixture.initialGeneration,
+      message: .sessionEvent(.init(cursor: .init(rawValue: SynchronizationFixture.unknownCursor), sessionID: child, event: event))))
+    XCTAssertEqual(SynchronizationFixture.effectNames(effects), ["publish_event", "request_side_snapshot", "arm_deadline"])
+  }
+
   func testScriptedTransportTraversesEverySynchronizationPhase() throws {
     let snapshotCursor = SynchronizationFixture.initialCursor
     var transport = try SynchronizationFixture.transport()

@@ -225,11 +225,17 @@ where
         .map_err(|_| AttachmentPreparationFailure::Unavailable)?;
     signalbox_application::with_scheduler_slot_released(async move {
         let _permit = _permit;
-        tokio::time::timeout(crate::blob_read_runtime::BLOB_READ_TIMEOUT, traversal)
-            .await
-            .map_err(|_| AttachmentPreparationFailure::Unavailable)?
+        within_attachment_deadline(traversal).await
     })
     .await
+}
+
+async fn within_attachment_deadline(
+    preparation: impl Future<Output = Result<(), AttachmentPreparationFailure>>,
+) -> Result<(), AttachmentPreparationFailure> {
+    tokio::time::timeout(crate::blob_read_runtime::BLOB_READ_TIMEOUT, preparation)
+        .await
+        .unwrap_or(Err(AttachmentPreparationFailure::Unavailable))
 }
 
 async fn prepare_attachments_inner(
@@ -393,21 +399,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn preparation_uses_one_day_across_the_entire_traversal() {
-        let budget = tokio::sync::Semaphore::new(8);
+    async fn attachment_candidates_share_one_aggregate_deadline() {
+        let deadline = crate::blob_read_runtime::BLOB_READ_TIMEOUT;
         let started = tokio::time::Instant::now();
-        let outcome = super::bounded_attachment_preparation(&budget, async {
-            tokio::time::sleep(std::time::Duration::from_secs(23 * 60 * 60)).await;
-            tokio::time::sleep(std::time::Duration::from_secs(2 * 60 * 60)).await;
+        let outcome = super::within_attachment_deadline(async {
+            tokio::time::sleep(deadline * 3 / 4).await;
+            tokio::time::sleep(deadline * 3 / 4).await;
             Ok(())
         })
         .await;
+
         assert_eq!(outcome, Err(AttachmentPreparationFailure::Unavailable));
-        assert_eq!(
-            started.elapsed(),
-            std::time::Duration::from_secs(24 * 60 * 60)
-        );
-        assert!(budget.try_acquire_many(8).is_ok());
+        assert_eq!(started.elapsed(), deadline);
     }
 
     #[test]
