@@ -5,13 +5,11 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CliDecodeFailure, CliDecodeFailureClass, CliProcessLabels,
-    CliSession, CliTerminalTextCapture, CompletionEvidence, CompletionFinish, DeliveryMode,
-    DiscardedField, ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation,
-    ObservationFact, ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
-    ProviderReportedModel, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
-    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolArgumentRedaction, ToolCallId,
-    ToolCallProposal, ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, redact_json,
-    redact_text, validate_provider_json_nesting,
+    CliSession, CompletionEvidence, CompletionFinish, DeliveryMode, ExchangeFacts, FinishReason,
+    LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
+    ProviderRequestId, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, validate_provider_json_nesting,
 };
 
 use crate::SUPPORTED_CLAUDE_CLI_VERSION;
@@ -57,8 +55,6 @@ pub(crate) struct EventDecoder<C> {
     undelivered_line: bool,
     proposal_indexes: HashMap<String, usize>,
     result_ids: HashSet<String>,
-    emitted_tool_ids: HashSet<String>,
-    redacted_tool_id_cursor: usize,
     next_part_index: u32,
     usage: TokenUsage,
     usage_reported: bool,
@@ -70,7 +66,6 @@ pub(crate) struct EventDecoder<C> {
 enum CliTerminal {
     Success {
         stop_reason: String,
-        retained_stop_reason: String,
     },
     Error {
         subtype: String,
@@ -107,8 +102,6 @@ impl<C: Clone> EventDecoder<C> {
             undelivered_line: false,
             proposal_indexes: HashMap::new(),
             result_ids: HashSet::new(),
-            emitted_tool_ids: HashSet::new(),
-            redacted_tool_id_cursor: 1,
             next_part_index: 0,
             usage: TokenUsage::unreported(),
             usage_reported: false,
@@ -128,7 +121,7 @@ impl<C: Clone> EventDecoder<C> {
     /// follows. The later terminal paths keep calling this so a stream that
     /// ended without a `result` still reports its (unreported) usage exactly as
     /// before, and so the nonzero-exit path cannot drop the fact entirely.
-    fn report_usage(&mut self, sink: &mut RedactingSink<'_, C>) {
+    fn report_usage(&mut self, sink: &mut (dyn ObservationSink<C> + Send)) {
         if self.usage_reported {
             return;
         }
@@ -142,7 +135,7 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn push(
         &mut self,
         line: &[u8],
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), DecodeFailure> {
         // Each line is examined on its own merits; nothing carries over except
         // `opened_tool_calls`, which is sticky by design.
@@ -175,10 +168,7 @@ impl<C: Clone> EventDecoder<C> {
             "assistant" => self.assistant(text, sink),
             "user" => self.user(value),
             "result" => self.result(value, sink),
-            "rate_limit_event" | "stream_event" => {
-                sink.extend_dropped_context(text);
-                Ok(())
-            }
+            "rate_limit_event" | "stream_event" => Ok(()),
             _ => Err(DecodeFailure::stream_protocol(format!(
                 "unrecognized Claude event type `{event_type}`"
             ))),
@@ -188,7 +178,7 @@ impl<C: Clone> EventDecoder<C> {
     fn system(
         &mut self,
         value: Value,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), DecodeFailure> {
         let subtype = value.get("subtype").and_then(Value::as_str);
         if matches!(
@@ -202,67 +192,15 @@ impl<C: Clone> EventDecoder<C> {
                     | "thinking_tokens"
             )
         ) {
-            let mut event = value;
-            if let Value::Object(members) = &mut event {
-                // Closed protocol metadata describes the envelope, not
-                // discarded provider content. In particular,
-                // `thinking_tokens` must not create a credential-shaped
-                // lookbehind merely because its name contains `token`, and
-                // repeated copies of the already-retained session identity
-                // must not accumulate as dropped content.
-                members.remove("type");
-                members.remove("subtype");
-                // That last exemption is a claim about the value, so it is
-                // checked rather than assumed. `session_id` is dropped only
-                // where it is provably the identity `system/init` retained; a
-                // differing value contradicts that correlation exactly as it
-                // does on a `result` event, and a value arriving before any
-                // init is not a repeated identity at all. Anything this
-                // predicate cannot vouch for stays provider-controlled content
-                // and seeds the dropped lookbehind, because a
-                // credential prefix discarded here would let its continuation
-                // escape the shape redactor in a later field.
-                match (
-                    members.get("session_id").and_then(Value::as_str),
-                    self.native_session_id.as_deref(),
-                ) {
-                    (Some(session), Some(native)) if session == native => {
-                        members.remove("session_id");
-                    }
-                    (Some(_), Some(_)) => {
-                        return Err(DecodeFailure::stream_protocol(
-                            "Claude lifecycle session contradicts system init",
-                        ));
-                    }
-                    _ => {}
-                }
-                members.retain(|_, value| !value.is_null());
-                if members.is_empty() {
-                    return Ok(());
-                }
+            if let (Some(session), Some(native)) = (
+                value.get("session_id").and_then(Value::as_str),
+                self.native_session_id.as_deref(),
+            ) && session != native
+            {
+                return Err(DecodeFailure::stream_protocol(
+                    "Claude lifecycle session contradicts system init",
+                ));
             }
-            let mut context = String::new();
-            let members = event.as_object().ok_or_else(|| {
-                DecodeFailure::stream_protocol("Claude system event is not an object")
-            })?;
-            for (name, value) in members {
-                if !context.is_empty() {
-                    context.push('\n');
-                }
-                context.push_str(name);
-                context.push(':');
-                if let Some(value) = value.as_str() {
-                    context.push_str(value);
-                } else {
-                    let value = serde_json::to_string(value).map_err(|error| {
-                        DecodeFailure::stream_protocol(format!(
-                            "Claude lifecycle event could not be retained for redaction: {error}"
-                        ))
-                    })?;
-                    context.push_str(&value);
-                }
-            }
-            sink.extend_dropped_context(&context);
             return Ok(());
         }
         if subtype != Some("init") || self.initialized {
@@ -319,8 +257,8 @@ impl<C: Clone> EventDecoder<C> {
                 "Claude init exposed an ambient instruction or plugin surface",
             ));
         }
-        let request_id = sink.redact_provider_id("", &event.session_id);
-        let model = sink.redact_provider_id(&request_id, &event.model);
+        let request_id = event.session_id.clone();
+        let model = event.model;
         self.native_session_id = Some(event.session_id);
         self.exchange.provider_request_id = Some(ProviderRequestId::new(request_id.clone()));
         self.reported_model = Some(ProviderReportedModel::new(model.clone()));
@@ -333,14 +271,13 @@ impl<C: Clone> EventDecoder<C> {
             correlation: self.correlation.clone(),
             fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(model.clone())),
         });
-        sink.seed_emitted_context(&model);
         Ok(())
     }
 
     fn assistant(
         &mut self,
         text: &str,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), DecodeFailure> {
         self.require_initialized()?;
         let event: AssistantEvent = decode_text(text)?;
@@ -377,16 +314,7 @@ impl<C: Clone> EventDecoder<C> {
             ));
         }
         if self.native_message_id.is_none() {
-            // The id leaves the adapter inside `CompletionEvidence.message_id`,
-            // where this message's own text sits beside it. Sanitizing alone is
-            // not enough: an id ending in a credential marker prefix (`api_`)
-            // beside a first text block opening `key=value` reconstructs the
-            // credential across the two retained fields. Register the id so the
-            // continuation is suppressed, without discarding the model chain the
-            // system-init event may still have live.
-            let sanitized = sink.redact_provider_id("", &event.message.id);
-            sink.add_emitted_identifier(&sanitized);
-            self.message_id = Some(ProviderMessageId::new(sanitized));
+            self.message_id = Some(ProviderMessageId::new(event.message.id.clone()));
             self.native_message_id = Some(event.message.id.clone());
         }
         if self
@@ -398,28 +326,9 @@ impl<C: Clone> EventDecoder<C> {
                 "Claude assistant model contradicts prior assistant content",
             ));
         }
-        // The provider-resolved model is accepted and then discarded: it is
-        // retained only to detect a later contradiction and leaves the adapter
-        // in no record, so an ambient delivery has no exact value to redact
-        // downstream. A marker prefix ending it (`api_`) beside a text block
-        // opening `key=value` still reconstructs the credential, so register it
-        // as a lookbehind chain of its own — the emitted chain belongs to the
-        // message id above, and the dropped chain to provider content this
-        // field does not sit in.
-        //
-        // Every assistant envelope repeats and discards this same field, and
-        // each repetition sits beside that envelope's own content blocks, so
-        // registration happens on every event rather than only the first:
-        // content that spends the lookbehind in one event would otherwise leave
-        // the next event's text unguarded. The check above has already proven a
-        // repeat equal to the stored value.
-        let repetition = if self.native_assistant_model.is_none() {
+        if self.native_assistant_model.is_none() {
             self.native_assistant_model = Some(event.message.model.clone());
-            DiscardedField::New
-        } else {
-            DiscardedField::Repeated
-        };
-        sink.add_discarded_field_identifier(&event.message.model, repetition);
+        }
         if let Some(usage) = event.message.usage {
             self.usage.absorb(message_usage(usage));
         }
@@ -443,22 +352,22 @@ impl<C: Clone> EventDecoder<C> {
         &mut self,
         block: AssistantContent,
         raw_block: &str,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), DecodeFailure> {
         match block {
             AssistantContent::Text { text } => {
                 if self.result_ids.is_empty() {
                     let index = self.take_part_index()?;
-                    sink.observe(Observation {
-                        correlation: self.correlation.clone(),
-                        fact: ObservationFact::TextDelta {
-                            index,
-                            text: text.clone(),
-                        },
-                    });
+                    if self.delivery == DeliveryMode::Streamed {
+                        sink.observe(Observation {
+                            correlation: self.correlation.clone(),
+                            fact: ObservationFact::TextDelta {
+                                index,
+                                text: text.clone(),
+                            },
+                        });
+                    }
                     self.content.push(AssistantPart::Text(text));
-                } else {
-                    sink.extend_dropped_context(&text);
                 }
             }
             AssistantContent::Thinking {
@@ -466,23 +375,23 @@ impl<C: Clone> EventDecoder<C> {
                 signature,
             } => {
                 let index = self.take_part_index()?;
-                sink.observe(Observation {
-                    correlation: self.correlation.clone(),
-                    fact: ObservationFact::ThinkingDelta {
-                        index,
-                        text: thinking.clone(),
-                    },
-                });
+                if self.delivery == DeliveryMode::Streamed {
+                    sink.observe(Observation {
+                        correlation: self.correlation.clone(),
+                        fact: ObservationFact::ThinkingDelta {
+                            index,
+                            text: thinking.clone(),
+                        },
+                    });
+                }
                 self.content.push(AssistantPart::Thinking {
                     text: thinking,
-                    signature: signature.map(|value| sink.redact_retained_metadata(&value)),
+                    signature,
                 });
             }
             AssistantContent::RedactedThinking { data } => {
                 self.take_part_index()?;
-                self.content.push(AssistantPart::RedactedThinking {
-                    data: sink.redact_retained_metadata(&data),
-                });
+                self.content.push(AssistantPart::RedactedThinking { data });
             }
             AssistantContent::ToolUse { id, name, input } => {
                 self.opened_tool_calls = true;
@@ -504,44 +413,27 @@ impl<C: Clone> EventDecoder<C> {
                     ));
                 }
                 let index = self.take_part_index()?;
-                let arguments = sink.redact_tool_arguments("", raw_arguments);
+                let arguments = raw_arguments.to_string();
                 self.proposal_indexes.insert(id.clone(), self.content.len());
-                match arguments {
-                    ToolArgumentRedaction::Admitted(arguments) => {
-                        // The proposal id leaves the adapter in `ToolCallProposed`
-                        // and in the retained assistant content, so later text sits
-                        // beside it for the same reason the message id does: an id
-                        // ending `api_` next to a following text block opening
-                        // `key=value` reconstructs the credential across the two
-                        // emitted fields.
-                        let sanitized_id = sink.redact_provider_id("", &id);
-                        sink.add_emitted_identifier(&sanitized_id);
-                        let proposal_id = self.unique_tool_id(&id, sanitized_id);
-                        let proposal = ToolCallProposal {
-                            id: ToolCallId::new(proposal_id),
-                            name: ToolName::new(name),
-                            arguments_json: arguments.clone(),
-                        };
-                        self.content.push(AssistantPart::ToolCall(proposal.clone()));
-                        if self.delivery == DeliveryMode::Streamed {
-                            sink.observe(Observation {
-                                correlation: self.correlation.clone(),
-                                fact: ObservationFact::ToolArgumentsDelta {
-                                    index,
-                                    fragment: arguments,
-                                },
-                            });
-                        }
-                        sink.observe(Observation {
-                            correlation: self.correlation.clone(),
-                            fact: ObservationFact::ToolCallProposed(proposal),
-                        });
-                    }
-                    ToolArgumentRedaction::Suppressed => {
-                        self.content
-                            .push(AssistantPart::SuppressedToolCall(ToolName::new(name)));
-                    }
+                let proposal = ToolCallProposal {
+                    id: ToolCallId::new(id),
+                    name: ToolName::new(name),
+                    arguments_json: arguments.clone(),
+                };
+                self.content.push(AssistantPart::ToolCall(proposal.clone()));
+                if self.delivery == DeliveryMode::Streamed {
+                    sink.observe(Observation {
+                        correlation: self.correlation.clone(),
+                        fact: ObservationFact::ToolArgumentsDelta {
+                            index,
+                            fragment: arguments,
+                        },
+                    });
                 }
+                sink.observe(Observation {
+                    correlation: self.correlation.clone(),
+                    fact: ObservationFact::ToolCallProposed(proposal),
+                });
             }
             AssistantContent::Other => {
                 return Err(DecodeFailure::stream_protocol(
@@ -577,7 +469,7 @@ impl<C: Clone> EventDecoder<C> {
     fn result(
         &mut self,
         value: Value,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), DecodeFailure> {
         self.require_initialized()?;
         let event: ResultEvent = decode(value)?;
@@ -608,21 +500,14 @@ impl<C: Clone> EventDecoder<C> {
                     "Claude success lacks the completed terminal reason",
                 ));
             }
-            let retained_stop_reason = match finish_reason(&stop_reason) {
-                FinishReason::Unrecognized { .. } => sink.redact_retained_metadata(&stop_reason),
-                _ => stop_reason.clone(),
-            };
-            let finish = finish_reason_with_token(&stop_reason, &retained_stop_reason);
-            sink.finish();
+            let finish = finish_reason(&stop_reason);
+
             self.finish_reported = Some(finish.clone());
             sink.observe(Observation {
                 correlation: self.correlation.clone(),
                 fact: ObservationFact::FinishReported(finish),
             });
-            self.terminal = Some(CliTerminal::Success {
-                stop_reason,
-                retained_stop_reason,
-            });
+            self.terminal = Some(CliTerminal::Success { stop_reason });
         } else if event.is_error {
             let message = event.errors.join("; ");
             let message = if message.is_empty() {
@@ -646,7 +531,7 @@ impl<C: Clone> EventDecoder<C> {
         Ok(())
     }
 
-    pub(crate) fn finish(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
+    pub(crate) fn finish(mut self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
         let Some(terminal) = self.terminal.take() else {
             return self.loss(LossCause::StreamEndedWithoutTerminalMarker {
                 interruption: signalbox_model_runtime::StreamInterruption::EndOfStream,
@@ -659,8 +544,7 @@ impl<C: Clone> EventDecoder<C> {
                 message,
             } => {
                 let kind = classify_error(status, &subtype, &message);
-                let subtype = sink.redact_retained_metadata(&subtype);
-                let message = sink.redact_retained_metadata(&message);
+
                 self.report_usage(sink);
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
                     exchange: self.exchange,
@@ -675,12 +559,8 @@ impl<C: Clone> EventDecoder<C> {
                     usage: self.usage,
                 });
             }
-            CliTerminal::Success {
-                stop_reason,
-                retained_stop_reason,
-            } => (stop_reason, retained_stop_reason),
+            CliTerminal::Success { stop_reason } => stop_reason,
         };
-        let (stop_reason, retained_stop_reason) = stop_reason;
         if self.proposal_indexes.len() != self.result_ids.len() {
             self.report_usage(sink);
             return self.loss(LossCause::ResponseUnintelligible {
@@ -695,8 +575,7 @@ impl<C: Clone> EventDecoder<C> {
                     detail: "Claude refusal also proposed a tool".to_string(),
                 });
             }
-            let mut capture = sink.take_terminal_text_capture();
-            let content = self.redacted_content(&mut capture);
+            let content = self.retained_content();
             self.report_usage(sink);
             return TerminalEvidence::Refused(RefusalEvidence {
                 reason: signalbox_model_runtime::RefusalReason::Unspecified,
@@ -720,15 +599,14 @@ impl<C: Clone> EventDecoder<C> {
             self.report_usage(sink);
             return self.loss(LossCause::ResponseUnintelligible { detail });
         }
-        let mut capture = sink.take_terminal_text_capture();
-        let content = self.redacted_content(&mut capture);
+        let content = self.retained_content();
         self.report_usage(sink);
         if content.is_empty() {
             return self.loss(LossCause::ResponseUnintelligible {
                 detail: "Claude terminal success carried no typed assistant content".to_string(),
             });
         }
-        let finish = completion_finish(&stop_reason, &retained_stop_reason);
+        let finish = completion_finish(&stop_reason);
         TerminalEvidence::Completed(CompletionEvidence {
             exchange: self.exchange,
             message_id: self.message_id,
@@ -743,7 +621,7 @@ impl<C: Clone> EventDecoder<C> {
         mut self,
         fallback: &str,
         fallback_kind: ProviderErrorKind,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
         // Every other terminal path reports usage before returning its evidence;
         // this one must too, or a result that stated usage and was then followed
@@ -767,8 +645,7 @@ impl<C: Clone> EventDecoder<C> {
                 ProviderErrorKind::Unrecognized => fallback_kind,
                 determined => determined,
             };
-            let subtype = sink.redact_retained_metadata(&subtype);
-            let message = sink.redact_retained_metadata(&message);
+
             TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: self.exchange,
                 reported_model: self.reported_model,
@@ -804,7 +681,7 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn boundary_loss_unless_provider_failure(
         self,
         cause: LossCause,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
         if matches!(self.terminal, Some(CliTerminal::Error { .. })) {
             let kind = classify_error(None, "process_exit", "Claude reported an error");
@@ -836,20 +713,6 @@ impl<C: Clone> EventDecoder<C> {
         Ok(index)
     }
 
-    /// Preserves typed correlation when credential redaction changes native tool ids.
-    fn unique_tool_id(&mut self, native: &str, sanitized: String) -> String {
-        if sanitized == native && self.emitted_tool_ids.insert(sanitized.clone()) {
-            return sanitized;
-        }
-        loop {
-            let candidate = format!("claude-redacted-call-{}", self.redacted_tool_id_cursor);
-            self.redacted_tool_id_cursor += 1;
-            if self.emitted_tool_ids.insert(candidate.clone()) {
-                return candidate;
-            }
-        }
-    }
-
     fn validate_tool_requirement(&self) -> Result<(), String> {
         match &self.tool_requirement {
             ToolRequirement::Optional => Ok(()),
@@ -857,9 +720,6 @@ impl<C: Clone> EventDecoder<C> {
                 Err("Claude did not satisfy the required any-tool choice".to_string())
             }
             ToolRequirement::Any => Ok(()),
-            // Suppression withholds a proposal's arguments, never its admitted
-            // tool name, so a suppressed foreign proposal violates the choice
-            // exactly as an admitted one does.
             ToolRequirement::Named(name)
                 if self.proposal_indexes.is_empty()
                     || self.content.iter().any(|part| match part {
@@ -880,51 +740,10 @@ impl<C: Clone> EventDecoder<C> {
         }
     }
 
-    fn redacted_content(&mut self, capture: &mut TerminalTextCapture) -> Vec<AssistantPart> {
+    fn retained_content(&mut self) -> Vec<AssistantPart> {
         self.content
             .drain(..)
-            .zip(0_u32..)
-            .filter_map(|(part, index)| match part {
-                AssistantPart::Text(text) => {
-                    let text = capture.take_text(index).unwrap_or_else(|| {
-                        if text.is_empty() {
-                            String::new()
-                        } else {
-                            REDACTED.to_string()
-                        }
-                    });
-                    (!text.is_empty()).then_some(AssistantPart::Text(text))
-                }
-                AssistantPart::Thinking { text, signature } => {
-                    let text = capture.take_thinking(index).unwrap_or_else(|| {
-                        if text.is_empty() {
-                            text
-                        } else {
-                            REDACTED.to_string()
-                        }
-                    });
-                    Some(AssistantPart::Thinking {
-                        text,
-                        signature: signature.map(|value| redact_text(&value)),
-                    })
-                }
-                AssistantPart::RedactedThinking { data } => Some(AssistantPart::RedactedThinking {
-                    data: redact_text(&data),
-                }),
-                AssistantPart::ProviderReasoning { item_json } => {
-                    Some(AssistantPart::ProviderReasoning { item_json })
-                }
-                AssistantPart::ProviderCompaction { block_json } => {
-                    Some(AssistantPart::ProviderCompaction { block_json })
-                }
-                AssistantPart::ToolCall(mut call) => {
-                    call.arguments_json = redact_json(&call.arguments_json);
-                    Some(AssistantPart::ToolCall(call))
-                }
-                AssistantPart::SuppressedToolCall(name) => {
-                    Some(AssistantPart::SuppressedToolCall(name))
-                }
-            })
+            .filter(|part| !matches!(part, AssistantPart::Text(text) if text.is_empty()))
             .collect()
     }
 
@@ -1022,30 +841,22 @@ fn result_usage(value: crate::wire::ResultUsage) -> TokenUsage {
 }
 
 fn finish_reason(token: &str) -> FinishReason {
-    finish_reason_with_token(token, token)
-}
-
-fn finish_reason_with_token(token: &str, retained_token: &str) -> FinishReason {
     match token {
         "end_turn" => FinishReason::EndTurn,
         "refusal" => FinishReason::Refusal,
         "max_tokens" => FinishReason::MaxOutputTokens,
         "tool_use" => FinishReason::ToolUse,
         other => FinishReason::Unrecognized {
-            provider_token: if retained_token == token {
-                other.to_string()
-            } else {
-                retained_token.to_string()
-            },
+            provider_token: other.to_string(),
         },
     }
 }
 
-fn completion_finish(token: &str, retained_token: &str) -> CompletionFinish {
-    finish_reason_with_token(token, retained_token)
+fn completion_finish(token: &str) -> CompletionFinish {
+    finish_reason(token)
         .completion_finish()
         .unwrap_or(CompletionFinish::Unrecognized {
-            provider_token: retained_token.to_string(),
+            provider_token: token.to_string(),
         })
 }
 
@@ -1084,13 +895,6 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         &self.correlation
     }
 
-    fn terminal_text_capture(&self) -> CliTerminalTextCapture {
-        match self.delivery {
-            DeliveryMode::Buffered => CliTerminalTextCapture::TerminalOnly,
-            DeliveryMode::Streamed => CliTerminalTextCapture::StreamAndTerminal,
-        }
-    }
-
     fn terminal_observed(&self) -> bool {
         EventDecoder::terminal_observed(self)
     }
@@ -1098,7 +902,7 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
     fn push(
         &mut self,
         line: &[u8],
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), CliDecodeFailure> {
         EventDecoder::push(self, line, sink).map_err(|error| {
             CliDecodeFailure::new(
@@ -1114,7 +918,7 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         EventDecoder::loss_at_decode_failure(self, LossCause::StreamProtocolViolation { detail })
     }
 
-    fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
+    fn finish(self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
         EventDecoder::finish(self, sink)
     }
 
@@ -1137,7 +941,7 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
     fn boundary_loss_unless_provider_failure(
         self,
         cause: LossCause,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
         EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
     }
@@ -1146,7 +950,7 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         self,
         message: &str,
         classification: &str,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
         let kind = classify_error(None, "process_exit", classification);
         EventDecoder::provider_error_after_exit(self, message, kind, sink)
