@@ -182,7 +182,13 @@ instead consumes the wait, opens a fresh immediate successor with its applied
 interrupt proof, ends it AfterCancellation(Cancelled), and appends TurnCancelled
 after the wait frontier while reclassifying pending steering.
 
+A due deadline makes a wait eligible through the scheduler's existing
+reconciliation sweep. A durable member-availability update or a successful
+operator clear grants eligibility to waits naming that member in the same
+transaction. Eligibility prepares no call and consumes no wait. Startup alone
+leaves exhausted waits unchanged; deadline-free waits have no timer.
+
 ## Planned
 
-- Contention and capacity reservations, wake delivery, and the typed wait
-  projection ([design](../design/credential-availability.md)).
+- Contention and capacity reservations, their startup re-evaluation, and the
+  typed wait projection ([design](../design/credential-availability.md)).

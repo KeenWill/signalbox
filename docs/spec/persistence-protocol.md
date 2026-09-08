@@ -595,6 +595,9 @@ evidence, the latest frontier and optional deadline. Its released successor
 names the consumed wait and retains any predecessor call and non-acceptance
 proof. Release commits the successor's prepared call or terminal disposition
 with wait consumption; re-parking replaces evidence and deadline in place.
+Member-availability updates and successful exclusion clears grant named waits
+eligibility in their committing transactions; replayed or ineffective clears
+grant none. The scheduler rechecks due deadlines and eligible waits.
 
 Runner replacement and abandonment commit the placement move, terminal command
 result, and one runner-state-transition event per affected session atomically.
@@ -640,6 +643,4 @@ retaining registration and history.
 - Credential-pool state, capacity reservations, and availability-wait storage:
   [persistence-protocol design](../design/persistence-protocol.md).
 - A producer for the session-state-changed outbox event:
-  [persistence-protocol design](../design/persistence-protocol.md).
-- OAuth refresh member-availability wakeups:
   [persistence-protocol design](../design/persistence-protocol.md).

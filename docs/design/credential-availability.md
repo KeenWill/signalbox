@@ -42,10 +42,6 @@ two wakes matter because the wait also records excluded members, and one can
 become admissible while every bounded member stays saturated. A restart alone is
 not a wake.
 
-An exhausted wait becomes eligible at its deadline, on a durable
-member-availability update, or on an operator clear. A deadline-free wait has no
-timer.
-
 Wait-transition failure after a predecessor call needs a wire shape correlating
 that call with a terminal attempt that owns no call. The provider cause remains
 the predecessor's; the terminal evidence never reports pool exhaustion.

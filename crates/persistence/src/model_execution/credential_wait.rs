@@ -167,7 +167,7 @@ pub(super) async fn prepare_release(
     session_id: SessionId,
     successor: TurnAttemptId,
 ) -> Result<Option<CredentialAvailabilityWait>, ModelCallRepositoryError> {
-    let waiting = sqlx::query("SELECT wait_attempt_id, turn_id, pool_policy_id, eligible FROM credential_availability_wait WHERE session_id = $1 AND consumed_by_attempt_id IS NULL")
+    let waiting = sqlx::query("SELECT wait_attempt_id, turn_id, pool_policy_id, credential_wait_is_eligible(wait_attempt_id) AS eligible FROM credential_availability_wait WHERE session_id = $1 AND consumed_by_attempt_id IS NULL")
         .bind(session_id.into_uuid()).fetch_optional(&mut *connection).await?;
     let Some(waiting) = waiting else {
         return Ok(None);

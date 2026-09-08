@@ -77,6 +77,12 @@ impl PostgresEligibilitySweep {
         let scan_through = self.scan_through.map(session_id_to_uuid);
         let rows = sqlx::query_as::<_, (Uuid, Uuid, bool)>(
             "WITH swept AS (
+                SELECT waiting.session_id FROM credential_availability_wait waiting
+                  JOIN turn_lifecycle active ON active.turn_id = waiting.turn_id AND active.session_id = waiting.session_id
+                 WHERE active.state_kind = 'active' AND NOT active.delegation_runtime_terminal
+                   AND goal_turn_is_runtime_relevant(active.session_id, active.turn_id)
+                   AND credential_wait_is_eligible(waiting.wait_attempt_id)
+                UNION
                 SELECT queued.session_id
                   FROM turn_lifecycle AS queued
                  WHERE queued.state_kind = 'queued'

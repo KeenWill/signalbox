@@ -361,6 +361,11 @@ impl PostgresToolLoopRepository {
                 AND state_kind = 'active'
                 AND goal_turn_is_runtime_relevant(session_id, turn_id)
                 AND (
+                    EXISTS (SELECT 1 FROM credential_availability_wait waiting
+                        WHERE waiting.turn_id = turn_lifecycle.turn_id
+                          AND waiting.session_id = turn_lifecycle.session_id
+                          AND credential_wait_is_eligible(waiting.wait_attempt_id))
+                    OR
                     EXISTS (
                         SELECT 1
                           FROM model_call AS prepared

@@ -68,12 +68,6 @@ A session-state-changed event is appended, through the outbox append, in the
 transaction that commits a nonterminal session state change; the transition to
 terminal has its own event. Its typed record and decoder exist.
 
-The replace-and-clear commit publishes the durable member-availability update
-that wakes a parked deadline-free exhausted wait, as every accepted exclusion
-clear does in its own transaction, and a clear that removes no exclusion
-publishes nothing. Delivery of OAuth material to a model call is owned by
-[configuration-and-credentials](../spec/configuration-and-credentials.md).
-
 ## Compatibility constraints
 
 No writer produces imported-create storage version 4, and the version gate keeps
