@@ -483,7 +483,7 @@ export const commandRegistry = [
   },
   {
     id: 'imports.continue.retry',
-    title: 'Retry exact imported continuation',
+    title: 'Retry import continuation',
     description: 'Replay the retained imported-continuation command without changing its payload.',
     category: 'Imports',
     bindings: [],
@@ -492,7 +492,7 @@ export const commandRegistry = [
   },
   {
     id: 'imports.continue.abandon',
-    title: 'Abandon exact imported continuation',
+    title: 'Abandon import continuation',
     description: 'Discard the retained imported-continuation command after explicit confirmation.',
     category: 'Imports',
     bindings: [],

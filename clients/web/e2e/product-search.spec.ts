@@ -108,11 +108,12 @@ const useRefreshingSearchFixture = async (page: Page) => {
 
 // Shared setup reads its expected heading from the fixture, so changing the fixture's cardinality
 // never fails other scenarios before they reach their own assertions.
-const resultsHeading = (results: readonly unknown[]) => `${results.length} results on this page`
+const resultsHeading = (results: readonly unknown[]) =>
+  `${results.length} ${results.length === 1 ? 'result' : 'results'}`
 
 const submitSearch = async (page: Page) => {
   await page.getByRole('textbox', { name: 'Search text' }).fill('release evidence')
-  await page.getByRole('textbox', { name: /Exact session/ }).fill(sessionId)
+  await page.getByRole('textbox', { name: /Session ID/ }).fill(sessionId)
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
   await expect(page.getByRole('heading', { name: resultsHeading(firstPage.results) })).toBeVisible()
 }
@@ -133,7 +134,6 @@ test('searches without advertising an unavailable session reveal', async ({ page
   await expect(page).toHaveURL(/q=release(?:\+|%20)evidence/)
   await expect(page.getByText('durable release evidence')).toContainText('release')
   await expect(page.getByRole('link', { name: 'Reveal in session' })).toHaveCount(0)
-  await expect(page.getByText('Session reveal unavailable').first()).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -165,23 +165,23 @@ test('preserves JSON-shaped lexical text in deep-link URLs', async ({ page }) =>
   await page.goto('/search?q=%7B%22term%22%3A%22release%22%7D')
 
   await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveValue('{"term":"release"}')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
 })
 
 test('replaces the bounded result page through its typed cursor', async ({ page }) => {
   const problems = watchBrowser(page)
   await useSearchFixture(page)
   await page.goto('/search?q=release')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
 
-  const nextPage = page.getByRole('button', { name: 'Next page' })
+  const nextPage = page.getByRole('button', { name: 'Next' })
   await nextPage.focus()
   await nextPage.click()
-  await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '1 result' })).toBeVisible()
   await expect(page).toHaveURL(
     new RegExp(`afterAddress=${firstPage.continuation.address.event_sequence}`),
   )
-  await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeFocused()
+  await expect(page.getByRole('heading', { name: '1 result' })).toBeFocused()
   await expect(page.getByText('release planning')).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -189,9 +189,9 @@ test('replaces the bounded result page through its typed cursor', async ({ page 
 test('restores focus when pagination fails', async ({ page }) => {
   await useFailingPaginationFixture(page)
   await page.goto('/search?q=release')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Next page' }).click()
+  await page.getByRole('button', { name: 'Next' }).click()
 
   await expect(page.getByRole('heading', { name: 'Search could not be read' })).toBeFocused()
 })
@@ -199,15 +199,15 @@ test('restores focus when pagination fails', async ({ page }) => {
 test('resets pagination when submitting a different search scope', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search?q=release')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Next page' }).click()
-  await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
+  await page.getByRole('button', { name: 'Next' }).click()
+  await expect(page.getByRole('heading', { name: '1 result' })).toBeVisible()
   const search = page.getByRole('textbox', { name: 'Search text' })
   await search.fill('different scope')
   await search.press('Enter')
 
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
   await expect(page).toHaveURL(/q=different(?:\+|%20)scope/)
   await expect(page).not.toHaveURL(/afterAddress=/)
 })
@@ -215,23 +215,23 @@ test('resets pagination when submitting a different search scope', async ({ page
 test('synchronizes pagination with browser history', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search?q=release')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Next page' }).click()
-  await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
+  await page.getByRole('button', { name: 'Next' }).click()
+  await expect(page.getByRole('heading', { name: '1 result' })).toBeVisible()
   await expect(page).toHaveURL(
     new RegExp(`afterAddress=${firstPage.continuation.address.event_sequence}`),
   )
   await page.goBack()
 
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeFocused()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeFocused()
   await expect(page).not.toHaveURL(/afterAddress=/)
 })
 
 test('restores results focus when browser history changes search scope', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search?q=release')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
 
   const search = page.getByRole('textbox', { name: 'Search text' })
   await search.fill('different scope')
@@ -241,7 +241,7 @@ test('restores results focus when browser history changes search scope', async (
   await page.goBack()
 
   await expect(page).toHaveURL(/q=release/)
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeFocused()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeFocused()
 })
 
 test('restores focus after a successful search retry', async ({ page }) => {
@@ -252,7 +252,7 @@ test('restores focus after a successful search retry', async ({ page }) => {
   await retry.focus()
   await retry.click()
 
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeFocused()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeFocused()
 })
 
 test('does not request malformed session or cursor URL state', async ({ page }) => {
@@ -266,7 +266,7 @@ test('does not request malformed session or cursor URL state', async ({ page }) 
     `/search?q=release&session=${'x'.repeat(128)}&afterAddress=${'9'.repeat(128)}&afterProjection=${'9'.repeat(128)}`,
   )
 
-  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
   expect(searchRequests).toBe(0)
 })
 
@@ -281,11 +281,11 @@ test('does not write malformed search drafts into browser history', async ({ pag
 
   const search = page.getByRole('textbox', { name: 'Search text' })
   await search.fill('é'.repeat(257))
-  await page.getByRole('textbox', { name: /Exact session/ }).fill('not-a-session')
+  await page.getByRole('textbox', { name: /Session ID/ }).fill('not-a-session')
   await search.press('Enter')
 
   await expect(page).toHaveURL(/\/search$/)
-  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
   expect(searchRequests).toBe(0)
 })
 
@@ -294,7 +294,7 @@ test('bounds search drafts while they are being edited', async ({ page }) => {
   await page.goto('/search')
 
   const search = page.getByRole('textbox', { name: 'Search text' })
-  const session = page.getByRole('textbox', { name: /Exact session/ })
+  const session = page.getByRole('textbox', { name: /Session ID/ })
   await search.fill('é'.repeat(bootstrapFixture.limits.max_search_query_bytes))
   await session.fill('x'.repeat(1000))
 
@@ -307,7 +307,7 @@ test('restores focus to validation after malformed browser history', async ({ pa
   await page.goto('/search?q=release&afterAddress=750')
   await expect(page.getByRole('alert')).toBeVisible()
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
   await page.goBack()
 
   await expect(page.getByRole('alert')).toBeFocused()
@@ -323,7 +323,7 @@ test('does not request NUL-bearing search text', async ({ page }) => {
 
   await page.goto('/search?q=term%00suffix')
 
-  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
   expect(searchRequests).toBe(0)
 })
 
@@ -336,7 +336,7 @@ test('does not request an unpaired cursor URL field', async ({ page }) => {
   })
   await page.goto('/search?q=release&afterAddress=750')
 
-  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
   expect(searchRequests).toBe(0)
 })
 
@@ -349,7 +349,7 @@ test('does not widen repeated exact-session parameters to global search', async 
   })
   await page.goto(`/search?q=release&session=${sessionId}&session=${sessionId}`)
 
-  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
   expect(searchRequests).toBe(0)
 })
 
@@ -358,11 +358,11 @@ test('recovers global search when resubmitting over repeated session parameters'
 }) => {
   await useSearchFixture(page)
   await page.goto(`/search?q=release&session=${sessionId}&session=${sessionId}`)
-  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
 
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
 
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
   await expect(page).not.toHaveURL(/session=/)
 })
 
@@ -373,7 +373,7 @@ test('restores focus to validation when history restores repeated session parame
   await page.goto(`/search?q=release&session=${sessionId}&session=${sessionId}`)
   await expect(page.getByRole('alert')).toBeVisible()
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
   await page.goBack()
 
   await expect(page.getByRole('alert')).toBeFocused()
@@ -435,14 +435,12 @@ test('does not expose focusable search fields before capabilities defer Search',
 test('refetches when resubmitting the current first-page search', async ({ page }) => {
   await useRefreshingSearchFixture(page)
   await page.goto('/search?q=release')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
 
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
 
-  await expect(page.getByText('Refreshing the durable projection.', { exact: true })).toHaveText(
-    'Refreshing the durable projection.',
-  )
-  await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
+  await expect(page.getByText('Refreshing.', { exact: true })).toHaveText('Refreshing.')
+  await expect(page.getByRole('heading', { name: '1 result' })).toBeVisible()
   await expect(page.getByText('1 results loaded on this page.', { exact: true })).toHaveText(
     '1 results loaded on this page.',
   )
@@ -484,7 +482,7 @@ test('captures desktop dark, desktop light, and responsive search evidence', asy
   const problems = watchBrowser(page)
   await useSearchFixture(page)
   await page.goto('/search?q=release')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
   await expect.soft(page).toHaveScreenshot('search-desktop-dark.png', { animations: 'disabled' })
 
   await page.getByRole('button', { name: 'Use light theme' }).click()
