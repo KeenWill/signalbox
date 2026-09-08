@@ -462,7 +462,7 @@ pub struct SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
     pub stored_actor: Actor,
     pub result_session: SessionId,
     pub result_digest: BlobDigest,
-    pub verified_prefix: boxed::Box<[BlobDigest]>,
+    pub verified_prefix: option::Option<boxed::Box<[BlobDigest]>>,
 }
 // derives: clone::Clone, fmt::Debug
 ```
