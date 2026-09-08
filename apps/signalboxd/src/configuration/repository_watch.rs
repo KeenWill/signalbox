@@ -575,6 +575,7 @@ fn parse_repository_watch_webhook_configuration(
         .map(|item| {
             item.as_str()
                 .and_then(|value| value.parse::<SocketAddr>().ok())
+                .filter(|address| address.port() != 0)
                 .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
         })
         .transpose()?

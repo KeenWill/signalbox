@@ -972,6 +972,9 @@ where
 /// A structurally invalid frame value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameValidationError {
+    /// A runner-status page or diagnostic violates its closed shape.
+    #[error("runner-status frame shape is inconsistent")]
+    RunnerStatusShape,
     #[error("OAuth credential frame shape is inconsistent")]
     /// An OAuth profile or device-authorization detail violates its bounds.
     OauthCredentialShape,
