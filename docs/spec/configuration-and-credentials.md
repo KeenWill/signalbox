@@ -502,7 +502,8 @@ from HTTP status alone.
 
 Blob descriptor, content, and download routes reject
 `Sec-Fetch-Site: cross-site` with a 403 `cross_site_blob_request_rejected`
-before storage access. Other or absent fetch-site values pass this gate.
+before storage access. This rejection precedes the loopback authority check.
+Other or absent fetch-site values pass this gate.
 
 Browser mutation routes use POST, require `application/json`, and when `Origin`
 is supplied require its host and effective port to equal the request `Host`

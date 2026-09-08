@@ -15,10 +15,11 @@ pub(super) async fn validate_loopback_host(request: Request, next: Next) -> Resp
 }
 
 pub(super) async fn validate_blob_fetch_site(request: Request, next: Next) -> Response {
-    if request
-        .headers()
-        .get("sec-fetch-site")
-        .is_some_and(|site| site == "cross-site")
+    if request.uri().path().starts_with("/api/blobs/")
+        && request
+            .headers()
+            .get("sec-fetch-site")
+            .is_some_and(|site| site == "cross-site")
     {
         return transport_error(
             StatusCode::FORBIDDEN,
