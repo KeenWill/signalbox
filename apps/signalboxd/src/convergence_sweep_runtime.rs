@@ -262,6 +262,13 @@ impl ConvergenceSweepRuntime {
                                                 }
                                             } => return,
                                         }
+                                        if let Err(error) = runtime.state.acknowledge_reenrollment_nudge(
+                                            &target.repository, target.pull_request, session,
+                                        ).await {
+                                            tracing::error!(cause = %error, "convergence re-enrollment nudge acknowledgement failed; retrying on the next tick");
+                                            drop(permit);
+                                            continue;
+                                        }
                                     }
                                     reenrolled = true;
                                 }
@@ -1458,6 +1465,17 @@ mod tests {
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn restoration_waits_for_nudge_capacity_without_periodic_sweeps()
     -> Result<(), Box<dyn Error>> {
+        restoration_retains_nudge(false).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn restoration_retries_the_pending_nudge_after_worker_restart()
+    -> Result<(), Box<dyn Error>> {
+        restoration_retains_nudge(true).await
+    }
+
+    async fn restoration_retains_nudge(restart_worker: bool) -> Result<(), Box<dyn Error>> {
         let (_container, pool) = migrated_postgres().await?;
         let (mut runtime, _unused_source) = fixture_runtime(&pool, RESTORATION_TEST_COOL_OFF)?;
         let command = DurableCommandId::from_uuid(uuid::Uuid::now_v7());
@@ -1500,10 +1518,21 @@ mod tests {
         );
         runtime.eligibility_nudge = nudge.clone();
         let before = recorded_events(&pool).await?;
-        let (shutdown, receiver) = watch::channel(false);
-        let running = tokio::spawn(runtime.run(receiver));
+        let (mut shutdown, receiver) = watch::channel(false);
+        let mut running = tokio::spawn(runtime.run(receiver));
         wait_for_retained_nudge(&nudge, session).await?;
         assert_eq!(recorded_events(&pool).await?, before);
+        if restart_worker {
+            shutdown.send(true)?;
+            tokio::time::timeout(RESTORATION_TEST_TIMEOUT, running).await??;
+            let (mut restarted, _unused_source) =
+                fixture_runtime(&pool, RESTORATION_TEST_COOL_OFF)?;
+            restarted.eligibility_nudge = nudge.clone();
+            let (restart_shutdown, receiver) = watch::channel(false);
+            shutdown = restart_shutdown;
+            running = tokio::spawn(restarted.run(receiver));
+            wait_for_retained_nudge(&nudge, session).await?;
+        }
         assert_eq!(source.next().await?, occupying_session);
         assert_eq!(
             tokio::time::timeout(RESTORATION_TEST_TIMEOUT, source.next()).await??,

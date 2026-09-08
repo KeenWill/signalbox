@@ -87,6 +87,8 @@ template and the timing policy, and each repository lists its
 predicate described in [review workflows](review-workflows.md). The sweep
 evaluates one revalidated snapshot and uses that verdict for its decision. After
 restoring a parked session, re-enrollment waits for scheduler nudge capacity.
+The target retains the session reference until that handoff is acknowledged, so
+restart retries an interrupted handoff.
 
 The daemon composes the repository-watch module when `[repository_watch]` is
 configured and enabled. Dispatch actions and lifecycle reactions are retained in

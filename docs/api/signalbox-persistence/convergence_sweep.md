@@ -156,6 +156,12 @@ impl convergence_sweep::PostgresConvergenceSweepStore {
         option::Option<signalbox_domain::SessionId>,
         convergence_sweep::ConvergenceSweepStoreError,
     >;
+    pub async fn acknowledge_reenrollment_nudge(
+        &self,
+        repository: &signalbox_domain::RepositorySlug,
+        pull_request: signalbox_domain::PullRequestNumber,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<(), convergence_sweep::ConvergenceSweepStoreError>;
     pub async fn load_target(
         &self,
         repository: &signalbox_domain::RepositorySlug,

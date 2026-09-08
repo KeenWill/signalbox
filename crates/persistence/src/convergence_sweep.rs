@@ -399,9 +399,9 @@ impl PostgresConvergenceSweepStore {
         Ok(restored)
     }
 
-    /// Re-enrolls one configured target, making daemon restart its explicit recovery path.
+    /// Restores a configured target's session and retains its durable nudge handoff.
     ///
-    /// Returns the session restored when re-enrollment clears a commissioned park.
+    /// A returned session remains pending until its scheduler nudge is acknowledged.
     pub async fn reenroll_target(
         &self,
         repository: &RepositorySlug,
@@ -409,7 +409,7 @@ impl PostgresConvergenceSweepStore {
     ) -> Result<Option<SessionId>, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
-        let parked_session: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+        let parked_session = sqlx::query_scalar::<_, Option<Uuid>>(
             "SELECT parked_session_id
                FROM convergence_sweep_target
               WHERE repository = $1 AND pull_request_number = $2
@@ -420,37 +420,36 @@ impl PostgresConvergenceSweepStore {
         .bind(convergence_sweep_state_to_str(
             ConvergenceSweepStateStorageKind::Parked,
         ))
-        .fetch_one(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "UPDATE convergence_sweep_target
-                SET state_kind = $3, failure_kind = NULL,
-                    consecutive_failures = 0, retry_not_before = NULL,
-                    parked_at = NULL, operator_need = NULL,
-                    parked_dispatch_id = NULL, parked_session_id = NULL,
-                    parked_dispatched_at = NULL
-              WHERE repository = $1 AND pull_request_number = $2
-                AND state_kind = $4",
-        )
-        .bind(repository.as_str())
-        .bind(Decimal::from(pull_request.get()))
-        .bind(convergence_sweep_state_to_str(
-            ConvergenceSweepStateStorageKind::Observed,
-        ))
-        .bind(convergence_sweep_state_to_str(
-            ConvergenceSweepStateStorageKind::Parked,
-        ))
-        .execute(&mut *transaction)
-        .await?;
-        let restored = if let Some(parked_session) = parked_session {
-            restore_commissioned_dispatch_park(&mut transaction, parked_session)
-                .await?
-                .then_some(SessionId::from_uuid(parked_session))
+        .fetch_optional(&mut *transaction)
+        .await?
+        .flatten();
+        if let Some(session) = parked_session {
+            restore_commissioned_dispatch_park(&mut transaction, session).await?;
         } else {
-            None
-        };
+            clear_reenrollment_park(&mut transaction, repository, pull_request, None).await?;
+        }
         transaction.commit().await?;
-        Ok(restored)
+        Ok(parked_session.map(SessionId::from_uuid))
+    }
+
+    /// Completes re-enrollment after the restored session's scheduler nudge is retained.
+    pub async fn acknowledge_reenrollment_nudge(
+        &self,
+        repository: &RepositorySlug,
+        pull_request: PullRequestNumber,
+        session: SessionId,
+    ) -> Result<(), ConvergenceSweepStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        ensure_target(&mut transaction, repository, pull_request).await?;
+        clear_reenrollment_park(
+            &mut transaction,
+            repository,
+            pull_request,
+            Some(session.into_uuid()),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Loads retry/park state and the latest globally commissioned session.
@@ -1208,6 +1207,37 @@ impl PostgresConvergenceSweepStore {
             Err(error) => Err(ConvergenceSweepStoreError::Database(error)),
         }
     }
+}
+
+async fn clear_reenrollment_park(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repository: &RepositorySlug,
+    pull_request: PullRequestNumber,
+    expected_session: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE convergence_sweep_target
+                SET state_kind = $3, failure_kind = NULL,
+                    consecutive_failures = 0, retry_not_before = NULL,
+                    parked_at = NULL, operator_need = NULL,
+                    parked_dispatch_id = NULL, parked_session_id = NULL,
+                    parked_dispatched_at = NULL
+              WHERE repository = $1 AND pull_request_number = $2
+                AND state_kind = $4
+                AND parked_session_id IS NOT DISTINCT FROM $5",
+    )
+    .bind(repository.as_str())
+    .bind(Decimal::from(pull_request.get()))
+    .bind(convergence_sweep_state_to_str(
+        ConvergenceSweepStateStorageKind::Observed,
+    ))
+    .bind(convergence_sweep_state_to_str(
+        ConvergenceSweepStateStorageKind::Parked,
+    ))
+    .bind(expected_session)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn restore_commissioned_dispatch_park(

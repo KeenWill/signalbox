@@ -1025,13 +1025,36 @@ async fn target_reenrollment_restores_its_commissioned_session_park() -> Result<
     .await?;
 
     let restored = store.reenroll_target(&repository, pull_request()).await?;
-    let lifecycle = SessionLifecycleRepository::new(pool)
+    let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(session)
         .await?
         .expect("the restored session retains its lifecycle row");
 
     assert_eq!(restored, Some(session));
     assert!(!lifecycle.state().is_parked());
+    let restarted = PostgresConvergenceSweepStore::new(pool);
+    assert_eq!(
+        restarted
+            .reenroll_target(&repository, pull_request())
+            .await?,
+        Some(session)
+    );
+    restarted
+        .acknowledge_reenrollment_nudge(&repository, pull_request(), session)
+        .await?;
+    assert_eq!(
+        restarted
+            .reenroll_target(&repository, pull_request())
+            .await?,
+        None
+    );
+    assert!(
+        !restarted
+            .load_target(&repository, pull_request())
+            .await?
+            .expect("target remains durable")
+            .is_parked()
+    );
     Ok(())
 }
 
