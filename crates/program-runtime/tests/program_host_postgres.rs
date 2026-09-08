@@ -876,13 +876,16 @@ async fn registered_run(
     use signalbox_persistence::program_registration::ProgramRegistrationRepository;
     let repository = ProgramRegistrationRepository::new(pool.clone());
     let registration = repository
-        .register_user(ProgramRegistrationRequest {
-            name: "effect-fixture".into(),
-            revision: "fixture-revision".into(),
-            source: artifact.source().as_bytes().to_vec(),
-            artifact: artifact.source().into(),
-            grants,
-        })
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            ProgramRegistrationRequest {
+                name: "effect-fixture".into(),
+                revision: "fixture-revision".into(),
+                source: artifact.source().as_bytes().to_vec(),
+                artifact: artifact.source().into(),
+                grants,
+            },
+        )
         .await?;
     Ok(repository
         .start_run(ProgramRunId::from_uuid(Uuid::now_v7()), registration.id)
@@ -1062,7 +1065,7 @@ async fn program_registration_widening_is_refused_in_the_journal() -> Result<(),
     use signalbox_domain::{ProgramCapability, RejectReason, program_registration::ProgramGrants};
     let (_container, pool) = migrated_postgres().await?;
     let input =
-        br#"{"name":"child","revision":"one","source":[],"artifact":"","grants":["judge"]}"#;
+        br#"{"id":"01991964-62ef-7000-8000-000000000001","name":"child","revision":"one","source":[],"artifact":"","grants":["judge"]}"#;
     let artifact = register_artifact(input, "reject");
     let run = registered_run(
         &pool,
@@ -1102,7 +1105,7 @@ async fn registration_recovery_adopts_the_matching_immutable_row() -> Result<(),
     };
     use signalbox_persistence::program_registration::ProgramRegistrationRepository;
     let (_container, pool) = migrated_postgres().await?;
-    let input = br#"{"name":"child","revision":"one","source":[],"artifact":"","grants":[]}"#;
+    let input = br#"{"id":"01991964-62ef-7000-8000-000000000002","name":"child","revision":"one","source":[],"artifact":"","grants":[]}"#;
     let artifact = register_artifact(input, "answer");
     let run = registered_run(
         &pool,
@@ -1114,6 +1117,12 @@ async fn registration_recovery_adopts_the_matching_immutable_row() -> Result<(),
     let child = registrations
         .register_child(
             run,
+            signalbox_domain::ProgramRegistrationId::from_uuid(
+                deno_core::serde_json::from_slice::<deno_core::serde_json::Value>(input)?["id"]
+                    .as_str()
+                    .expect("fixture registration identity")
+                    .parse()?,
+            ),
             ProgramRegistrationRequest {
                 name: "child".into(),
                 revision: "one".into(),

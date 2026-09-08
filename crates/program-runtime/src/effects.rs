@@ -5,8 +5,8 @@ use std::{collections::BTreeSet, future::Future, pin::Pin};
 use deno_core::serde_json;
 use serde::Deserialize;
 use signalbox_domain::{
-    DeliveryKind, EffectRequest, InlineFramePayload, JournalFrame, ProgramCapability, ProgramRunId,
-    RejectReason, RequestFrame, RequestKind, RequestOrdinal,
+    DeliveryKind, EffectRequest, InlineFramePayload, JournalFrame, ProgramCapability,
+    ProgramRegistrationId, ProgramRunId, RejectReason, RequestFrame, RequestKind, RequestOrdinal,
     program_registration::{ProgramGrants, ProgramRegistrationRequest},
 };
 use signalbox_persistence::program_registration::{
@@ -200,6 +200,11 @@ impl<P, E> GrantedDeliveries<'_, P, E> {
         }
         let input: RegisterInput = serde_json::from_slice(request.payload().as_bytes())
             .map_err(|_| LiveDeliveryFailure::new("invalid registration request"))?;
+        let registration_id = input
+            .id
+            .parse()
+            .map(ProgramRegistrationId::from_uuid)
+            .map_err(|_| LiveDeliveryFailure::new("invalid registration identity"))?;
         let grants = ProgramGrants::new(input.grants.into_iter().map(Into::into));
         if !self.grants.permits_child(&grants) {
             return Ok(DeliveryKind::Reject {
@@ -217,7 +222,7 @@ impl<P, E> GrantedDeliveries<'_, P, E> {
         let registration = match attempt {
             EffectAttempt::Live => self
                 .registrations
-                .register_child(self.run, input)
+                .register_child(self.run, registration_id, input)
                 .await
                 .map_err(registration_failure)?,
             EffectAttempt::Recovered => {
@@ -226,6 +231,7 @@ impl<P, E> GrantedDeliveries<'_, P, E> {
                     .find(&input.into_content())
                     .await
                     .map_err(registration_failure)?
+                    .filter(|registration| registration.id == registration_id)
                 else {
                     return Ok(DeliveryKind::Answer {
                         resolves: frame.ordinal(),
@@ -263,6 +269,7 @@ pub(crate) fn request_capability(kind: &RequestKind) -> Option<ProgramCapability
 
 #[derive(Deserialize)]
 struct RegisterInput {
+    id: String,
     name: String,
     revision: String,
     source: Vec<u8>,
