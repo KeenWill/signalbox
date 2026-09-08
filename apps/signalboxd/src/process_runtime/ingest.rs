@@ -533,7 +533,14 @@ where
             if configured_u64(&services.model_configuration, "max_blob_replica_count")
                 .is_some_and(|maximum| metadata.replica_count > maximum)
             {
-                return Err(ProcessConnectionError::EncodeInvariant);
+                return write_blob_read_error(
+                    writer,
+                    version,
+                    request_id,
+                    None,
+                    BlobReadError::Unavailable,
+                )
+                .await;
             }
             write_message(
                 writer,

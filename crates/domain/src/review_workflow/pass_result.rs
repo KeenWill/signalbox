@@ -157,6 +157,9 @@ pub struct ReviewProducedFindings {
 }
 
 impl ReviewProducedFindings {
+    /// Maximum findings admitted by one review result.
+    pub const MAXIMUM: usize = REVIEW_PRODUCED_FINDINGS_MAXIMUM;
+
     /// Canonicalizes and bounds one exact finding inventory.
     pub fn try_new(
         mut findings: Vec<ReviewFindingRef>,
