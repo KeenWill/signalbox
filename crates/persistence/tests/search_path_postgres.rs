@@ -454,6 +454,32 @@ fn relation_alias_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
                     cursor = after;
                 }
             }
+            if tokens
+                .get(cursor)
+                .is_some_and(|token| token.is_keyword("tablesample"))
+            {
+                cursor += 1;
+                while matches!(tokens.get(cursor), Some(BodyToken::Word { .. })) {
+                    cursor += 1;
+                    if tokens.get(cursor) != Some(&BodyToken::Dot) {
+                        break;
+                    }
+                    cursor += 1;
+                }
+                let Some(after) = after_parenthesized(tokens, cursor) else {
+                    break;
+                };
+                cursor = after;
+                if tokens
+                    .get(cursor)
+                    .is_some_and(|token| token.is_keyword("repeatable"))
+                {
+                    let Some(after) = after_parenthesized(tokens, cursor + 1) else {
+                        break;
+                    };
+                    cursor = after;
+                }
+            }
             if tokens.get(cursor) != Some(&BodyToken::Comma) {
                 break;
             }
@@ -896,6 +922,10 @@ fn collect_classifier_failures(keywords: &BTreeMap<String, KeywordUse>) -> Vec<&
             delete_using_aliases_preserve_only_function_call_edges,
         ),
         (
+            "table_sample_suffix_preserves_following_relation_aliases",
+            table_sample_suffix_preserves_following_relation_aliases,
+        ),
+        (
             "function_sources_remain_call_edges",
             function_sources_remain_call_edges,
         ),
@@ -1125,6 +1155,22 @@ fn unterminated_parenthesized_body_has_no_end(keywords: &BTreeMap<String, Keywor
         after_parenthesized(&body_tokens("(value", keywords), 0),
         None
     );
+}
+
+fn table_sample_suffix_preserves_following_relation_aliases(
+    keywords: &BTreeMap<String, KeywordUse>,
+) {
+    for source in [
+        "SELECT restore_probe_tail() FROM first TABLESAMPLE SYSTEM (1), second restore_probe_head(value)",
+        "SELECT 1 FROM first TABLESAMPLE SYSTEM (restore_probe_tail()) REPEATABLE (restore_probe_tail()), second restore_probe_head(value)",
+        "SELECT 1 FROM first AS restore_probe_head(value) TABLESAMPLE public.system (1) REPEATABLE (restore_probe_tail()), second restore_probe_middle(value)",
+    ] {
+        assert_eq!(
+            body_call_names(source, keywords),
+            BTreeSet::from(["system".to_owned(), RESTORE_PROBE_TAIL.to_owned()]),
+            "{source}"
+        );
+    }
 }
 
 fn delete_using_aliases_preserve_only_function_call_edges(keywords: &BTreeMap<String, KeywordUse>) {
