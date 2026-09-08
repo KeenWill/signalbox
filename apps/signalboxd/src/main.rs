@@ -1157,7 +1157,6 @@ async fn run_hub(
             SanitizedStartupCause::WebHttpConfiguration(&error),
         )
     })?;
-    let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
     let on_disk = fs::read_to_string(configuration.model_configuration_file()).map_err(|_| {
         erase_startup_cause(
             RuntimePhase::Configuration,
@@ -1456,6 +1455,7 @@ async fn run_hub(
                 )
             })?;
     }
+    let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,

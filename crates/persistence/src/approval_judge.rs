@@ -1739,14 +1739,8 @@ async fn headless_escalation_identities(
 /// replay must check the persisted continuation identity rather than accept a
 /// newly supplied one.
 ///
-/// A later admissible request in the batch that is still undecided, or decided by
-/// anything other than a proposal-time source, is evidence that this completion
-/// was not the last: those decisions land after the batch is proposed. The
-/// proposal-time sources are the ones the proposing transaction itself records —
-/// `policy_auto`, `session_blanket`, and `user_override`, whose one-shot
-/// pre-approval is consumed at proposal time from the producing call's frozen
-/// inventory. Omitting one of them would make a terminal replay accept any
-/// supplied continuation identity and mask an identity mismatch.
+/// A later admissible request that is undecided or resolved after proposal time
+/// proves this completion was not the final decision in its batch.
 async fn exact_completion_continuation(
     connection: &mut PgConnection,
     prepared: &PreparedApprovalJudge,
@@ -1763,7 +1757,7 @@ async fn exact_completion_continuation(
              AND (
                  decision.request_id IS NULL
                  OR decision.decision_source
-                     NOT IN ('policy_auto', 'session_blanket', 'user_override')
+                     NOT IN ('policy_auto', 'session_blanket', 'user_override', 'runtime_safety')
              )
         )",
     )

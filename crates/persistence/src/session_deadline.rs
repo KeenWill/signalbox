@@ -35,6 +35,8 @@ pub enum SessionDeadlinePassOutcome {
     Idle,
     /// One supported deadline materialized its configured expiry.
     Armed { session: SessionId },
+    /// Admission expired after turn activity, so its deadline was settled.
+    Superseded { session: SessionId },
     /// Admission expired and the session retired.
     Retired { session: SessionId },
     /// A waiting deadline expired and the live turn was suspended in place.
@@ -108,7 +110,8 @@ impl PostgresSessionDeadlineRepository {
         let candidate: Option<Uuid> = sqlx::query_scalar(
             "SELECT session_id
                FROM session_deadline
-              WHERE (deadline_kind = 'admission'
+              WHERE NOT settled
+                AND ((deadline_kind = 'admission'
                      AND (expires_at IS DISTINCT FROM CASE
                               WHEN $1::BIGINT IS NULL THEN NULL
                               ELSE armed_at + $1 * INTERVAL '1 millisecond'
@@ -119,7 +122,7 @@ impl PostgresSessionDeadlineRepository {
                               WHEN $2::BIGINT IS NULL THEN NULL
                               ELSE armed_at + $2 * INTERVAL '1 millisecond'
                           END
-                          OR expires_at <= clock_timestamp()))
+                          OR expires_at <= clock_timestamp())))
               ORDER BY COALESCE(
                            expires_at,
                            CASE deadline_kind
@@ -149,7 +152,7 @@ impl PostgresSessionDeadlineRepository {
                     WHEN 'admission' THEN armed_at + $2 * INTERVAL '1 millisecond'
                     WHEN 'waiting' THEN armed_at + $3 * INTERVAL '1 millisecond'
                 END
-             WHERE session_id = $1
+             WHERE session_id = $1 AND NOT settled
          RETURNING session_deadline.deadline_kind,
                    session_deadline.expires_at <= clock_timestamp() AS due",
         )
@@ -186,20 +189,44 @@ impl PostgresSessionDeadlineRepository {
                     .fetch_one(&mut *transaction)
                     .await
                     .map_err(database_failure("lock_admission_scheduler"))?;
-                retire_queued_turns(&mut transaction, session)
-                    .await
-                    .map_err(database_failure("retire_queued_turns"))?;
-                session_lifecycle::close_in_transaction(
-                    &mut transaction,
-                    session,
-                    SessionTerminalOutcome::Retired {
-                        cause: SessionRetirementCause::AdmissionDeadlineExpired,
-                    },
-                    LifecycleActor::Watchdog,
+                // Activation records lineage; retiring queued work does not.
+                let has_activity: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM turn_lifecycle
+                         WHERE session_id = $1 AND start_lineage_kind IS NOT NULL
+                    )",
                 )
+                .bind(candidate)
+                .fetch_one(&mut *transaction)
                 .await
-                .map_err(lifecycle_failure("close_expired_admission"))?;
-                SessionDeadlinePassOutcome::Retired { session }
+                .map_err(database_failure("read_admission_activity"))?;
+                if has_activity {
+                    sqlx::query(
+                        "UPDATE session_deadline
+                            SET settled = true, expires_at = NULL
+                          WHERE session_id = $1 AND deadline_kind = 'admission'",
+                    )
+                    .bind(candidate)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(database_failure("settle_superseded_admission_deadline"))?;
+                    SessionDeadlinePassOutcome::Superseded { session }
+                } else {
+                    retire_queued_turns(&mut transaction, session)
+                        .await
+                        .map_err(database_failure("retire_queued_turns"))?;
+                    session_lifecycle::close_in_transaction(
+                        &mut transaction,
+                        session,
+                        SessionTerminalOutcome::Retired {
+                            cause: SessionRetirementCause::AdmissionDeadlineExpired,
+                        },
+                        LifecycleActor::Watchdog,
+                    )
+                    .await
+                    .map_err(lifecycle_failure("close_expired_admission"))?;
+                    SessionDeadlinePassOutcome::Retired { session }
+                }
             }
             ("waiting", SessionLifecycleState::Waiting { .. }) => {
                 session_lifecycle::park_in_transaction(

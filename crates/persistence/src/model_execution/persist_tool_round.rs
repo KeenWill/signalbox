@@ -421,8 +421,8 @@ pub(super) async fn persist_tool_continuation_headroom_exhaustion(
              usage_input_includes_cache_tokens, usage_input_tokens,
              usage_output_tokens, usage_cache_creation_input_tokens,
              usage_cache_read_input_tokens, projected_result_content_bytes,
-             max_output_tokens, context_window_tokens)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+             max_output_tokens, context_window_tokens, pending_steering_content_bytes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(required.failed().attempt().id().into_uuid())
     .bind(required.producing_call().into_uuid())
@@ -436,6 +436,7 @@ pub(super) async fn persist_tool_continuation_headroom_exhaustion(
     .bind(Decimal::from(evidence.projected_result_content_bytes))
     .bind(Decimal::from(evidence.limit.max_output_tokens()))
     .bind(Decimal::from(evidence.limit.context_window_tokens()))
+    .bind(Decimal::from(evidence.pending_steering_content_bytes))
     .execute(&mut *connection)
     .await?;
     Ok(())
