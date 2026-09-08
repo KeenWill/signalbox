@@ -209,6 +209,26 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
   ])
 })
 
+test('fetches fresh original bytes after browser decoding fails', async ({ page }) => {
+  const undecodable = Buffer.alloc(jpegOriginalFixture.byteLength)
+  undecodable.set([0xff, 0xd8, 0xff])
+  await page.route(
+    `**${jpegOriginalPath}`,
+    (route) => route.fulfill({ status: 200, contentType: 'image/jpeg', body: undecodable }),
+    { times: 1 },
+  )
+  await page.goto('/scenario/blobs')
+  const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
+  await artifact.getByRole('button', { name: 'Load original' }).click()
+  await expect(artifact.getByRole('button', { name: 'Retry original' })).toBeVisible()
+  const freshRead = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === jpegOriginalPath,
+  )
+  await artifact.getByRole('button', { name: 'Retry original' }).click()
+  await freshRead
+  await expect(artifact.getByRole('button', { name: 'Original loaded' })).toBeVisible()
+})
+
 test('restores a loaded original after leaving and reopening the scenario', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/blobs')
