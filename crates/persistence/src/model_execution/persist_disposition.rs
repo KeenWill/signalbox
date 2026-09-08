@@ -147,6 +147,31 @@ pub(super) async fn persist_tool_round_authority(
     assistant_entries: &[SemanticTranscriptEntry],
     requests: &[ToolRequest],
 ) -> Result<(), ModelCallRepositoryError> {
+    persist_tool_round_record(
+        connection,
+        session,
+        turn,
+        call,
+        boundary_kind,
+        boundary_frontier,
+        assistant_entries,
+        requests,
+    )
+    .await?;
+    persist_tool_round_entries(connection, assistant_entries, requests).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn persist_tool_round_record(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    call: ModelCallId,
+    boundary_kind: &'static str,
+    boundary_frontier: signalbox_domain::ContextFrontierId,
+    assistant_entries: &[SemanticTranscriptEntry],
+    requests: &[ToolRequest],
+) -> Result<(), ModelCallRepositoryError> {
     let response_part_count = u64::try_from(assistant_entries.len())
         .map_err(|_| ModelCallCorruption::Inconsistent("tool response part count"))?;
     let request_count = u64::try_from(requests.len())
@@ -166,6 +191,14 @@ pub(super) async fn persist_tool_round_authority(
     .bind(Decimal::from(request_count))
     .execute(&mut *connection)
     .await?;
+    Ok(())
+}
+
+pub(super) async fn persist_tool_round_entries(
+    connection: &mut PgConnection,
+    assistant_entries: &[SemanticTranscriptEntry],
+    requests: &[ToolRequest],
+) -> Result<(), ModelCallRepositoryError> {
     for request in requests {
         let arguments_kind = match request.arguments().kind() {
             signalbox_domain::ToolArgumentsKind::Json => "json",

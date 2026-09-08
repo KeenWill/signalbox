@@ -36,7 +36,8 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
     {
         return Ok(());
     }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let root = std::env::current_dir()?
+        .join(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .ok_or("tools-exec manifest is not nested under the workspace root")?

@@ -184,20 +184,7 @@ impl FileMediaRegistry {
                 match sanitize_probe(reader, raw)? {
                     SanitizedProbe::NoMatch => {}
                     SanitizedProbe::Candidate(candidate) => {
-                        // A retained candidate must be re-examinable inside the
-                        // envelope `validate_candidate` will grant, and that envelope
-                        // is the clamped pair rather than the deployment ceiling
-                        // alone. For a reader whose declared validation envelope is
-                        // the smaller of the two, the ceiling by itself would keep
-                        // evidence validation can never cover.
-                        if candidate.evidence_bytes
-                            <= self
-                                .ceilings
-                                .validation_source_bytes
-                                .min(reader.validation().source_bytes())
-                        {
-                            candidates.push(candidate);
-                        }
+                        candidates.push(candidate);
                     }
                     SanitizedProbe::Malformed {
                         media_type,
@@ -253,16 +240,19 @@ impl FileMediaRegistry {
             .cloned()
             .collect::<Vec<_>>();
         if !strong.is_empty() {
-            return self
+            let inspection = self
                 .resolve_candidates(
                     processor,
-                    request,
+                    request.clone(),
                     source,
                     cancellation,
                     strong,
                     ValidationEvidence::StrongSignature,
                 )
-                .await;
+                .await?;
+            if !matches!(inspection, FileInspection::Unknown { .. }) {
+                return Ok(inspection);
+            }
         }
 
         let structural = candidates
@@ -372,7 +362,17 @@ impl FileMediaRegistry {
             .map(|candidate| candidate.reader.clone())
             .collect::<std::collections::BTreeSet<_>>();
         if media_types.len() != 1 || readers.len() != 1 {
-            if !collision_validation_allowed(evidence, candidates.len()) {
+            if !collision_validation_allowed(evidence, candidates.len())
+                || candidates.iter().any(|candidate| {
+                    self.readers.get(&candidate.reader).is_some_and(|reader| {
+                        candidate.evidence_bytes
+                            > self
+                                .ceilings
+                                .validation_source_bytes
+                                .min(reader.validation().source_bytes())
+                    })
+                })
+            {
                 return Ok(FileInspection::Ambiguous {
                     source: request.source,
                     media_types,
@@ -473,6 +473,14 @@ impl FileMediaRegistry {
             .readers
             .get(&candidate.reader)
             .ok_or(FileMediaFailure::ProcessorFailed)?;
+        if candidate.evidence_bytes
+            > self
+                .ceilings
+                .validation_source_bytes
+                .min(reader.validation().source_bytes())
+        {
+            return Err(FileMediaFailure::ProcessorFailed);
+        }
         let raw = processor
             .validate(
                 reader.identity(),

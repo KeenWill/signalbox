@@ -264,6 +264,7 @@ impl model_execution::PostgresModelCallRepository {
         targets: signalbox_domain::ModelTargetCatalog,
         credential_reference: signalbox_application::ModelCallCredentialReference,
     ) -> Self;
+    pub fn with_runner_recovery(self, runner: runner_protocol::RunnerProtocolStore) -> Self;
     pub fn with_session_credentials(
         self,
         credential_families: ModelCredentialFamilyCatalog,

@@ -75,3 +75,14 @@ pub async fn restore_module_park(
     module: signalbox_domain::DispatchingModule,
 ) -> result::Result<bool, session_lifecycle::SessionLifecycleRepositoryError>;
 ```
+
+## goal_resumption_input
+
+```rust
+#[cfg(feature = "test-support")]
+pub async fn goal_resumption_input(
+    pool: &sqlx_postgres::PgPool,
+    session: signalbox_domain::SessionId,
+    event: signalbox_domain::GoalEventOrdinal,
+) -> result::Result<signalbox_domain::UserContent, goal::GoalRepositoryError>;
+```
