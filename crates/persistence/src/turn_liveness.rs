@@ -18,7 +18,10 @@ use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId, SessionId,
     TurnAttemptId, TurnTerminalCause,
 };
-use sqlx::{PgConnection, PgPool, Row, types::Decimal, types::Uuid};
+use sqlx::{
+    Acquire as _, PgConnection, PgPool, Postgres, Row, Transaction, pool::PoolConnection,
+    types::Decimal, types::Uuid,
+};
 use tokio::time::timeout;
 
 use crate::mapping::{
@@ -401,13 +404,11 @@ impl PostgresTurnLivenessRepository {
     where
         Generator: signalbox_application::StartupScanIdGenerator + Send,
     {
-        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+        let mut setup = LivenessTransactionSetup::acquire(&self.pool, self.bounds.acquire_wait)
             .await
-            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
             .map_err(TurnLivenessRepositoryError::terminalization)?;
-        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(postgres_lock_timeout(self.bounds.lock_wait))
-            .execute(&mut *transaction)
+        let mut transaction = setup
+            .begin(self.bounds)
             .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         let decision = recover_observed_slot_held_in_transaction(
@@ -468,13 +469,11 @@ impl PostgresTurnLivenessRepository {
         session: SessionId,
         abandoned_call: ModelCallId,
     ) -> Result<Option<StartupScanSessionOutcome>, TurnLivenessRepositoryError> {
-        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+        let mut setup = LivenessTransactionSetup::acquire(&self.pool, self.bounds.acquire_wait)
             .await
-            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
             .map_err(TurnLivenessRepositoryError::terminalization)?;
-        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(postgres_lock_timeout(self.bounds.lock_wait))
-            .execute(&mut *transaction)
+        let mut transaction = setup
+            .begin(self.bounds)
             .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         let recovered = crate::startup::recover_abandoned_compaction_in_transaction(
@@ -519,18 +518,11 @@ impl PostgresTurnLivenessRepository {
     where
         Generator: signalbox_application::StartupScanIdGenerator + Send,
     {
-        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+        let mut setup = LivenessTransactionSetup::acquire(&self.pool, self.bounds.acquire_wait)
             .await
-            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
             .map_err(TurnLivenessRepositoryError::terminalization)?;
-        // Bounded before anything is read or written, so the only statement it
-        // can interrupt is the one waiting for the scheduler row. A bound that
-        // could fire later — over the whole statement, or over the future —
-        // might interrupt the commit instead, and this pass would then not know
-        // whether the turn ended.
-        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(postgres_lock_timeout(self.bounds.lock_wait))
-            .execute(&mut *transaction)
+        let mut transaction = setup
+            .begin(self.bounds)
             .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         let outcome = terminalize_in_transaction(
@@ -1148,6 +1140,56 @@ where
         };
     insert_prepared_failure(connection, prepared, TurnTerminalCause::WatchdogStaleTurn).await?;
     Ok(StaleTurnOutcome::Terminalized)
+}
+
+/// Incomplete setup owns the connection until it can be safely reused.
+struct LivenessTransactionSetup {
+    connection: Option<PoolConnection<Postgres>>,
+    discard_on_drop: bool,
+}
+
+impl LivenessTransactionSetup {
+    async fn acquire(pool: &PgPool, bound: Option<Duration>) -> Result<Self, sqlx::Error> {
+        let connection = optional_timeout(bound, pool.acquire())
+            .await
+            .unwrap_or(Err(sqlx::Error::PoolTimedOut))?;
+        Ok(Self {
+            connection: Some(connection),
+            discard_on_drop: true,
+        })
+    }
+
+    async fn begin(
+        &mut self,
+        bounds: TurnLivenessPersistenceBounds,
+    ) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
+        let connection = self.connection.as_mut().ok_or(sqlx::Error::PoolClosed)?;
+        let transaction = optional_timeout(bounds.acquire_wait, async {
+            let mut transaction = connection.begin().await?;
+            sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+                .bind(postgres_lock_timeout(bounds.lock_wait))
+                .execute(&mut *transaction)
+                .await?;
+            Ok::<_, sqlx::Error>(transaction)
+        })
+        .await
+        .unwrap_or(Err(sqlx::Error::PoolTimedOut))?;
+        self.discard_on_drop = false;
+        Ok(transaction)
+    }
+}
+
+impl Drop for LivenessTransactionSetup {
+    fn drop(&mut self) {
+        if self.discard_on_drop {
+            // A queued rollback cannot release a connection whose setup query
+            // is still running. Dropping the detached socket releases the pool
+            // slot without waiting for that backend response.
+            if let Some(connection) = self.connection.take() {
+                drop(connection.detach());
+            }
+        }
+    }
 }
 
 async fn optional_timeout<F>(

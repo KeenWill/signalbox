@@ -1140,3 +1140,104 @@ async fn compaction_recovery_spares_a_compaction_its_window_never_prepared()
     drop(container);
     Ok(())
 }
+
+async fn stalled_timeout_setup_releases_its_connection(
+    cancel_outer: bool,
+) -> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x129900).await?;
+    let single = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    sqlx::query("SET search_path = public, pg_catalog")
+        .execute(&single)
+        .await?;
+    let original_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&single)
+        .await?;
+    let bounds = TurnLivenessPersistenceBounds::new(
+        Some(std::time::Duration::from_secs(1)),
+        if cancel_outer {
+            None
+        } else {
+            Some(std::time::Duration::from_millis(250))
+        },
+        Some(std::time::Duration::from_secs(1)),
+    );
+    let repository = PostgresTurnLivenessRepository::new(single.clone(), bounds);
+    let candidate = *repository
+        .quiescent_active_turns(None)
+        .await?
+        .candidates()
+        .first()
+        .expect("fixture has one active turn");
+    // The disposable database stalls the exact timeout-installation statement.
+    sqlx::raw_sql(
+        "CREATE FUNCTION public.set_config(text, text, boolean) RETURNS text
+         LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(10); RETURN $2; END $$;",
+    )
+    .execute(&pool)
+    .await?;
+    let identities = AcceptedInputTurnFailureIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+        ContextFrontierId::from_uuid(Uuid::now_v7()),
+    );
+    let mut ids = UuidV7StartupScanIdGenerator;
+    let recovery = repository.recover_observed_slot_held_turn(candidate, identities, &mut ids);
+    if cancel_outer {
+        let mut recovery = Box::pin(recovery);
+        tokio::select! {
+            result = &mut recovery => panic!("setup must still be blocked: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let sleeping: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event = 'PgSleep')")
+                        .bind(original_backend).fetch_one(&pool).await?;
+                    if sleeping { break Ok::<_, sqlx::Error>(()); }
+                    tokio::task::yield_now().await;
+                }
+            }) => result??,
+        }
+        drop(recovery);
+    } else {
+        let error = recovery
+            .await
+            .expect_err("setup has its own acquisition budget");
+        assert!(matches!(error, signalbox_persistence::turn_liveness::TurnLivenessRepositoryError::TerminalizationDatabase {
+            source: sqlx::Error::PoolTimedOut, commit_ambiguous: false,
+        }));
+    }
+    let replacement: i32 = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&single),
+    )
+    .await??;
+    assert_ne!(
+        original_backend, replacement,
+        "interrupted setup cannot return its busy connection to the pool"
+    );
+    let phase: String =
+        sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(phase, "active");
+    single.close().await;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn liveness_timeout_setup_expires_without_retaining_the_pool_slot()
+-> Result<(), Box<dyn Error>> {
+    stalled_timeout_setup_releases_its_connection(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cancelled_liveness_timeout_setup_discards_its_busy_connection()
+-> Result<(), Box<dyn Error>> {
+    stalled_timeout_setup_releases_its_connection(true).await
+}
