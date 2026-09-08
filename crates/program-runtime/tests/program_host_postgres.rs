@@ -1573,19 +1573,23 @@ async fn terminal_unregistered_run_is_rejected_by_registered_execution()
     Ok(())
 }
 
-async fn unsupported_session_effect(attempt: SessionEffectAttempt) -> Result<(), Box<dyn Error>> {
+async fn refused_session_effect(
+    pool: &PgPool,
+    attempt: SessionEffectAttempt,
+    method: &str,
+    input: &[u8],
+) -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{EffectRequest, ProgramCapability, program_registration::ProgramGrants};
     use signalbox_program_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
-    let (_container, pool) = migrated_postgres().await?;
     let artifact = ProgramArtifact::new(format!(
         r#"
 import {{ effect }} from "{PROGRAM_SDK_V1_SPECIFIER}";
-const answer = await effect("session", "unknown", new Uint8Array());
+const answer = await effect("session", "{method}", new Uint8Array({input:?}));
 if (answer.kind !== "answer") throw new Error("expected a session refusal answer");
 "#
     ));
     let run = registered_run(
-        &pool,
+        pool,
         &artifact,
         ProgramGrants::new([ProgramCapability::Session]),
     )
@@ -1598,8 +1602,8 @@ if (answer.kind !== "answer") throw new Error("expected a session refusal answer
                 None,
                 RequestKind::Effect(EffectRequest::new(
                     ProgramCapability::Session,
-                    "unknown".into(),
-                    InlineFramePayload::default(),
+                    method.into(),
+                    InlineFramePayload::new(input),
                 )),
             )
             .await?;
@@ -1610,7 +1614,7 @@ if (answer.kind !== "answer") throw new Error("expected a session refusal answer
         executions: 0,
         adoptions: 0,
     };
-    let mut effects = SessionEffects::new(session_repository(&pool), other, |_| {}, |_| None);
+    let mut effects = SessionEffects::new(session_repository(pool), other, |_| {}, |_| None);
     let host = ProgramHost::new(journal.clone());
     assert_eq!(
         host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
@@ -1632,7 +1636,6 @@ if (answer.kind !== "answer") throw new Error("expected a session refusal answer
         ProgramExecutionOutcome::Completed
     );
     assert_eq!(journal.load(run).await?.expect("replayed journal"), loaded);
-    pool.close().await;
     Ok(())
 }
 
@@ -1640,14 +1643,20 @@ if (answer.kind !== "answer") throw new Error("expected a session refusal answer
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn unsupported_session_operation_is_journaled_as_a_replayable_refusal()
 -> Result<(), Box<dyn Error>> {
-    unsupported_session_effect(SessionEffectAttempt::Live).await
+    let (_container, pool) = migrated_postgres().await?;
+    refused_session_effect(&pool, SessionEffectAttempt::Live, "unknown", &[]).await?;
+    pool.close().await;
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn an_unanswered_unsupported_session_operation_recovers_to_a_refusal()
 -> Result<(), Box<dyn Error>> {
-    unsupported_session_effect(SessionEffectAttempt::Recovered).await
+    let (_container, pool) = migrated_postgres().await?;
+    refused_session_effect(&pool, SessionEffectAttempt::Recovered, "unknown", &[]).await?;
+    pool.close().await;
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1705,6 +1714,37 @@ async fn malformed_registration_requests_are_durably_rejected() -> Result<(), Bo
             assert_eq!(replayed.entries(), loaded.entries());
             assert_eq!(effects.executions, 0);
         }
+    }
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn invalid_session_requests_are_refused_live_and_after_recovery() -> Result<(), Box<dyn Error>>
+{
+    use deno_core::serde_json::json;
+    let (_container, pool) = migrated_postgres().await?;
+    let identity = Uuid::now_v7().to_string();
+    let create = json!({"command": identity, "model": identity});
+    let turn =
+        json!({"command": identity, "session": identity, "text": "input", "defaults_version": 1});
+    let mut invalid = vec![("create", b"{".to_vec()), ("turn", b"{".to_vec())];
+    for (method, valid, field, value) in [
+        ("create", &create, "command", json!("invalid")),
+        ("create", &create, "model", json!("invalid")),
+        ("turn", &turn, "command", json!("invalid")),
+        ("turn", &turn, "session", json!("invalid")),
+        ("turn", &turn, "defaults_version", json!(0)),
+        ("turn", &turn, "text", json!("")),
+    ] {
+        let mut input = valid.clone();
+        input[field] = value;
+        invalid.push((method, deno_core::serde_json::to_vec(&input)?));
+    }
+    for (method, input) in invalid {
+        refused_session_effect(&pool, SessionEffectAttempt::Live, method, &input).await?;
+        refused_session_effect(&pool, SessionEffectAttempt::Recovered, method, &input).await?;
     }
     pool.close().await;
     Ok(())

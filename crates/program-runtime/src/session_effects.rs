@@ -60,14 +60,14 @@ impl<E: EffectExecutor, N: Fn(SessionId), A: Fn(ModelAlias) -> Option<FrozenAlia
             if invocation.request.capability() != ProgramCapability::Session {
                 return self.other.adopt(invocation).await;
             }
-            let result = match decode(invocation.request)? {
-                SessionOperation::Unsupported => return Ok(Some(refused())),
-                SessionOperation::Turn(input) => self
+            let result = match decode(invocation.request) {
+                Err(_) | Ok(SessionOperation::Unsupported) => return Ok(Some(refused())),
+                Ok(SessionOperation::Turn(input)) => self
                     .sessions
                     .adopt_turn(invocation.run, input, &self.nudge)
                     .await
                     .map(|outcome| outcome.map(encode_outcome)),
-                SessionOperation::Create(input) => self
+                Ok(SessionOperation::Create(input)) => self
                     .sessions
                     .adopt_creation(invocation.run, input)
                     .await
@@ -94,14 +94,14 @@ impl<E: EffectExecutor, N: Fn(SessionId), A: Fn(ModelAlias) -> Option<FrozenAlia
             if invocation.request.capability() != ProgramCapability::Session {
                 return self.other.execute(invocation).await;
             }
-            let result = match decode(invocation.request)? {
-                SessionOperation::Unsupported => return Ok(refused()),
-                SessionOperation::Turn(input) => self
+            let result = match decode(invocation.request) {
+                Err(_) | Ok(SessionOperation::Unsupported) => return Ok(refused()),
+                Ok(SessionOperation::Turn(input)) => self
                     .sessions
                     .drive_turn(invocation.run, input, &self.aliases, &self.nudge)
                     .await
                     .map(encode_outcome),
-                SessionOperation::Create(input) => self
+                Ok(SessionOperation::Create(input)) => self
                     .sessions
                     .create(invocation.run, input)
                     .await

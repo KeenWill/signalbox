@@ -9,10 +9,7 @@ use signalbox_domain::{
         ProgramSessionCreate, ProgramSessionDisposition, ProgramSessionOutcome, ProgramSessionTurn,
     },
 };
-use sqlx::{
-    PgPool, Row,
-    postgres::{PgListener, PgPoolOptions},
-};
+use sqlx::{PgPool, Row, postgres::PgListener};
 use uuid::Uuid;
 
 use crate::{
@@ -262,10 +259,7 @@ impl ProgramSessionRepository {
             return Err(ProgramSessionError::Refused);
         };
         nudge(origin.session());
-        let listener_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy_with(self.pool.connect_options().as_ref().clone());
-        let mut listener = PgListener::connect_with(&listener_pool).await?;
+        let mut listener = PgListener::connect_with(&self.pool).await?;
         listener.listen("program_session_activity").await?;
         loop {
             let journal = ProgramJournalRepository::new(self.pool.clone())

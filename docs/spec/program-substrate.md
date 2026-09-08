@@ -55,15 +55,16 @@ executor checks child-grant attenuation and adopts a matching immutable
 registration after a lost answer.
 
 `SessionEffects` composes host-side session creation and input services.
-Unsupported session operations receive a journaled refusal. A session grant can
-create a workflow session or submit one ordinary turn and await its terminal
-outcome. Recovery adopts the exact durable command receipt; reissuing either
-operation uses that same command identity. Turn answers carry the session, turn,
-accepted-input identity, terminal disposition, and a SHA-256 digest of that
-metadata and the terminal frontier when present, without transcript bytes. The
-host retains credentials and signals ordinary session eligibility; the approval
-judge governs the turn, with no program hook inside it. Program cancellation
-wakes a waiting session operation and retains the run's terminal outcome.
+Unsupported operations and invalid session requests receive a journaled refusal.
+A session grant can create a workflow session or submit one ordinary turn and
+await its terminal outcome. Recovery adopts the exact durable command receipt;
+reissuing either operation uses that same command identity. Turn answers carry
+the session, turn, accepted-input identity, terminal disposition, and a SHA-256
+digest of that metadata and the terminal frontier when present, without
+transcript bytes. The host retains credentials and signals ordinary session
+eligibility; the approval judge governs the turn, with no program hook inside
+it. Program cancellation wakes a waiting session operation and retains the run's
+terminal outcome.
 
 A journaled `run_cancel` delivery is terminal: the host returns the cancelled
 outcome and creates no isolate.
