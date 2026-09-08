@@ -137,6 +137,37 @@ fn arguments_preserve_arbitrary_precision_numbers() {
     );
 }
 
+#[test]
+fn arguments_preserve_reserved_number_key_objects() {
+    let cases = [
+        (
+            r#"{"$serde_json::private::Number":"1"}"#,
+            r#"{"$serde_json::private::Number":"1"}"#,
+        ),
+        (
+            r#"{"z":[{"\u0024serde_json::private::Number":"1","tail":true}]," x":"$serde_json::private::Number"}"#,
+            r#"{" x":"$serde_json::private::Number","z":[{"$serde_json::private::Number":"1","tail":true}]}"#,
+        ),
+        (
+            r#"{"quote\"key":"value\\","$serde_json::private::Number":"1"}"#,
+            r#"{"$serde_json::private::Number":"1","quote\"key":"value\\"}"#,
+        ),
+    ];
+    for (input, expected) in cases {
+        let normalized = NormalizedToolArguments::try_from_provider_text(input.to_owned())
+            .expect("ordinary object members remain JSON");
+
+        assert_eq!(normalized.kind(), ToolArgumentsKind::Json, "{input}");
+        assert_eq!(normalized.as_str(), expected, "{input}");
+        assert_eq!(
+            NormalizedToolArguments::try_from_stored(ToolArgumentsKind::Json, expected.to_owned())
+                .expect("canonical stored object reconstitutes"),
+            normalized,
+            "{input}"
+        );
+    }
+}
+
 /// the byte bound, rather than serde's default recursion cutoff, governs syntactically valid nested
 /// JSON.
 #[test]

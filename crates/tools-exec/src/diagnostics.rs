@@ -331,6 +331,7 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
     let arguments = match command {
         CargoDiagnosticsCommand::Check => [
             "check",
+            "--offline",
             "--workspace",
             "--all-targets",
             "--all-features",
@@ -340,6 +341,7 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
         .to_vec(),
         CargoDiagnosticsCommand::Clippy => [
             "clippy",
+            "--offline",
             "--workspace",
             "--all-targets",
             "--all-features",
@@ -352,6 +354,7 @@ fn cargo_arguments(command: CargoDiagnosticsCommand, timeout_seconds: u64) -> Ex
         .to_vec(),
         CargoDiagnosticsCommand::Test => [
             "test",
+            "--offline",
             "--config",
             "term.quiet=false",
             "--no-fail-fast",
@@ -1278,6 +1281,23 @@ mod tests {
     }
 
     #[test]
+    fn all_cargo_diagnostics_resolve_dependencies_offline() {
+        for command in [
+            CargoDiagnosticsCommand::Check,
+            CargoDiagnosticsCommand::Clippy,
+            CargoDiagnosticsCommand::Test,
+        ] {
+            let arguments = cargo_arguments(command, 30);
+            assert!(
+                arguments
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == "--offline")
+            );
+        }
+    }
+
+    #[test]
     fn cargo_test_arguments_keep_no_fail_fast_before_workspace_flags() {
         let arguments = cargo_arguments(CargoDiagnosticsCommand::Test, 300);
 
@@ -1285,6 +1305,7 @@ mod tests {
             arguments.arguments,
             [
                 "test",
+                "--offline",
                 "--config",
                 "term.quiet=false",
                 "--no-fail-fast",
