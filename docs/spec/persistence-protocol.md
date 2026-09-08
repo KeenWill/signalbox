@@ -592,15 +592,16 @@ from the tool-loop continuation origin, and stores its predecessor call,
 qualifying cause, and non-acceptance evidence atomically. What these rows mean
 is owned by [credential-availability](credential-availability.md).
 
-Credential admission freezes the session's policy revision before its first call
-or wait. A credential wait records that revision, every member's exclusion
-evidence, the latest frontier and optional deadline. Its released successor
-names the consumed wait and retains any predecessor call and non-acceptance
-proof. Release commits the successor's prepared call or terminal disposition
-with wait consumption; re-parking replaces evidence and deadline in place.
-Member-availability updates and successful exclusion clears grant named waits
-eligibility in their committing transactions; replayed or ineffective clears
-grant none. The scheduler rechecks due deadlines and eligible waits.
+Each fresh availability chain resolves the current catalog and freezes its
+policy revision before its first call or wait. A credential wait records that
+revision, every member's exclusion evidence, the latest frontier and optional
+deadline. Its released successor names the consumed wait and retains any
+predecessor call and non-acceptance proof. Release commits the successor's
+prepared call or terminal disposition with wait consumption; re-parking replaces
+evidence and deadline in place. Member-availability updates and successful
+exclusion clears grant named waits eligibility in their committing transactions;
+replayed or ineffective clears grant none. The scheduler rechecks due deadlines
+and eligible waits.
 
 A contended wait additionally retains the complete bounded-member set and each
 member's invocation reservations. Admission locks capacity rows in profile byte
