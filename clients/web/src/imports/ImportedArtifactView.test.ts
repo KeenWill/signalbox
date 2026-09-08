@@ -92,7 +92,7 @@ describe('imported artifact projection', () => {
       displayName: 'Imported entry 8',
       kind: 'blocked',
       attemptedKind: 'imported document',
-      reason: 'No typed renderer is available for this imported content kind.',
+      reason: 'Content unavailable.',
     })
   })
 
@@ -109,7 +109,7 @@ describe('imported artifact projection', () => {
       displayName: 'Imported entry 8',
       kind: 'blocked',
       attemptedKind: 'imported text',
-      reason: 'The source did not attest text for this entry. No content was inferred.',
+      reason: 'Text not attested.',
     })
   })
 

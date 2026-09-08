@@ -12,9 +12,9 @@ The module's only admitted import is the canonical SDK specifier, which the
 loader resolves to a host-supplied synthetic module. The isolate exposes no
 filesystem, network, environment, module source, wall clock, or unvirtualized
 randomness. Its only asynchronous operation is the closed request op behind that
-SDK module. The SDK exports four primitives: the virtual clock, a randomness
-draw, a sleep, and an event wait. Each takes exact bytes and produces one typed
-request at the Rust boundary.
+SDK module. The SDK exports generic capability effects and four primitives: the
+virtual clock, a randomness draw, a sleep, and an event wait. Each takes exact
+bytes and produces one typed request at the Rust boundary.
 
 The journal is one append-only sequence of frames per program-run identity, held
 by `ProgramJournalRepository`. A frame is a request (what the program asked) or
@@ -22,27 +22,52 @@ a delivery (what the host answered). Requests are journaled in program order,
 deliveries in delivery order, and every row carries one contiguous global
 position, so their interleaving is retained. The request, delivery, and fault
 vocabularies are closed; the domain crate's `RequestKind`, `DeliveryKind`, and
-`FaultCause` and the migration's check constraints fix their members. The four
-primitive answerable requests, nondeterminism faults, and user cancellation are
-produced; no executor applies effects, scope cancellation, terminal admission,
-or capability rejection.
+`FaultCause` and the migration's check constraints fix their members. Primitive
+requests, effects, capability refusals, nondeterminism faults, and user
+cancellation are produced.
 
-Resume discards nothing and restores nothing. A journal that already holds a
-terminal delivery, one that ended the run instead of answering a request, names
-the run's outcome; the host returns that outcome and creates no isolate. Any
-other woken run re-executes its module from the start; `ReplayCursor` answers
-each request from the journal in delivery order, and execution goes live where
-the journal ends. Live requests are answered through the `LiveDeliverySource`
-seam, which receives only the outstanding durable request frames; that seam is
-the boundary later capability executors implement.
+Resume discards nothing and restores nothing. A registered run's journal that
+already holds a terminal delivery, one that ended the run instead of answering a
+request, names the run's outcome; the host returns that outcome and creates no
+isolate. Any other woken run re-executes its module from the start;
+`ReplayCursor` answers each request from the journal in delivery order, and
+execution goes live where the journal ends. Live primitive requests are answered
+through `LiveDeliverySource`; granted effects reach host-side `EffectExecutor`
+implementations.
 
-The journal's stream row pins only frame-contract version one and is not a run
-aggregate: no row records a program's registration, grants, or budgets. The
-capability vocabulary is closed and fixed by `ProgramCapability` and the
-migration. No code grants or exercises a capability, and registration,
-capability executors, event subscriptions, and session driving have no present
-code. A journaled `run_cancel` delivery is terminal: the host returns the
-cancelled outcome and creates no isolate.
+`ProgramRegistrationRepository` stores immutable registrations keyed by name and
+revision, recording SHA-256 digests of exact source and stripped artifact bytes.
+Each registration carries explicit grants from `ProgramCapability`; identical
+bytes under distinct names or grant lists remain distinct programs. A run pins
+its registration, whose row records its artifact and grants. Program-initiated
+registration requires `register` and admits only a subset of the registrant's
+grants; user registration may widen grants under a new key. The host loads the
+artifact bound to the run, and session capability issuance requires a registered
+session grant. Registration and run creation take caller-supplied identities: an
+equal retry returns the recorded value; different content or a different
+registration binding conflicts.
+
+`ProgramHost::execute_registered` loads the pinned artifact and grants;
+ungranted requests receive a journaled refusal before any executor acts.
+Recovery first adopts a proven durable outcome, reissues only operations
+declared idempotent, and otherwise journals an ambiguous answer. The register
+executor checks child-grant attenuation and adopts a matching immutable
+registration after a lost answer.
+
+`SessionEffects` composes host-side session creation and input services.
+Unsupported operations and invalid session requests receive a journaled refusal.
+A session grant can create a workflow session or submit one ordinary turn and
+await its terminal outcome. Recovery adopts the exact durable command receipt;
+reissuing either operation uses that same command identity. Turn answers carry
+the session, turn, accepted-input identity, terminal disposition, and a SHA-256
+digest of that metadata and the terminal frontier when present, without
+transcript bytes. The host retains credentials and signals ordinary session
+eligibility; the approval judge governs the turn, with no program hook inside
+it. Program cancellation wakes a waiting session operation and retains the run's
+terminal outcome.
+
+A journaled `run_cancel` delivery is terminal: the host returns the cancelled
+outcome and creates no isolate.
 
 Cancel authority is user authority. Cancel is a command with ordinary durable
 command identity ([identity and commands](../spec/identity-and-commands.md)),
@@ -106,26 +131,5 @@ authority.
 
 ## Planned
 
-- Program registration under an identity of name, revision, and content digests;
-  no present surface registers a program
-  ([design](../design/program-substrate.md)).
-- A run's authority resolved from its recorded registration; no present row
-  binds a run to a registration ([design](../design/program-substrate.md)).
-- Capability grants, with an ungranted capability refused before any authority
-  is exercised; no present code grants or refuses a capability
-  ([design](../design/program-substrate.md)).
-- Attenuation of the register grant along program-initiated registrations; no
-  program registers programs today ([design](../design/program-substrate.md)).
-- Recovery of external effects by adopted outcome, idempotent re-issue, or
-  journaled ambiguous answer; no executor applies effects
-  ([design](../design/program-substrate.md)).
 - Payload offload to SHA-256 blobs under the `program_journal` storage class;
   every payload is inline today ([design](../design/program-substrate.md)).
-- Session outcome frames carrying session, turn, and input identities and an
-  outcome digest; no session outcome executor exists
-  ([design](../design/program-substrate.md)).
-- Turn-by-turn session driving with no contract inside a turn; no session
-  outcome executor exists ([design](../design/program-substrate.md)).
-- Host-side execution of every credentialed operation, so credentials never
-  enter the isolate; the closed isolate is built and its executors are not
-  ([design](../design/program-substrate.md)).

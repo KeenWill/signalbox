@@ -23,12 +23,13 @@ command carries as provenance only.
 
 Every session records two independent immutable creation facts, paired as
 `SessionCreationProvenance`. The cause says why the session exists: a user
-created it, a module dispatched it, or a parent session's tool request delegated
-it. The ancestry says where its initial context came from: no prior transcript,
-one source session at one frontier, or one imported conversation at one
-inclusive boundary. An imported ancestry also records whether the client resumed
-or forked from that point. Resume declares a continuation and fork declares a
-branch, and the relationship records creation-time intent only.
+created it, a module dispatched it, a parent session's tool request delegated
+it, or a registered program run created a workflow session. The ancestry says
+where its initial context came from: no prior transcript, one source session at
+one frontier, or one imported conversation at one inclusive boundary. An
+imported ancestry also records whether the client resumed or forked from that
+point. Resume declares a continuation and fork declares a branch, and the
+relationship records creation-time intent only.
 
 Two durable command families create sessions from outside a turn, and a
 delegation spawn creates a child session from inside one. `CreateSession`
@@ -99,7 +100,9 @@ projection and follow stream for one session, a timeline of durable events with
 typed detail, and lexical search. Its request and response shapes live in
 `crates/web-contract`. `POST /api/sessions/{session_id}/input` submits browser
 text with a user-global command ID through the operator submit-input path,
-starting only when no turn is active. A 204 response acknowledges durable
+starting only when no turn is active. The browser keeps the message composer
+visible below the scrolling session history, with scroll access when a resized
+composer exceeds the available viewport. A 204 response acknowledges durable
 acceptance; typed errors report rejection, and an unconfirmed outcome is retried
 with the same command ID and text. Browser drafts are limited to 65,536 UTF-16
 code units before serialization; the serialized request must fit the JSON byte
@@ -173,9 +176,9 @@ version and no history API; the retained command payloads and installation
 evidence are neither an optimistic-concurrency mechanism nor a history
 projection. Archive is organizational visibility only: it never cancels, pauses,
 rejects, or rewrites work and never cascades to descendants or related sessions.
-Because no creation boundary carries actor attribution, the default list view is
-exactly all non-archived sessions, and no visibility taxonomy, creation-time
-override, or inference from missing attribution is stored.
+The default list view is exactly all non-archived sessions, and no visibility
+taxonomy, creation-time override, or inference from missing attribution is
+stored.
 
 `Session` embeds no transcript entries, accepted inputs, turns, queue facts,
 command history, evidence, or presentation state, because embedding them would
@@ -278,10 +281,15 @@ fixes the interactive cause with no ancestry; the imported-frontier family
 records the interactive cause as well. A command naming a source-session
 ancestry is well formed but fails preparation with a nonterminal error that
 claims no command identifier. When a creation names no ownership or finish
-condition, a module-dispatched or delegated session is created owned, and a
-module-dispatched session takes an external-gate finish condition. Attaching a
-goal to an unmonitored session confers ownership in the same transaction,
-recorded as an adopted transition.
+condition, a module-dispatched, delegated, or workflow session is created owned,
+and a module-dispatched session takes an external-gate finish condition.
+Attaching a goal to an unmonitored session confers ownership in the same
+transaction, recorded as an adopted transition.
+
+The program host's session capability creates workflow provenance naming its
+registered run. The creation command, session, and creation event retain that
+same run; reconstitution rejects missing or conflicting references. Workflow
+creation has no transcript ancestry and records program issuer provenance.
 
 Replay equality in both modes compares provenance, placement, start gate,
 ownership, and finish condition. Explicit creation also compares the complete
@@ -692,7 +700,7 @@ closed.
 - Instruction-aware defaults replacement, rejecting a model selection whose
   targets lack instruction transport or capacity for the session's admitted set
   ([design](../design/sessions-and-transcript.md)).
-- Workflow and eval creation causes for sessions created by registered programs
+- Eval creation causes for sessions created by registered programs
   ([design](../design/sessions-and-transcript.md)).
 - Durable timeline-to-blob relation behind the referenced blob count and byte
   length ([design](../design/sessions-and-transcript.md)).

@@ -192,3 +192,28 @@ fn delegation_terminal_turn_state_round_trips_crossed_parent_policy()
     )?;
     Ok(())
 }
+
+#[test]
+fn terminal_credential_wait_release_retains_only_predecessor_provider_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state = TurnState::FailedAfterCredentialWait {
+        terminal_frontier_id: uuid(1),
+        terminal_attempt_id: uuid(2),
+        predecessor_model_call: FailedTerminalModelCall::known_failed_with_cause(
+            uuid(3),
+            FailedModelCallCause::QuotaExhausted,
+        ),
+    };
+    let encoded = serde_json::to_value(&state)?;
+    assert_eq!(serde_json::from_value::<TurnState>(encoded.clone())?, state);
+    let mut missing_cause = encoded.clone();
+    missing_cause["predecessor_model_call"]
+        .as_object_mut()
+        .expect("call object")
+        .remove("cause");
+    assert!(serde_json::from_value::<TurnState>(missing_cause).is_err());
+    let mut local_failure = encoded;
+    local_failure["predecessor_model_call"]["cause"] = serde_json::json!("attachment_missing");
+    assert!(serde_json::from_value::<TurnState>(local_failure).is_err());
+    Ok(())
+}

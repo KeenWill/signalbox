@@ -42,3 +42,52 @@ impl program_session::ProgramSessionCapability {
     pub const fn actor(self) -> Actor;
 }
 ```
+
+## ProgramSessionTurn
+
+```rust
+pub struct ProgramSessionTurn {
+    pub command: DurableCommandId,
+    pub session: SessionId,
+    pub content: UserContent,
+    pub configuration: PerInputConfigurationChoices,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ProgramSessionOutcome
+
+```rust
+pub struct ProgramSessionOutcome {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub accepted_input: AcceptedInputId,
+    pub digest: program_registration::ProgramContentDigest,
+    pub disposition: program_session::ProgramSessionDisposition,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ProgramSessionDisposition
+
+```rust
+pub enum ProgramSessionDisposition {
+    Completed,
+    Refused,
+    Failed,
+    Cancelled,
+    Retired,
+    Ambiguous,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## ProgramSessionCreate
+
+```rust
+pub struct ProgramSessionCreate {
+    pub command: DurableCommandId,
+    pub defaults: SessionConfigurationDefaults,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```

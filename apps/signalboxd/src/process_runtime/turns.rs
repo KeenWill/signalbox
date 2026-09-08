@@ -965,6 +965,11 @@ where
             }
             DecideToolRequestResult::Rejected(rejected) => {
                 let detail = match *rejected {
+                    DecideToolRequestRejectedResult::AwaitingApprovalJudge { request } => {
+                        RejectionDetail::ToolRequestAwaitingApprovalJudge {
+                            tool_request_id: wire_uuid(request.into_uuid()),
+                        }
+                    }
                     DecideToolRequestRejectedResult::RequestNotFound { request } => {
                         RejectionDetail::ToolRequestNotFound {
                             tool_request_id: wire_uuid(request.into_uuid()),

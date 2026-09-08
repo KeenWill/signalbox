@@ -6,6 +6,7 @@
 
 ```rust
 pub enum CredentialAvailabilityWaitCause {
+    Contended,
     Exhausted,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
@@ -94,6 +95,11 @@ impl<'de> de::Deserialize<'de> for FailedTerminalModelCall {
 
 ```rust
 pub enum TurnState {
+    FailedAfterCredentialWait {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        predecessor_model_call: FailedTerminalModelCall,
+    },
     ActiveAwaitingCredentialAvailability {
         wait_attempt_id: CanonicalUuid,
         cause: CredentialAvailabilityWaitCause,

@@ -3,7 +3,7 @@ use super::*;
 use signalbox_domain::CredentialAvailabilityWaitCause;
 use signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion;
 
-pub(super) fn park_policy(name: &str, members: &[&str]) -> CredentialPoolRuntimePolicy {
+pub(crate) fn park_policy(name: &str, members: &[&str]) -> CredentialPoolRuntimePolicy {
     CredentialPoolRuntimePolicy::new(
         name.to_owned(),
         members
@@ -24,7 +24,7 @@ pub(super) fn park_policy(name: &str, members: &[&str]) -> CredentialPoolRuntime
     )
 }
 
-async fn prepare_wait_admission(
+pub(crate) async fn prepare_wait_admission(
     repository: &PostgresModelCallRepository,
     session: SessionId,
     seed: u128,
@@ -360,3 +360,9 @@ async fn credential_pool_wait_retains_the_failed_predecessor_and_never_readmits_
 
 #[path = "credential_wait_wakes.rs"]
 mod wakes;
+
+#[path = "credential_wait_capacity.rs"]
+mod capacity;
+
+#[path = "credential_wait_projection.rs"]
+mod projection;

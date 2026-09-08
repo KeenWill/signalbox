@@ -146,6 +146,21 @@ where
         };
         let queued_at_snapshot = consume_snapshot_queued_update(&mut updates_queued_at_snapshot);
         match update {
+            ProcessUpdate::ResyncRequired { session } => {
+                if session.is_none_or(|session| session == selected_session) {
+                    return run_until_shutdown(
+                        &mut shutdown,
+                        write_error(
+                            writer,
+                            version,
+                            request_id,
+                            ProtocolError::without_detail(ErrorCode::ResyncRequired),
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Ok(()));
+                }
+            }
             ProcessUpdate::Durable {
                 cursor,
                 session,
@@ -1949,6 +1964,9 @@ pub(super) fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             TurnState::ActiveAwaitingCredentialAvailability {
                 wait_attempt_id: wire_uuid(wait.attempt().into_uuid()),
                 cause: match wait.cause() {
+                    signalbox_domain::CredentialAvailabilityWaitCause::Contended => {
+                        signalbox_process_protocol::CredentialAvailabilityWaitCause::Contended
+                    }
                     signalbox_domain::CredentialAvailabilityWaitCause::Exhausted => {
                         signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted
                     }
@@ -1963,6 +1981,20 @@ pub(super) fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             runner_id: wire_uuid(runner.into_uuid()),
             placement_revision: PositiveCanonicalU64::from(*placement_revision),
             tool_attempt_id: interrupted_tool_attempt.map(|attempt| wire_uuid(attempt.into_uuid())),
+        },
+        ProcessTurnState::FailedAfterCredentialWait {
+            terminal_frontier,
+            terminal_attempt,
+            predecessor_call,
+            provider_cause,
+        } => TurnState::FailedAfterCredentialWait {
+            terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
+            predecessor_model_call:
+                signalbox_process_protocol::FailedTerminalModelCall::known_failed_with_cause(
+                    wire_uuid(predecessor_call.into_uuid()),
+                    wire_provider_failure_cause(*provider_cause),
+                ),
         },
         ProcessTurnState::FailedCredentialPoolExhausted(evidence) => {
             TurnState::FailedCredentialPoolExhausted {

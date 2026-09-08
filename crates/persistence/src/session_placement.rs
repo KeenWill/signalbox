@@ -328,8 +328,8 @@ pub(crate) async fn load_current(
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
             AND native_creation.command_kind = 'create_session'
-            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8)
-            AND (native_creation.storage_version IN (6, 7, 8)
+            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8, 9)
+            AND (native_creation.storage_version IN (6, 7, 8, 9)
                  OR (native_creation.storage_version IN (1, 2, 3, 4)
                      AND event.placement_path IS NULL
                      AND NOT event.root_global_read_intent))
@@ -449,8 +449,8 @@ pub(crate) async fn load_current_batch(
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
             AND native_creation.command_kind = 'create_session'
-            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8)
-            AND (native_creation.storage_version IN (6, 7, 8)
+            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8, 9)
+            AND (native_creation.storage_version IN (6, 7, 8, 9)
                  OR (native_creation.storage_version IN (1, 2, 3, 4)
                      AND event.placement_path IS NULL
                      AND NOT event.root_global_read_intent))
@@ -684,8 +684,8 @@ async fn load_direct_authenticated_version(
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
             AND native_creation.command_kind = 'create_session'
-            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8)
-            AND (native_creation.storage_version IN (6, 7, 8)
+            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8, 9)
+            AND (native_creation.storage_version IN (6, 7, 8, 9)
                  OR (native_creation.storage_version IN (1, 2, 3, 4)
                      AND event.placement_path IS NULL
                      AND NOT event.root_global_read_intent))

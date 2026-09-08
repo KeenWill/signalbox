@@ -201,13 +201,6 @@ impl tool_loop::PostgresToolLoopRepository {
     ) -> result::Result<signalbox_domain::ToolAttemptCrashOutcome, tool_loop::ToolLoopRepositoryError>
     where
         NextTurn: function::FnMut(signalbox_domain::AcceptedInputId) -> signalbox_domain::TurnId;
-    pub async fn commit_result_and_prepare_continuation(
-        &self,
-        producing_call: signalbox_domain::ModelCallId,
-        projection: &signalbox_domain::PreparedToolResultProjection,
-        prepared: &signalbox_domain::PreparedInitialModelCall,
-        credential_reference: &signalbox_application::ModelCallCredentialReference,
-    ) -> result::Result<(), tool_loop::ToolLoopRepositoryError>;
     pub async fn prepare_continuation<NextSteering>(
         &self,
         session: signalbox_domain::SessionId,
