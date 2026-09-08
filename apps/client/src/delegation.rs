@@ -347,6 +347,11 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
         | ServerMessage::CredentialExclusionEnd { .. }
+        | ServerMessage::RunnerStatusStart {}
+        | ServerMessage::RunnerStatus { .. }
+        | ServerMessage::RunnerOperationFailure { .. }
+        | ServerMessage::RunnerWorkspaceLeak { .. }
+        | ServerMessage::RunnerStatusEnd { .. }
         | ServerMessage::CredentialExclusionCleared { .. } => DelegationResponse::Unexpected,
     }
 }

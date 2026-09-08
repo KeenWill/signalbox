@@ -155,6 +155,24 @@ pub fn validate_oauth_authorization(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+    /// Opens one runner-status page.
+    RunnerStatusStart {},
+    /// One current enrollment or session placement, on the first page only.
+    RunnerStatus { status: crate::RunnerStatusFact },
+    /// One retained refusal with redacted diagnostic detail.
+    RunnerOperationFailure {
+        failure: crate::RunnerOperationFailure,
+    },
+    /// One retained workspace leak.
+    RunnerWorkspaceLeak { leak: crate::RunnerWorkspaceLeak },
+    /// Closes the page and names its exclusive continuation.
+    RunnerStatusEnd {
+        runner_count: CanonicalU64,
+        failure_count: CanonicalU64,
+        leak_count: CanonicalU64,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        next_after: Option<crate::RunnerStatusCursor>,
+    },
     /// The stored result of one program cancellation command.
     ProgramRunCancellationReceipt {
         command_id: crate::CommandId,
@@ -937,6 +955,28 @@ impl ServerMessage {
             return Err(FrameValidationError::DelegationShape);
         }
         validate_operator_status_message(self)?;
+        match self {
+            Self::RunnerOperationFailure { failure } => failure.validate()?,
+            Self::RunnerWorkspaceLeak { leak } => leak.validate()?,
+            Self::RunnerStatusEnd {
+                failure_count,
+                leak_count,
+                next_after,
+                ..
+            } => {
+                let count = failure_count
+                    .value()
+                    .checked_add(leak_count.value())
+                    .ok_or(FrameValidationError::RunnerStatusShape)?;
+                if count > 100 || (count == 0 && next_after.is_some()) {
+                    return Err(FrameValidationError::RunnerStatusShape);
+                }
+                if let Some(cursor) = next_after {
+                    cursor.validate()?;
+                }
+            }
+            _ => {}
+        }
         match self {
             Self::OauthCredentialAuthorization {
                 profile,

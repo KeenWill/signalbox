@@ -495,6 +495,7 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::ReadRunnerStatus { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
@@ -719,6 +720,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
             | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::ReadRunnerStatus { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReloadConfiguration { .. }

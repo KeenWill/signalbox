@@ -38,6 +38,12 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Read current runner facts and one page of retained diagnostics.
+    ReadRunnerStatus {
+        page_size: u32,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        after: Option<crate::RunnerStatusCursor>,
+    },
     /// Cancel a retained program run through its journal.
     CancelProgramRun {
         command_id: CommandId,
@@ -736,6 +742,14 @@ impl ClientRequest {
             | Self::ReprovisionOauthCredential { profile, .. }
             | Self::DeleteOauthCredential { profile, .. } => {
                 crate::response::validate_oauth_profile(profile)?;
+            }
+            Self::ReadRunnerStatus { page_size, after } => {
+                if !(1..=100).contains(page_size) {
+                    return Err(FrameValidationError::RunnerStatusShape);
+                }
+                if let Some(cursor) = after {
+                    cursor.validate()?;
+                }
             }
             Self::ListCredentialExclusions { page_size, after } => {
                 if !(1..=100).contains(page_size) {
