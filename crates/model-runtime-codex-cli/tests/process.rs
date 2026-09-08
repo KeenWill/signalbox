@@ -179,7 +179,11 @@ impl signalbox_model_runtime_codex_cli::OauthCredentialProvider for WaitingOauth
 #[cfg(unix)]
 #[tokio::test]
 async fn oauth_delivery_cancellation_reports_cancelled_preparation() {
+    use std::os::unix::fs::PermissionsExt;
+
     let temporary = tempfile::tempdir().expect("working directory");
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private temporary parent");
     let root_path = temporary.path().join("oauth");
     let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
         .expect("private root");
@@ -224,7 +228,11 @@ async fn oauth_delivery_cancellation_reports_cancelled_preparation() {
 #[cfg(unix)]
 #[tokio::test]
 async fn oauth_dispatch_isolates_file_auth_scrubs_tokens_and_removes_home() {
+    use std::os::unix::fs::PermissionsExt;
+
     let temporary = tempfile::tempdir().expect("working directory");
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private temporary parent");
     let root_path = temporary.path().join("oauth");
     let root = signalbox_model_runtime_codex_cli::OauthCredentialRoot::open(&root_path)
         .expect("private root");

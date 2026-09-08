@@ -727,6 +727,30 @@ fn probe_evidence_outside_the_reader_validation_envelope_cannot_validate() {
 }
 
 #[test]
+fn probe_evidence_outside_validation_envelope_preserves_typed_malformed_result() {
+    let source = MemorySource::synthetic();
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = SELECTION_PROBE_EVIDENCE_BYTES - 1;
+    let registry = selection_registry_with_ceilings(
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+        ceilings,
+    );
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Strong,
+        validation: SelectionValidation::Malformed,
+    };
+
+    let outcome = inspect(&registry, &processor, &source, "unknown")
+        .expect("bounded validation may report a typed malformed result");
+
+    assert!(
+        matches!(outcome, FileInspection::Malformed { reason_code, .. }
+        if reason_code.as_str() == MALFORMED_REASON)
+    );
+}
+
+#[test]
 fn strong_candidate_outside_validation_envelope_fails_before_fallbacks() {
     let registry = selection_registry_with_media_types(
         &[SYNTHETIC_MEDIA_TYPE, "text/plain"],
