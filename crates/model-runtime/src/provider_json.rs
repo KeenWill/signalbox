@@ -6,6 +6,55 @@ use std::fmt;
 
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
+/// Builds objects explicitly so serde_json's private discriminators
+/// cannot reinterpret an ordinary object member as another value.
+pub(crate) fn parse_json_value(text: &str) -> Result<serde_json::Value, serde_json::Error> {
+    validate_provider_json_nesting(text.as_bytes()).map_err(serde::de::Error::custom)?;
+    parse_json_value_inner(text)
+}
+
+fn parse_json_value_inner(text: &str) -> Result<serde_json::Value, serde_json::Error> {
+    use serde_json::{Value, value::RawValue};
+    match text.trim_start().as_bytes().first() {
+        Some(b'{') => {
+            let object: std::collections::BTreeMap<String, &RawValue> = serde_json::from_str(text)?;
+            object
+                .into_iter()
+                .map(|(key, raw)| parse_json_value_inner(raw.get()).map(|value| (key, value)))
+                .collect::<Result<_, _>>()
+                .map(Value::Object)
+        }
+        Some(b'[') => {
+            let array: Vec<&RawValue> = serde_json::from_str(text)?;
+            array
+                .into_iter()
+                .map(|raw| parse_json_value_inner(raw.get()))
+                .collect::<Result<_, _>>()
+                .map(Value::Array)
+        }
+        _ => serde_json::from_str(text),
+    }
+}
+
+pub(crate) fn has_reserved_json_key(value: &serde_json::Value) -> bool {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::Object(object) => {
+                if object.contains_key("$serde_json::private::Number")
+                    || object.contains_key("$serde_json::private::RawValue")
+                {
+                    return true;
+                }
+                pending.extend(object.values());
+            }
+            serde_json::Value::Array(array) => pending.extend(array),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Maximum permitted nesting of JSON object and array containers in one
 /// provider-controlled value.
 pub const PROVIDER_JSON_NESTING_LIMIT: usize = 127;

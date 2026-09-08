@@ -676,7 +676,8 @@ impl PostgresModelCallRepository {
         let origin_contents =
             load_origin_contents(&mut transaction, &frontier_entries, &[], &[]).await?;
         let attachment_blob_facts =
-            load_attachment_blob_facts(&mut transaction, &origin_contents).await?;
+            load_attachment_blob_facts(&mut transaction, &origin_contents, &frontier_entries, &[])
+                .await?;
         let tool_result_correlations =
             load_tool_result_correlations(&mut transaction, &frontier_entries).await?;
         let tool_inadmissible_correlations =
