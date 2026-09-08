@@ -13,6 +13,7 @@ rust_library(
         "//crates/convergence:signalbox_convergence",
         "//crates/domain:signalbox_domain",
         "//crates/egress-transport:signalbox_egress_transport",
+        "//crates/github-transport:signalbox_github_transport",
         "//crates/model-runtime:signalbox_model_runtime",
         "//crates/tool-contract:signalbox_tool_contract",
     ],

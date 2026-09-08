@@ -339,6 +339,21 @@ async fn review_workflow_store_reconstructs_complete_evidence() -> Result<(), Bo
             .expect("posted finding loads through observed link history"),
         Some(posted_finding.clone())
     );
+    for (reported_link, ordinal) in [
+        (ReviewExternalLinkId::from_uuid(Uuid::nil()), 2),
+        (link_id, 3),
+    ] {
+        let invalid_report = observation(
+            reported_link,
+            ReviewEventOrdinal::try_new(ordinal).expect("positive ordinal"),
+            unchanged_import_evidence.clone(),
+            ReviewExternalObjectState::Current,
+        );
+        store
+            .append_external_observation(link_id, invalid_report)
+            .await
+            .expect_err("unchanged reports must name the link and next ordinal");
+    }
     let unchanged = observation(
         link_id,
         ReviewEventOrdinal::try_new(2).expect("positive ordinal"),

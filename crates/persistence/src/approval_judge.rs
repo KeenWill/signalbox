@@ -486,6 +486,10 @@ impl PostgresApprovalJudgeRepository {
             read: prepared.session_context.goal(),
             in_force: in_force.as_ref(),
         });
+        let offered_recommendation = recommendation;
+        let substitution_cause = (!authority_stands
+            && recommendation != DelegateApprovalRecommendation::EscalateToHuman)
+            .then_some("authority_withdrawn");
         let recommendation = if authority_stands {
             recommendation
         } else {
@@ -527,7 +531,8 @@ impl PostgresApprovalJudgeRepository {
                 SET state_kind = $1, terminal_disposition_kind = $2,
                     recommendation_kind = $3, rationale = $4,
                     input_tokens = $5, output_tokens = $6,
-                    cache_creation_input_tokens = $7, cache_read_input_tokens = $8
+                    cache_creation_input_tokens = $7, cache_read_input_tokens = $8,
+                    offered_recommendation_kind = $12, substitution_cause = $13
               WHERE model_call_id = $9 AND session_id = $10 AND state_kind = $11",
         )
         .bind(approval_judge_state_to_str(
@@ -547,6 +552,8 @@ impl PostgresApprovalJudgeRepository {
         .bind(approval_judge_state_to_str(
             ApprovalJudgeStateStorageKind::InFlight,
         ))
+        .bind(approval_judge_recommendation_to_str(offered_recommendation))
+        .bind(substitution_cause)
         .execute(&mut *transaction)
         .await?
         .rows_affected();
@@ -1620,7 +1627,7 @@ async fn exact_completed(
     let encoded = encode_usage(usage);
     let row = sqlx::query(
         "SELECT terminal_disposition_kind, recommendation_kind, rationale,
-                input_tokens, output_tokens, cache_creation_input_tokens,
+                offered_recommendation_kind, substitution_cause, input_tokens, output_tokens, cache_creation_input_tokens,
                 cache_read_input_tokens
            FROM tool_approval_judge_model_call WHERE model_call_id = $1",
     )
@@ -1629,32 +1636,30 @@ async fn exact_completed(
     .await?;
     let terminal_disposition: String = required(&row, "terminal_disposition_kind")?;
     let stored_recommendation: String = required(&row, "recommendation_kind")?;
-    // What the completion committed, which is not always what its caller
-    // offered: a completion whose authority closed during the provider
-    // round-trip stored an escalation in place of the provider's
-    // recommendation. A retry after an uncertain response still carries the
-    // original value, so the replay is judged against the stored decision.
-    //
-    // A stored escalation is admitted for a different offered value only while
-    // the authority is still withdrawn, which is the condition that produced it
-    // and one a closed generation cannot leave. With the authority intact the
-    // escalation was the provider's own, so an offered approval or denial is a
-    // structurally different call and must be reported rather than replayed.
     let stored = approval_judge_recommendation_from_str(&stored_recommendation);
-    let substituted = stored == Some(DelegateApprovalRecommendation::EscalateToHuman)
-        && !read_authority_still_stands(JudgedTurnAuthority {
-            read: prepared.session_context.goal(),
-            in_force: load_judged_turn_authority_in_force(
-                connection,
-                prepared.request.session(),
-                prepared.request.turn(),
-            )
-            .await?
-            .as_ref(),
-        });
+    let offered = approval_judge_recommendation_from_str(&required::<String>(
+        &row,
+        "offered_recommendation_kind",
+    )?);
+    let substitution_cause: Option<String> = row.try_get("substitution_cause")?;
+    let correlated = match substitution_cause.as_deref() {
+        None => stored == offered,
+        Some("authority_withdrawn") => {
+            stored == Some(DelegateApprovalRecommendation::EscalateToHuman)
+                && matches!(
+                    offered,
+                    Some(
+                        DelegateApprovalRecommendation::Approve
+                            | DelegateApprovalRecommendation::Deny
+                    )
+                )
+        }
+        Some(_) => false,
+    };
     let exact = approval_judge_terminal_disposition_from_str(&terminal_disposition)
         == Some(ApprovalJudgeTerminalDispositionStorageKind::Completed)
-        && (stored == Some(recommendation) || substituted)
+        && offered == Some(recommendation)
+        && correlated
         && required::<String>(&row, "rationale")? == rationale.as_str()
         && row.try_get::<Option<Decimal>, _>("input_tokens")? == encoded.input
         && row.try_get::<Option<Decimal>, _>("output_tokens")? == encoded.output
