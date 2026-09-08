@@ -66,17 +66,17 @@ impl ProgramHost {
             .load(run)
             .await?
             .ok_or(ProgramHostError::JournalMissing(run))?;
+        let registrations = self.journal.registrations();
+        let registration = registrations
+            .for_run(run)
+            .await?
+            .ok_or(ProgramRegistrationError::RunMissing)?;
         if let Some(outcome) = journal
             .terminal_delivery()
             .and_then(crate::terminal_outcome)
         {
             return Ok(outcome);
         }
-        let registrations = self.journal.registrations();
-        let registration = registrations
-            .for_run(run)
-            .await?
-            .ok_or(ProgramRegistrationError::RunMissing)?;
         let recovered = journal
             .entries()
             .iter()
