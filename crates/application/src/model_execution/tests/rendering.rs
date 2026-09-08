@@ -68,12 +68,42 @@ fn maximum_checked_attachment_metadata_fits_the_named_stub_bound() {
     }])
     .expect("the maximum metadata fixture is valid");
 
+    let charged = super::super::render::user_content_text_bytes(&content);
     let rendered = render_model_user_content(content, |_| Some(NonZeroU64::MAX))
         .expect("the derived bound covers maximum checked metadata");
     let stub = rendered.parts()[0].as_str();
 
     assert!(stub.len() <= MAX_RENDERED_ATTACHMENT_STUB_BYTES);
     assert_eq!(stub.len(), 2_242);
+    assert!(charged >= stub.len());
+}
+
+#[test]
+fn repeated_attachment_occurrences_each_count_toward_rendered_content() {
+    let attachment = UserContentPart::Attachment {
+        digest: BlobDigest::digest(b"repeated attachment"),
+        kind: AttachmentKind::File,
+        media_type: signalbox_domain::DeclaredMediaType::try_new("text/plain".into())
+            .expect("fixture media type"),
+        display_filename: None,
+    };
+    let single = UserContent::try_parts(vec![attachment.clone()]).expect("one occurrence");
+    let repeated = UserContent::try_parts(vec![attachment.clone(), attachment])
+        .expect("two occurrences of one digest");
+    let single_charge = super::super::render::user_content_text_bytes(&single);
+    let repeated_charge = super::super::render::user_content_text_bytes(&repeated);
+    let rendered = render_model_user_content(repeated, |_| Some(NonZeroU64::MIN))
+        .expect("catalog length is available");
+
+    assert_eq!(repeated_charge, single_charge * 2);
+    assert!(
+        repeated_charge
+            >= rendered
+                .parts()
+                .iter()
+                .map(|part| part.as_str().len())
+                .sum()
+    );
 }
 
 #[test]

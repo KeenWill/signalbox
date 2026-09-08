@@ -223,6 +223,10 @@ part of the canonical decision payload; the session named by
 `override_denied_tool_request` is part of its canonical payload because the
 recorded override is a session-scoped standing fact.
 
+A decision on the earliest delegated request without terminal judge evidence
+records an `awaiting_approval_judge` rejection and returns
+`tool_request_awaiting_approval_judge`.
+
 A one-segment root path is legal only under the `root_global_read` placement,
 which records the explicit intent that the session gains global conversation
 read. The client accepts a placement receipt only when the session and placement
@@ -632,3 +636,7 @@ A terminal credential wait release after a provider call projects
 `failed_after_credential_wait`, naming the fresh call-free terminal attempt and
 its known-failed predecessor with the retained provider cause. Its live terminal
 event is `turn_failed`; it emits no pool-exhaustion event.
+
+## Planned
+
+None.

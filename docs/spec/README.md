@@ -113,7 +113,6 @@ anchor, unless the anchor is a heading on the linking page.
 - [Model and session settings design](../design/model-session-settings.md)
 - [Configuration and credentials design](../design/configuration-and-credentials.md)
 - [Identity and commands design](../design/identity-and-commands.md)
-- [Ownership seam design](../design/ownership-seam.md)
 - [Persistence protocol design](../design/persistence-protocol.md)
 - [Blob storage design](../design/blob-storage.md)
 - [File and media interpretation design](../design/file-and-media.md)

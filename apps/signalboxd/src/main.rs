@@ -2119,6 +2119,7 @@ async fn run_hub(
             model_configuration.clone(),
             compaction.clone(),
         )
+        .with_blob_store_registry(pass_blobs.clone())
         .with_repository_watch_continuation(pass_nudge.clone(), tool_dispatch_gate.clone());
         let execution = execution_supervisor.with_execution(
             PostgresProviderModelExecution::new(
@@ -2151,6 +2152,7 @@ async fn run_hub(
                 compaction,
                 execution,
             )
+            .with_blob_store_registry(pass_blobs.clone())
             .with_reported_usage_compaction(reported_usage_compaction)
             .with_workspace_instructions(workspace_instruction_runtime.clone())
             .with_occupancy_recovery(
