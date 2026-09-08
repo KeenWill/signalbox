@@ -1431,3 +1431,62 @@ async fn workspace_registration_without_request_path_replays_only_at_its_origina
     ));
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn workspace_registration_replay_detects_an_earlier_field_and_a_missing_typed_record()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::workspace::{WorkspaceError, WorkspaceRepository};
+    let (_container, pool) = migrated_postgres().await?;
+    let mut tx = pool.begin().await?;
+    insert_command(&mut tx, command_id(1), "register_workspace").await?;
+    sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1)")
+        .bind(workspace_id(1).into_uuid()).bind(WORKSPACE_ROOT).bind(command_id(1).into_uuid())
+        .execute(&mut *tx).await?;
+    tx.commit().await?;
+    let repository = WorkspaceRepository::new(pool.clone());
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE workspace DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    let error = sqlx::query("UPDATE workspace SET registration_request_root = root_path")
+        .execute(&mut *tx)
+        .await
+        .expect_err("earlier registration cannot carry the request path");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("workspace_registration_request_versioned")
+    );
+    tx.rollback().await?;
+
+    // Retain invalid storage only to exercise the corruption reader.
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE workspace DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE workspace DROP CONSTRAINT workspace_registration_request_versioned")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE workspace SET registration_request_root = root_path")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert!(matches!(
+        repository
+            .registration_replay(command_id(1), WORKSPACE_ROOT)
+            .await,
+        Err(WorkspaceError::Corruption(
+            "registration request root version"
+        ))
+    ));
+    sqlx::query("DELETE FROM workspace").execute(&pool).await?;
+    assert!(matches!(
+        repository
+            .registration_replay(command_id(1), WORKSPACE_ROOT)
+            .await,
+        Err(WorkspaceError::Corruption("registry typed record"))
+    ));
+    Ok(())
+}
