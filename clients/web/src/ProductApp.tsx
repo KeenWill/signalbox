@@ -715,7 +715,9 @@ export function ProductApp({
       artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
       searchAvailable:
-        surface === 'search' && bootstrap.data?.capabilities.bounded_lexical_search === true,
+        surface === 'search' &&
+        bootstrap.isSuccess &&
+        bootstrap.data.capabilities.bounded_lexical_search === true,
       focusSearch: () => document.getElementById('product-search-input')?.focus(),
       configuresTranscriptDetail: surface === 'settings',
       focusTimeline:
@@ -771,6 +773,7 @@ export function ProductApp({
   }, [
     artifactAvailable,
     bootstrap.data,
+    bootstrap.isSuccess,
     dispatch,
     importsCommandContext,
     navigate,
