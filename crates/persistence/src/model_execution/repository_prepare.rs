@@ -135,6 +135,12 @@ impl PostgresModelCallRepository {
                             PrepareInitialModelCallOutcome::Ready {
                                 request: Box::new(request),
                                 credential_reference,
+                                retained_mapped_target:
+                                    super::credential_wait::retained_mapped_target(
+                                        &mut transaction,
+                                        execution.current_attempt().id(),
+                                    )
+                                    .await?,
                                 dangerous_tool_auto_approval,
                                 recorded_user_overrides,
                                 system_prompt,

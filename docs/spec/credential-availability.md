@@ -228,4 +228,7 @@ authorization use the wait's retained effective target with its retained policy;
 a missing current selection leaves the wait unconsumed. Release pins a pre-call
 wait's retained target on its turn, and domain call preparation retains that pin
 across catalog reloads. The rendered provider operation uses that retained
-target. Parking retains the exclusions that selected the wait.
+target. A post-failure wait retains its already mapped serving target separately
+from the turn's base-target pin; successor delivery does not apply a reloaded
+fast-mode mapping to that pin. Parking retains the exclusions that selected the
+wait.

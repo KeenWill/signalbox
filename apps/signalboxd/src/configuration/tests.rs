@@ -5758,7 +5758,7 @@ reasoning_replay_family = "shared"
     let (effective, _) = catalog
         .resolve(&selected)
         .expect("selected target")
-        .effective_target(&selected, signalbox_model_runtime::FastMode::Enabled)
+        .effective_target(&selected, signalbox_model_runtime::FastMode::Enabled, None)
         .expect("fast target");
     assert_eq!(
         catalog

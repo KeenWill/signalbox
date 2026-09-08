@@ -32,6 +32,7 @@ impl ModelCapabilities {
         &'a self,
         selected: &'a ResolvedTarget,
         fast_mode: FastMode,
+        retained_mapped_target: option::Option<&'a ResolvedTarget>,
     ) -> result::Result<(&'a ResolvedTarget, FastMode), ModelCapabilityError>;
 }
 ```

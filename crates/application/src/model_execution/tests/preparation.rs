@@ -167,6 +167,7 @@ async fn prepared_capability_receives_the_frozen_epoch_system_prompt() {
         FixedIds::baseline(),
         FakePrepare {
             outcomes: [Ok(PrepareModelCallOutcome::Ready {
+                retained_mapped_target: None,
                 reasoning_provenance: Box::new([]),
                 request: Box::new(request.clone()),
                 credential_reference: credential_reference(),
