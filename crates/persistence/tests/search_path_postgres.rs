@@ -36,7 +36,10 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{collections::BTreeSet, error::Error};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+};
 
 use signalbox_persistence::{
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
@@ -137,7 +140,7 @@ fn synthetic_transitive_chain() -> SyntheticTransitiveChain {
         create_middle: format!(
             "CREATE FUNCTION {RESTORE_PROBE_MIDDLE}() RETURNS boolean
                 LANGUAGE sql IMMUTABLE AS
-                'SELECT {RESTORE_PROBE_TAIL}()'"
+                'SELECT result FROM (SELECT 1, CASE {RESTORE_PROBE_TAIL}() WHEN true THEN true ELSE false END AS result) AS probe'"
         ),
         create_head: format!(
             "CREATE FUNCTION {RESTORE_PROBE_HEAD}(value text) RETURNS boolean
@@ -176,16 +179,36 @@ async fn restore_reachable_functions(pool: &PgPool) -> Result<Vec<(String, bool)
             source,
         })
         .collect::<Vec<_>>();
-    Ok(restore_reachable_function_pins(&roots, &catalogue))
+    let keywords: Vec<(String, bool, bool)> = sqlx::query_as(
+        "SELECT word, catcode IN ('U', 'C'), catcode IN ('U', 'T') FROM pg_get_keywords()",
+    )
+    .fetch_all(pool)
+    .await?;
+    let keywords = keywords
+        .into_iter()
+        .map(|(word, relation_name, function_name)| {
+            (
+                word,
+                KeywordUse {
+                    relation_name,
+                    function_name,
+                },
+            )
+        })
+        .collect();
+    Ok(restore_reachable_function_pins(
+        &roots, &catalogue, &keywords,
+    ))
 }
 
 fn restore_reachable_function_pins(
     roots: &[i64],
     catalogue: &[RestoreFunction],
+    keywords: &BTreeMap<String, KeywordUse>,
 ) -> Vec<(String, bool)> {
     let calls = catalogue
         .iter()
-        .map(|function| (function.oid, body_call_names(&function.source)))
+        .map(|function| (function.oid, body_call_names(&function.source, keywords)))
         .collect::<Vec<_>>();
     let mut covered = roots.iter().copied().collect::<BTreeSet<_>>();
     loop {
@@ -219,39 +242,40 @@ fn restore_reachable_function_pins(
         .collect()
 }
 
-fn body_call_names(source: &str) -> BTreeSet<String> {
-    let tokens = body_tokens(source);
-    let cte_names = cte_name_positions(&tokens);
+fn body_call_names(source: &str, keywords: &BTreeMap<String, KeywordUse>) -> BTreeSet<String> {
+    let tokens = body_tokens(source, keywords);
+    let cte_headers = cte_header_positions(&tokens);
     tokens
         .windows(2)
         .enumerate()
-        .filter_map(|(index, pair)| match pair {
-            [BodyToken::Identifier(name), BodyToken::Open]
-                if !cte_names.contains(&index)
-                    && !follows_relation_name(&tokens, index)
-                    && !matches!(
-                        index.checked_sub(1).map(|previous| &tokens[previous]),
-                        Some(BodyToken::As | BodyToken::Close)
-                    ) =>
-            {
-                Some(name.clone())
-            }
-            _ => None,
+        .filter_map(|(index, pair)| {
+            let previous = index.checked_sub(1).map(|previous| &tokens[previous]);
+            let name = match (&pair[0], previous) {
+                (BodyToken::Word { name, .. }, Some(BodyToken::Dot)) => name.as_str(),
+                _ => pair[0].function_name()?,
+            };
+            (pair[1] == BodyToken::Open
+                && !cte_headers.contains(&index)
+                && !follows_relation_name(&tokens, index)
+                && !previous
+                    .is_some_and(|token| token.is_keyword("as") || *token == BodyToken::Close))
+            .then(|| name.to_owned())
         })
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct KeywordUse {
+    relation_name: bool,
+    function_name: bool,
+}
+
 #[derive(Debug, PartialEq)]
 enum BodyToken {
-    Identifier(String),
-    With,
-    Recursive,
-    As,
-    Not,
-    Materialized,
-    From,
-    Join,
-    Lateral,
+    Word {
+        name: String,
+        keyword: Option<KeywordUse>,
+    },
     Dot,
     Open,
     Close,
@@ -259,7 +283,42 @@ enum BodyToken {
     Other,
 }
 
-fn body_tokens(source: &str) -> Vec<BodyToken> {
+impl BodyToken {
+    fn is_keyword(&self, word: &str) -> bool {
+        matches!(self, Self::Word { name, keyword: Some(_) } if name == word)
+    }
+
+    fn is_relation_name(&self) -> bool {
+        matches!(
+            self,
+            Self::Word {
+                keyword: None
+                    | Some(KeywordUse {
+                        relation_name: true,
+                        ..
+                    }),
+                ..
+            }
+        )
+    }
+
+    fn function_name(&self) -> Option<&str> {
+        match self {
+            Self::Word {
+                name,
+                keyword:
+                    None
+                    | Some(KeywordUse {
+                        function_name: true,
+                        ..
+                    }),
+            } => Some(name),
+            _ => None,
+        }
+    }
+}
+
+fn body_tokens(source: &str, keywords: &BTreeMap<String, KeywordUse>) -> Vec<BodyToken> {
     let bytes = source.as_bytes();
     let mut cursor = 0;
     let mut tokens = Vec::new();
@@ -288,7 +347,10 @@ fn body_tokens(source: &str) -> Vec<BodyToken> {
             b'"' => {
                 let (identifier, after) = quoted_identifier(source, cursor);
                 cursor = after;
-                tokens.push(identifier.map_or(BodyToken::Other, BodyToken::Identifier));
+                tokens.push(identifier.map_or(BodyToken::Other, |name| BodyToken::Word {
+                    name,
+                    keyword: None,
+                }));
             }
             byte if is_identifier_start(byte) => {
                 let start = cursor;
@@ -297,16 +359,10 @@ fn body_tokens(source: &str) -> Vec<BodyToken> {
                     cursor += 1;
                 }
                 let identifier = source[start..cursor].to_ascii_lowercase();
-                tokens.push(match identifier.as_str() {
-                    "with" => BodyToken::With,
-                    "recursive" => BodyToken::Recursive,
-                    "as" => BodyToken::As,
-                    "not" => BodyToken::Not,
-                    "materialized" => BodyToken::Materialized,
-                    "from" => BodyToken::From,
-                    "join" => BodyToken::Join,
-                    "lateral" => BodyToken::Lateral,
-                    _ => BodyToken::Identifier(identifier),
+                let keyword = keywords.get(&identifier).copied();
+                tokens.push(BodyToken::Word {
+                    name: identifier,
+                    keyword,
                 });
             }
             punctuation @ (b'(' | b')' | b',' | b'.') => {
@@ -328,13 +384,24 @@ fn body_tokens(source: &str) -> Vec<BodyToken> {
 }
 
 fn follows_relation_name(tokens: &[BodyToken], mut index: usize) -> bool {
-    while index > 0 && matches!(tokens[index - 1], BodyToken::Identifier(_)) {
+    while index > 0
+        && (tokens[index - 1].is_relation_name()
+            || (index > 1
+                && tokens[index - 2] == BodyToken::Dot
+                && matches!(tokens[index - 1], BodyToken::Word { .. })))
+    {
         index -= 1;
         if index == 0 {
             return false;
         }
         match tokens[index - 1] {
-            BodyToken::From | BodyToken::Join | BodyToken::Comma => return true,
+            ref token
+                if token.is_keyword("from")
+                    || token.is_keyword("join")
+                    || *token == BodyToken::Comma =>
+            {
+                return true;
+            }
             BodyToken::Dot => index -= 1,
             _ => return false,
         }
@@ -342,17 +409,20 @@ fn follows_relation_name(tokens: &[BodyToken], mut index: usize) -> bool {
     false
 }
 
-fn cte_name_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
-    let mut names = BTreeSet::new();
+fn cte_header_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
+    let mut headers = BTreeSet::new();
     for (index, token) in tokens.iter().enumerate() {
-        if *token != BodyToken::With {
+        if !token.is_keyword("with") {
             continue;
         }
         let mut cursor = index + 1;
-        if tokens.get(cursor) == Some(&BodyToken::Recursive) {
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.is_keyword("recursive"))
+        {
             cursor += 1;
         }
-        while matches!(tokens.get(cursor), Some(BodyToken::Identifier(_))) {
+        while tokens.get(cursor).is_some_and(BodyToken::is_relation_name) {
             let name = cursor;
             cursor += 1;
             if tokens.get(cursor) == Some(&BodyToken::Open) {
@@ -361,20 +431,29 @@ fn cte_name_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
                 };
                 cursor = after;
             }
-            if tokens.get(cursor) != Some(&BodyToken::As) {
+            if !tokens
+                .get(cursor)
+                .is_some_and(|token| token.is_keyword("as"))
+            {
                 break;
             }
             cursor += 1;
-            if tokens.get(cursor) == Some(&BodyToken::Not) {
+            if tokens
+                .get(cursor)
+                .is_some_and(|token| token.is_keyword("not"))
+            {
                 cursor += 1;
             }
-            if tokens.get(cursor) == Some(&BodyToken::Materialized) {
+            if tokens
+                .get(cursor)
+                .is_some_and(|token| token.is_keyword("materialized"))
+            {
                 cursor += 1;
             }
             let Some(after) = after_parenthesized(tokens, cursor) else {
                 break;
             };
-            names.insert(name);
+            headers.extend(name..cursor);
             cursor = after;
             if tokens.get(cursor) != Some(&BodyToken::Comma) {
                 break;
@@ -382,7 +461,7 @@ fn cte_name_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
             cursor += 1;
         }
     }
-    names
+    headers
 }
 
 fn after_parenthesized(tokens: &[BodyToken], start: usize) -> Option<usize> {
@@ -623,7 +702,7 @@ async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<d
 #[test]
 fn quoted_function_identifier_is_a_call_edge() {
     assert_eq!(
-        body_call_names(r#"SELECT "restore_probe_tail"()"#),
+        fixture_body_call_names(r#"SELECT "restore_probe_tail"()"#),
         BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
     );
 }
@@ -631,7 +710,7 @@ fn quoted_function_identifier_is_a_call_edge() {
 #[test]
 fn block_comment_between_function_name_and_parenthesis_preserves_the_call_edge() {
     assert_eq!(
-        body_call_names("SELECT restore_probe_tail /* nested /* body */ comment */ ()"),
+        fixture_body_call_names("SELECT restore_probe_tail /* nested /* body */ comment */ ()"),
         BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
     );
 }
@@ -639,35 +718,35 @@ fn block_comment_between_function_name_and_parenthesis_preserves_the_call_edge()
 #[test]
 fn line_comment_between_function_name_and_parenthesis_preserves_the_call_edge() {
     assert_eq!(
-        body_call_names("SELECT restore_probe_tail -- body comment\n ()"),
+        fixture_body_call_names("SELECT restore_probe_tail -- body comment\n ()"),
         BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
     );
 }
 
 #[test]
 fn same_spelled_bare_alias_is_not_a_call_edge() {
-    assert!(body_call_names("SELECT true AS restore_probe_tail").is_empty());
+    assert!(fixture_body_call_names("SELECT true AS restore_probe_tail").is_empty());
 }
 
 #[test]
 fn call_shaped_name_inside_a_comment_is_not_a_call_edge() {
-    assert!(body_call_names("SELECT true /* restore_probe_tail() */").is_empty());
+    assert!(fixture_body_call_names("SELECT true /* restore_probe_tail() */").is_empty());
 }
 
 #[test]
 fn call_shaped_name_inside_a_string_is_not_a_call_edge() {
-    assert!(body_call_names("SELECT 'restore_probe_tail()'").is_empty());
+    assert!(fixture_body_call_names("SELECT 'restore_probe_tail()'").is_empty());
 }
 
 #[test]
 fn call_shaped_name_inside_a_dollar_quoted_string_is_not_a_call_edge() {
-    assert!(body_call_names("SELECT $body$restore_probe_tail()$body$").is_empty());
+    assert!(fixture_body_call_names("SELECT $body$restore_probe_tail()$body$").is_empty());
 }
 
 #[test]
 fn standard_string_backslash_does_not_hide_following_calls() {
     assert_eq!(
-        body_call_names(r"SELECT '\', restore_probe_tail()"),
+        fixture_body_call_names(r"SELECT '\', restore_probe_tail()"),
         BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
     );
 }
@@ -680,7 +759,7 @@ fn escape_strings_skip_escaped_quotes_without_inventing_calls() {
         r"SELECT E'\\', restore_probe_tail()",
     ] {
         assert_eq!(
-            body_call_names(source),
+            fixture_body_call_names(source),
             BTreeSet::from([String::from(RESTORE_PROBE_TAIL)]),
             "{source}"
         );
@@ -690,7 +769,7 @@ fn escape_strings_skip_escaped_quotes_without_inventing_calls() {
 #[test]
 fn doubled_standard_quotes_keep_call_shaped_string_content_hidden() {
     assert_eq!(
-        body_call_names("SELECT 'it''s restore_probe_head()', restore_probe_tail()"),
+        fixture_body_call_names("SELECT 'it''s restore_probe_head()', restore_probe_tail()"),
         BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
     );
 }
@@ -704,7 +783,7 @@ fn column_alias_lists_do_not_add_call_edges() {
         "SELECT * FROM (SELECT restore_probe_tail()) AS restore_probe_head(value)",
     ] {
         assert_eq!(
-            body_call_names(source),
+            fixture_body_call_names(source),
             BTreeSet::from([String::from(RESTORE_PROBE_TAIL)]),
             "{source}"
         );
@@ -721,7 +800,7 @@ fn table_alias_column_lists_do_not_add_call_edges() {
         "SELECT restore_probe_tail() FROM records JOIN public.records restore_probe_head(value) ON true",
     ] {
         assert_eq!(
-            body_call_names(source),
+            fixture_body_call_names(source),
             BTreeSet::from([String::from(RESTORE_PROBE_TAIL)]),
             "{source}"
         );
@@ -737,7 +816,7 @@ fn function_sources_remain_call_edges() {
         "SELECT * FROM records, LATERAL restore_probe_tail()",
     ] {
         assert_eq!(
-            body_call_names(source),
+            fixture_body_call_names(source),
             BTreeSet::from([String::from(RESTORE_PROBE_TAIL)]),
             "{source}",
         );
@@ -747,7 +826,7 @@ fn function_sources_remain_call_edges() {
 #[test]
 fn cte_column_lists_preserve_calls_inside_each_body() {
     assert_eq!(
-        body_call_names(
+        fixture_body_call_names(
             "WITH RECURSIVE restore_probe_head(value) AS MATERIALIZED (
                  SELECT restore_probe_tail()
              ), restore_probe_middle(value) AS NOT MATERIALIZED (
@@ -760,11 +839,83 @@ fn cte_column_lists_preserve_calls_inside_each_body() {
 
 #[test]
 fn parenthesized_body_ends_after_nested_groups() {
-    let tokens = body_tokens("(value, (nested)) remaining");
+    let tokens = body_tokens("(value, (nested)) remaining", &fixture_keywords());
     assert_eq!(after_parenthesized(&tokens, 0), Some(7));
 }
 
 #[test]
 fn unterminated_parenthesized_body_has_no_end() {
-    assert_eq!(after_parenthesized(&body_tokens("(value"), 0), None);
+    assert_eq!(
+        after_parenthesized(&body_tokens("(value", &fixture_keywords()), 0),
+        None
+    );
+}
+
+fn fixture_keywords() -> BTreeMap<String, KeywordUse> {
+    [
+        ("with", false, false),
+        ("recursive", true, true),
+        ("as", false, false),
+        ("not", false, false),
+        ("materialized", true, true),
+        ("from", false, false),
+        ("join", false, true),
+        ("lateral", false, false),
+        ("select", false, false),
+        ("case", false, false),
+        ("when", false, false),
+        ("then", false, false),
+        ("else", false, false),
+        ("end", false, false),
+        ("time", true, false),
+        ("overlaps", false, true),
+        ("filter", true, true),
+    ]
+    .into_iter()
+    .map(|(word, relation_name, function_name)| {
+        (
+            word.to_owned(),
+            KeywordUse {
+                relation_name,
+                function_name,
+            },
+        )
+    })
+    .collect()
+}
+
+fn fixture_body_call_names(source: &str) -> BTreeSet<String> {
+    body_call_names(source, &fixture_keywords())
+}
+
+#[test]
+fn expression_keywords_do_not_turn_calls_into_relation_aliases() {
+    for source in [
+        "SELECT 1, CASE WHEN restore_probe_tail() THEN true ELSE false END",
+        "SELECT 1, CASE restore_probe_tail() WHEN true THEN true ELSE false END",
+        "SELECT CASE true WHEN true THEN restore_probe_tail() ELSE false END",
+    ] {
+        assert_eq!(
+            fixture_body_call_names(source),
+            BTreeSet::from([RESTORE_PROBE_TAIL.to_owned()]),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn keyword_categories_preserve_permitted_names_and_quoted_identifiers() {
+    assert!(fixture_body_call_names("SELECT * FROM time restore_probe_head(value)").is_empty());
+    assert_eq!(
+        fixture_body_call_names("SELECT overlaps(), filter()"),
+        BTreeSet::from(["overlaps".to_owned(), "filter".to_owned()])
+    );
+    assert_eq!(
+        fixture_body_call_names(r#"SELECT "when"() FROM "case" restore_probe_head(value)"#),
+        BTreeSet::from(["when".to_owned()])
+    );
+    assert_eq!(
+        fixture_body_call_names("SELECT public.when() FROM public.case restore_probe_head(value)"),
+        BTreeSet::from(["when".to_owned()])
+    );
 }
