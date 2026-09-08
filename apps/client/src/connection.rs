@@ -53,6 +53,17 @@ impl ProcessClient {
         self.open(request, RequestDelivery::Setup).await
     }
 
+    pub(crate) async fn continue_read_request(
+        &mut self,
+        connection: &mut Connection,
+        request: ClientRequest,
+    ) -> Result<(), ClientError> {
+        let request_id = self.next_request_id()?;
+        connection
+            .send(request_id, request, RequestDelivery::ReadOnly)
+            .await
+    }
+
     pub(crate) async fn continue_setup_request(
         &mut self,
         connection: &mut Connection,

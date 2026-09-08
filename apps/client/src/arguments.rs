@@ -2725,7 +2725,11 @@ fn conversation_cursor(value: &str) -> Result<ConversationCursor, String> {
 }
 
 fn metadata_page_size(value: &str) -> Result<CanonicalU64, String> {
-    canonical_u64(value)
+    let value = canonical_u64(value)?;
+    if value.value() == 0 {
+        return Err(String::from("the result limit must be positive"));
+    }
+    Ok(value)
 }
 
 fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
@@ -3646,8 +3650,8 @@ mod tests {
     }
 
     #[test]
-    fn search_defers_canonical_result_limit_policy_to_the_daemon() {
-        assert!(parse(["search", "--limit", "0"].map(Into::into)).is_ok());
+    fn search_requires_a_positive_canonical_result_limit() {
+        assert!(parse(["search", "--limit", "0"].map(Into::into)).is_err());
         assert!(parse(["search", "--limit", "101"].map(Into::into)).is_ok());
     }
 
@@ -3807,8 +3811,8 @@ mod tests {
     }
 
     #[test]
-    fn conversations_defers_canonical_result_limit_policy_to_the_daemon() {
-        assert!(parse(["conversations", "--limit", "0"].map(Into::into)).is_ok());
+    fn conversations_require_a_positive_canonical_result_limit() {
+        assert!(parse(["conversations", "--limit", "0"].map(Into::into)).is_err());
         assert!(parse(["conversations", "--limit", "101"].map(Into::into)).is_ok());
     }
 

@@ -30,6 +30,26 @@ pub(crate) async fn read_deployment_limits(
     let mut connection = client
         .request(ClientRequest::ReadDeploymentLimits {})
         .await?;
+    read_limits_response(&mut connection).await
+}
+
+pub(crate) async fn follow_with_deployment_limits(
+    client: &mut ProcessClient,
+    session_id: CanonicalUuid,
+) -> Result<(ClientDeploymentLimits, crate::connection::Connection), ClientError> {
+    let mut connection = client
+        .request(ClientRequest::ReadDeploymentLimits {})
+        .await?;
+    let limits = read_limits_response(&mut connection).await?;
+    client
+        .continue_read_request(&mut connection, ClientRequest::FollowSession { session_id })
+        .await?;
+    Ok((limits, connection))
+}
+
+async fn read_limits_response(
+    connection: &mut crate::connection::Connection,
+) -> Result<ClientDeploymentLimits, ClientError> {
     match connection.message().await? {
         ServerMessage::DeploymentLimits {
             max_message_utf8_bytes,
@@ -84,9 +104,7 @@ pub(crate) fn command_uses_deployment_limits(command: &Command) -> bool {
         } => true,
         Command::Review(command) => matches!(
             command.as_ref(),
-            ReviewCommand::RecordFinding { .. }
-                | ReviewCommand::RecordFindings { .. }
-                | ReviewCommand::ListFindings { .. }
+            ReviewCommand::RecordFinding { .. } | ReviewCommand::RecordFindings { .. }
         ),
         _ => false,
     }
@@ -129,9 +147,10 @@ pub(crate) fn validate_metadata_page_policy(
     limits: Option<ClientDeploymentLimits>,
 ) -> Result<(), ClientError> {
     let limits = limits.ok_or(ClientError::Protocol("deployment limits were not read"))?;
-    if limits
-        .min_metadata_page_size
-        .is_some_and(|minimum| page_size.value() < minimum)
+    if page_size.value() == 0
+        || limits
+            .min_metadata_page_size
+            .is_some_and(|minimum| page_size.value() < minimum)
         || limits
             .max_metadata_page_size
             .is_some_and(|maximum| page_size.value() > maximum)

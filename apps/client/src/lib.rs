@@ -240,16 +240,10 @@ pub async fn run_terminal(
         let mut stdout = std::io::stdout().lock();
         let mut stderr = std::io::stderr().lock();
         let mut output = Output::new(&mut stdout, &mut stderr, raw_output);
-        let deployment_limits = read_deployment_limits(&mut client).await?;
-        let input = chat::terminal_input(deployment_limits.terminal_input_channel_capacity)?;
-        chat::run(
-            &mut client,
-            &mut output,
-            session_id,
-            input,
-            deployment_limits,
-        )
-        .await
+        let initial_follow =
+            deployment_limits::follow_with_deployment_limits(&mut client, session_id).await?;
+        let input = chat::terminal_input(initial_follow.0.terminal_input_channel_capacity)?;
+        chat::run(&mut client, &mut output, session_id, input, initial_follow).await
     }
     .await;
     match result {
@@ -715,6 +709,22 @@ fn socket_path(
     Ok(path)
 }
 
+// JSON string contents reserve the remaining frame space for the command envelope.
+fn input_fits_encoded_frame(content: &str) -> bool {
+    let mut encoded = 0usize;
+    for byte in content.bytes() {
+        encoded += match byte {
+            b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0c' | b'\r' => 2,
+            0..=31 => 6,
+            _ => 1,
+        };
+        if encoded > MAX_INPUT_CONTENT_FRAME_BYTES {
+            return false;
+        }
+    }
+    true
+}
+
 fn read_input(stdin: &mut dyn Read) -> Result<String, ClientError> {
     let mut bytes = Vec::new();
     stdin
@@ -735,6 +745,11 @@ fn read_input(stdin: &mut dyn Read) -> Result<String, ClientError> {
     if text.contains('\0') {
         return Err(ClientError::Input(
             "standard-input content must not contain U+0000",
+        ));
+    }
+    if !input_fits_encoded_frame(&text) {
+        return Err(ClientError::Input(
+            "standard-input content exceeds the encoded wire-frame guard",
         ));
     }
     Ok(text)
