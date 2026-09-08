@@ -1604,7 +1604,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   func isTerminalDelegateDenied(_ invocationID: SignalboxToolInvocationID) -> Bool {
-    guard let approval = toolApprovalDecisionsByRequestID[invocationID.rawValue],
+    guard let requestID = try? SignalboxCanonicalUUID(validating: invocationID.rawValue),
+      let approval = toolApprovalDecisionsByRequestID[invocationID.rawValue],
       case .deny = approval.decision,
       case .delegate = approval.decider
     else {
@@ -1615,6 +1616,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         return false
       }
       return tool.toolRequestID.rawValue == invocationID.rawValue && tool.status == .denied
+        && tool.sessionToolRequestPositions?[requestID] != nil
     }
   }
 

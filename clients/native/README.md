@@ -30,9 +30,9 @@ REST, WebSocket, or OpenAI-compatible surfaces.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
 - Approve or deny pending tool requests, arm a one-shot override of a terminal
-  delegate denial, and stop an active turn while sending its required successor
-  input. An override applies to a later matching proposal after one extra model
-  round.
+  delegate denial from the current session, and stop an active turn while sending
+  its required successor input. An override applies to a later matching proposal
+  after one extra model round.
 - Reconcile a model-call recovery wait while sending its continuation, retaining
   the exact prepared command after an ambiguous response.
 - Create a session by selecting a model alias read from the running daemon and

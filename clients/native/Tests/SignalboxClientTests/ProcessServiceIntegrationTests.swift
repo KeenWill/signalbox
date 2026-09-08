@@ -3128,6 +3128,31 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testInheritedDelegateDenialCannotBeOverriddenInTheCurrentSession() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(
+        overrideRecorded: false,
+        sourceSessionID: ProcessProjectionFixture.reusedToolSourceSession
+      )
+    ))
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: viewModel.timeline)
+    XCTAssertEqual(tool.status, .denied)
+    XCTAssertEqual(tool.approvalDecider, ProcessProjectionFixture.delegateDenialLabel)
+    XCTAssertFalse(viewModel.isTerminalDelegateDenied(tool.invocationID))
+
+    await viewModel.overrideToolDenial(tool.invocationID)
+
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(tool.invocationID.rawValue))
+  }
+
+  @MainActor
   func testAmbiguousOverrideRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -8669,7 +8694,8 @@ private enum ProcessProjectionFixture {
     turnEvidence: [String],
     usageEvidence: [String],
     approvalMember: String = "",
-    resultEntries: [String] = []
+    resultEntries: [String] = [],
+    sourceSessionID: String = ProcessDriverFixture.session
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -8692,7 +8718,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_text_entry",
           "entry_index":"0",
-          "source_session_id":"\(ProcessDriverFixture.session)",
+          "source_session_id":"\(sourceSessionID)",
           "entry_id":"\(proposedAssistantEntry)",
           "entry":{
             "type":"assistant",
@@ -8714,7 +8740,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_entry",
           "entry_index":"1",
-          "source_session_id":"\(ProcessDriverFixture.session)",
+          "source_session_id":"\(sourceSessionID)",
           "entry_id":"\(proposedToolEntry)",
           "entry":{
             "type":"assistant_tool_use",
@@ -8845,7 +8871,8 @@ private enum ProcessProjectionFixture {
   }
 
   static func snapshotWithDelegateDenial(
-    overrideRecorded: Bool? = nil
+    overrideRecorded: Bool? = nil,
+    sourceSessionID: String = ProcessDriverFixture.session
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithProposedTool(
       turnEvidence: [], usageEvidence: [],
@@ -8864,9 +8891,10 @@ private enum ProcessProjectionFixture {
       resultEntries: overrideRecorded.map { recorded in
         [toolDeniedMessage(
           index: 2, entryID: reconciliationClosedEntry, requestID: proposedToolRequest,
-          overrideRecorded: recorded
+          overrideRecorded: recorded, sourceSessionID: sourceSessionID
         )]
-      } ?? []
+      } ?? [],
+      sourceSessionID: sourceSessionID
     )
   }
 
@@ -11258,13 +11286,14 @@ private enum ProcessProjectionFixture {
     index: UInt64,
     entryID: String,
     requestID: String,
-    overrideRecorded: Bool = false
+    overrideRecorded: Bool = false,
+    sourceSessionID: String = ProcessDriverFixture.session
   ) -> String {
     """
     {
       "type":"transcript_entry",
       "entry_index":"\(index)",
-      "source_session_id":"\(ProcessDriverFixture.session)",
+      "source_session_id":"\(sourceSessionID)",
       "entry_id":"\(entryID)",
       "entry":{
         "type":"tool_denied",
