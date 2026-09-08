@@ -202,10 +202,14 @@ identities and the deadline. When every bounded member becomes excluded,
 admission reruns the exhaustion policy and converts to exhausted-wait in place
 or terminalizes. Startup re-evaluates contended waits against current
 registrations and retained reservations; restart alone grants no eligibility.
+The daemon rechecks retained invocation groups until their exit permits
+reservation release.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
 wait attempt and closed cause. Transcript reads and initial follow snapshots
-retain the active turn and its slot without rejection detail.
+retain the active turn and its slot without rejection detail. A released wait
+uses its retained effective serving target with its retained pool policy through
+call preparation and send authorization.
 
 A terminal release after a predecessor call projects
 `failed_after_credential_wait` with the fresh terminal attempt and the

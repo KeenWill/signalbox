@@ -206,6 +206,13 @@ impl PostgresModelCallRepository {
                     resolved.target(),
                     fast_mode,
                 );
+                let serving_evidence = super::credential_wait::retain_serving_target(
+                    &mut transaction,
+                    execution.current_attempt().id(),
+                    self.credential_families.as_ref(),
+                    serving_evidence,
+                )
+                .await?;
                 let selected = Some(
                     select_runtime_pool_credential(
                         &mut transaction,
@@ -363,6 +370,13 @@ impl PostgresModelCallRepository {
                 prepared.call().target(),
                 fast_mode,
             );
+            let serving_evidence = super::credential_wait::retain_serving_target(
+                &mut transaction,
+                prepared.attempt(),
+                self.credential_families.as_ref(),
+                serving_evidence,
+            )
+            .await?;
             insert_prepared_call(
                 &mut transaction,
                 &prepared,
@@ -437,6 +451,13 @@ impl PostgresModelCallRepository {
                 current.target(),
                 fast_mode,
             );
+            let current_serving_evidence = super::credential_wait::retain_serving_target(
+                &mut transaction,
+                execution.current_attempt().id(),
+                self.credential_families.as_ref(),
+                current_serving_evidence,
+            )
+            .await?;
             let current_effective_target = current_serving_evidence.effective_target;
             let stored_serving_evidence = sqlx::query(
                 "SELECT effective_provider_model_identity_id,
