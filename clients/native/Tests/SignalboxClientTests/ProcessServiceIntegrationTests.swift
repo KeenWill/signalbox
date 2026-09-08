@@ -106,6 +106,37 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testArchiveActionsWaitForThePreviousRowToPublish() async throws {
+    let requester = FirstArchiveSuspendedRequester()
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    await viewModel.refresh()
+    let firstID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let secondID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.approvalSessionID)
+    let first = try XCTUnwrap(viewModel.nativeConversation(sessionID: firstID))
+    let second = try XCTUnwrap(viewModel.nativeConversation(sessionID: secondID))
+
+    let archive = Task { await viewModel.toggleArchive(first) }
+    await requester.firstArchive.waitUntilPaused()
+    XCTAssertTrue(viewModel.isUpdatingArchive)
+    await viewModel.toggleArchive(second)
+    await requester.firstArchive.resume()
+    await archive.value
+
+    XCTAssertEqual(viewModel.nativeConversation(sessionID: firstID)?.archived, true)
+    XCTAssertEqual(viewModel.nativeConversation(sessionID: secondID)?.archived, false)
+    XCTAssertFalse(viewModel.isUpdatingArchive)
+    XCTAssertNil(viewModel.errorMessage)
+
+    await viewModel.toggleArchive(second)
+
+    XCTAssertEqual(viewModel.nativeConversation(sessionID: firstID)?.archived, true)
+    XCTAssertEqual(viewModel.nativeConversation(sessionID: secondID)?.archived, true)
+    XCTAssertFalse(viewModel.isUpdatingArchive)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
   func testArchiveCompletionPreservesTheNewerPageRefresh() async throws {
     let requester = SuspendedArchivePaginationRequester()
     let service = SignalboxProcessService(
@@ -6219,6 +6250,23 @@ private actor ProcessRequestSuspension {
   func resume() {
     completion?.resume()
     completion = nil
+  }
+}
+
+private actor FirstArchiveSuspendedRequester: SignalboxProcessRequesting {
+  let firstArchive = ProcessRequestSuspension()
+  private var archiveCount = 0
+  private let fallback = SignalboxProcessClient(
+    connectionFactory: MockProcessProtocolConnectionFactory())
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    if case .replaceSessionMetadata = request {
+      archiveCount += 1
+      if archiveCount == 1 {
+        await firstArchive.pause()
+      }
+    }
+    return try await fallback.open(request)
   }
 }
 

@@ -35,6 +35,7 @@ final class ProcessSessionListViewModel: ObservableObject {
   @Published var searchText = ""
   @Published var errorMessage: String?
   @Published private(set) var isLoading = false
+  @Published private(set) var isUpdatingArchive = false
 
   private let maximumMetadataPages: UInt
   private var hasEarlierConversations = false
@@ -67,6 +68,7 @@ final class ProcessSessionListViewModel: ObservableObject {
     nextAfter = nil
     errorMessage = nil
     isLoading = false
+    isUpdatingArchive = false
   }
 
   var visibleConversations: [SignalboxProcessConversation] {
@@ -193,10 +195,16 @@ final class ProcessSessionListViewModel: ObservableObject {
   }
 
   func toggleArchive(_ conversation: SignalboxProcessConversation) async {
-    guard conversation.origin == .native else {
+    guard conversation.origin == .native, !isUpdatingArchive else {
       return
     }
     let generation = serviceGeneration
+    isUpdatingArchive = true
+    defer {
+      if serviceGeneration == generation {
+        isUpdatingArchive = false
+      }
+    }
     publicationGeneration &+= 1
     let publication = publicationGeneration
     activeRefreshID = UUID()
@@ -377,6 +385,7 @@ struct ProcessSessionsScreen: View {
                     systemImage: conversation.archived ? "tray.and.arrow.up" : "archivebox"
                   )
                 }
+                .disabled(viewModel.isUpdatingArchive)
               }
             }
             .accessibilityIdentifier("session-row-\(conversation.conversationID.rawValue)")
