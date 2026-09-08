@@ -659,6 +659,34 @@ impl PostgresToolLoopRepository {
                     let batch = load_active_batch_from_connection(&mut transaction, session, turn)
                         .await?
                         .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+                    let awaiting_judge: bool = sqlx::query_scalar(
+                        "SELECT request.approval_posture = 'delegated'
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM tool_approval_judge_model_call AS judge
+                                     WHERE judge.request_id = request.request_id
+                                       AND judge.state_kind = 'terminal'
+                                )
+                           FROM tool_request AS request WHERE request.request_id = $1",
+                    )
+                    .bind(tool_request_id_to_uuid(command.request()))
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                    if batch
+                        .awaiting_approval()
+                        .is_some_and(|wait| wait.request() == command.request())
+                        && awaiting_judge
+                    {
+                        let prepared = command.prepare_awaiting_approval_judge();
+                        persist_decision_command(
+                            &mut transaction,
+                            &prepared,
+                            signalbox_domain::CommandPrincipal::Operator,
+                        )
+                        .await?;
+                        settle_decision_injection(&mut transaction, session, turn, &prepared)
+                            .await?;
+                        return Ok(prepared);
+                    }
                     let continuation_attempt = batch
                         .awaiting_approval()
                         .filter(|waiting| waiting.request() == command.request())
@@ -3703,6 +3731,11 @@ async fn settle_decision_injection(
     prepared: &PreparedDecideToolRequest,
 ) -> Result<(), ToolLoopRepositoryError> {
     let outcome = match prepared.result() {
+        DecideToolRequestResult::Rejected(
+            DecideToolRequestRejectedResult::AwaitingApprovalJudge { .. },
+        ) => outbox::InjectionOutcomeOutbox::Rejected {
+            kind: "awaiting_approval_judge",
+        },
         DecideToolRequestResult::Applied(_) => {
             outbox::InjectionOutcomeOutbox::Delivered { turn: Some(turn) }
         }
@@ -3738,6 +3771,9 @@ async fn persist_decision_command(
     let command = prepared.command();
     let (decision_kind, denial_reason) = encode_approval(command.decision());
     let (result_kind, rejection_kind, earliest) = match prepared.result() {
+        DecideToolRequestResult::Rejected(
+            DecideToolRequestRejectedResult::AwaitingApprovalJudge { .. },
+        ) => ("rejected", Some("awaiting_approval_judge"), None),
         DecideToolRequestResult::Applied(_) => ("applied", None, None),
         DecideToolRequestResult::Rejected(DecideToolRequestRejectedResult::RequestNotFound {
             ..
@@ -3832,6 +3868,7 @@ async fn load_decision_receipt(
         }
         ("rejected", Some("request_not_found")) => command.prepare_request_not_found(),
         ("rejected", Some("already_resolved")) => command.prepare_already_resolved(),
+        ("rejected", Some("awaiting_approval_judge")) => command.prepare_awaiting_approval_judge(),
         ("rejected", Some("not_earliest_undecided")) => command.prepare_not_earliest(
             tool_request_id_from_uuid(required(&row, "result_earliest_undecided_request_id")?),
         ),
