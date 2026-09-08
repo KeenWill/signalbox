@@ -15,6 +15,7 @@ use signalbox_process_protocol::{
 #[derive(Debug)]
 pub(crate) enum ClientError {
     Io(io::Error),
+    DaemonIo(io::Error),
     SourceFile(io::Error),
     BlobSourceFile {
         path: PathBuf,
@@ -48,6 +49,7 @@ pub(crate) enum ClientError {
     Encode(FrameEncodeError),
     Decode(FrameDecodeError),
     Protocol(&'static str),
+    ConnectionClosed,
     Remote {
         code: ErrorCode,
         message: String,
@@ -147,10 +149,12 @@ impl ClientError {
             | Self::ReviewInputExceedsFrame
             | Self::SourceExceedsFrame => self,
             Self::Io(_)
+            | Self::DaemonIo(_)
             | Self::ScanDirectory(_)
             | Self::ScanIncomplete { .. }
             | Self::Encode(_)
             | Self::Decode(_)
+            | Self::ConnectionClosed
             | Self::Protocol(_)
             | Self::AmbiguousMutation
             | Self::Input(_)
@@ -172,7 +176,10 @@ impl ClientError {
 impl fmt::Display for ClientError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(_) => formatter.write_str("local process communication failed"),
+            Self::ConnectionClosed => formatter.write_str("the daemon connection closed"),
+            Self::Io(_) | Self::DaemonIo(_) => {
+                formatter.write_str("local process communication failed")
+            }
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
             }
@@ -275,6 +282,7 @@ impl Error for ClientError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error)
+            | Self::DaemonIo(error)
             | Self::SourceFile(error)
             | Self::SystemPromptFile(error)
             | Self::GoalTextFile { source: error, .. }
@@ -287,7 +295,8 @@ impl Error for ClientError {
             Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
-            Self::Protocol(_)
+            Self::ConnectionClosed
+            | Self::Protocol(_)
             | Self::Remote { .. }
             | Self::AmbiguousMutation
             | Self::Input(_)
