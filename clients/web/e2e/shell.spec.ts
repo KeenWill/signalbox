@@ -870,3 +870,26 @@ test('does not advertise search focus while the usage view owns the surface', as
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
 })
+
+test('retains an ambiguous import continuation and accepts only its exact replay', async ({
+  page,
+}) => {
+  await page.goto('/scenario/imports?continuation=ambiguous')
+  const resume = page.getByRole('button', { name: 'Resume', exact: true })
+  await expect(resume).toBeEnabled()
+  await resume.click()
+  const retry = page.getByRole('button', { name: 'Retry exact command' })
+  await expect(retry).toBeVisible()
+  await expect(resume).toBeDisabled()
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  await expect(entries).toHaveAttribute('aria-disabled', 'true')
+  const retained = await page.evaluate(() => JSON.stringify(sessionStorage))
+  await entries.press('ArrowDown')
+  expect(await page.evaluate(() => JSON.stringify(sessionStorage))).toBe(retained)
+  await retry.click()
+  await expect(
+    page.getByText(`Session created: ${importsFixture.continuedSessionId}`, { exact: true }),
+  ).toBeVisible()
+  await expect(retry).toBeHidden()
+  await expect(entries).toHaveAttribute('aria-disabled', 'false')
+})

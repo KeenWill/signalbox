@@ -111,7 +111,14 @@ const result = spawnSync(
   ],
   { cwd: project, env: environment, stdio: 'inherit' },
 )
-if (process.argv.includes('--update-snapshots=all')) {
+if (
+  result.status === 0 &&
+  process.argv
+    .slice(2)
+    .some(
+      (argument) => argument === '--update-snapshots' || argument.startsWith('--update-snapshots='),
+    )
+) {
   for (const entry of readdirSync(join(project, 'e2e'), { withFileTypes: true })) {
     if (entry.isDirectory() && entry.name.endsWith('-snapshots')) {
       materialize(
