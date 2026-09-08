@@ -67,7 +67,7 @@ impl InlineFramePayload {
 }
 
 /// Capability named by a generic effect request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ProgramCapability {
     Time,
     Random,

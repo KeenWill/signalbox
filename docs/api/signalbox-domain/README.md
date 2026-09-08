@@ -4,6 +4,7 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| program_registration | 5 | 0 | 0 | [program_registration](program_registration.md) |
 | program_session | 2 | 1 | 0 | [program_session](program_session.md) |
 | accepted_input | 5 | 0 | 0 | [accepted_input](accepted_input.md) |
 | actor | 2 | 0 | 0 | [actor](actor.md) |
@@ -49,4 +50,4 @@
 | workspace | 4 | 0 | 0 | [workspace](workspace.md) |
 | workspace_command | 3 | 0 | 0 | [workspace_command](workspace_command.md) |
 | workspace_instruction | 18 | 0 | 0 | [workspace_instruction](workspace_instruction.md) |
-| root | 32 | 0 | 0 | [root](root.md) |
+| root | 33 | 0 | 0 | [root](root.md) |

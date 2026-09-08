@@ -73,20 +73,15 @@ where
     NextClosureDecision: FnMut() -> DurableCommandId + Send,
     NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
 {
-    let issuer = match (command.actor(), principal) {
-        (signalbox_domain::Actor::Program { .. }, None) => ("program", None),
-        (signalbox_domain::Actor::Program { .. }, Some(_)) | (_, None) => {
-            return Err(SubmitInputCorruption::Inconsistent("actor and envelope principal").into());
-        }
-        (_, Some(principal)) => crate::command_registry::issuer_columns(principal),
-    };
+    let issuer = admitted_issuer(command.actor(), principal)?;
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
         Some(CommandKind::SubmitInput) => {
-            return Ok(TransactionDecision::Rollback(existing_outcome(
+            return Ok(TransactionDecision::Rollback(replayed_outcome(
                 &command,
+                principal,
                 require_recorded(connection, command_id).await?,
-            )));
+            )?));
         }
         Some(
             CommandKind::CreateSession
@@ -152,10 +147,11 @@ where
 
     if !claimed {
         return match inspect_registry(connection, command_id).await? {
-            Some(CommandKind::SubmitInput) => Ok(TransactionDecision::Rollback(existing_outcome(
+            Some(CommandKind::SubmitInput) => Ok(TransactionDecision::Rollback(replayed_outcome(
                 &command,
+                principal,
                 require_recorded(connection, command_id).await?,
-            ))),
+            )?)),
             Some(
                 CommandKind::CreateSession
                 | CommandKind::CreateSessionFromImportedFrontier
@@ -1070,4 +1066,28 @@ where
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
+}
+
+fn admitted_issuer(
+    actor: signalbox_domain::Actor,
+    principal: Option<CommandPrincipal>,
+) -> Result<(&'static str, Option<&'static str>), SubmitInputRepositoryError> {
+    match (actor, principal) {
+        (signalbox_domain::Actor::Program { .. }, None) => Ok(("program", None)),
+        (signalbox_domain::Actor::Program { .. }, Some(_)) | (_, None) => {
+            Err(SubmitInputCorruption::Inconsistent("actor and envelope principal").into())
+        }
+        (_, Some(principal)) => Ok(crate::command_registry::issuer_columns(principal)),
+    }
+}
+
+fn replayed_outcome(
+    command: &SubmitInput,
+    principal: Option<CommandPrincipal>,
+    recorded: signalbox_domain::ReconstitutedSubmitInput,
+) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError> {
+    if command == recorded.command() {
+        admitted_issuer(recorded.command().actor(), principal)?;
+    }
+    Ok(existing_outcome(command, recorded))
 }
