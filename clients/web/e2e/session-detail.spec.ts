@@ -6,6 +6,7 @@ import {
   detailLive,
   detailPage,
   detailSessionId,
+  detailTurnId,
   detailWindow,
   resultCursor,
   toolResultItem,
@@ -16,7 +17,7 @@ async function openDetails(
   mismatch = false,
   override = false,
   creation?: WebTimelineCreationCause,
-  outcome?: 'reconciliation' | 'retired',
+  outcome?: 'reconciliation' | 'retired' | 'exhausted',
   partialResult = false,
 ) {
   const items = detailItems.map((item, index) =>
@@ -44,7 +45,19 @@ async function openDetails(
               kind: 'goal_turn_retired' as const,
               body: { type: 'event_fact' as const, kind: 'goal_turn_retired' as const },
             }
-          : item,
+          : outcome === 'exhausted' && index >= 3
+            ? {
+                ...item,
+                kind: 'turn_failed' as const,
+                projected_body_bytes: 128,
+                body: {
+                  type: 'turn_lifecycle' as const,
+                  turn_id: detailTurnId,
+                  lifecycle: 'terminalized' as const,
+                  cause_code: 'failed',
+                },
+              }
+            : item,
   )
   const windowItems = detailWindow.items.map((item, index) => ({
     ...item,
@@ -201,6 +214,7 @@ async function openDetails(
         first_address: { event_sequence: '1' },
         latest_address: { event_sequence: '5' },
         observed_through: '5',
+        repository_watch: null,
         sizes: {
           item_count: '5',
           projected_text_bytes: '256',
@@ -372,6 +386,20 @@ test('shows retired goal turns in conversation order with events hidden', async 
     )
     .toEqual(['1', '2', '2', '4', '5'])
   await page.screenshot({ path: test.info().outputPath('retired-outcome.png') })
+})
+
+test('shows one failed outcome for credential-pool exhaustion while retaining both events', async ({
+  page,
+}) => {
+  await openDetails(page, false, false, undefined, 'exhausted')
+  const events = page.getByRole('checkbox', { name: 'Events', exact: true })
+  await events.uncheck()
+  const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+  await expect(conversation.getByText('Turn failed', { exact: true })).toHaveCount(1)
+  await events.check()
+  const timeline = page.getByRole('grid', { name: 'Session timeline' })
+  await expect(timeline.getByRole('row').filter({ hasText: 'turn failed' })).toHaveCount(2)
+  await expect(conversation.getByText('Turn failed', { exact: true })).toHaveCount(1)
 })
 
 test('labels partial tool payloads and the final continued chunk', async ({ page }) => {

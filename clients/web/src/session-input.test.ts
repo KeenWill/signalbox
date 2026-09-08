@@ -860,6 +860,63 @@ it.each(['unchanged', 'body facts', 'byte total'] as const)(
   },
 )
 
+it.each(['one response', 'scan continuation', 'window extension'] as const)(
+  'retains one failed outcome per turn and cause across %s',
+  async (boundary) => {
+    const terminal = {
+      address: { event_sequence: '1' },
+      kind: 'turn_failed' as const,
+      projected_body_bytes: 128,
+      body: {
+        type: 'turn_lifecycle' as const,
+        turn_id: sessionId,
+        lifecycle: 'terminalized' as const,
+        cause_code: 'failed',
+      },
+    }
+    const duplicate = { ...terminal, address: { event_sequence: '2' } }
+    const otherTurn = {
+      ...terminal,
+      address: { event_sequence: '3' },
+      body: { ...terminal.body, turn_id: '00000000-0000-0000-0000-000000000992' },
+    }
+    const otherCause = {
+      ...terminal,
+      address: { event_sequence: '4' },
+      kind: 'turn_cancelled' as const,
+      body: { ...terminal.body, cause_code: 'cancelled' },
+    }
+    const items = [terminal, duplicate, otherTurn, otherCause]
+    const page = (
+      selected: WebSessionTimelineDetailPage['items'],
+      continuation: WebTimelineDetailContinuation | null = null,
+    ) => Response.json({ ...detailPage(selected, continuation), session_id: sessionId })
+    const fetch = vi.fn()
+    if (boundary === 'one response') fetch.mockResolvedValueOnce(page(items))
+    else
+      fetch
+        .mockResolvedValueOnce(
+          page(
+            [terminal],
+            boundary === 'scan continuation'
+              ? { type: 'more_at', address: duplicate.address }
+              : null,
+          ),
+        )
+        .mockResolvedValueOnce(page(items.slice(1)))
+    vi.stubGlobal('fetch', fetch)
+    const window = { sessionId, first: '1', through: '4' }
+    const held =
+      boundary === 'window extension'
+        ? await readExtendedSessionTranscript({ ...window, through: '1' }, null, limits, null)
+        : null
+    const result = await readExtendedSessionTranscript(window, null, limits, held)
+    expect(result.page.items).toEqual([terminal, otherTurn, otherCause])
+    expect(result.page.projected_body_bytes).toBe(3 * 128)
+    expect(fetch).toHaveBeenCalledTimes(boundary === 'one response' ? 1 : 2)
+  },
+)
+
 it.each(['retained', 'outside the window'] as const)(
   'deduplicates appended tool arguments against requests %s',
   async (prior) => {

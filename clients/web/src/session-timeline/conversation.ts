@@ -31,7 +31,17 @@ export const hasConversationContent = (
     case 'reconciliation':
       return true
     case 'turn_lifecycle':
-      return body.lifecycle === 'terminalized' && body.cause_code !== 'completed'
+      return (
+        body.lifecycle === 'terminalized' &&
+        body.cause_code !== 'completed' &&
+        !preceding.some(
+          (prior) =>
+            prior.body.type === 'turn_lifecycle' &&
+            prior.body.lifecycle === 'terminalized' &&
+            prior.body.turn_id === body.turn_id &&
+            prior.body.cause_code === body.cause_code,
+        )
+      )
     case 'event_fact':
       return body.kind === 'goal_turn_retired'
     default:
