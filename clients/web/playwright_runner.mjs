@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import {
+  chmodSync,
   closeSync,
   copyFileSync,
   linkSync,
@@ -91,6 +92,12 @@ const environment = {
   SIGNALBOX_WEB_PREVIEW_COMMAND: `${quote(node)} ${quote(vite)} preview --host 127.0.0.1 --port 4173`,
   TMPDIR: temporary,
   XDG_CACHE_HOME: join(temporary, 'cache'),
+}
+for (const entry of readdirSync(join(project, 'e2e'), { recursive: true, withFileTypes: true })) {
+  if (entry.isFile() && entry.name.endsWith('.png')) {
+    const path = join(entry.parentPath, entry.name)
+    chmodSync(path, statSync(path).mode | 0o200)
+  }
 }
 const result = spawnSync(
   node,
