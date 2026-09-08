@@ -471,7 +471,7 @@ async fn startup_recovery_and_outbox_commit_or_roll_back_together() -> Result<()
     .await?;
     assert_eq!(
         rolled_back,
-        ("active".into(), "prepared".into(), 0, 0, Decimal::from(5))
+        ("active".into(), "prepared".into(), 0, 0, Decimal::from(7))
     );
 
     sqlx::query(
@@ -510,7 +510,7 @@ async fn startup_recovery_and_outbox_commit_or_roll_back_together() -> Result<()
     .await?;
     assert_eq!(
         committed,
-        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(6))
+        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(8))
     );
 
     pool.close().await;

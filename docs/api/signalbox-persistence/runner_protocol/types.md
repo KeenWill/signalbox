@@ -349,6 +349,8 @@ pub struct RunnerProtocolStore {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl runner_protocol::RunnerProtocolStore {
     pub fn new(pool: sqlx_postgres::PgPool, catalog: signalbox_domain::RunnerCatalog) -> Self;
+    #[must_use]
+    pub fn with_recovery_notifications(self, notifications: watch::Receiver<()>) -> Self;
     pub async fn open_connection(
         &self,
         enrollment: signalbox_domain::RunnerEnrollmentId,

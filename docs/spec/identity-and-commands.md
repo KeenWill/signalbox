@@ -45,15 +45,26 @@ and returned as a replay outcome, not as a registry error.
 
 `Actor` in `crates/domain` records, from a closed set, what issued a command:
 the user, daemon core, the model output of one turn, the startup recovery scan,
-or the execution of one tool request. Only submit-input and metadata-replacement
-commands carry an actor in their durable payload. Repository watch and
-commissioned dispatch stamp a module issuer principal on the registry row.
-Commissioned dispatch composes its initial input, the one automated action
-attributed to the user, under the user actor. Repository watch emits a held
-create-session command and does not submit an initial input. Actor answers who
-issued one command; a session's creation cause, owned by
-[sessions-and-transcript](sessions-and-transcript.md), answers why the session
-exists, and neither fact substitutes for the other.
+the execution of one tool request, or one verified program run. Only
+submit-input and metadata-replacement commands carry an actor in their durable
+payload. Repository watch and commissioned dispatch stamp a module issuer
+principal on the registry row. Commissioned dispatch composes its initial input,
+the one automated action attributed to the user, under the user actor.
+Repository watch emits a held create-session command and does not submit an
+initial input. Actor answers who issued one command; a session's creation cause,
+owned by [sessions-and-transcript](sessions-and-transcript.md), answers why the
+session exists, and neither fact substitutes for the other.
+
+The program host's session capability verifies the retained run and fixes the
+submit-input actor; the reference confers no authority. Program input derives no
+authenticated principal and records `program` issuer provenance. Admission,
+including replay, requires a principal for every other actor and rejects one for
+a program actor. Model, tool, and program input cannot settle a committed core
+closure. Model, tool, and recovery input records admit only replay of an
+existing command. Submit-input writes version 4 and reads versions 3 and 4,
+preserving each row's stored actor kind. The `program` spelling carries only its
+run reference and is corruption in version 3. Actor identity participates in
+replay equality and hashing. Create-session carries no actor.
 
 ## Design decisions
 
@@ -220,7 +231,10 @@ replacement claim and settle in one transaction. A provisioning replacement
 claims its complete request and one single-use authorization, waits without a
 transaction, and installs its exact retained receipt and terminal result
 together. Equal pending replay joins the retained operation; startup resumes
-unterminated replacement commands before admitting process clients.
+unterminated replacement commands before admitting process clients. A
+replacement staged behind a model call or tool batch claims immediately and
+completes or retires at the turn-lifecycle boundary, retaining provisioning
+authorization only when required.
 
 OAuth provisioning, re-provisioning, and deletion have distinct registry kinds
 and typed relational request and result families keyed by command identifier.
@@ -234,6 +248,4 @@ receipt.
 ## Planned
 
 - A production generator for `ProviderTargetEvidenceId`:
-  [design](../design/identity-and-commands.md).
-- A program arm of `Actor` and a program admissibility path for submit-input:
   [design](../design/identity-and-commands.md).

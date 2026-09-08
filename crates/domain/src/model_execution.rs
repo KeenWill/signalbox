@@ -201,7 +201,7 @@ impl ModelCallExecutionReconstitutionInput {
     }
 
     /// Supplies durable proof that a call-free pinned attempt is the distinct
-    /// successor of an availability-failed predecessor.
+    /// successor of an availability-failed predecessor or a durable credential wait.
     pub fn with_availability_successor(mut self) -> Self {
         self.availability_successor = true;
         self
@@ -358,6 +358,22 @@ pub struct ModelCallExecution {
 }
 
 impl ModelCallExecution {
+    /// Borrows the exact frontier that a call-free admission consumes or retains.
+    pub const fn admission_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.current_snapshot
+    }
+    /// Ends a call-free admission attempt while retaining its transcript and turn slot.
+    pub fn yield_to_credential_availability(
+        &self,
+    ) -> Result<EndedTurnAttempt, ModelCallClosureError> {
+        if self.current_call.is_some() || !self.attempt_accepts_prepared_call() {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        self.current_attempt
+            .clone()
+            .end_without_stop(UnstoppedAttemptDisposition::YieldedToDurableWait)
+            .map_err(|_| ModelCallClosureError::CallStateMismatch)
+    }
     /// Borrows the checked active-turn facts that establish ownership.
     pub const fn active_turn(&self) -> &ActivatedTurn {
         &self.active_turn
@@ -993,6 +1009,7 @@ impl ModelCallExecution {
             .end_without_stop(UnstoppedAttemptDisposition::KnownFailure)
             .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
         Ok(AvailabilitySuccessorModelCallTurn {
+            non_acceptance_proven: observation.non_acceptance_proven(),
             session: self.session,
             turn: self.turn,
             predecessor_call: ended_call,
@@ -1629,7 +1646,7 @@ fn reconstitute(
         }
         (Some(stored), Some(_), None, false)
         | (Some(stored), Some(_), None, true)
-        | (Some(stored), None, Some(_), false)
+        | (Some(stored), None, Some(_), _)
         | (Some(stored), None, None, true) => {
             let Some(pinned) = stored.reconstitute_for_turn(turn) else {
                 return Err(fail(
@@ -1639,7 +1656,7 @@ fn reconstitute(
             };
             Some(pinned)
         }
-        (Some(_), Some(_), Some(_), _) | (Some(_), None, Some(_), true) => {
+        (Some(_), Some(_), Some(_), _) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::ContinuationSnapshotUnexpected,
@@ -2007,7 +2024,16 @@ fn frontier_closes_latest_tool_round(
             return Ok(false);
         }
     }
-    Ok(suffix[results_end..].iter().all(|entry| {
+    let mut continuation = &suffix[results_end..];
+    if continuation.first().is_some_and(|entry| {
+        matches!(
+            entry.payload(),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+        )
+    }) {
+        continuation = &continuation[1..];
+    }
+    Ok(continuation.iter().all(|entry| {
         matches!(
             entry.payload(),
             SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }

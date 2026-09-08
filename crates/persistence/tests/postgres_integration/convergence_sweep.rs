@@ -696,9 +696,8 @@ async fn locked_admission_rejects_a_recent_terminal_dispatch_during_cool_off()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn target_cool_off_uses_the_database_clock() -> Result<(), Box<dyn Error>> {
-    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let (_container, pool, database_url) = migrated_postgres().await?;
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
-    let sweep = PostgresConvergenceSweepStore::new(pool.clone());
     let _ = dispatched(
         commissioned
             .commission(
@@ -709,19 +708,46 @@ async fn target_cool_off_uses_the_database_clock() -> Result<(), Box<dyn Error>>
             .await?,
     );
 
+    // Only this pool resolves the fixture clock before pg_catalog's wall clock.
+    sqlx::query(
+        "CREATE FUNCTION public.clock_timestamp() RETURNS timestamptz
+         LANGUAGE SQL AS 'SELECT recorded_at FROM commissioned_dispatch'",
+    )
+    .execute(&pool)
+    .await?;
+    let clock_pool = sqlx::postgres::PgPoolOptions::new()
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                sqlx::query("SET search_path = public, pg_catalog")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(signalbox_persistence::local_test_connection_options(
+            &database_url,
+        )?)
+        .await?;
+    let sweep = PostgresConvergenceSweepStore::new(clock_pool.clone());
     let recent = sweep
         .load_target_with_cool_off(&repository()?, pull_request(), Duration::from_secs(1))
         .await?
         .expect("loading enrolls the target");
     assert!(!recent.cool_off_elapsed());
 
-    sqlx::query("SELECT pg_sleep(1.1)").execute(&pool).await?;
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION public.clock_timestamp() RETURNS timestamptz
+         LANGUAGE SQL AS 'SELECT recorded_at + interval ''1 second'' FROM commissioned_dispatch'",
+    )
+    .execute(&pool)
+    .await?;
     let elapsed = sweep
         .load_target_with_cool_off(&repository()?, pull_request(), Duration::from_secs(1))
         .await?
         .expect("the target remains enrolled");
 
     assert!(elapsed.cool_off_elapsed());
+    clock_pool.close().await;
     Ok(())
 }
 
@@ -1025,13 +1051,36 @@ async fn target_reenrollment_restores_its_commissioned_session_park() -> Result<
     .await?;
 
     let restored = store.reenroll_target(&repository, pull_request()).await?;
-    let lifecycle = SessionLifecycleRepository::new(pool)
+    let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(session)
         .await?
         .expect("the restored session retains its lifecycle row");
 
     assert_eq!(restored, Some(session));
     assert!(!lifecycle.state().is_parked());
+    let restarted = PostgresConvergenceSweepStore::new(pool);
+    assert_eq!(
+        restarted
+            .reenroll_target(&repository, pull_request())
+            .await?,
+        Some(session)
+    );
+    restarted
+        .acknowledge_reenrollment_nudge(&repository, pull_request(), session)
+        .await?;
+    assert_eq!(
+        restarted
+            .reenroll_target(&repository, pull_request())
+            .await?,
+        None
+    );
+    assert!(
+        !restarted
+            .load_target(&repository, pull_request())
+            .await?
+            .expect("target remains durable")
+            .is_parked()
+    );
     Ok(())
 }
 
@@ -1386,6 +1435,44 @@ async fn target_removal_restores_its_commissioned_session_park() -> Result<(), B
 
     assert_eq!(restored, vec![session]);
     assert!(!lifecycle.state().is_parked());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn target_removal_retains_a_handoff_until_acknowledgement() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let session = park_commissioned_session(
+        &pool,
+        &store,
+        &repository,
+        &observation,
+        0x89_266,
+        0x89_267,
+        0x89_268,
+    )
+    .await?;
+    assert_eq!(
+        store.reenroll_target(&repository, pull_request()).await?,
+        Some(session)
+    );
+    assert!(
+        !SessionLifecycleRepository::new(pool)
+            .load(session)
+            .await?
+            .expect("the restored session retains its lifecycle row")
+            .state()
+            .is_parked()
+    );
+    assert_eq!(
+        store.reconcile_configured_targets(&[]).await?,
+        vec![session]
+    );
+    store.acknowledge_removed_target_nudge(session).await?;
+    assert!(store.reconcile_configured_targets(&[]).await?.is_empty());
     Ok(())
 }
 

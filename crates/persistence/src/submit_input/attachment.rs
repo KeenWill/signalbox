@@ -95,18 +95,42 @@ pub(super) async fn prospective_attachment_frontier_exceeds_bound(
             field: "delegated turn attempt state",
             value,
         })) if value == "stop_requested" => Err(ModelCallRepositoryError::NoLiveExecution),
-        // A turn executing a tool batch keeps the `running` phase against the
-        // continuation attempt while the call that produced the batch is
-        // already terminal. Model-execution reconstitution then sees the
-        // turn's retained provider pin with no current call and reports
-        // `PinnedTargetUnexpected`, which is exactly the statement that this
-        // turn has no live model call to read a frontier from. The scheduling
-        // projection records the batch's yielded frontier, so route the state
-        // through the same no-live-execution path the parked phases use rather
-        // than rolling back an otherwise-applied submission.
-        Err(ModelCallRepositoryError::Corruption(ModelCallCorruption::Execution(
-            signalbox_domain::ModelCallExecutionReconstitutionFailure::PinnedTargetUnexpected,
-        ))) => Err(ModelCallRepositoryError::NoLiveExecution),
+        Err(
+            error @ ModelCallRepositoryError::Corruption(ModelCallCorruption::Execution(
+                signalbox_domain::ModelCallExecutionReconstitutionFailure::PinnedTargetUnexpected,
+            )),
+        ) => {
+            let running = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT turn_id, current_attempt_id FROM turn_lifecycle
+                  WHERE session_id = $1 AND state_kind = 'active'
+                    AND active_phase_kind = 'running'
+                    AND active_tool_round_call_id IS NOT NULL
+                    AND NOT delegation_runtime_terminal",
+            )
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut *connection)
+            .await?;
+            let executing = if let Some((turn, attempt)) = running {
+                load_active_batch_from_connection(connection, session, turn_id_from_uuid(turn))
+                    .await
+                    .map_err(map_tool_loop_error)?
+                    .is_some_and(|batch| match batch.phase() {
+                        signalbox_domain::ToolBatchPhase::Executing { turn_attempt } => {
+                            turn_attempt.into_uuid() == attempt
+                        }
+                        signalbox_domain::ToolBatchPhase::AwaitingApproval { .. }
+                        | signalbox_domain::ToolBatchPhase::AwaitingRecovery { .. }
+                        | signalbox_domain::ToolBatchPhase::AwaitingChild { .. } => false,
+                    })
+            } else {
+                false
+            };
+            if executing {
+                Err(ModelCallRepositoryError::NoLiveExecution)
+            } else {
+                Err(error)
+            }
+        }
         result => result,
     };
     let (base_origins, check_base) = match live_execution {
@@ -524,6 +548,17 @@ async fn load_delegated_parked_attachment_frontier(
                 .reconstitute()
                 .ok_or(SubmitInputCorruption::Inconsistent(
                     "delegated model recovery snapshot invalid",
+                ))?
+        }
+        ActiveTurnPhaseStorageKind::AwaitingCredentialAvailability => {
+            let wait =
+                crate::model_execution::credential_wait::load_phase(connection, session, turn)
+                    .await?;
+            load_call_snapshot(connection, session, wait.frontier())
+                .await?
+                .reconstitute()
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "credential wait frontier",
                 ))?
         }
         ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery => {

@@ -13,6 +13,7 @@ be asked to demonstrate on demand.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import json
 import os
 import re
@@ -21,7 +22,9 @@ import signal
 import subprocess
 import tempfile
 import time
+import tomllib
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPOSITORY = Path(__file__).absolute().parent.parent
@@ -151,11 +154,72 @@ REFUSED_REMOVAL = "Error response from daemon: removal is denied by policy"
 
 HARMLESS_REMOVAL_NOTE = "WARNING: --volumes is deprecated in favour of -v"
 
-MARKED_START = ".with_labels(disposable_test_container_labels())"
+MARKED_START = re.compile(
+    r"\.with_labels\((?:(?P<qualifier>signalbox_persistence|crate)::)?disposable_test_container_labels\(\)\)"
+)
 
 # A chain longer than this is not a container start; the walk backwards stops
 # rather than reaching into whatever precedes an unrecognized statement.
 CHAIN_LINE_LIMIT = 40
+
+@functools.cache
+def module_sources_command() -> list[str]:
+    binary = os.environ.get("SIGNALBOX_RUST_MODULE_SOURCES")
+    if binary is None:
+        build = subprocess.run(
+            ["cargo", "build", "--quiet", "-p", "signalbox-derive", "--bin", "module_sources", "--message-format=json"],
+            cwd=Path(__file__).absolute().parent.parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        artifacts = [json.loads(line) for line in build.stdout.splitlines()]
+        binary = next(artifact["executable"] for artifact in artifacts if artifact.get("executable"))
+    command = [str(Path(binary).absolute())]
+    runtime = os.environ.get("SIGNALBOX_RUST_MODULE_RUNTIME")
+    if runtime is not None:
+        command.insert(0, str(Path(runtime).absolute()))
+    return command
+
+
+def rust_module_sources(crate_root: Path, *excluded_roots: Path) -> set[Path]:
+    inventory = subprocess.run(
+        [*module_sources_command(), str(crate_root), *map(str, excluded_roots)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return {Path(path) for path in inventory.stdout.split("\0") if path}
+
+
+def persistence_library_sources() -> set[Path]:
+    """Return sources owned only by the persistence library Cargo target."""
+    package = REPOSITORY / "crates" / "persistence"
+    manifest = tomllib.loads((package / "Cargo.toml").read_text())
+    settings = manifest["package"]
+    library = package / manifest.get("lib", {}).get("path", "src/lib.rs")
+    other_roots = set()
+    for kind, folder, automatic in (
+        ("bin", "src/bin", "autobins"),
+        ("test", "tests", "autotests"),
+        ("bench", "benches", "autobenches"),
+        ("example", "examples", "autoexamples"),
+    ):
+        inferred = {path.stem: path for path in (package / folder).glob("*.rs")}
+        inferred.update({path.parent.name: path for path in (package / folder).glob("*/main.rs")})
+        if kind == "bin" and (package / "src/main.rs").is_file():
+            inferred[settings["name"]] = package / "src/main.rs"
+        targets = inferred.copy() if settings.get(automatic, True) else {}
+        for target in manifest.get(kind, []):
+            targets[target["name"]] = (
+                package / target["path"] if "path" in target else inferred[target["name"]]
+            )
+        other_roots.update(targets.values())
+    build = settings.get("build", "build.rs")
+    if build is not False:
+        other_roots.add(package / ("build.rs" if build is True else build))
+    return rust_module_sources(library, *sorted(other_roots))
+
 
 def container_start_sites() -> tuple[list[str], list[str]]:
     """Locate every testcontainers start in the tree, and those carrying no mark.
@@ -181,6 +245,7 @@ def container_start_sites() -> tuple[list[str], list[str]]:
             text=True,
             check=True,
         ).stdout.split("\0")
+    library_sources = persistence_library_sources()
     sites = []
     unmarked = []
     for name in filter(None, tracked):
@@ -224,7 +289,11 @@ def container_start_sites() -> tuple[list[str], list[str]]:
                 and not lines[head - 2].lstrip().startswith("let ")
             ):
                 head -= 1
-            if MARKED_START not in "\n".join(lines[head - 2 : number]):
+            marked = MARKED_START.search("\n".join(lines[head - 2 : number]))
+            if marked is None or (
+                marked.group("qualifier") == "crate"
+                and (REPOSITORY / name).resolve() not in library_sources
+            ):
                 unmarked.append(f"{name}:{number}")
     return sites, unmarked
 
@@ -450,6 +519,135 @@ def run_sweep(
 
 
 class SweepTestContainersTest(unittest.TestCase):
+    def test_only_harness_qualifiers_mark_a_container_start(self) -> None:
+        cases = [
+            {"file": "apps/fixture.rs", "qualifier": "", "unmarked": 0},
+            {"file": "apps/fixture.rs", "qualifier": "signalbox_persistence::", "unmarked": 0},
+            {"file": "crates/persistence/src/fixture.rs", "qualifier": "crate::", "unmarked": 0},
+            {"file": "apps/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/tests/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/benches/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/examples/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/src/bin/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/src/main.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "apps/fixture.rs", "qualifier": "unrelated::", "unmarked": 1},
+            {"file": "crates/persistence/src/fixture.rs", "qualifier": "unrelated::", "unmarked": 1},
+        ]
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                package = root / "crates/persistence"
+                (package / "src").mkdir(parents=True)
+                (package / "Cargo.toml").write_text(
+                    '[package]\nname = "signalbox-persistence"\nversion = "0.0.0"\n'
+                )
+                (package / "src/lib.rs").write_text("mod fixture;")
+                source = root / case["file"]
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(
+                    "use testcontainers::runners::AsyncRunner;\n"
+                    "async fn fixture() {\n"
+                    "let container = Postgres::default()\n"
+                    f"    .with_labels({case['qualifier']}disposable_test_container_labels())\n"
+                    "    .start().await;\n"
+                    "}\n"
+                )
+                (root / "sources.json").write_text(json.dumps([case["file"]]))
+                with mock.patch(f"{__name__}.REPOSITORY", root), mock.patch.dict(
+                    os.environ, {"SIGNALBOX_RUST_SOURCE_MANIFEST": "sources.json"}
+                ):
+                    sites, unmarked = container_start_sites()
+
+                self.assertEqual(len(sites), 1)
+                self.assertEqual(len(unmarked), case["unmarked"])
+
+    def test_crate_labels_follow_cargo_target_modules(self) -> None:
+        chain = (
+            "use testcontainers::runners::AsyncRunner;\n"
+            "async fn fixture() {\n"
+            "let container = Postgres::default()\n"
+            "    .with_labels(crate::disposable_test_container_labels())\n"
+            "    .start().await;\n"
+            "}\n"
+        )
+        cases = [
+            ("library sibling", {"src/lib.rs": "mod fixture;", "src/fixture.rs": chain}, "", 0),
+            ("binary sibling", {"src/main.rs": "mod fixture;", "src/fixture.rs": chain}, "", 1),
+            ("shared sibling", {"src/lib.rs": "mod fixture;", "src/main.rs": "mod fixture;", "src/fixture.rs": chain}, "", 1),
+            ("explicit binary", {"src/runner.rs": "mod fixture;", "src/fixture.rs": chain}, '\n[[bin]]\nname = "runner"\npath = "src/runner.rs"\n', 1),
+            ("nested library", {"src/lib.rs": "mod nested;", "src/nested/mod.rs": "mod fixture;", "src/nested/fixture.rs": chain}, "", 0),
+            ("nested library file", {"src/lib.rs": "mod nested;", "src/nested.rs": "mod fixture;", "src/nested/fixture.rs": chain}, "", 0),
+            ("inline binary", {"src/main.rs": "mod nested { mod fixture; }", "src/nested/fixture.rs": chain}, "", 1),
+            ("library path", {"src/lib.rs": '#[path = "../support/fixture.rs"] mod fixture;', "support/fixture.rs": chain}, "", 0),
+            ("binary path", {"src/lib.rs": "mod fixture;", "src/main.rs": '#[path = "fixture.rs"] mod other;', "src/fixture.rs": chain}, "", 1),
+            ("explicit library child", {"src/lib.rs": '#[path = "../support/foo.rs"] mod foo;', "support/foo.rs": "mod child;", "support/child.rs": chain}, "", 0),
+            ("explicit binary child", {"src/lib.rs": '#[path = "../support/child.rs"] mod child;', "src/main.rs": '#[path = "../support/foo.rs"] mod foo;', "support/foo.rs": "mod child;", "support/child.rs": chain}, "", 1),
+            ("comment", {"src/lib.rs": "/* mod fixture; */", "src/fixture.rs": chain}, "", 1),
+            ("string", {"src/lib.rs": 'const TEXT: &str = "mod fixture;";', "src/fixture.rs": chain}, "", 1),
+            ("raw library identifier", {"src/lib.rs": "mod r#type;", "src/type.rs": chain}, "", 0),
+            ("raw binary identifier", {"src/lib.rs": "mod r#type;", "src/main.rs": "mod r#type;", "src/type.rs": chain}, "", 1),
+        ]
+        for literal in ('r"fixture.rs"', 'r#"fixture.rs"#', 'r##"fixture.rs"##', r'"fi\x78ture.rs"', r'"fi\u{78}ture.rs"'):
+            declaration = f"#[path = {literal}] mod fixture;"
+            cases.extend([
+                (f"literal library path {literal}", {"src/lib.rs": declaration, "src/fixture.rs": chain}, "", 0),
+                (f"literal binary path {literal}", {"src/lib.rs": "mod fixture;", "src/main.rs": declaration, "src/fixture.rs": chain}, "", 1),
+            ])
+        for name, files, targets, expected_unmarked in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                package = root / "crates/persistence"
+                (package / "src").mkdir(parents=True)
+                (package / "src/lib.rs").write_text("")
+                (package / "Cargo.toml").write_text(
+                    '[package]\nname = "signalbox-persistence"\nversion = "0.0.0"\n' + targets
+                )
+                for filename, content in files.items():
+                    source = package / filename
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_text(content)
+                (root / "sources.json").write_text(json.dumps([
+                    str(source.relative_to(root)) for source in package.rglob("*.rs")
+                ]))
+                with mock.patch(f"{__name__}.REPOSITORY", root), mock.patch.dict(
+                    os.environ, {"SIGNALBOX_RUST_SOURCE_MANIFEST": "sources.json"}
+                ):
+                    sites, unmarked = container_start_sites()
+                self.assertEqual(len(sites), 1)
+                self.assertEqual(len(unmarked), expected_unmarked)
+
+    def test_only_the_owner_removes_sweep_scratch(self) -> None:
+        cleanup = re.search(
+            r"^cleanup\(\) \{\n.*?^\}", SWEEP.read_text(), re.MULTILINE | re.DOTALL
+        ).group()
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory) / "sweep-scratch"
+            scratch.mkdir()
+            run = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    cleanup + "\n" + """
+set -e
+readonly sweep_pid=$$
+scratch=$1
+bounded_worker=""
+bounded_deadline=""
+(cleanup)
+test -d "$scratch"
+cleanup
+test ! -e "$1"
+""",
+                    "cleanup-fixture",
+                    str(scratch),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=SWEEP_TIMEOUT_SECONDS,
+            )
+
+        self.assertEqual(run.returncode, 0, run.stderr)
+
     def test_the_listing_asks_for_this_repository_s_disposable_label_alone(self) -> None:
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],

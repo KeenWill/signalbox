@@ -102,6 +102,10 @@ where
         })
     }
 
+    pub(super) fn process_runner(&self) -> ExecRunner {
+        self.exec_runner.clone()
+    }
+
     async fn resolve_workspace_instruction_root(
         &mut self,
         session: SessionId,

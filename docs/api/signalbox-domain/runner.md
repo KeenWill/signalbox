@@ -1223,6 +1223,7 @@ pub enum RunnerRecoveryRejection {
     SessionNotFound,
     PlacementNotLost,
     ExistingControlRequired,
+    TurnTerminalized,
     PendingRunnerNotFound,
     RunnerUnavailable,
     ReplacementPending,
