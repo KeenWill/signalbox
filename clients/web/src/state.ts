@@ -231,7 +231,12 @@ const appSlice = createSlice({
       state,
       action: { payload: { id: string; result: 'loaded' | 'failed' } },
     ) {
+      if (state.originalArtifacts[action.payload.id] === undefined) return
       state.originalArtifacts[action.payload.id] = action.payload.result
+      state.activitySequence += 1
+    },
+    artifactOriginalReleased(state, action: { payload: string }) {
+      delete state.originalArtifacts[action.payload]
       state.activitySequence += 1
     },
     transcriptRangeSet(state, action: { payload: VisibleRange }) {
