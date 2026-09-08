@@ -1740,12 +1740,16 @@ async fn handle_workspace<Writer: AsyncWrite + Unpin>(
         }
         Ok(WorkspaceOutcome::ConflictingReuse) => ErrorCode::ConflictingReuse,
         Err(error) => {
-            let failure_class = match error {
-                signalbox_persistence::workspace::WorkspaceError::Database(_) => "database",
-                signalbox_persistence::workspace::WorkspaceError::Corruption(_) => "corruption",
+            use signalbox_persistence::workspace::WorkspaceError;
+            let (failure_class, code) = match error {
+                WorkspaceError::CommitAmbiguous(_) => {
+                    ("commit_ambiguous", ErrorCode::CommitAmbiguous)
+                }
+                WorkspaceError::Database(_) => ("database", ErrorCode::Unavailable),
+                WorkspaceError::Corruption(_) => ("corruption", ErrorCode::Unavailable),
             };
             tracing::warn!(failure_class, "workspace command failed");
-            ErrorCode::Unavailable
+            code
         }
     };
     write_error(
