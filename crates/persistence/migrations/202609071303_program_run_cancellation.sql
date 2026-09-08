@@ -1,5 +1,12 @@
-ALTER TABLE durable_command DROP CONSTRAINT durable_command_kind_closed;
-ALTER TABLE durable_command ADD CONSTRAINT durable_command_kind_closed CHECK ((command_kind = ANY (ARRAY['create_session'::text, 'create_session_from_imported_frontier'::text, 'replace_session_defaults'::text, 'replace_session_metadata'::text, 'submit_input'::text, 'decide_tool_request'::text, 'override_denied_tool_request'::text, 'review_workflow'::text, 'review_orchestration'::text, 'compact_session'::text, 'goal'::text, 'update_session_placement'::text, 'register_workspace'::text, 'mint_git_remote'::text, 'withdraw_git_remote'::text, 'session_lifecycle'::text, 'clear_credential_exclusion'::text, 'provision_oauth_credential'::text, 'reprovision_oauth_credential'::text, 'delete_oauth_credential'::text, 'cancel_program_run'::text])));
+DO $$
+DECLARE expression text;
+BEGIN
+ SELECT pg_get_expr(conbin, conrelid) INTO STRICT expression FROM pg_constraint
+   WHERE conrelid = 'durable_command'::regclass AND conname = 'durable_command_kind_closed';
+ ALTER TABLE durable_command DROP CONSTRAINT durable_command_kind_closed;
+ EXECUTE format('ALTER TABLE durable_command ADD CONSTRAINT durable_command_kind_closed CHECK ((%s) OR command_kind = %L)', expression, 'cancel_program_run');
+END;
+$$;
 
 DO $$
 DECLARE item record;
@@ -77,6 +84,10 @@ BEGIN
         WHEN 'reprovision_oauth_credential' THEN SELECT count(*) INTO matching_records FROM reprovision_oauth_credential_command WHERE command_id = NEW.command_id;
         WHEN 'delete_oauth_credential' THEN SELECT count(*) INTO matching_records FROM delete_oauth_credential_command WHERE command_id = NEW.command_id;
         WHEN 'clear_credential_exclusion' THEN SELECT count(*) INTO matching_records FROM clear_credential_exclusion_command WHERE command_id = NEW.command_id;
+        WHEN 'reload_configuration' THEN SELECT count(*) INTO matching_records FROM reload_configuration_command WHERE command_id = NEW.command_id;
+        WHEN 'replace_lost_runner' THEN SELECT count(*) INTO matching_records FROM replace_lost_runner_command WHERE command_id = NEW.command_id;
+        WHEN 'abandon_lost_runner' THEN SELECT count(*) INTO matching_records FROM abandon_lost_runner_command WHERE command_id = NEW.command_id;
+        WHEN 'promote_pending_runner' THEN SELECT count(*) INTO matching_records FROM promote_pending_runner_command WHERE command_id = NEW.command_id;
         WHEN 'cancel_program_run' THEN SELECT count(*) INTO matching_records FROM cancel_program_run_command WHERE command_id = NEW.command_id;
         ELSE RAISE EXCEPTION 'unsupported durable command kind %', NEW.command_kind USING ERRCODE = '23514';
     END CASE;
