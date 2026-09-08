@@ -13,7 +13,6 @@ const originalPath =
   '/api/blobs/sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e/content/image-png'
 const documentDownloadPath = `/api/blobs/sha256:${'6f'.repeat(32)}/download`
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
-const MOBILE_ATTACHMENT_RASTERIZATION_TOLERANCE = 0.08
 
 const watchBrowser = (page: Page): BrowserProblems => {
   const problems: BrowserProblems = { consoleErrors: [], pageErrors: [] }
@@ -153,7 +152,6 @@ test('captures mobile attachment evidence', async ({ page }, testInfo) => {
   await page.goto('/scenario/attachments')
   await expect(page.getByRole('region', { name: 'Artifact attachments' })).toHaveScreenshot(
     'attachments-mobile-dark.png',
-    { maxDiffPixelRatio: MOBILE_ATTACHMENT_RASTERIZATION_TOLERANCE },
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

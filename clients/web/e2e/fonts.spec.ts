@@ -15,7 +15,13 @@ test('uses bundled sans and monospace faces independently of host font selection
     context.font = sans
     const sansWidth = context.measureText('Signalbox bounded workstation').width
     context.font = mono
+    const artifactSummary = document.createElement('p')
+    artifactSummary.className = 'artifact-bound-summary'
+    document.body.append(artifactSummary)
+    const artifactFamily = getComputedStyle(artifactSummary).fontFamily
+    artifactSummary.remove()
     return {
+      artifactFamily,
       rootFamily: getComputedStyle(document.documentElement).fontFamily,
       sansLoaded: document.fonts.check(sans),
       monoLoaded: document.fonts.check(mono),
@@ -26,6 +32,7 @@ test('uses bundled sans and monospace faces independently of host font selection
   expect(typography.rootFamily).toContain('Signalbox Test Sans')
   expect(typography.sansLoaded).toBe(true)
   expect(typography.monoLoaded).toBe(true)
+  expect(typography.artifactFamily).toContain('Signalbox Test Mono')
   await testInfo.attach('font-metrics', {
     body: JSON.stringify(typography),
     contentType: 'application/json',

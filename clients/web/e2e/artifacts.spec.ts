@@ -26,9 +26,6 @@ const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.met
 const originalFixture = readFileSync(new URL('./fixtures/original.png', import.meta.url))
 const thumbnailFixture = readFileSync(new URL('./fixtures/thumbnail.png', import.meta.url))
 const jpegOriginalFixture = readFileSync(new URL('./fixtures/original.jpg', import.meta.url))
-// The owned 390 px crop is almost entirely text, so CI font rasterization accounts for 7% of its
-// pixels even when geometry is identical. Keep that measured host allowance local to this fixture.
-const MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE = 0.08
 
 const sha256Digest = (bytes: Buffer): string =>
   `sha256:${createHash('sha256').update(bytes).digest('hex')}`
@@ -408,7 +405,6 @@ test('captures mobile artifact evidence', async ({ page }, testInfo) => {
   await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
   await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
     'artifacts-mobile-dark.png',
-    { maxDiffPixelRatio: MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE },
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
