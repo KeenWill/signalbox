@@ -432,7 +432,7 @@ impl ClaudeCliRuntime {
                 };
             }
         };
-        let mut translated = match translate(&operation) {
+        let translated = match translate(&operation) {
             Ok(translated) => translated,
             Err(TranslationError::Failure(failure)) => {
                 return PreparationOutcome::Failed {
@@ -504,12 +504,26 @@ impl ClaudeCliRuntime {
                 }
             }
         };
-        let support = match create_support_files(
-            &self.mcp_bridge_executable,
-            &translated,
-            request_fast_mode,
-            credential.as_ref(),
-        ) {
+        let bridge = self.mcp_bridge_executable.clone();
+        let support_worker = tokio::task::spawn_blocking(move || {
+            let support =
+                create_support_files(&bridge, &translated, request_fast_mode, credential.as_ref());
+            (support, translated, credential)
+        });
+        let (support, mut translated, credential) =
+            match cancellation.run_until_cancelled(support_worker).await {
+                None => return PreparationOutcome::Cancelled { correlation },
+                Some(Ok(prepared)) => prepared,
+                Some(Err(error)) => {
+                    return PreparationOutcome::Defect {
+                        correlation,
+                        defect: PreparationDefect::RequestConstructionFailed {
+                            detail: format!("support-file worker failed: {error}"),
+                        },
+                    };
+                }
+            };
+        let support = match support {
             Ok(support) => support,
             Err(detail) => {
                 return PreparationOutcome::Defect {
