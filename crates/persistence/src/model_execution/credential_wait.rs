@@ -221,7 +221,7 @@ pub(super) async fn prepare_release(
     session_id: SessionId,
     successor: TurnAttemptId,
 ) -> Result<Option<CredentialAvailabilityWait>, ModelCallRepositoryError> {
-    let waiting = sqlx::query("SELECT wait_attempt_id, turn_id, pool_policy_id, credential_wait_is_eligible(wait_attempt_id) AS eligible FROM credential_availability_wait WHERE session_id = $1 AND consumed_by_attempt_id IS NULL")
+    let waiting = sqlx::query("SELECT wait_attempt_id, turn_id, pool_policy_id, effective_target_id, credential_wait_is_eligible(wait_attempt_id) AS eligible FROM credential_availability_wait WHERE session_id = $1 AND consumed_by_attempt_id IS NULL")
         .bind(session_id.into_uuid()).fetch_optional(&mut *connection).await?;
     let Some(waiting) = waiting else {
         return Ok(None);
@@ -265,25 +265,28 @@ pub(super) async fn prepare_release(
         .targets
         .resolve(*execution.configuration().effective().model())
     else {
+        sqlx::query("ROLLBACK TO SAVEPOINT credential_wait_admission")
+            .execute(&mut *connection)
+            .await?;
         sqlx::query("RELEASE SAVEPOINT credential_wait_admission")
             .execute(&mut *connection)
             .await?;
-        return Ok(None);
+        return Ok(Some(wait));
     };
     let target = resolved.target();
-    let serving = super::credential_pool::prepared_serving_evidence(
+    let mut serving = super::credential_pool::prepared_serving_evidence(
         repository.credential_families.as_ref(),
         &repository.continuation_usage_limits,
         target,
         fast,
     );
-    let serving = retain_serving_target(
-        connection,
-        successor,
-        repository.credential_families.as_ref(),
-        serving,
-    )
-    .await?;
+    serving.effective_target = ResolvedProviderTarget::naming(
+        signalbox_domain::ProviderModelIdentity::from_uuid(waiting.try_get("effective_target_id")?),
+    );
+    serving.credential_model_family = repository
+        .credential_families
+        .as_ref()
+        .and_then(|families| families.family(serving.effective_target));
     let selected = super::credential_pool::select_runtime_pool_credential(
         connection,
         session_id,
@@ -387,7 +390,7 @@ pub(super) async fn park_failed(
         .collect::<Vec<_>>();
     let mut bounded = crate::credential_invocations::bounded_members(connection, &profiles).await?;
     bounded.retain(|member| !excluded.excluded.contains(&member.profile));
-    let Some(mut snapshot) = admission_snapshot(
+    let Some(snapshot) = admission_snapshot(
         connection,
         execution.session(),
         execution.turn(),
@@ -418,18 +421,6 @@ pub(super) async fn park_failed(
         observation.usage(),
         cause,
         backoff,
-    )
-    .await?;
-    let refreshed =
-        load_durable_pool_exclusions(connection, execution.session(), execution.turn(), policy)
-            .await?;
-    snapshot.members = credential_pool_evidence::snapshot(
-        connection,
-        execution.session(),
-        execution.turn(),
-        policy,
-        refreshed.observed_at,
-        &refreshed.headroom,
     )
     .await?;
     let fresh = Box::pin(super::live_turn::require_live_execution(

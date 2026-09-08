@@ -910,9 +910,11 @@ pub trait InvocationProcessObserver: Send + Sync {
         process_group: u32,
     ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + '_>>;
     /// Reconciles capacity after runtime execution has completed cleanup.
+    /// The observed group is retained even when registration did not finish.
     fn finished(
         &self,
         call: ModelCallId,
+        process_group: Option<u32>,
         proven_unsent: bool,
     ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
@@ -927,6 +929,7 @@ pub struct RuntimeModelCallProvider<R> {
 }
 
 struct AcceptanceObservations<AcceptancePossible, Correlation> {
+    invocation_process_group: Option<u32>,
     invocation_processes: Option<Arc<dyn InvocationProcessObserver>>,
     expected_correlation: Correlation,
     correlation_mismatch: bool,
@@ -959,6 +962,7 @@ where
             self.correlation_mismatch = true;
             return Box::pin(async { false });
         }
+        self.invocation_process_group = Some(process_group);
         let observer = self.invocation_processes.clone();
         let call = self.telemetry.call;
         Box::pin(async move {
@@ -1396,6 +1400,7 @@ where
             ));
         }
         let mut observations = AcceptanceObservations {
+            invocation_process_group: None,
             invocation_processes: self.invocation_processes.clone(),
             expected_correlation: correlation,
             correlation_mismatch: false,
@@ -1422,6 +1427,7 @@ where
             observer
                 .finished(
                     correlation,
+                    observations.invocation_process_group,
                     matches!(report.evidence, TerminalEvidence::ProvenUnsent(_)),
                 )
                 .await;
@@ -2486,6 +2492,7 @@ mod tests {
 
     fn capacity_sink() -> AcceptanceObservations<fn(), ModelCallId> {
         AcceptanceObservations {
+            invocation_process_group: None,
             invocation_processes: None,
             expected_correlation: call(),
             correlation_mismatch: false,
@@ -3006,6 +3013,7 @@ mod tests {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
+            invocation_process_group: None,
             invocation_processes: None,
             expected_correlation: call(),
             correlation_mismatch: false,
@@ -3044,6 +3052,7 @@ mod tests {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
+            invocation_process_group: None,
             invocation_processes: None,
             expected_correlation: call(),
             correlation_mismatch: false,
@@ -3090,6 +3099,7 @@ mod tests {
         let expected_text = String::from("already [redacted]");
         let recorded = RecordedTextDeltas::default();
         let mut sink = AcceptanceObservations {
+            invocation_process_group: None,
             invocation_processes: None,
             expected_correlation: expected_call,
             correlation_mismatch: false,

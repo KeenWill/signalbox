@@ -549,9 +549,10 @@ where
                     turn: delegated_turn,
                 }
             }
-            "awaiting_tool_approval" | "awaiting_child" | "awaiting_runner_recovery" => {
-                StartupScanSessionOutcome::NoActiveTurn
-            }
+            "awaiting_tool_approval"
+            | "awaiting_child"
+            | "awaiting_runner_recovery"
+            | "awaiting_credential_availability" => StartupScanSessionOutcome::NoActiveTurn,
             _ => {
                 return Err(StartupScanCorruption::Inconsistent("delegated active phase").into());
             }
