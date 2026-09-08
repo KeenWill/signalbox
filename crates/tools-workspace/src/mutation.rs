@@ -1244,17 +1244,18 @@ fn rollback_staged(staged: &mut [StagedMutation]) -> Result<(), ()> {
             true
         };
         failed |= !can_restore;
-        if can_restore && file.backup_created {
-            if let Some(backup) = &file.backup {
-                failed |= renameat_with(
-                    &file.parent,
-                    backup,
-                    &file.parent,
-                    &file.target,
-                    RenameFlags::NOREPLACE,
-                )
-                .is_err();
-            }
+        if can_restore
+            && file.backup_created
+            && let Some(backup) = &file.backup
+        {
+            failed |= renameat_with(
+                &file.parent,
+                backup,
+                &file.parent,
+                &file.target,
+                RenameFlags::NOREPLACE,
+            )
+            .is_err();
         }
         if let Some(stage) = file.stage.take() {
             failed |= unlinkat(&file.parent, stage, AtFlags::empty()).is_err();
