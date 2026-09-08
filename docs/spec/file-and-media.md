@@ -45,6 +45,10 @@ result returned. `signalbox-file-media-provider-runtime` supplies the
 registry-backed service behind both and authorizes each request through an
 injected `FileUseResolver`.
 
+PDF preflight charges recursive length-carrier decoding against the aggregate
+object-stream budget. Text reads charge page content and font CMaps against one
+read-wide decoding budget and accept bounded indirect content arrays.
+
 ## Design decisions
 
 View names and their meanings are provider-owned; the core fixes only the closed
