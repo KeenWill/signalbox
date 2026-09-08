@@ -6,10 +6,11 @@ use super::turn_facts::{
     decode_model_call_usage, load_next_model_call_usage, load_next_transcript_turn,
 };
 use super::{ProcessReadCorruption, ProcessReadError};
+use crate::credential_pool_exhaustion::CredentialPoolEvidenceError;
 use crate::mapping::session_id_to_uuid;
 use signalbox_domain::{ContextFrontierId, ModelCallId, SessionId, TurnId};
 use sqlx::types::Uuid;
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, Row, Transaction};
 
 /// One repeatable-read transcript cursor that owns at most one decoded row.
 ///
@@ -75,22 +76,22 @@ impl ProcessTranscriptReader {
             if let Some(row) = row {
                 let mut decoded =
                     decode_transcript_turn(&row, self.automatic_reconciliation_attempt_budget)?;
-                if let Some(evidence) = crate::credential_pool_exhaustion::load(
-                    &mut **self.transaction_mut()?,
-                    session.into_uuid(),
-                    decoded.turn.turn().into_uuid(),
-                )
-                .await
-                .map_err(|error| match error {
-                    crate::credential_pool_exhaustion::CredentialPoolEvidenceError::Database(
-                        error,
-                    ) => ProcessReadError::from(error),
-                    crate::credential_pool_exhaustion::CredentialPoolEvidenceError::Corruption => {
-                        ProcessReadError::from(ProcessReadCorruption::Inconsistent(
-                            "pool exhaustion evidence",
-                        ))
-                    }
-                })? {
+                if row.try_get::<bool, _>("credential_pool_exhausted")?
+                    && let Some(evidence) = crate::credential_pool_exhaustion::load(
+                        &mut **self.transaction_mut()?,
+                        session.into_uuid(),
+                        decoded.turn.turn().into_uuid(),
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        CredentialPoolEvidenceError::Database(error) => {
+                            ProcessReadError::from(error)
+                        }
+                        CredentialPoolEvidenceError::Corruption => ProcessReadError::from(
+                            ProcessReadCorruption::Inconsistent("pool exhaustion evidence"),
+                        ),
+                    })?
+                {
                     decoded.turn.state =
                         super::transcript_types::ProcessTurnState::FailedCredentialPoolExhausted(
                             Box::new(evidence),

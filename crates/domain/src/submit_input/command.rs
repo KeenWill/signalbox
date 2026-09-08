@@ -478,7 +478,8 @@ impl SubmitInput {
             },
             crate::ActiveTurnPhase::AwaitingApproval { .. }
             | crate::ActiveTurnPhase::AwaitingChild { .. }
-            | crate::ActiveTurnPhase::AwaitingRunnerRecovery { .. } => None,
+            | crate::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+            | crate::ActiveTurnPhase::AwaitingCredentialAvailability { .. } => None,
             crate::ActiveTurnPhase::AwaitingRecoveryDecision {
                 applied_interrupt, ..
             } => *applied_interrupt,

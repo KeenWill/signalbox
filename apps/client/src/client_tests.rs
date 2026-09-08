@@ -1086,6 +1086,19 @@ fn queued_send_fails_when_its_tool_recovery_blocker_requires_operator_action() {
 }
 
 #[test]
+fn credential_wait_keeps_send_and_queued_follow_nonterminal() {
+    let state = TurnState::ActiveAwaitingCredentialAvailability {
+        wait_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+        cause: signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted,
+    };
+    assert_eq!(
+        terminal_snapshot_state(Some(&state)).expect("credential wait is readable"),
+        None
+    );
+    assert!(blocker_recovery_snapshot_state(&state).is_ok());
+}
+
+#[test]
 fn send_fails_explicitly_when_runner_recovery_is_required() {
     let state = TurnState::ActiveAwaitingRunnerRecovery {
         runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),

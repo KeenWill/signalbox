@@ -62,12 +62,6 @@ machine they serve is owned by
 [credential-availability](../spec/credential-availability.md), and its design
 fixes their transitions.
 
-The replace-and-clear commit publishes the durable member-availability update
-that wakes a parked deadline-free exhausted wait, as every accepted exclusion
-clear does in its own transaction, and a clear that removes no exclusion
-publishes nothing. Delivery of OAuth material to a model call is owned by
-[configuration-and-credentials](../spec/configuration-and-credentials.md).
-
 ## Compatibility constraints
 
 Failure detail is never acknowledged before it is stored, because a restart

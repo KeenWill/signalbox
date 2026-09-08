@@ -124,6 +124,17 @@ impl<'a> Output<'a> {
                     automatic_reconciliation_attempts.value()
                 )
             }
+            TurnState::ActiveAwaitingCredentialAvailability {
+                wait_attempt_id,
+                cause,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=active_awaiting_credential_availability attempt={wait_attempt_id} cause={}",
+                match cause {
+                    signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted =>
+                        "exhausted",
+                },
+            ),
             TurnState::ActiveAwaitingRunnerRecovery {
                 runner_id,
                 placement_revision,

@@ -11,6 +11,7 @@ mod credential_pool;
 mod credential_pool_evidence;
 #[path = "credential_pool_records.rs"]
 mod credential_pool_records;
+pub(crate) mod credential_wait;
 mod delegated_result;
 mod delegation_lock;
 mod live_turn;
@@ -615,6 +616,7 @@ pub(crate) struct ModelCallOutboxOrderGuard {
 }
 
 pub(crate) enum CountedActivationCheckpointOutcome {
+    CredentialWait,
     Prepared,
     PoolExhausted(CredentialPoolRuntimePolicy),
 }
