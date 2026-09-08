@@ -405,7 +405,12 @@ fn relation_alias_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
                 cursor += 1;
             }
             if tokens.get(cursor) != Some(&BodyToken::Open) {
-                if !tokens.get(cursor).is_some_and(BodyToken::is_relation_name) {
+                let source_name = tokens.get(cursor).is_some_and(|token| {
+                    token.is_relation_name()
+                        || (token.function_name().is_some()
+                            && tokens.get(cursor + 1) == Some(&BodyToken::Open))
+                });
+                if !source_name {
                     break;
                 }
                 cursor += 1;
@@ -966,6 +971,16 @@ fn keyword_categories_preserve_permitted_names_and_quoted_identifiers(
         fixture_body_call_names("SELECT overlaps(), filter()"),
         BTreeSet::from(["overlaps".to_owned(), "filter".to_owned()])
     );
+    for source in [
+        "SELECT * FROM overlaps() restore_probe_head(value)",
+        "SELECT * FROM overlaps() WITH ORDINALITY restore_probe_head(value, ordinal)",
+    ] {
+        assert_eq!(
+            fixture_body_call_names(source),
+            BTreeSet::from(["overlaps".to_owned()]),
+            "{source}"
+        );
+    }
     assert_eq!(
         fixture_body_call_names(r#"SELECT "when"() FROM "case" restore_probe_head(value)"#),
         BTreeSet::from(["when".to_owned()])
