@@ -393,7 +393,7 @@ fn body_tokens(source: &str, keywords: &BTreeMap<String, KeywordUse>) -> Vec<Bod
 fn relation_alias_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
     let mut aliases = BTreeSet::new();
     for (index, token) in tokens.iter().enumerate() {
-        if !token.is_keyword("from") && !token.is_keyword("join") {
+        if !token.is_keyword("from") && !token.is_keyword("join") && !token.is_keyword("using") {
             continue;
         }
         let mut cursor = index + 1;
@@ -892,6 +892,10 @@ fn collect_classifier_failures(keywords: &BTreeMap<String, KeywordUse>) -> Vec<&
             table_alias_column_lists_do_not_add_call_edges,
         ),
         (
+            "delete_using_aliases_preserve_only_function_call_edges",
+            delete_using_aliases_preserve_only_function_call_edges,
+        ),
+        (
             "function_sources_remain_call_edges",
             function_sources_remain_call_edges,
         ),
@@ -1121,6 +1125,21 @@ fn unterminated_parenthesized_body_has_no_end(keywords: &BTreeMap<String, Keywor
         after_parenthesized(&body_tokens("(value", keywords), 0),
         None
     );
+}
+
+fn delete_using_aliases_preserve_only_function_call_edges(keywords: &BTreeMap<String, KeywordUse>) {
+    for source in [
+        "DELETE FROM target USING source restore_probe_head(value) WHERE restore_probe_tail()",
+        "DELETE FROM target USING source AS restore_probe_head(value), ONLY other restore_probe_middle(value) WHERE restore_probe_tail()",
+        "DELETE FROM target USING restore_probe_tail() restore_probe_head(value)",
+        "DELETE FROM target USING source JOIN other USING (value) WHERE restore_probe_tail()",
+    ] {
+        assert_eq!(
+            body_call_names(source, keywords),
+            BTreeSet::from([RESTORE_PROBE_TAIL.to_owned()]),
+            "{source}"
+        );
+    }
 }
 
 fn expression_keywords_do_not_turn_calls_into_relation_aliases(
