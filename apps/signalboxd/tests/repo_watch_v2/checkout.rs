@@ -1290,16 +1290,18 @@ async fn removal_migration_settles_existing_checkouts_without_inventing_location
         "WITH event AS (
              INSERT INTO gh_event
                  (event_id, content_identity, repository, event_kind, target_kind,
-                  pull_request_number, normalized_payload, recorded_at, retain_until)
+                  pull_request_number, normalized_payload, recorded_at,
+                  frontier_generation, event_ordinal, producer, repository_event_ordinal)
              VALUES (gen_random_uuid(), decode(repeat('00', 32), 'hex'),
                      'checkout/project', 'pull_request_opened', 'pull_request',
-                     1, ''::bytea, now(), now() + interval '1 day')
+                     1, ''::bytea, now(), 1, 1, 'poll', 1)
              RETURNING event_id
          ), rule AS (
              INSERT INTO rule_revision
-                 (repository, rule_id, revision, content_digest, activated_at)
+                 (repository, rule_id, revision, content_digest, activated_at,
+                  activated_after_event_ordinal)
              VALUES ('checkout/project', 'checkout', 1,
-                     decode(repeat('00', 32), 'hex'), now())
+                     decode(repeat('00', 32), 'hex'), now(), 0)
              RETURNING repository, rule_id, revision
          )
          INSERT INTO dispatch_ledger
