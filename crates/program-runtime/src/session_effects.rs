@@ -61,6 +61,7 @@ impl<E: EffectExecutor, N: Fn(SessionId), A: Fn(ModelAlias) -> Option<FrozenAlia
                 return self.other.adopt(invocation).await;
             }
             let result = match decode(invocation.request)? {
+                SessionOperation::Unsupported => return Ok(Some(refused())),
                 SessionOperation::Turn(input) => self
                     .sessions
                     .adopt_turn(invocation.run, input, &self.nudge)
@@ -94,6 +95,7 @@ impl<E: EffectExecutor, N: Fn(SessionId), A: Fn(ModelAlias) -> Option<FrozenAlia
                 return self.other.execute(invocation).await;
             }
             let result = match decode(invocation.request)? {
+                SessionOperation::Unsupported => return Ok(refused()),
                 SessionOperation::Turn(input) => self
                     .sessions
                     .drive_turn(invocation.run, input, &self.aliases, &self.nudge)
@@ -127,6 +129,7 @@ fn refused() -> InlineFramePayload {
 }
 
 enum SessionOperation {
+    Unsupported,
     Turn(ProgramSessionTurn),
     Create(ProgramSessionCreate),
 }
@@ -189,7 +192,7 @@ fn decode(request: &EffectRequest) -> Result<SessionOperation, LiveDeliveryFailu
                 defaults: SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(model)),
             }))
         }
-        _ => Err(LiveDeliveryFailure::new("unsupported session operation")),
+        _ => Ok(SessionOperation::Unsupported),
     }
 }
 

@@ -82,6 +82,24 @@ async fn workflow_creation_replays_its_session_and_reconstitutes_its_program_cau
         OutboxDeliveryDecision::Delivered
     }).await? != OutboxDispatchOutcome::Idle {}
     assert!(observed);
+    let mut old_version = pool.begin().await?;
+    sqlx::query("ALTER TABLE session_created_outbox_event DISABLE TRIGGER USER")
+        .execute(&mut *old_version)
+        .await?;
+    let error = sqlx::query(
+        "UPDATE session_created_outbox_event SET storage_version = 2 WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut *old_version)
+    .await
+    .expect_err("workflow provenance requires the new event shape");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("session_created_workflow_version")
+    );
+    old_version.rollback().await?;
     let ungranted = registered_session_run(&pool, ProgramGrants::new([])).await?;
     assert!(matches!(
         repository.create(ungranted, input).await,

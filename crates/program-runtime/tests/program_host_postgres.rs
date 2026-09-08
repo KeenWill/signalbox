@@ -1282,12 +1282,12 @@ fn session_repository(
     )
 }
 
-enum SessionCreationAttempt {
+enum SessionEffectAttempt {
     Live,
     Recovered,
 }
 
-async fn execute_session_creation(attempt: SessionCreationAttempt) -> Result<(), Box<dyn Error>> {
+async fn execute_session_creation(attempt: SessionEffectAttempt) -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{
         DirectModelSelection, DurableCommandId, EffectRequest, ModelSelectionRequest,
         ProgramCapability, SessionConfigurationDefaults, SessionId,
@@ -1306,7 +1306,7 @@ async fn execute_session_creation(attempt: SessionCreationAttempt) -> Result<(),
     .await?;
     let sessions = session_repository(&pool);
     let journal = ProgramJournalRepository::new(pool.clone());
-    let created = if matches!(attempt, SessionCreationAttempt::Recovered) {
+    let created = if matches!(attempt, SessionEffectAttempt::Recovered) {
         let session = sessions
             .create(
                 run,
@@ -1390,14 +1390,14 @@ async fn execute_session_creation(attempt: SessionCreationAttempt) -> Result<(),
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_session_effect_creates_a_workflow_session_host_side() -> Result<(), Box<dyn Error>> {
-    execute_session_creation(SessionCreationAttempt::Live).await
+    execute_session_creation(SessionEffectAttempt::Live).await
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn session_creation_recovery_adopts_the_durable_command_receipt() -> Result<(), Box<dyn Error>>
 {
-    execute_session_creation(SessionCreationAttempt::Recovered).await
+    execute_session_creation(SessionEffectAttempt::Recovered).await
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1571,4 +1571,81 @@ async fn terminal_unregistered_run_is_rejected_by_registered_execution()
     ));
     pool.close().await;
     Ok(())
+}
+
+async fn unsupported_session_effect(attempt: SessionEffectAttempt) -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{EffectRequest, ProgramCapability, program_registration::ProgramGrants};
+    use signalbox_program_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
+    let (_container, pool) = migrated_postgres().await?;
+    let artifact = ProgramArtifact::new(format!(
+        r#"
+import {{ effect }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+const answer = await effect("session", "unknown", new Uint8Array());
+if (answer.kind !== "answer") throw new Error("expected a session refusal answer");
+"#
+    ));
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Session]),
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    if matches!(attempt, SessionEffectAttempt::Recovered) {
+        journal
+            .append_request(
+                run,
+                None,
+                RequestKind::Effect(EffectRequest::new(
+                    ProgramCapability::Session,
+                    "unknown".into(),
+                    InlineFramePayload::default(),
+                )),
+            )
+            .await?;
+    }
+    let other = EffectProbe {
+        policy: EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    let mut effects = SessionEffects::new(session_repository(&pool), other, |_| {}, |_| None);
+    let host = ProgramHost::new(journal.clone());
+    assert_eq!(
+        host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed
+    );
+    let loaded = journal.load(run).await?.expect("registered journal");
+    let JournalFrame::Delivery(delivery) = loaded.entries().last().expect("refusal answer").frame()
+    else {
+        panic!("refusal answer")
+    };
+    let DeliveryKind::Answer { payload, .. } = delivery.kind() else {
+        panic!("refusal answer")
+    };
+    assert_eq!(payload.as_bytes(), br#"{"outcome":"refused"}"#);
+    assert_eq!(
+        host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed
+    );
+    assert_eq!(journal.load(run).await?.expect("replayed journal"), loaded);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unsupported_session_operation_is_journaled_as_a_replayable_refusal()
+-> Result<(), Box<dyn Error>> {
+    unsupported_session_effect(SessionEffectAttempt::Live).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unanswered_unsupported_session_operation_recovers_to_a_refusal()
+-> Result<(), Box<dyn Error>> {
+    unsupported_session_effect(SessionEffectAttempt::Recovered).await
 }
