@@ -148,6 +148,23 @@ pub enum SessionEvent {
         terminal_frontier_id: CanonicalUuid,
     },
     /// Turn failed.
+    /// The turn failed before a call because every pool member was excluded.
+    TurnCredentialPoolExhausted {
+        /// Failed turn.
+        turn_id: CanonicalUuid,
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+        /// Terminal physical attempt.
+        terminal_attempt_id: CanonicalUuid,
+        /// Semantic failure marker.
+        failure_entry_id: CanonicalUuid,
+        /// Frozen pool policy identity.
+        pool_policy_id: CanonicalUuid,
+        /// Complete policy inventory in configuration order.
+        policy_members: Vec<String>,
+        /// Exactly one evidence item per policy member.
+        members: Vec<crate::CredentialPoolMemberEvidence>,
+    },
     TurnFailed {
         /// Failed turn.
         turn_id: CanonicalUuid,
@@ -418,6 +435,15 @@ pub(crate) fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameV
             ..
         } => validate_tool_approval_event_shape(decision, decider, rationale)?,
         SessionEvent::InputAccepted { content, .. } => content.validate()?,
+        SessionEvent::TurnCredentialPoolExhausted {
+            policy_members,
+            members,
+            ..
+        } => {
+            if !crate::valid_credential_pool_evidence(policy_members, members) {
+                return Err(FrameValidationError::TurnStateShape);
+            }
+        }
         SessionEvent::SessionCreated {}
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }

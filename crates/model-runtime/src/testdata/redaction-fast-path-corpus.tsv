@@ -1,6 +1,0 @@
-true	password=SYNTH-CRED-01	password=[redacted]
-true	mysql-p-w-d=SYNTH-CRED-02	mysql-p-w-d=[redacted]
-true	api key: SYNTH-CRED-03	api key: [redacted]
-true	--passphrase SYNTH-CRED-04	--passphrase [redacted]
-false	totp_seed=SYNTH-CRED-05	totp_seed=SYNTH-CRED-05
-false	ordinary output SYNTH-CRED-06	ordinary output SYNTH-CRED-06

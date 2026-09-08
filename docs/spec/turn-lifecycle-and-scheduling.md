@@ -44,7 +44,8 @@ the execution ports owned by [model-call-execution](model-call-execution.md) and
 [tool-loop](tool-loop.md).
 
 Connection-loss propagation retains a post-commit eligibility hint when the
-nudge channel is full and retries when capacity becomes available.
+nudge channel is full and retries when capacity becomes available. A nudge that
+waits for capacity only coalesces with a hint already queued in the channel.
 
 Every component deadline covers one physical operation. A running turn with no
 model call, tool attempt, or durable wait outstanding is reached by none of them
@@ -434,11 +435,35 @@ occupancy bound and drains under that window: after its in-flight operation
 reaches a durable boundary, it checkpoints the active turn and returns without
 issuing another, and a successor resumes from that boundary.
 
+A runner replacement issued during a model call or tool batch remains staged.
+Replacement admission or installation for a turn parked in
+`awaiting_runner_recovery` rejects with `ExistingControlRequired`.
+After every request resolves, continuation appends all results, installs the
+replacement and appends one relocation boundary, then prepares the next call. An
+earlier boundary commit is rejected. Candidate recovery waits retain no
+transaction or pooled connection. Interrupt or crash-loss batch terminalization
+retires the staged command before ending the turn. A model observation,
+including failure, refusal, cancellation or ambiguity, permits installation and
+retains the turn state that observation produced. A retry or credential-rotation
+successor waits for the staged replacement to settle and retains its relocation
+at the predecessor's observation frontier before preparing its next call. A
+tool-round observation installs a ready staged replacement at its yielded
+frontier before classifying the new requests for placement loss; that round
+retains the relocation in its boundary. A delegated logical terminal retains any issued provider call as an
+observation barrier; its late correlated observation retires the physical call
+without changing the logical terminal. Pre-pin installation appends no boundary.
+
+A queued turn cannot activate while its placement is lost. Replacement and
+abandonment outbox events wake queued work, retaining hints when the eligibility
+channel is full. Committed turn and runner authority changes resume retained
+replacement commands without requiring a connected command client. Startup
+rechecks them after the generic scan and before client admission. Abandonment
+with an active turn records the existing-control result and creates no
+cancellation.
+
 ## Planned
 
-- Runner-loss recovery: replacement and abandonment of a lost runner, and the
-  runner-loss projection's effect on queued activation and runner execution;
-  design in
+- Pre-continuation runner takeover and retry supersession; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - Recovery-only startup: a runner reconciliation phase between migrations and
   the generic scan; design in

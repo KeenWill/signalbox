@@ -145,6 +145,7 @@ mod blob_objects;
 mod compaction;
 mod continuation_compaction;
 mod credential_exclusions;
+mod credential_pool;
 mod fixtures;
 mod fleet_soak;
 mod imported_conversations;

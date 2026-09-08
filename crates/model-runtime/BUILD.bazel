@@ -8,7 +8,6 @@ rust_package()
 
 rust_library(
     name = "signalbox_model_runtime",
-    compile_data = glob(["src/testdata/**"]),
     crate_features = CRATE_FEATURES,
     crate_root = "src/lib.rs",
 )

@@ -71,18 +71,16 @@ fn json(value: &impl Serialize) -> Result<String, OauthCredentialRepositoryError
 }
 
 async fn lock_catalog(connection: &mut PgConnection) -> Result<(), OauthCredentialRepositoryError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('oauth-registration-catalog', 0))")
+    sqlx::query(crate::lock_inventory::OAUTH_REGISTRATION_CATALOG_WRITE)
         .execute(connection)
         .await?;
     Ok(())
 }
 
 pub(super) async fn read_catalog(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT pg_advisory_xact_lock_shared(hashtextextended('oauth-registration-catalog', 0))",
-    )
-    .execute(connection)
-    .await?;
+    sqlx::query(crate::lock_inventory::OAUTH_REGISTRATION_CATALOG_READ)
+        .execute(connection)
+        .await?;
     Ok(())
 }
 
@@ -97,7 +95,7 @@ async fn lock_profiles(
         .bind(profile)
         .execute(&mut *connection)
         .await?;
-        sqlx::query("SELECT profile FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE")
+        sqlx::query(crate::lock_inventory::OAUTH_CREDENTIAL_PROFILE)
             .bind(profile)
             .execute(&mut *connection)
             .await?;
@@ -218,12 +216,11 @@ impl OauthCredentialRepository {
         .bind(&command.profile)
         .execute(&mut *tx)
         .await?;
-        let generation: i64 = sqlx::query_scalar(
-            "SELECT generation FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE",
-        )
-        .bind(&command.profile)
-        .fetch_one(&mut *tx)
-        .await?;
+        let generation: i64 =
+            sqlx::query_scalar(crate::lock_inventory::OAUTH_CREDENTIAL_PROFILE_GENERATION)
+                .bind(&command.profile)
+                .fetch_one(&mut *tx)
+                .await?;
         let authorized: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM oauth_credential_authorization WHERE profile = $1)",
         )
@@ -291,7 +288,7 @@ impl OauthCredentialRepository {
         loop {
             let mut tx = self.pool.begin().await?;
             read_catalog(&mut tx).await?;
-            sqlx::query("SELECT command_id FROM durable_command WHERE command_id = $1 FOR UPDATE")
+            sqlx::query(crate::lock_inventory::OAUTH_EXCHANGE_COMMAND)
                 .bind(exchange.command.command_id.into_uuid())
                 .execute(&mut *tx)
                 .await?;
@@ -314,12 +311,11 @@ impl OauthCredentialRepository {
                 tx.rollback().await?;
                 continue;
             }
-            let generation: i64 = sqlx::query_scalar(
-                "SELECT generation FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE",
-            )
-            .bind(&exchange.command.profile)
-            .fetch_one(&mut *tx)
-            .await?;
+            let generation: i64 =
+                sqlx::query_scalar(crate::lock_inventory::OAUTH_CREDENTIAL_PROFILE_GENERATION)
+                    .bind(&exchange.command.profile)
+                    .fetch_one(&mut *tx)
+                    .await?;
             let current: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM oauth_credential_registration WHERE profile = $1 AND tuple = $2::jsonb)")
             .bind(&exchange.command.profile).bind(json(&exchange.registration)?).fetch_one(&mut *tx).await?;
             let outcome = if generation != exchange.generation {
