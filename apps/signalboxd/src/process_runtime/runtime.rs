@@ -169,16 +169,21 @@ impl ProcessRuntime {
         }
     }
 
+    /// Shares committed runner-authority wakeups with continuation boundary waiters.
+    pub fn runner_recovery_notifications(&self) -> watch::Receiver<()> {
+        self.fanouts.runner_recovery.subscribe()
+    }
+
     /// Serves requests and dispatches durable updates until `shutdown` changes
     /// to true or its sender closes.
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
         let mut recovery_listener = sqlx::postgres::PgListener::connect_with(&self.pool)
             .await
-            .map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
+            .map_err(ProcessRuntimeError::DatabaseNotifications)?;
         recovery_listener
-            .listen("runner_recovery")
+            .listen_all(["runner_recovery", "credential_wait_changed"])
             .await
-            .map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
+            .map_err(ProcessRuntimeError::DatabaseNotifications)?;
         let oauth = signalbox_persistence::oauth_credential::OauthCredentialRepository::new(
             self.pool.clone(),
         );
@@ -191,9 +196,22 @@ impl ProcessRuntime {
             .await
             .map_err(ProcessRuntimeError::OauthRecovery)?;
         let fanouts = self.fanouts;
-        let recovery_notifications = forward_runner_recovery_notifications(
+        let recovery_store = signalbox_persistence::runner_protocol::RunnerProtocolStore::new(
+            self.pool.clone(),
+            crate::runner_protocol_runtime::registration_only_catalog().map_err(|error| {
+                ProcessRuntimeError::RunnerRecoveryCommands(
+                    signalbox_persistence::runner_protocol::RunnerProtocolStoreError::Domain(error)
+                        .into(),
+                )
+            })?,
+        );
+        resume_runner_replacements_and_notify(&recovery_store, &fanouts.runner_recovery).await?;
+        let recovery_notifications = forward_database_notifications(
             recovery_listener,
+            recovery_store,
             fanouts.runner_recovery.clone(),
+            fanouts.streaming.clone(),
+            self.eligibility_nudge.clone(),
             shutdown.clone(),
         );
         let connection_dependencies = ConnectionDependencies {
@@ -227,25 +245,54 @@ impl ProcessRuntime {
     }
 }
 
-async fn forward_runner_recovery_notifications(
+async fn resume_runner_replacements_and_notify(
+    store: &signalbox_persistence::runner_protocol::RunnerProtocolStore,
+    notifications: &watch::Sender<()>,
+) -> Result<(), ProcessRuntimeError> {
+    store
+        .resume_runner_replacements()
+        .await
+        .map_err(ProcessRuntimeError::RunnerRecoveryCommands)?;
+    notifications.send_replace(());
+    Ok(())
+}
+
+async fn forward_database_notifications(
     mut listener: sqlx::postgres::PgListener,
+    store: signalbox_persistence::runner_protocol::RunnerProtocolStore,
     notifications: watch::Sender<()>,
+    credential_wait_updates: broadcast::Sender<ProcessUpdate>,
+    eligibility_nudge: InProcessEligibilityNudge,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
     loop {
         if *shutdown.borrow() {
             return Ok(());
         }
-        tokio::select! {
+        let notification = tokio::select! {
             notification = listener.try_recv() => {
-                notification.map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
-                // A reconnect also rechecks durable results after missed notifications.
-                notifications.send_replace(());
+                notification.map_err(ProcessRuntimeError::DatabaseNotifications)?
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+                continue;
             }
+        };
+        if let Some(notification) = notification {
+            if notification.channel() == "credential_wait_changed" {
+                let session = uuid::Uuid::parse_str(notification.payload())
+                    .ok()
+                    .map(SessionId::from_uuid);
+                if let Some(session) = session {
+                    eligibility_nudge.nudge(session);
+                }
+                let _ = credential_wait_updates.send(ProcessUpdate::ResyncRequired { session });
+                continue;
+            }
+        } else {
+            let _ = credential_wait_updates.send(ProcessUpdate::ResyncRequired { session: None });
         }
+        resume_runner_replacements_and_notify(&store, &notifications).await?;
     }
 }
 
@@ -293,7 +340,20 @@ pub(super) async fn dispatch_updates(
                 );
                 // A sessionless receipt has no follower to reach.
                 if let Some(session) = event.session() {
-                    nudge_delegation_wake(&eligibility_nudge, session, event.kind());
+                    let outcome =
+                        nudge_eligible_outbox_wake(&eligibility_nudge, session, event.kind());
+                    if outcome
+                        == Some(signalbox_application::EligibilityNudgeOutcome::DroppedAtCapacity)
+                        && matches!(
+                            event.kind(),
+                            DispatchedOutboxEventKind::RunnerStateTransition { .. }
+                        )
+                    {
+                        let nudge = eligibility_nudge.clone();
+                        tokio::spawn(
+                            async move { nudge.nudge_waiting_for_capacity(session).await },
+                        );
+                    }
                     let _ = fanouts.monitor.send(ProcessMonitorUpdate::Durable {
                         cursor: event.sequence(),
                         session,
@@ -408,6 +468,9 @@ pub enum ProcessMonitorReceiveError {
 
 fn monitor_event_kind(event: &DispatchedOutboxEventKind) -> SessionTimelineEventKind {
     match event {
+        DispatchedOutboxEventKind::CredentialPoolExhausted(_) => {
+            SessionTimelineEventKind::TurnFailed
+        }
         DispatchedOutboxEventKind::SessionCreated(_) => SessionTimelineEventKind::SessionCreated,
         DispatchedOutboxEventKind::SessionStateChanged(_) => {
             SessionTimelineEventKind::SessionStateChanged
@@ -471,13 +534,24 @@ fn monitor_event_kind(event: &DispatchedOutboxEventKind) -> SessionTimelineEvent
     }
 }
 
-pub(super) fn nudge_delegation_wake(
+pub(super) fn nudge_eligible_outbox_wake(
     eligibility_nudge: &impl EligibilityNudge,
     session: SessionId,
     event: &DispatchedOutboxEventKind,
-) {
-    if matches!(event, DispatchedOutboxEventKind::DelegationWake(_)) {
-        let _ = eligibility_nudge.nudge(session);
+) -> Option<signalbox_application::EligibilityNudgeOutcome> {
+    if matches!(
+        event,
+        DispatchedOutboxEventKind::DelegationWake(_)
+            | DispatchedOutboxEventKind::RunnerStateTransition {
+                state: DispatchedRunnerState::Replaced
+                    | DispatchedRunnerState::WorkingDirectoryChanged
+                    | DispatchedRunnerState::Abandoned,
+                ..
+            }
+    ) {
+        Some(eligibility_nudge.nudge(session))
+    } else {
+        None
     }
 }
 
@@ -529,7 +603,8 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         DispatchedOutboxEventKind::ModelCallTransition { state, .. } => {
             observe_model_call_metrics(metrics, *state);
         }
-        DispatchedOutboxEventKind::SessionCreated(_)
+        DispatchedOutboxEventKind::CredentialPoolExhausted(_)
+        | DispatchedOutboxEventKind::SessionCreated(_)
         | DispatchedOutboxEventKind::SessionStateChanged(_)
         | DispatchedOutboxEventKind::SessionTerminal(_)
         | DispatchedOutboxEventKind::GoalChanged(_)
@@ -607,17 +682,34 @@ mod runner_recovery_tests {
             .connect_with(local_test_connection_options(&database_url)?)
             .await?;
         let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+        signalbox_persistence::migrate(&pool).await?;
         listener.listen("runner_recovery").await?;
         let (notifications, _) = watch::channel(());
         let mut waiters: Vec<_> = (0..PENDING_REPLAYS)
             .map(|_| notifications.subscribe())
             .collect();
         let (shutdown, receiver) = watch::channel(false);
-        let forwarder = tokio::spawn(forward_runner_recovery_notifications(
+        let store = signalbox_persistence::runner_protocol::RunnerProtocolStore::new(
+            pool.clone(),
+            crate::runner_protocol_runtime::registration_only_catalog()
+                .expect("registration catalog is valid"),
+        );
+        resume_runner_replacements_and_notify(&store, &notifications).await?;
+        let (updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let forwarder = tokio::spawn(forward_database_notifications(
             listener,
+            store,
             notifications,
+            updates,
+            nudge,
             receiver,
         ));
+        for waiter in &mut waiters {
+            tokio::time::timeout(COMPLETION_DEADLINE, waiter.changed()).await??;
+        }
         tokio::time::timeout(
             COMPLETION_DEADLINE,
             sqlx::query("SELECT pg_notify('runner_recovery', '')").execute(&pool),

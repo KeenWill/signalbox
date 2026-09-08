@@ -65,6 +65,15 @@ impl BulkIngestKind {
 pub enum RejectionDetail {
     /// A newer active generation exists at the target's exact scope.
     StaleGeneration {},
+    /// The named turn does not reference this immutable pool policy.
+    UnknownPoolPolicy {
+        /// Named session.
+        session_id: CanonicalUuid,
+        /// Named turn.
+        turn_id: CanonicalUuid,
+        /// Requested policy identity.
+        pool_policy_id: CanonicalUuid,
+    },
     /// No clearable retained record matches the exact target.
     UnknownCredentialExclusion {},
     /// Another chunked bulk-ingest kind already owns this connection.
@@ -188,6 +197,11 @@ pub enum RejectionDetail {
     /// The named tool request already had a terminal approval resolution.
     ToolRequestAlreadyResolved {
         /// Resolved logical tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The delegated request has no terminal approval-judge evidence yet.
+    ToolRequestAwaitingApprovalJudge {
+        /// Request awaiting its judge.
         tool_request_id: CanonicalUuid,
     },
     /// An earlier request in the same batch still awaited its decision.
@@ -473,6 +487,7 @@ impl RejectionDetail {
             | Self::SafePointUnavailableWhileStopping { .. }
             | Self::ToolRequestNotFound { .. }
             | Self::ToolRequestAlreadyResolved { .. }
+            | Self::ToolRequestAwaitingApprovalJudge { .. }
             | Self::ToolRequestNotEarliestUndecided { .. }
             | Self::ToolRequestNotInSession { .. }
             | Self::ToolRequestNotDelegateDenied { .. }
@@ -490,6 +505,7 @@ impl RejectionDetail {
             | Self::DelegationDeliverySequenceExhausted { .. }
             | Self::DefaultsVersionMismatch { .. }
             | Self::StaleGeneration {}
+            | Self::UnknownPoolPolicy { .. }
             | Self::UnknownCredentialExclusion {}
             | Self::UnknownModelAlias { .. }
             | Self::AcceptancePositionExhausted { .. }
@@ -596,6 +612,7 @@ pub(crate) fn validate_rejection_detail(
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestAwaitingApprovalJudge { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
         | RejectionDetail::ToolRequestNotDelegateDenied { .. }
@@ -611,6 +628,7 @@ pub(crate) fn validate_rejection_detail(
         | RejectionDetail::DelegationMessageIdentityCollision { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::StaleGeneration {}
+        | RejectionDetail::UnknownPoolPolicy { .. }
         | RejectionDetail::UnknownCredentialExclusion {}
         | RejectionDetail::UnknownModelAlias { .. }
         | RejectionDetail::AcceptancePositionExhausted { .. }
@@ -708,6 +726,7 @@ pub(crate) fn validate_conversation_import_detail(
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestAwaitingApprovalJudge { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
         | RejectionDetail::ToolRequestNotDelegateDenied { .. }
@@ -725,6 +744,7 @@ pub(crate) fn validate_conversation_import_detail(
         | RejectionDetail::DelegationDeliverySequenceExhausted { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::StaleGeneration {}
+        | RejectionDetail::UnknownPoolPolicy { .. }
         | RejectionDetail::UnknownCredentialExclusion {}
         | RejectionDetail::UnknownModelAlias { .. }
         | RejectionDetail::AcceptancePositionExhausted { .. }

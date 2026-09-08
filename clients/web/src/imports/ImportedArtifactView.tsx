@@ -19,7 +19,7 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
       ...identity,
       kind: 'blocked',
       attemptedKind: `imported ${contentKindLabel(entry.content_kind)}`,
-      reason: 'No typed renderer is available for this imported content kind.',
+      reason: 'Content unavailable.',
     }
   }
   if (!entry.text) {
@@ -30,7 +30,7 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
       ...identity,
       kind: 'blocked',
       attemptedKind: 'imported text',
-      reason: 'The source did not attest text for this entry. No content was inferred.',
+      reason: 'Text not attested.',
     }
   }
   if (entry.text.kind === 'attested_absent') {
@@ -38,7 +38,7 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
       ...identity,
       kind: 'blocked',
       attemptedKind: 'imported text',
-      reason: 'The source explicitly attests that text is absent. No content was inferred.',
+      reason: 'Text absent.',
     }
   }
   return {
@@ -50,13 +50,6 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
   }
 }
 
-const sourceBoundLabel = (entry: WebImportedEntry): string => {
-  if (entry.text?.kind !== 'attested') return 'No attested text payload'
-  return entry.text.completeness === 'truncated'
-    ? 'Server-bounded source prefix'
-    : 'Complete attested source text'
-}
-
 export function ImportedArtifactView({
   entry,
   commandContext,
@@ -65,21 +58,14 @@ export function ImportedArtifactView({
   commandContext: CommandContext
 }) {
   return (
-    <section className="import-artifact-view" aria-labelledby="import-artifact-heading">
-      <header>
-        <div>
-          <span className="eyebrow">Typed artifact view</span>
-          <h3 id="import-artifact-heading">Selected imported evidence</h3>
-        </div>
-        {entry && <small>{sourceBoundLabel(entry)}</small>}
-      </header>
+    <section className="import-artifact-view" aria-label="Imported entry">
       {entry ? (
         <ArtifactRenderer
           artifact={projectImportedEntryArtifact(entry)}
           commandContext={commandContext}
         />
       ) : (
-        <p className="imports-state">Select an imported source entry to inspect its typed view.</p>
+        <p className="imports-state">No entry selected.</p>
       )}
     </section>
   )

@@ -155,6 +155,13 @@ pub fn validate_oauth_authorization(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+    /// Complete inventory reconstituted from immutable policy records.
+    CredentialPoolPolicy {
+        /// Exact retained policy identity.
+        pool_policy_id: CanonicalUuid,
+        /// Complete configured member order.
+        policy_members: Vec<String>,
+    },
     /// Opens one runner-status page.
     RunnerStatusStart {},
     /// One current enrollment or session placement.
@@ -722,6 +729,9 @@ pub enum ServerMessage {
     },
     /// Begins one transcript snapshot sequence.
     TranscriptSnapshotStart {
+        /// Retained repository-watch origin, absent for other creation causes.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        repository_watch: Option<crate::RepositoryWatchProvenance>,
         /// Selected session.
         session_id: CanonicalUuid,
         /// Snapshot outbox cursor.
@@ -970,6 +980,12 @@ impl ServerMessage {
             return Err(FrameValidationError::DelegationShape);
         }
         validate_operator_status_message(self)?;
+        if let Self::CredentialPoolPolicy { policy_members, .. } = self
+            && !crate::valid_credential_pool_members(policy_members)
+        {
+            return Err(FrameValidationError::CredentialExclusionShape);
+        }
+
         match self {
             Self::RunnerOperationFailure { failure } => failure.validate()?,
             Self::RunnerWorkspaceLeak { leak } => leak.validate()?,

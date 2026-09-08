@@ -41,6 +41,11 @@ impl BulkIngestKind {
 ```rust
 pub enum RejectionDetail {
     StaleGeneration {},
+    UnknownPoolPolicy {
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        pool_policy_id: CanonicalUuid,
+    },
     UnknownCredentialExclusion {},
     BulkIngestAlreadyInProgress {
         active_kind: BulkIngestKind,
@@ -116,6 +121,9 @@ pub enum RejectionDetail {
         tool_request_id: CanonicalUuid,
     },
     ToolRequestAlreadyResolved {
+        tool_request_id: CanonicalUuid,
+    },
+    ToolRequestAwaitingApprovalJudge {
         tool_request_id: CanonicalUuid,
     },
     ToolRequestNotEarliestUndecided {

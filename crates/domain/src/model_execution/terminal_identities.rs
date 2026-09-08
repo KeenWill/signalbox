@@ -491,6 +491,65 @@ pub enum ModelCallInterruptOutcome {
 }
 
 impl ModelCallTerminalIdentities {
+    /// Returns the proposed semantic-entry identities and snapshot identity.
+    pub fn frontier_identity_candidates(
+        &self,
+    ) -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId) {
+        match self {
+            Self::Completed(identities) => {
+                let mut entries = identities.assistant_entries.clone();
+                entries.push(identities.completion_entry);
+                (entries, identities.terminal_frontier)
+            }
+            Self::ToolRound(identities) => (
+                identities
+                    .response_parts
+                    .iter()
+                    .map(|part| match part {
+                        ToolResponsePartIdentity::Text { entry }
+                        | ToolResponsePartIdentity::ProviderCompaction { entry }
+                        | ToolResponsePartIdentity::ProviderReasoning { entry }
+                        | ToolResponsePartIdentity::ToolCall { entry, .. } => *entry,
+                    })
+                    .collect(),
+                identities.yielded_frontier,
+            ),
+            Self::StoppedToolRound(identities) => {
+                let mut entries = Vec::new();
+                for part in &identities.response_parts {
+                    match part {
+                        StoppedToolResponsePartIdentity::Text { entry }
+                        | StoppedToolResponsePartIdentity::ProviderCompaction { entry }
+                        | StoppedToolResponsePartIdentity::ProviderReasoning { entry } => {
+                            entries.push(*entry)
+                        }
+                        StoppedToolResponsePartIdentity::ToolCall {
+                            entry,
+                            closed_result_entry,
+                            ..
+                        } => {
+                            entries.extend([*entry, *closed_result_entry]);
+                        }
+                    }
+                }
+                entries.push(identities.cancellation_entry);
+                (entries, identities.terminal_frontier)
+            }
+            Self::Failed(identities) => {
+                (vec![identities.failure_entry], identities.terminal_frontier)
+            }
+            Self::PhysicalCancellation(identities) => (
+                vec![identities.terminal_entry],
+                identities.terminal_frontier,
+            ),
+            Self::Refused(identities) => (
+                identities.provider_compaction_entries.clone(),
+                identities.terminal_frontier,
+            ),
+            Self::Ambiguous(identities) => (Vec::new(), identities.terminal_frontier),
+        }
+    }
+
     pub(super) fn pending_steering_reclassifications(
         &self,
     ) -> &[PendingSteeringReclassificationIdentity] {

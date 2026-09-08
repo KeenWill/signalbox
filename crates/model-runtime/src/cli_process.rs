@@ -10,7 +10,7 @@ use tokio::process::{Child, Command};
 
 use crate::{
     CancellationSignal, LossCause, Observation, ObservationFact, ObservationSink,
-    ProvenUnsentEvidence, REDACTED, RedactingSink, TerminalEvidence, TransportFacts, UnsentCause,
+    ProvenUnsentEvidence, TerminalEvidence, TransportFacts, UnsentCause,
 };
 
 const TRUNCATION_SUFFIX: &str = "… [truncated]";
@@ -119,17 +119,6 @@ impl CliEnvironmentVariable {
     }
 }
 
-/// How the shared redactor handles provider text for terminal reconstruction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CliTerminalTextCapture {
-    /// The provider decoder owns terminal text independently.
-    Disabled,
-    /// Capture sanitized text for terminal evidence without forwarding deltas.
-    TerminalOnly,
-    /// Capture sanitized text and forward the same streamed deltas.
-    StreamAndTerminal,
-}
-
 /// One fully constructed provider command and its shared execution policy.
 pub struct CliProcessRequest<D> {
     /// Provider-specific command arguments and working directory.
@@ -168,7 +157,7 @@ pub enum CliDecodeFailureClass {
     StreamProtocolViolation,
 }
 
-/// A content-bearing decoder failure sanitized by the shared runner.
+/// A content-bearing decoder failure reported by the shared runner.
 #[derive(Debug)]
 pub struct CliDecodeFailure {
     class: CliDecodeFailureClass,
@@ -211,8 +200,6 @@ pub trait CliSession<C>: Sized {
     const LABELS: CliProcessLabels;
     /// The one correlation used for every observation in this exchange.
     fn correlation(&self) -> &C;
-    /// Terminal text capture and forwarding policy owned by this decoder.
-    fn terminal_text_capture(&self) -> CliTerminalTextCapture;
     /// Whether the decoder has observed terminal provider evidence.
     fn terminal_observed(&self) -> bool;
     /// Keeps stdin open for framed requests while stdout is decoded.
@@ -227,12 +214,12 @@ pub trait CliSession<C>: Sized {
     fn push(
         &mut self,
         line: &[u8],
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), CliDecodeFailure>;
-    /// Converts a sanitized decode failure into typed terminal evidence.
+    /// Converts a decode failure into typed terminal evidence.
     fn decode_failure(self, class: CliDecodeFailureClass, detail: String) -> TerminalEvidence;
     /// Produces terminal evidence after a successful process exit.
-    fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence;
+    fn finish(self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence;
     /// Produces typed boundary-loss evidence.
     fn boundary_loss(self, cause: LossCause) -> TerminalEvidence;
     /// Records that bytes were read off the process but never delivered.
@@ -261,14 +248,14 @@ pub trait CliSession<C>: Sized {
     fn boundary_loss_unless_provider_failure(
         self,
         cause: LossCause,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence;
-    /// Produces a provider failure from sanitized evidence and bounded raw exit material.
+    /// Produces a provider failure from evidence and bounded raw exit material.
     fn provider_error_after_exit(
         self,
         message: &str,
         classification: &str,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence;
 }
 
@@ -472,6 +459,24 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
             });
         }
     };
+    if let Some(process_group) = child.process_group_id {
+        let registration = tokio::select! {
+            biased;
+            registered = sink.register_process(correlation.clone(), process_group) => {
+                registered.then_some(()).ok_or_else(|| UnsentCause::ConnectFailed(
+                    TransportFacts::new("invocation process registration failed"),
+                ))
+            },
+            () = &mut *cancellation => Err(UnsentCause::CancelledBeforeSend),
+            () = wait_for_deadline(deadline) => Err(UnsentCause::ConnectFailed(
+                TransportFacts::new("exchange deadline elapsed before process registration"),
+            )),
+        };
+        if let Err(cause) = registration {
+            force_kill(&mut child).await;
+            return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence { cause });
+        }
+    }
     let Some(mut stdin) = child.stdin.take() else {
         force_kill(&mut child).await;
         return pre_exchange_transport_loss(format!(
@@ -502,16 +507,6 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
         read_bounded_output_with_lookahead(stderr, stderr_limit, credential_lookahead).await
     });
     let mut decoder = decoder;
-    let mut redacting_sink = RedactingSink::new(sink);
-    match decoder.terminal_text_capture() {
-        CliTerminalTextCapture::Disabled => {}
-        CliTerminalTextCapture::TerminalOnly => {
-            redacting_sink.begin_terminal_only_text_capture();
-        }
-        CliTerminalTextCapture::StreamAndTerminal => {
-            redacting_sink.begin_streaming_terminal_text_capture();
-        }
-    }
     let duplex = decoder.keeps_stdin_open();
     let input_step = if duplex {
         InputStep::Written(Ok(()))
@@ -662,23 +657,11 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                     }
                     line = text.into_bytes();
                 }
-                if let Err(error) = decoder.push(&line, &mut redacting_sink) {
+                if let Err(error) = decoder.push(&line, sink) {
                     let (class, error_detail) = error.into_parts();
-                    // Serde details quote provider-controlled bytes, and both
-                    // that library's prose and the adapter's own wrapper sit
-                    // between a held credential marker and the continuation the
-                    // detail quotes — so a joined-form scan reads the join as
-                    // clean however the pieces are ordered. The detail is
-                    // therefore content-silent whenever any context is held,
-                    // and keeps its content only when nothing could complete.
-                    let detail = format!(
-                        "undecodable {}: {}",
-                        labels.decode_event,
-                        redacting_sink.redact_wrapped_provider_detail(&error_detail)
-                    );
+                    let detail = format!("undecodable {}: {}", labels.decode_event, error_detail);
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
-                    redacting_sink.finish();
                     // The failing line is already unexamined material; a suffix
                     // the same batch left buffered behind it is a second chunk
                     // nothing read, and is abandoned here too.
@@ -705,7 +688,6 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                     )
                     .await;
                     abort_stderr_task(&mut stderr_task).await;
-                    redacting_sink.finish();
                     return decoder.boundary_loss(LossCause::CancellationRequested);
                 }
                 // Rechecked after every decoded line — never gated on an
@@ -734,7 +716,6 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                     }
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
-                    redacting_sink.finish();
                     return decoder.boundary_loss(timeout_cause(labels));
                 }
             }
@@ -742,7 +723,6 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
             ProcessStep::Line(Err(error)) => {
                 force_kill(&mut child).await;
                 abort_stderr_task(&mut stderr_task).await;
-                redacting_sink.finish();
                 return read_error_loss(
                     decoder,
                     LossCause::StreamProtocolViolation {
@@ -780,15 +760,14 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                     let evidence = if let Some(error) = input_error {
                         decoder.boundary_loss_unless_provider_failure(
                             incomplete_upload_cause(&error, labels),
-                            &mut redacting_sink,
+                            sink,
                         )
                     } else {
-                        decoder.finish(&mut redacting_sink)
+                        decoder.finish(sink)
                     };
-                    redacting_sink.finish();
                     return evidence;
                 }
-                redacting_sink.finish();
+
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             }
             ProcessStep::TimedOut => {
@@ -831,7 +810,6 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                     Ok(Some(_)) | Ok(None) | Err(_) => {
                         force_kill(&mut child).await;
                         abort_stderr_task(&mut stderr_task).await;
-                        redacting_sink.finish();
                         return decoder.boundary_loss(timeout_cause(labels));
                     }
                 }
@@ -864,7 +842,6 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                 )
                 .await;
                 abort_stderr_task(&mut stderr_task).await;
-                redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::CancellationRequested);
             } else {
                 let cleanup_grace = remaining_interrupt_grace(interrupt_grace, deadline);
@@ -877,12 +854,11 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                 let evidence = if let Some(error) = input_error {
                     decoder.boundary_loss_unless_provider_failure(
                         incomplete_upload_cause(&error, labels),
-                        &mut redacting_sink,
+                        sink,
                     )
                 } else {
-                    decoder.finish(&mut redacting_sink)
+                    decoder.finish(sink)
                 };
-                redacting_sink.finish();
                 return evidence;
             }
         },
@@ -921,7 +897,6 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                 Ok(Some(_)) | Ok(None) | Err(_) => {
                     force_kill(&mut child).await;
                     abort_stderr_task(&mut stderr_task).await;
-                    redacting_sink.finish();
                     return decoder.boundary_loss(timeout_cause(labels));
                 }
             }
@@ -965,15 +940,14 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                                 let evidence = if let Some(error) = input_error {
                                     decoder.boundary_loss_unless_provider_failure(
                                         incomplete_upload_cause(&error, labels),
-                                        &mut redacting_sink,
+                                        sink,
                                     )
                                 } else {
-                                    decoder.finish(&mut redacting_sink)
+                                    decoder.finish(sink)
                                 };
-                                redacting_sink.finish();
                                 return evidence;
                             }
-                            redacting_sink.finish();
+
                             return decoder.boundary_loss(LossCause::CancellationRequested);
                         }
                     },
@@ -984,7 +958,6 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                             Ok(())
                         } else {
                             force_kill(&mut child).await;
-                            redacting_sink.finish();
                             return decoder.boundary_loss(timeout_cause(labels));
                         }
                     },
@@ -992,7 +965,6 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
             };
             if let Err(error) = exit_ready {
                 force_kill(&mut child).await;
-                redacting_sink.finish();
                 return decoder.boundary_loss(LossCause::TransportFailed(TransportFacts::new(
                     format!(
                         "could not observe {} process exit safely: {error}",
@@ -1014,33 +986,20 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
 
     match status {
         Ok(status) if status.success() => {
-            let evidence = if let Some(error) = input_error {
+            if let Some(error) = input_error {
                 decoder.boundary_loss_unless_provider_failure(
                     incomplete_upload_cause(&error, labels),
-                    &mut redacting_sink,
+                    sink,
                 )
             } else {
-                decoder.finish(&mut redacting_sink)
-            };
-            redacting_sink.finish();
-            evidence
+                decoder.finish(sink)
+            }
         }
         Ok(status) => {
-            // The stderr text consults the held lookbehind state on its own,
-            // before any adapter-owned status prose is prefixed: inserted
-            // prose between a held credential-marker fragment and its stderr
-            // continuation would otherwise keep the pair from rejoining, and
-            // the continuation would survive the stateless stderr redaction.
-            let stderr_detail = sanitized_stderr_with_credentials(
-                &redacting_sink,
-                &stderr,
-                stderr_limit,
-                exact_credentials,
-            );
-            // The emitted message carries only sanitized stderr; the failure
-            // is classified from the bounded raw stderr so an explicit error
-            // phrase sharing a line with a consumed credential marker still
-            // reaches the classifier.
+            let stderr_detail =
+                sanitized_stderr_with_credentials(&stderr, stderr_limit, exact_credentials);
+            // Classification uses the bounded raw stderr independently of
+            // any exact-value redaction applied to the emitted evidence.
             let (message, classification) = if !stderr_detail.trim().is_empty() {
                 (
                     format!(
@@ -1063,20 +1022,11 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
                 let message = format!("{} exited with status {status}", labels.process);
                 (message.clone(), message)
             };
-            // Evidence is built before the sink flushes so the failure
-            // message still sees the held cross-fragment redaction state.
-            let evidence =
-                decoder.provider_error_after_exit(&message, &classification, &mut redacting_sink);
-            redacting_sink.finish();
-            evidence
+            decoder.provider_error_after_exit(&message, &classification, sink)
         }
-        Err(error) => {
-            redacting_sink.finish();
-            decoder.boundary_loss(LossCause::TransportFailed(TransportFacts::new(format!(
-                "could not wait for {} process: {error}",
-                labels.process
-            ))))
-        }
+        Err(error) => decoder.boundary_loss(LossCause::TransportFailed(TransportFacts::new(
+            format!("could not wait for {} process: {error}", labels.process),
+        ))),
     }
 }
 
@@ -1169,9 +1119,7 @@ const PROXY_URL_VARIABLES: &[&str] = &[
 /// Assembles the allowlisted child environment through the injectable `read`,
 /// rejecting (with the offending variable's name, never its value): a proxy URL
 /// that embeds userinfo — such a credential would transit to the child verbatim
-/// and a CLI that reflects its proxy configuration would hand the password to
-/// output the adapter can only shape-redact, and `redact_text` has no
-/// proxy-userinfo rule — and a `HOME`/`CODEX_HOME` the parent cannot
+/// and a CLI could reflect it in output — and a `HOME`/`CODEX_HOME` the parent cannot
 /// resolve to an absolute directory, which would point the child's credential
 /// store somewhere under its working directory and select an unintended ambient
 /// login (see [`absolute_credential_home`]). Both must never reach the child.
@@ -1242,9 +1190,8 @@ impl EnvironmentRejection {
             ),
             EnvironmentRejectionReason::EmbedsUserinfo => format!(
                 "inherited `{name}` embeds URL userinfo; the {} would receive that \
-                 credential verbatim and could reflect it in output the adapter can only \
-                 shape-redact, so the exchange is refused — remove the credential from the \
-                 proxy URL",
+                 credential verbatim and could reflect it in output; remove the credential from \
+                 the proxy URL",
                 self.labels.process
             ),
             EnvironmentRejectionReason::Unverifiable => format!(
@@ -1621,17 +1568,7 @@ fn stderr_sanitization_limit(evidence_limit: usize) -> usize {
     evidence_limit.saturating_mul(2)
 }
 
-#[cfg(test)]
-fn sanitized_stderr<C: Clone>(
-    sink: &RedactingSink<'_, C>,
-    stderr: &BoundedOutput,
-    evidence_limit: usize,
-) -> String {
-    sanitized_stderr_with_credentials(sink, stderr, evidence_limit, &[])
-}
-
-fn sanitized_stderr_with_credentials<C: Clone>(
-    sink: &RedactingSink<'_, C>,
+fn sanitized_stderr_with_credentials(
     stderr: &BoundedOutput,
     evidence_limit: usize,
     exact_credentials: &[crate::CredentialValue],
@@ -1644,8 +1581,7 @@ fn sanitized_stderr_with_credentials<C: Clone>(
     for credential in exact_credentials {
         text = crate::redaction::redact_native_message(text, credential, None);
     }
-    let sanitized = sink.redact_terminal_failure_text(&text);
-    truncate_text(&sanitized, evidence_limit, stderr.evidence_truncated)
+    truncate_text(&text, evidence_limit, stderr.evidence_truncated)
 }
 
 fn truncate_text(text: &str, limit: usize, force_suffix: bool) -> String {
@@ -1657,8 +1593,8 @@ fn truncate_text(text: &str, limit: usize, force_suffix: bool) -> String {
         end -= 1;
     }
     if let Some(marker_start) = text[..end].rfind('[')
-        && marker_start + REDACTED.len() > end
-        && text[marker_start..].starts_with(REDACTED)
+        && marker_start + "[redacted]".len() > end
+        && text[marker_start..].starts_with("[redacted]")
     {
         end = marker_start;
     }
@@ -1906,14 +1842,14 @@ mod tests {
     use super::{
         BoundedOutput, CliDecodeFailure, CliDecodeFailureClass, CliEnvironmentOverride,
         CliEnvironmentVariable, CliProcessLabels, CliProcessRequest, CliSession,
-        CliTerminalTextCapture, EnvironmentRejection, EnvironmentRejectionReason, LineProgress,
-        TRUNCATION_SUFFIX, absolute_credential_home, allowlisted_environment, execute_cli_process,
-        optional_timeout, read_bounded_line, read_bounded_output, read_error_loss,
-        sanitized_stderr, validated_environment_overrides,
+        EnvironmentRejection, EnvironmentRejectionReason, LineProgress, TRUNCATION_SUFFIX,
+        absolute_credential_home, allowlisted_environment, execute_cli_process, optional_timeout,
+        read_bounded_line, read_bounded_output, read_error_loss, sanitized_stderr_with_credentials,
+        validated_environment_overrides,
     };
     use crate::{
-        BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, REDACTED,
-        RedactingSink, TerminalEvidence, TokenUsage, ToolCallsAtLoss, UnsentCause,
+        BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, ObservationSink,
+        TerminalEvidence, TokenUsage, ToolCallsAtLoss, UnsentCause,
     };
 
     const TEST_ENVIRONMENT: &[CliEnvironmentVariable] = &[
@@ -1946,10 +1882,6 @@ mod tests {
             &self.correlation
         }
 
-        fn terminal_text_capture(&self) -> CliTerminalTextCapture {
-            CliTerminalTextCapture::Disabled
-        }
-
         fn terminal_observed(&self) -> bool {
             false
         }
@@ -1957,7 +1889,7 @@ mod tests {
         fn push(
             &mut self,
             _line: &[u8],
-            _sink: &mut RedactingSink<'_, u8>,
+            _sink: &mut (dyn ObservationSink<u8> + Send),
         ) -> Result<(), CliDecodeFailure> {
             Ok(())
         }
@@ -1970,7 +1902,7 @@ mod tests {
             unused_terminal_evidence()
         }
 
-        fn finish(self, _sink: &mut RedactingSink<'_, u8>) -> TerminalEvidence {
+        fn finish(self, _sink: &mut (dyn ObservationSink<u8> + Send)) -> TerminalEvidence {
             unused_terminal_evidence()
         }
 
@@ -1981,7 +1913,7 @@ mod tests {
         fn boundary_loss_unless_provider_failure(
             self,
             _cause: LossCause,
-            _sink: &mut RedactingSink<'_, u8>,
+            _sink: &mut (dyn ObservationSink<u8> + Send),
         ) -> TerminalEvidence {
             unused_terminal_evidence()
         }
@@ -1990,7 +1922,7 @@ mod tests {
             self,
             _message: &str,
             _classification: &str,
-            _sink: &mut RedactingSink<'_, u8>,
+            _sink: &mut (dyn ObservationSink<u8> + Send),
         ) -> TerminalEvidence {
             unused_terminal_evidence()
         }
@@ -2036,10 +1968,6 @@ mod tests {
             &self.correlation
         }
 
-        fn terminal_text_capture(&self) -> CliTerminalTextCapture {
-            CliTerminalTextCapture::Disabled
-        }
-
         fn terminal_observed(&self) -> bool {
             false
         }
@@ -2047,7 +1975,7 @@ mod tests {
         fn push(
             &mut self,
             _line: &[u8],
-            _sink: &mut RedactingSink<'_, u8>,
+            _sink: &mut (dyn ObservationSink<u8> + Send),
         ) -> Result<(), CliDecodeFailure> {
             Ok(())
         }
@@ -2060,7 +1988,7 @@ mod tests {
             unused_terminal_evidence()
         }
 
-        fn finish(self, _sink: &mut RedactingSink<'_, u8>) -> TerminalEvidence {
+        fn finish(self, _sink: &mut (dyn ObservationSink<u8> + Send)) -> TerminalEvidence {
             unused_terminal_evidence()
         }
 
@@ -2076,7 +2004,7 @@ mod tests {
         fn boundary_loss_unless_provider_failure(
             self,
             _cause: LossCause,
-            _sink: &mut RedactingSink<'_, u8>,
+            _sink: &mut (dyn ObservationSink<u8> + Send),
         ) -> TerminalEvidence {
             unused_terminal_evidence()
         }
@@ -2085,7 +2013,7 @@ mod tests {
             self,
             _message: &str,
             _classification: &str,
-            _sink: &mut RedactingSink<'_, u8>,
+            _sink: &mut (dyn ObservationSink<u8> + Send),
         ) -> TerminalEvidence {
             unused_terminal_evidence()
         }
@@ -2149,6 +2077,46 @@ mod tests {
             environment: &[],
             environment_overrides: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_process_registration_kills_the_child_before_request_delivery() {
+        struct RegistrationSink {
+            group: Option<u32>,
+        }
+        impl crate::ObservationSink<u8> for RegistrationSink {
+            fn observe(&mut self, _: crate::Observation<u8>) {}
+            fn register_process(
+                &mut self,
+                correlation: u8,
+                group: u32,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>
+            {
+                assert_eq!(correlation, 7);
+                self.group = Some(group);
+                Box::pin(async { false })
+            }
+        }
+        let mut request = direct_request(std::time::Duration::from_secs(30));
+        request.command = std::process::Command::new("/bin/sh");
+        request.command.args(["-c", "read request"]);
+        request.prompt = b"request\n".to_vec();
+        let mut sink = RegistrationSink { group: None };
+        let evidence =
+            execute_cli_process(request, &mut sink, &mut CancellationSignal::never()).await;
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(_),
+            })
+        ));
+        let group = rustix::process::Pid::from_raw(sink.group.expect("spawn is registered") as i32)
+            .expect("positive group");
+        assert_eq!(
+            rustix::process::test_kill_process_group(group),
+            Err(rustix::io::Errno::SRCH)
+        );
     }
 
     #[tokio::test]
@@ -2365,12 +2333,16 @@ mod tests {
             raw: body.into_bytes(),
             evidence_truncated: false,
         };
-        let mut observed: Vec<crate::Observation<u8>> = Vec::new();
-        let sink = RedactingSink::new(&mut observed);
 
-        let sanitized = sanitized_stderr(&sink, &stderr, evidence_limit);
+        let sanitized = sanitized_stderr_with_credentials(
+            &stderr,
+            evidence_limit,
+            &[crate::CredentialValue::new(
+                synthetic_credential.as_bytes().to_vec(),
+            )],
+        );
 
-        assert!(sanitized.contains(REDACTED));
+        assert!(sanitized.contains("[redacted]"));
         assert!(sanitized.ends_with(TRUNCATION_SUFFIX));
         assert!(!sanitized.contains(&synthetic_credential));
         assert!(!sanitized.contains(&escaped_credential));
@@ -2384,27 +2356,23 @@ mod tests {
             classification_end: 0,
             evidence_truncated: true,
         };
-        let mut observed: Vec<crate::Observation<u8>> = Vec::new();
-        let sink = RedactingSink::new(&mut observed);
 
-        let sanitized = sanitized_stderr(&sink, &stderr, usize::MAX);
+        let sanitized = sanitized_stderr_with_credentials(
+            &stderr,
+            usize::MAX,
+            &[crate::CredentialValue::new(
+                SYNTHETIC_CREDENTIAL.as_bytes().to_vec(),
+            )],
+        );
 
-        assert_eq!(sanitized, format!("api_key={REDACTED}{TRUNCATION_SUFFIX}"));
+        assert_eq!(sanitized, format!("\"[redacted]\"{TRUNCATION_SUFFIX}"));
         assert!(!sanitized.contains(SYNTHETIC_CREDENTIAL));
     }
 
     #[test]
     fn post_sanitization_truncation_keeps_the_redaction_marker_atomic() {
         const EVIDENCE_LIMIT: usize = 12;
-        let stderr = BoundedOutput {
-            raw: b"api_key=x".to_vec(),
-            classification_end: 0,
-            evidence_truncated: false,
-        };
-        let mut observed: Vec<crate::Observation<u8>> = Vec::new();
-        let sink = RedactingSink::new(&mut observed);
-
-        let sanitized = sanitized_stderr(&sink, &stderr, EVIDENCE_LIMIT);
+        let sanitized = super::truncate_text("api_key=[redacted]", EVIDENCE_LIMIT, false);
 
         assert_eq!(sanitized, format!("api_key={TRUNCATION_SUFFIX}"));
     }
@@ -3067,9 +3035,7 @@ mod tests {
         fn correlation(&self) -> &u8 {
             &self.correlation
         }
-        fn terminal_text_capture(&self) -> CliTerminalTextCapture {
-            CliTerminalTextCapture::Disabled
-        }
+
         fn terminal_observed(&self) -> bool {
             self.terminal
         }
@@ -3082,7 +3048,7 @@ mod tests {
         fn push(
             &mut self,
             line: &[u8],
-            _sink: &mut RedactingSink<'_, u8>,
+            _sink: &mut (dyn ObservationSink<u8> + Send),
         ) -> Result<(), CliDecodeFailure> {
             let line = std::str::from_utf8(line)
                 .expect("fixture sends UTF-8")
@@ -3102,7 +3068,7 @@ mod tests {
         fn decode_failure(self, _class: CliDecodeFailureClass, detail: String) -> TerminalEvidence {
             self.boundary_loss(LossCause::StreamProtocolViolation { detail })
         }
-        fn finish(self, _sink: &mut RedactingSink<'_, u8>) -> TerminalEvidence {
+        fn finish(self, _sink: &mut (dyn ObservationSink<u8> + Send)) -> TerminalEvidence {
             TerminalEvidence::Completed(crate::CompletionEvidence {
                 exchange: ExchangeFacts::default(),
                 message_id: None,
@@ -3129,7 +3095,7 @@ mod tests {
         fn boundary_loss_unless_provider_failure(
             self,
             cause: LossCause,
-            _sink: &mut RedactingSink<'_, u8>,
+            _sink: &mut (dyn ObservationSink<u8> + Send),
         ) -> TerminalEvidence {
             self.boundary_loss(cause)
         }
@@ -3137,7 +3103,7 @@ mod tests {
             self,
             message: &str,
             _classification: &str,
-            _sink: &mut RedactingSink<'_, u8>,
+            _sink: &mut (dyn ObservationSink<u8> + Send),
         ) -> TerminalEvidence {
             self.boundary_loss(LossCause::StreamProtocolViolation {
                 detail: message.to_string(),

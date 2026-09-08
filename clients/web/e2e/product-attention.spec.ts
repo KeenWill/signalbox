@@ -351,14 +351,14 @@ test('replaces the current bounded page instead of accumulating attention histor
   await page.goto('/attention')
 
   await expect(page.getByRole('listitem')).toHaveCount(continuedAttentionFixture.summaries.length)
-  await page.getByRole('button', { name: /Next page/ }).click()
+  await page.getByRole('button', { name: /Next/ }).click()
   await expect(page.getByRole('listitem')).toHaveCount(nextAttentionFixture.summaries.length)
   await expect(page.getByText(idleSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeHidden()
-  await expect(page.getByRole('button', { name: 'Return to live page' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Live page' })).toBeVisible()
   await expect(
     page.getByRole('heading', {
-      name: `${nextAttentionFixture.summaries.length} sessions`,
+      name: `${nextAttentionFixture.summaries.length} ${nextAttentionFixture.summaries.length === 1 ? 'session' : 'sessions'}`,
       level: 2,
     }),
   ).toBeFocused()
@@ -369,10 +369,10 @@ test('returns to the live page after a paged read fails', async ({ page }) => {
   await installFailedAttentionPageScenario(page)
   await page.goto('/attention')
 
-  await page.getByRole('button', { name: /Next page/ }).click()
+  await page.getByRole('button', { name: /Next/ }).click()
   await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry' })).toBeFocused()
-  await page.getByRole('button', { name: 'Return to live page' }).click()
+  await page.getByRole('button', { name: 'Live page' }).click()
 
   await expect(page.getByText(approvalSessionId)).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeHidden()
@@ -382,7 +382,7 @@ test('rejects a paged Attention response with a regressing cursor', async ({ pag
   await installRegressingAttentionPageScenario(page)
   await page.goto('/attention')
 
-  await page.getByRole('button', { name: /Next page/ }).click()
+  await page.getByRole('button', { name: /Next/ }).click()
 
   await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
   await expect(
@@ -394,13 +394,13 @@ test('advances the paged cursor floor after a successful read', async ({ page })
   const pagedRequests = await installAdvancingAttentionPageScenario(page)
   await page.goto('/attention')
 
-  await page.getByRole('button', { name: /Next page/ }).click()
-  await expect(page.getByText('cursor 50')).toBeVisible()
-  await page.getByRole('button', { name: 'Refresh snapshot' }).click()
+  await page.getByRole('button', { name: /Next/ }).click()
+  await expect(page.getByText(idleSessionId)).toBeVisible()
+  await page.getByRole('button', { name: 'Refresh' }).click()
 
   await expect.poll(pagedRequests).toBe(2)
-  await expect(page.getByText('cursor 50')).toBeVisible()
-  await expect(page.getByText('cursor 45')).toBeHidden()
+  await expect(page.getByText(idleSessionId)).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
 })
 
 test('closes the inspector with global Escape after focus leaves it', async ({ page }) => {
@@ -433,7 +433,7 @@ test('moves focus to the page heading when refreshed data removes the selection'
   await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
   await expect(
     page.getByRole('heading', {
-      name: `${nextAttentionFixture.summaries.length} sessions`,
+      name: `${nextAttentionFixture.summaries.length} ${nextAttentionFixture.summaries.length === 1 ? 'session' : 'sessions'}`,
       level: 2,
     }),
   ).toBeFocused()
@@ -477,7 +477,6 @@ test('keeps a newer HTTP snapshot than an in-flight follower snapshot', async ({
 
   await expect(page.getByText(idleSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeHidden()
-  await expect(page.getByText('cursor 43')).toBeVisible()
 })
 
 test('rejects a divergent equal-cursor HTTP snapshot after the follower starts', async ({
@@ -495,12 +494,12 @@ test('rejects a divergent equal-cursor HTTP snapshot after the follower starts',
 test('keeps the live projection when a refresh snapshot regresses', async ({ page }) => {
   const snapshotRequests = await installRegressingAttentionRefetchScenario(page)
   await page.goto('/attention')
-  await expect(page.getByText('cursor 42')).toBeVisible()
+  await expect(page.getByText(approvalSessionId)).toBeVisible()
 
   await page.getByRole('button', { name: 'Restart monitor' }).click()
 
   await expect.poll(snapshotRequests).toBe(2)
-  await expect(page.getByText('cursor 42')).toBeVisible()
+  await expect(page.getByText(approvalSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeVisible()
   await expect(page.getByText(idleSessionId)).toBeHidden()
 })
@@ -550,4 +549,33 @@ test('applies the density preference to Attention rows', async ({ page }) => {
   await expect(row).toHaveCSS('min-height', '62px')
   await page.getByRole('button', { name: 'Use comfortable density' }).click()
   await expect(row).toHaveCSS('min-height', '78px')
+})
+
+test('uses the available Attention width and keeps arrows inside their rows', async ({ page }) => {
+  await installAttentionScenario(page)
+  await page.goto('/attention')
+  for (const width of [1440, 1024, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    const row = page.locator('.attention-list li > button').first()
+    await expect(row).toBeVisible()
+    const workbench = await page.locator('.attention-workbench').boundingBox()
+    const list = await page.locator('.attention-list').boundingBox()
+    expect(list?.width).toBeGreaterThanOrEqual((workbench?.width ?? 0) - 1)
+    const checkArrow = async () => {
+      const button = await row.boundingBox()
+      const arrow = await row.locator('svg').boundingBox()
+      expect(button).not.toBeNull()
+      expect(arrow).not.toBeNull()
+      expect((arrow?.x ?? 0) + (arrow?.width ?? 0)).toBeLessThan(
+        (button?.x ?? 0) + (button?.width ?? 0) - 2,
+      )
+    }
+    await checkArrow()
+    await row.click()
+    const close = page.getByRole('button', { name: 'Close attention inspector' })
+    await expect(close).toBeVisible()
+    if (width > 760) await checkArrow()
+    await close.click()
+    await expect(row).toBeVisible()
+  }
 })

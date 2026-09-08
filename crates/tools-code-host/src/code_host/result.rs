@@ -12,6 +12,8 @@ use super::{
 };
 
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
+// The tool-loop contract fixes the maximum collection size.
+pub(super) const MAX_COLLECTION_MEMBERS: usize = 100;
 pub(super) const MAX_ENCODED_RESULT_BYTES: usize = 512 * 1024;
 
 /// Whether a bounded code-host result exhausted its source.

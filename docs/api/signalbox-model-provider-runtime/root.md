@@ -298,6 +298,24 @@ impl signalbox_application::ClassifyOperatorFailure for RuntimeModelCallProvider
 }
 ```
 
+## InvocationProcessObserver
+
+```rust
+pub trait InvocationProcessObserver: marker::Send + marker::Sync {
+    fn register(
+        &self,
+        call: signalbox_domain::ModelCallId,
+        process_group: u32,
+    ) -> pin::Pin<boxed::Box<dyn future::Future<Output = bool> + marker::Send + '_>>;
+    fn finished(
+        &self,
+        call: signalbox_domain::ModelCallId,
+        process_group: option::Option<u32>,
+        proven_unsent: bool,
+    ) -> pin::Pin<boxed::Box<dyn future::Future<Output = ()> + marker::Send + '_>>;
+}
+```
+
 ## RuntimeModelCallProvider
 
 ```rust
@@ -307,6 +325,10 @@ impl<R> RuntimeModelCallProvider<R> {
         runtime: R,
         models: RuntimeModelCatalog,
         diagnostic_model_identity_limit: option::Option<usize>,
+    ) -> Self;
+    pub fn with_invocation_process_observer(
+        self,
+        observer: impl InvocationProcessObserver + 'static,
     ) -> Self;
     pub fn with_text_delta_sink(self, text_deltas: impl ProviderTextDeltaSink + 'static) -> Self;
 }
@@ -391,6 +413,19 @@ impl signalbox_application::ClassifyOperatorFailure for RuntimeInputTokenCountEr
     fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
     fn operator_failure_cause_code(&self) -> &'static str;
 }
+```
+
+## rendered_entry_bytes
+
+```rust
+pub fn rendered_entry_bytes(
+    messages: &[signalbox_application::ModelConversationMessage],
+    provenance: &[signalbox_application::ProviderReasoningProvenance],
+    models: &RuntimeModelCatalog,
+    measure: impl function::FnMut(
+        &signalbox_model_runtime::ConversationMessage,
+    ) -> option::Option<usize>,
+) -> option::Option<map::BTreeMap<signalbox_domain::SemanticTranscriptEntryRef, u64>>;
 ```
 
 ## InvalidRuntimeToolSchema

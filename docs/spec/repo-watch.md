@@ -85,7 +85,13 @@ durable retry and park records, and configuration throttle. It is opt-in twice:
 template and the timing policy, and each repository lists its
 `convergence_pull_requests`. The `[convergence]` policy supplies the shared
 predicate described in [review workflows](review-workflows.md). The sweep
-evaluates one revalidated snapshot and uses that verdict for its decision.
+evaluates one revalidated snapshot and uses that verdict for its decision. After
+restoring a parked session, re-enrollment waits for scheduler nudge capacity.
+The target retains the session reference until that handoff is acknowledged, so
+restart retries an interrupted handoff. Removed targets hand their restored
+sessions to a task that waits for nudge capacity without blocking startup
+recovery. The task clears each removed-target handoff after its nudge is
+retained.
 
 The daemon composes the repository-watch module when `[repository_watch]` is
 configured and enabled. Dispatch actions and lifecycle reactions are retained in
@@ -217,15 +223,44 @@ The command adapter copies complete resolved template defaults without initial
 input or repository credentials and stamps the module issuer on creation claims;
 pull-request dispatch provisions the watched repository at the session's derived
 workspace root, on the retained head branch and SHA, before completing held
-creation. The ledger records checkout path `.` and the provisioned SHA. Git uses
-the polling credential only in its invocation environment, scoped to the watched
-repository URL; redirects are refused and fork heads are fetched
-unauthenticated. Provisioning failure retires the dispatch as
-`checkout_provisioning_failed` with the failing step and exit status and stops
-the session. Pending submission follow-ups remain retryable after core command
-settlement, including interruption of a live turn whose session is closing.
-Synchronous command-identity conflicts settle as rejected before submission
-continues to the next action.
+creation. Checkout execution clones the process runner pinned by the daemon's
+startup tool composition. The ledger records checkout path `.` and the
+provisioned SHA. Git uses the polling credential only in its invocation
+environment, scoped to the watched repository URL; redirects are refused and
+fork heads are fetched unauthenticated. Provisioning failure retires the
+dispatch as `checkout_provisioning_failed` with the failing step and exit status
+and stops the session. Retired dispatches and terminal sessions lose their
+provisioned checkout even when disabled (at next startup if no runtime exists);
+startup scavenges retained checkouts awaiting removal even with pending
+submissions or no repository-watch configuration. The ledger retains the
+provisioning workspace root and core session identity before filesystem work;
+cleanup uses them without waiting for `SessionCreated` settlement or consulting
+current configuration. Cleanup includes locations retained before checkout
+recording. Settled cleanup prevents repeated provisioning. The ledger records
+creation ownership and the directory device/inode before publishing a new
+directory at the session path. Unpublished staging names derive from the
+dispatch id and permit empty-directory cleanup before ownership recording;
+cancellation leaves staging for replay or cleanup. Replay resumes staged
+provisioning only when its identity matches the retained identity. Before
+publication on Linux, provisioning writes the dispatch id to the directory's
+`user.signalbox.dispatch` extended attribute; `.git/signalbox-dispatch` replaces
+that evidence after clone. Cleanup checks the attribute while present and the
+file marker otherwise. Directories not created by the dispatch are neither
+adopted nor removed. Removal verifies retained identities before changing
+permissions; both original and renamed paths require the matching dispatch
+marker before traversing contents. A missing or mismatched identity leaves
+removal pending. If that pathname is absent, cleanup searches its direct
+siblings under the derived session parent for the retained device/inode and
+matching dispatch marker; without a matching marker it settles without deleting.
+The parent is retained. The removal migration settles existing provisioned rows
+without a retained location. Removal restores owner search permission before
+marker lookup, owner read permission on the marker, and owner directory
+permissions before traversal, and refuses mount crossings; it reports
+unsupported outside Linux and leaves cleanup pending. Pending submission
+follow-ups remain retryable after core command settlement, including
+interruption of a live turn whose session is closing. Synchronous
+command-identity conflicts settle as rejected before submission continues to the
+next action.
 
 ## Boundary contracts
 
@@ -261,12 +296,13 @@ command behavior, and the module event/command/database boundary in the
 Reload stops and joins ingestion and active convergence attempts before rule
 activation, then publishes the selected catalogs before reconciling convergence
 targets, using an empty target set when disabled. Disabling repository watch
-stops and joins its pollers, listener, command worker, and sweep; enabling
-composes them from the retained configuration. The runtime replaces polling
-tasks when repositories, intervals, credential paths, or signal reviewers
-change. Listener removal stops and joins its server; same-address reload swaps
-routing atomically, and an address change binds the replacement before retiring
-the old listener. Bind refusal leaves the running listener intact.
+stops and joins its pollers, listener, and sweep, retaining checkout cleanup;
+enabling composes them from the retained configuration. The runtime replaces
+polling tasks when repositories, intervals, credential paths, or signal
+reviewers change. Listener removal stops and joins its server; same-address
+reload swaps routing atomically, and an address change binds the replacement
+before retiring the old listener. Bind refusal leaves the running listener
+intact.
 
 Each bounded canonical poll resource or page key retains its HTTP validators and
 an accepted typed snapshot sufficient to reconstruct its normalized contribution
@@ -281,7 +317,11 @@ with a persisted validator. After a complete accepted observation, cache
 retention removes untraversed resources and terminal pull-request pages;
 unchanged responses retain their traversed pages.
 
-## Planned
-
-Repository-watch dispatch provenance is planned in the
-[repository watch design](../design/repo-watch.md).
+Dispatched sessions retain the repository-watch creation cause, module actor,
+and dispatch reference. Their provenance resolves the existing dispatch ledger
+row and its created session, rule revision, event, action ordinal, repository,
+and optional pull request, without a second stored copy of the dispatch or
+session identity. Transcript snapshots and browser session descriptors project
+that retained origin as soon as creation commits, before ledger settlement; the
+browser workspace displays it. Held creation submits no initial input and
+creates no turn.

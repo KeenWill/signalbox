@@ -2,6 +2,12 @@
 
 # review
 
+## MAX_REVIEW_PRODUCED_FINDINGS
+
+```rust
+pub const MAX_REVIEW_PRODUCED_FINDINGS: usize;
+```
+
 ## ReviewTargetSubject
 
 ```rust

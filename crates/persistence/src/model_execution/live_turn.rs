@@ -1,5 +1,4 @@
 use super::load::{load_attachment_blob_facts, load_live_turn_calls, load_origin_contents};
-use super::prepared::map_tool_evidence_error;
 use super::{ModelCallCorruption, ModelCallRepositoryError, map_scheduling_error, required};
 use crate::mapping::{
     accepted_input_id_from_uuid, durable_command_id_from_uuid, input_position_from_numeric,
@@ -22,7 +21,8 @@ use signalbox_domain::{
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, SessionId,
-    ToolApprovalResolution, ToolResultAttemptCorrelation, TurnAttemptId, TurnId,
+    ToolDenialCorrelation, ToolInadmissibleCorrelation, ToolResultAttemptCorrelation,
+    TurnAttemptId, TurnId,
 };
 use sqlx::postgres::PgRow;
 use sqlx::types::Uuid;
@@ -211,7 +211,7 @@ pub(super) async fn require_live_execution_with_targets(
              SELECT 1
                FROM credential_pool_availability_successor
               WHERE successor_turn_attempt_id = $1
-         )",
+         ) OR EXISTS (SELECT 1 FROM credential_availability_wait_release WHERE turn_attempt_id = $1)",
     )
     .bind(current_attempt.id().into_uuid())
     .fetch_one(&mut *connection)
@@ -225,7 +225,7 @@ pub(super) async fn require_live_execution_with_targets(
         }
         None => None,
     };
-    let successor_snapshot = if availability_successor && call_snapshot.is_none() {
+    let successor_snapshot = if call_snapshot.is_none() {
         load_availability_predecessor_snapshot(
             connection,
             requested_session,
@@ -275,7 +275,13 @@ pub(super) async fn require_live_execution_with_targets(
         load_tool_denial_correlations(connection, &frontier_entries).await?;
     let recovered_targets;
     let targets = if let Some(targets) = configured_targets {
-        targets.clone()
+        super::credential_wait::retain_target_catalog(
+            connection,
+            active_turn.turn(),
+            *active_turn.configuration().effective().model(),
+            targets,
+        )
+        .await?
     } else {
         let mut definitions = calls
             .iter()
@@ -959,7 +965,7 @@ async fn load_delegated_consumed_steering(
 pub(super) async fn load_tool_inadmissible_correlations(
     connection: &mut PgConnection,
     entries: &[SemanticTranscriptEntry],
-) -> Result<Vec<signalbox_domain::ToolRequest>, ModelCallRepositoryError> {
+) -> Result<Vec<ToolInadmissibleCorrelation>, ModelCallRepositoryError> {
     let requests = entries
         .iter()
         .filter_map(|entry| match entry.payload() {
@@ -967,17 +973,42 @@ pub(super) async fn load_tool_inadmissible_correlations(
             _ => None,
         })
         .collect::<Vec<_>>();
-    Ok(crate::tool_loop::load_requests_by_id(connection, &requests)
-        .await
-        .map_err(map_tool_evidence_error)?
-        .into_values()
+    load_tool_inadmissibility_facts(
+        connection,
+        &requests.iter().map(|id| id.into_uuid()).collect::<Vec<_>>(),
+    )
+    .await
+}
+
+pub(super) async fn load_tool_inadmissibility_facts(
+    connection: &mut PgConnection,
+    requests: &[Uuid],
+) -> Result<Vec<ToolInadmissibleCorrelation>, ModelCallRepositoryError> {
+    let rows: Vec<(Uuid, Uuid, Uuid, Uuid, bool)> = sqlx::query_as(
+        "SELECT request_id, session_id, turn_id, producing_model_call_id, inadmissible_reason IS NOT NULL
+           FROM tool_request WHERE request_id = ANY($1)",
+    )
+    .bind(requests)
+    .fetch_all(connection)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(request, session, turn, producing_call, inadmissible)| ToolInadmissibleCorrelation {
+                request: signalbox_domain::ToolRequestId::from_uuid(request),
+                session: session_id_from_uuid(session),
+                turn: TurnId::from_uuid(turn),
+                producing_call: ModelCallId::from_uuid(producing_call),
+                inadmissible,
+            },
+        )
         .collect())
 }
 
 pub(super) async fn load_tool_denial_correlations(
     connection: &mut PgConnection,
     frontier_entries: &[SemanticTranscriptEntry],
-) -> Result<Vec<ToolApprovalResolution>, ModelCallRepositoryError> {
+) -> Result<Vec<ToolDenialCorrelation>, ModelCallRepositoryError> {
     let requests = frontier_entries
         .iter()
         .filter_map(|entry| match entry.payload() {
@@ -985,27 +1016,33 @@ pub(super) async fn load_tool_denial_correlations(
             _ => None,
         })
         .collect::<Vec<_>>();
+    load_tool_denial_facts(connection, &requests).await
+}
+
+pub(super) async fn load_tool_denial_facts(
+    connection: &mut PgConnection,
+    requests: &[Uuid],
+) -> Result<Vec<ToolDenialCorrelation>, ModelCallRepositoryError> {
     if requests.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query(
-        "SELECT approval.request_id, approval.decision_kind,
-                approval.decision_source, approval.denial_reason,
-                approval.user_command_id,
-                approval.delegate_model_selection_id,
-                approval.delegate_model_call_id, approval.rationale
-           FROM tool_approval_decision AS approval
-          WHERE approval.request_id = ANY($1)",
+    let rows: Vec<(Uuid, bool)> = sqlx::query_as(
+        "SELECT request_id, decision_kind = 'deny'
+           FROM tool_approval_decision WHERE request_id = ANY($1)",
     )
-    .bind(&requests)
-    .fetch_all(&mut *connection)
+    .bind(requests)
+    .fetch_all(connection)
     .await?;
     if rows.len() != requests.len() {
         return Err(ModelCallCorruption::Inconsistent("tool-denial resolution ownership").into());
     }
-    crate::tool_loop::decode_approvals(connection, rows)
-        .await
-        .map_err(map_tool_evidence_error)
+    Ok(rows
+        .into_iter()
+        .map(|(request, denied)| ToolDenialCorrelation {
+            request: signalbox_domain::ToolRequestId::from_uuid(request),
+            denied,
+        })
+        .collect())
 }
 
 pub(super) async fn load_tool_result_correlations(
@@ -1053,7 +1090,7 @@ pub(super) async fn load_tool_result_correlations(
         .collect())
 }
 
-/// Restores the frontier an availability predecessor was prepared against.
+/// Restores an availability predecessor frontier and its observation-boundary relocation.
 ///
 /// A successor attempt owns no call yet, and its predecessor is terminal, so
 /// the live call set omits it and reconstitution would fall back to the turn's
@@ -1062,8 +1099,8 @@ pub(super) async fn load_tool_result_correlations(
 /// predecessor that consumed steering would reconstitute without the durable
 /// consumed-steering rows the frontier holds.
 ///
-/// A predecessor prepared against the turn's own starting frontier adds
-/// nothing, so that case keeps the ordinary starting-snapshot path.
+/// When neither the predecessor nor a relocation extends the starting frontier,
+/// the ordinary starting-snapshot path applies.
 async fn load_availability_predecessor_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1071,11 +1108,22 @@ async fn load_availability_predecessor_snapshot(
     starting_frontier: signalbox_domain::ContextFrontierId,
 ) -> Result<Option<ResolvedContextFrontierReconstitutionInput>, ModelCallRepositoryError> {
     let frontier: Option<Uuid> = sqlx::query_scalar(
-        "SELECT predecessor.context_frontier_id
+        "SELECT COALESCE(relocation.context_frontier_id, predecessor.context_frontier_id)
            FROM credential_pool_availability_successor AS successor
            JOIN model_call AS predecessor
              ON predecessor.model_call_id = successor.predecessor_model_call_id
-          WHERE successor.successor_turn_attempt_id = $1",
+           LEFT JOIN LATERAL (
+                SELECT boundary.context_frontier_id
+                  FROM runner_placement_boundary AS boundary
+                  JOIN context_frontier AS frontier
+                    ON frontier.owning_session_id = boundary.session_id
+                   AND frontier.context_frontier_id = boundary.context_frontier_id
+                 WHERE boundary.session_id = predecessor.session_id
+                   AND frontier.prefix_context_frontier_id = predecessor.context_frontier_id
+                 ORDER BY boundary.placement_revision DESC LIMIT 1
+           ) AS relocation ON true
+          WHERE successor.successor_turn_attempt_id = $1
+          UNION ALL SELECT waiting.frontier_id FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1",
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)

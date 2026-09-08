@@ -22,10 +22,13 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         correlations: vec::Vec<ToolResultAttemptCorrelation>,
     ) -> Self;
-    pub fn with_tool_inadmissible_correlations(self, requests: vec::Vec<ToolRequest>) -> Self;
+    pub fn with_tool_inadmissible_correlations(
+        self,
+        requests: vec::Vec<ToolInadmissibleCorrelation>,
+    ) -> Self;
     pub fn with_tool_denial_correlations(
         self,
-        correlations: vec::Vec<ToolApprovalResolution>,
+        correlations: vec::Vec<ToolDenialCorrelation>,
     ) -> Self;
     pub fn with_uncommitted_tool_result_projection(
         self,
@@ -44,6 +47,32 @@ impl ModelCallExecutionReconstitutionInput {
         self,
     ) -> result::Result<ModelCallExecution, ModelCallExecutionReconstitutionError>;
 }
+```
+
+## ToolDenialCorrelation
+
+```rust
+pub struct ToolDenialCorrelation {
+    pub request: ToolRequestId,
+    pub denied: bool,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl convert::From<ToolApprovalResolution> for ToolDenialCorrelation {
+    fn from(resolution: ToolApprovalResolution) -> Self;
+}
+```
+
+## ToolInadmissibleCorrelation
+
+```rust
+pub struct ToolInadmissibleCorrelation {
+    pub request: ToolRequestId,
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub producing_call: ModelCallId,
+    pub inadmissible: bool,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ToolResultAttemptCorrelation
@@ -119,6 +148,10 @@ impl ModelCallExecutionReconstitutionError {
 pub struct ModelCallExecution {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ModelCallExecution {
+    pub const fn admission_snapshot(&self) -> &ResolvedContextFrontierSnapshot;
+    pub fn yield_to_credential_availability(
+        &self,
+    ) -> result::Result<EndedTurnAttempt, ModelCallClosureError>;
     pub const fn active_turn(&self) -> &ActivatedTurn;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
@@ -773,6 +806,11 @@ pub enum ModelCallTerminalIdentities {
     Ambiguous(AmbiguousModelCallTurnIdentities),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallTerminalIdentities {
+    pub fn frontier_identity_candidates(
+        &self,
+    ) -> (vec::Vec<SemanticTranscriptEntryId>, ContextFrontierId);
+}
 ```
 
 ## ModelCallTerminalOutcome
@@ -875,6 +913,7 @@ impl ToolRoundModelCallTurn {
 pub struct AvailabilitySuccessorModelCallTurn {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl AvailabilitySuccessorModelCallTurn {
+    pub const fn non_acceptance_proven(&self) -> bool;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn predecessor_call(&self) -> &EndedModelCall;

@@ -14,6 +14,7 @@ use std::{
 };
 
 use signalbox_model_runtime_claude_cli::CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY;
+use signalbox_process_protocol::MAX_HEADROOM_RESERVE_PERCENT;
 use toml_edit::{InlineTable, Item, Table};
 use url::Url;
 
@@ -21,9 +22,6 @@ use crate::configuration::{
     AvailabilityCause, BillingKind, HubModelConfigurationError, ModelAdapter,
     reject_unknown_fields, required_string, validated_name,
 };
-
-/// Maximum admitted headroom reserve, leaving at least one percent usable.
-const MAX_HEADROOM_RESERVE_PERCENT: i64 = 99;
 
 /// Maximum UTF-8 byte length admitted for a credential-delivery path.
 pub(crate) const MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES: usize = 4_096;
@@ -231,9 +229,6 @@ impl CredentialDelivery {
                     })?;
                 admit_credential_home(name, &path)?;
                 let max_concurrent_invocations = parse_max_concurrent_invocations(profile)?;
-                if max_concurrent_invocations.is_some() {
-                    return Err(HubModelConfigurationError::InvalidCredentialDelivery);
-                }
                 Ok(Self::CodexHome {
                     path,
                     max_concurrent_invocations,

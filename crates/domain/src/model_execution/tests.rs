@@ -325,9 +325,7 @@ fn execution_from_activation(session: Session) -> ModelCallExecution {
     .expect("activation facts reconstruct live execution")
 }
 
-fn attachment_execution_input(
-    facts: Vec<AttachmentBlobFact>,
-) -> ModelCallExecutionReconstitutionInput {
+fn attachment_execution_input() -> (ModelCallExecutionReconstitutionInput, BlobDigest) {
     let execution = active_execution();
     let digest = BlobDigest::digest(b"attachment fixture bytes");
     let content = UserContent::try_parts(vec![UserContentPart::Attachment {
@@ -338,7 +336,7 @@ fn attachment_execution_input(
         display_filename: None,
     }])
     .expect("the attachment-only fixture is valid");
-    ModelCallExecutionReconstitutionInput::new(
+    let input = ModelCallExecutionReconstitutionInput::new(
         execution.active_turn,
         execution.targets,
         execution.starting_snapshot,
@@ -349,18 +347,19 @@ fn attachment_execution_input(
         )],
         None,
         Vec::new(),
-    )
-    .with_attachment_blob_facts(facts)
+    );
+    (input, digest)
 }
 
 /// model preparation admits immutable catalog facts when they exactly cover every referenced
 /// attachment digest.
 #[test]
 fn exact_attachment_catalog_facts_reach_preparation() {
-    let digest = BlobDigest::digest(b"attachment fixture bytes");
+    let (input, digest) = attachment_execution_input();
     let length = NonZeroU64::new(24).expect("the fixture length is positive");
 
-    let execution = attachment_execution_input(vec![AttachmentBlobFact::new(digest, length)])
+    let execution = input
+        .with_attachment_blob_facts(vec![AttachmentBlobFact::new(digest, length)])
         .reconstitute()
         .expect("the exact attachment catalog projection is complete");
     let request = execution
@@ -374,7 +373,8 @@ fn exact_attachment_catalog_facts_reach_preparation() {
 /// omits a referenced attachment digest.
 #[test]
 fn missing_attachment_catalog_fact_fails_preparation() {
-    let missing = attachment_execution_input(Vec::new())
+    let (input, _) = attachment_execution_input();
+    let missing = input
         .reconstitute()
         .expect_err("a missing attachment catalog fact fails closed");
 
@@ -1078,7 +1078,7 @@ fn continuation_reconstitutes_exact_frontier_and_pin() {
         continuation.frontier().snapshot(),
         continuation.ordered_entries().collect(),
     ))
-    .with_tool_denial_correlations(vec![denied_approval(request)]);
+    .with_tool_denial_correlations(vec![denied_approval(request).into()]);
     let mut missing_denial = input.clone();
     missing_denial.tool_denial_correlations.clear();
     assert_eq!(
@@ -1095,7 +1095,8 @@ fn continuation_reconstitutes_exact_frontier_and_pin() {
             ToolApprovalDecision::Approve,
         )
         .reconstitute()
-        .expect("the mismatching approval fixture is valid"),
+        .expect("the mismatching approval fixture is valid")
+        .into(),
     ];
     assert_eq!(
         approved_instead
@@ -1419,7 +1420,7 @@ fn continuation_rejects_unresolved_latest_tool_round() {
         continuation.frontier().snapshot(),
         continuation.ordered_entries().collect(),
     ))
-    .with_tool_denial_correlations(vec![denied_approval(earlier_request)]);
+    .with_tool_denial_correlations(vec![denied_approval(earlier_request).into()]);
 
     let error = input
         .reconstitute()
@@ -1568,7 +1569,7 @@ fn continuation_rejects_crosswired_turn_pin() {
         continuation.frontier().snapshot(),
         continuation.ordered_entries().collect(),
     ))
-    .with_tool_denial_correlations(vec![denied_approval(request)]);
+    .with_tool_denial_correlations(vec![denied_approval(request).into()]);
 
     let error = input
         .reconstitute()
@@ -3355,4 +3356,60 @@ fn refusal_closes_call_attempt_and_turn_without_content() {
     assert_eq!(refused.call().disposition(), ModelCallDisposition::Refused);
     assert_eq!(refused.disposition(), &TurnDisposition::Refused);
     assert_eq!(refused.terminal_snapshot().entry_count(), 1);
+}
+
+#[test]
+fn tool_round_rejects_approval_that_disagrees_with_argument_suppression() {
+    for (suppressed, approval) in [
+        (true, InitialToolApproval::PolicyAuto),
+        (true, InitialToolApproval::Confirm),
+        (false, InitialToolApproval::RuntimeSafetyDeny),
+    ] {
+        let execution = in_flight_execution();
+        let call = execution
+            .current_call
+            .clone()
+            .expect("fixture issued a call")
+            .end_classified(ModelCallDisposition::Completed)
+            .expect("issued call can complete");
+        let attempt = execution
+            .current_attempt
+            .clone()
+            .end_without_stop(UnstoppedAttemptDisposition::YieldedToDurableWait)
+            .expect("running attempt can yield");
+        let proposal = if suppressed {
+            crate::ToolCallProposal::suppressed(
+                ToolName::try_new(String::from("current_time")).expect("fixture tool name"),
+            )
+        } else {
+            tool_proposal("current_time", "{}")
+        };
+        let response =
+            ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+                proposal,
+            )])
+            .expect("one tool proposal");
+        let error = assemble_tool_round(
+            ModelCallTurnScope {
+                session: execution.session(),
+                turn: execution.turn(),
+            },
+            call,
+            attempt,
+            execution.frontier_entries.to_vec(),
+            response,
+            ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    semantic_transcript_entry_id(43),
+                    tool_request_id(44),
+                    approval,
+                )],
+                context_frontier_id(45),
+                Some(turn_attempt_id(46)),
+            ),
+            DangerousToolAutoApproval::Disabled,
+        )
+        .expect_err("suppression and approval must agree before a request is created");
+        assert_eq!(error, ModelCallClosureError::InitialToolApprovalMismatch);
+    }
 }

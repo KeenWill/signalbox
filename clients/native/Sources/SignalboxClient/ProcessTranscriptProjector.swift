@@ -208,7 +208,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
-      .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed, .turnRefused,
+      .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed, .turnRefused,
       .turnCancelled, .turnReconciliationRequired, .turnToolReconciliationRequired,
       .runnerStateTransition:
       content = nil
@@ -496,7 +496,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             turnID: turnID
           )
         case .toolExecutionResult(let requestID, _, _),
-          .toolDenied(let requestID, _), .toolClosed(let requestID, _),
+          .toolDenied(let requestID, _, _), .toolClosed(let requestID, _, _),
           .toolInadmissible(let requestID, _),
           .delegationResult(let requestID, _, _, .foreground, _, _, _, _, _):
           let correlation = ToolCorrelation(
@@ -620,12 +620,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return records.reduce(into: [:]) { positions, record in
       guard case .entry(let message) = record,
         message.sourceSessionID == nativeSourceSessionID,
-        case .assistantToolUse(let turnID, _, let requestID, let toolName, _, _) = message.entry
+        case .assistantToolUse(let turnID, let modelCallID, let requestID, let toolName, _, _) = message.entry
       else {
         return
       }
       positions[requestID] = SignalboxProcessToolRequestPosition(
         turnID: turnID,
+        modelCallID: modelCallID,
         entryIndex: message.entryIndex,
         toolName: toolName,
         toolAttemptID: ambiguousResultRequestIDs.contains(requestID)
@@ -646,8 +647,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return terminalModelCallID
     case .cancelled(_, _, let terminalModelCallID):
       return terminalModelCallID
-    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
-      .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+    case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
+      .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .refused,
       .reconciliationRequired, .toolReconciliationRequired, .unknown:
       return nil
@@ -664,8 +665,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         .refused(_, _, let modelCallID),
         .reconciliationRequired(_, _, let modelCallID):
         modelCallIDs.insert(modelCallID.rawValue)
-      case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
-        .activeAwaitingChild, .activeAwaitingToolApproval,
+      case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
+        .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingToolApproval,
         .activeAwaitingToolRecovery, .failed, .completed, .cancelled,
         .toolReconciliationRequired, .unknown:
         break
@@ -868,15 +869,25 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         output: content,
         status: .completed
       )
-    case .toolDenied(let requestID, let content):
+    case .toolDenied(let requestID, let content, let overrideRecorded):
       return try updateTool(
         sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
         toolAttemptID: nil,
         output: content,
-        status: .denied
+        status: .denied,
+        overrideRecorded: overrideRecorded
       )
-    case .toolClosed(let requestID, let content), .toolInadmissible(let requestID, let content):
+    case .toolClosed(let requestID, let content, let approvedBeforeClose):
+      return try updateTool(
+        sourceSessionID: message.sourceSessionID.rawValue,
+        requestID: requestID.rawValue,
+        toolAttemptID: nil,
+        output: content,
+        status: .closed,
+        approvedBeforeClose: approvedBeforeClose
+      )
+    case .toolInadmissible(let requestID, let content):
       return try updateTool(
         sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
@@ -944,7 +955,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     requestID: String,
     toolAttemptID: SignalboxCanonicalUUID?,
     output: String?,
-    status: SignalboxProcessToolStatus
+    status: SignalboxProcessToolStatus,
+    approvedBeforeClose: Bool? = nil,
+    overrideRecorded: Bool? = nil
   ) throws -> SignalboxStoredEvent {
     let correlation = ToolCorrelation(
       sourceSessionID: sourceSessionID,
@@ -964,7 +977,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       toolName: prior.toolName,
       arguments: prior.arguments,
       output: output,
-      status: status
+      status: status,
+      approvedBeforeClose: approvedBeforeClose,
+      overrideRecorded: overrideRecorded
     )
     toolsByIdentity[identity] = updated
     guard let eventID = presentationIDs[identity.presentationIdentity],
@@ -996,7 +1011,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       toolName: event.toolName,
       arguments: event.arguments,
       output: event.output,
-      status: status
+      status: status,
+      approvedBeforeClose: event.approvedBeforeClose,
+      overrideRecorded: event.overrideRecorded
     )
     return SignalboxStoredEvent(
       eventID: eventID,
@@ -1181,8 +1198,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .cancelled:
         content = nil
       }
-    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
-      .activeAwaitingChild,
+    case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+      .activeAwaitingCredentialAvailability, .activeAwaitingChild,
       .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
@@ -1233,7 +1250,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return modelCallID == evidence.modelCallID
       case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
-        .inputAccepted, .turnActivated, .turnFailed, .turnRefused, .turnCancelled,
+        .inputAccepted, .turnActivated, .turnCredentialPoolExhausted, .turnFailed, .turnRefused, .turnCancelled,
         .toolApprovalDecided, .turnReconciliationRequired,
         .turnToolReconciliationRequired, .runnerStateTransition, .unknown:
         return false
@@ -1281,11 +1298,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func turnStateIsActive(_ state: SignalboxTranscriptTurnState) -> Bool {
     switch state {
-    case .activeRunning, .activeAwaitingChild, .activeAwaitingToolApproval,
+    case .activeRunning, .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingToolApproval,
       .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .reconciliationRequired,
       .toolReconciliationRequired:
       return true
-    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .failed,
+    case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .failed,
       .completed, .refused, .cancelled, .unknown:
       return false
     }
@@ -1345,7 +1362,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         for: trigger,
         nativeSourceSessionID: nativeSourceSessionID
       )
-    case .turnFailed, .turnCancelled:
+    case .turnCredentialPoolExhausted, .turnFailed, .turnCancelled:
       return isExactTerminalMarker(
         message,
         for: trigger,
@@ -1380,9 +1397,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let requestID: String
     switch message.entry {
     case .toolExecutionResult(let request, _, _),
-      .toolDenied(let request, _),
+      .toolDenied(let request, _, _),
       .toolInadmissible(let request, _),
-      .toolClosed(let request, _):
+      .toolClosed(let request, _, _):
       requestID = request.rawValue
     case .delegationResult(let request, _, _, .foreground, _, _, _, _, _):
       requestID = request.rawValue
@@ -1412,7 +1429,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   ) -> Set<SignalboxCanonicalUUID> {
     let turnID: SignalboxCanonicalUUID
     switch trigger {
-    case .turnFailed(let triggerTurnID, _, _):
+    case .turnCredentialPoolExhausted(let triggerTurnID, _), .turnFailed(let triggerTurnID, _, _):
       turnID = triggerTurnID
     case .turnCancelled(let triggerTurnID, _, _):
       turnID = triggerTurnID
@@ -1576,14 +1593,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         attemptID: attemptID,
         closesAttemptWithoutID: false
       )
-    case .toolDenied(let requestID, _), .toolInadmissible(let requestID, _):
+    case .toolDenied(let requestID, _, _), .toolInadmissible(let requestID, _):
       return TerminalToolResultEvidence(
         entryID: message.entryID,
         requestID: requestID.rawValue,
         attemptID: nil,
         closesAttemptWithoutID: false
       )
-    case .toolClosed(let requestID, _):
+    case .toolClosed(let requestID, _, _):
       return TerminalToolResultEvidence(
         entryID: message.entryID,
         requestID: requestID.rawValue,
@@ -1668,6 +1685,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return message.entryID == completionEntryID && entryTurnID == turnID
+    case .turnCredentialPoolExhausted(let turnID, let evidence):
+      guard case .turnFailed(let entryTurnID) = message.entry else { return false }
+      return message.entryID == evidence.failureEntryID && entryTurnID == turnID
     case .turnFailed(let turnID, let failureEntryID, _):
       guard case .turnFailed(let entryTurnID) = message.entry else {
         return false
@@ -1730,9 +1750,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
               return nil
             }
             switch message.entry {
-            case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
+            case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _, _),
               .toolInadmissible(let requestID, _),
-              .toolClosed(let requestID, _),
+              .toolClosed(let requestID, _, _),
               .delegationResult(let requestID, _, _, .foreground, _, _, _, _, _):
               return ToolCorrelation(
                 sourceSessionID: message.sourceSessionID.rawValue,
@@ -1781,6 +1801,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         )
       }
       return hasCompletionMarker && hasAssistantText
+    case .turnCredentialPoolExhausted(let turnID, let evidence):
+      return snapshot.records.contains {
+        guard case .turn(let turn) = $0,
+          turn.turnID == turnID,
+          case .failedCredentialPoolExhausted(let snapshotEvidence) = turn.state
+        else { return false }
+        return snapshotEvidence == evidence
+      } && snapshot.records.contains {
+        guard case .entry(let message) = $0 else { return false }
+        return isExactTerminalMarker(message, for: trigger, nativeSourceSessionID: snapshot.sessionID)
+      }
     case .turnFailed:
       return snapshot.records.contains {
         guard case .entry(let message) = $0 else {
@@ -1942,6 +1973,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return .init(state: .recoveryRequired, label: "Recovery required")
       }
       return .init(state: .running, label: "Running")
+    case .activeAwaitingCredentialAvailability(_, let cause):
+      let label = cause == .contended ? "Awaiting credential capacity" : "Awaiting credential availability"
+      return .init(state: .running, label: label)
     case .activeAwaitingChild:
       return .init(state: .running, label: "Awaiting child")
     case .activeAwaitingToolApproval:
@@ -1949,6 +1983,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery,
       .reconciliationRequired, .toolReconciliationRequired:
       return .init(state: .recoveryRequired, label: "Recovery required")
+    case .failedAfterCredentialWait(_, _, let predecessor):
+      let label = predecessor.cause.map { "Failed: \(providerFailureLabel($0))" } ?? "Failed"
+      return .init(state: .failed, label: SignalboxProcessPresentation.retainedLabel(label))
+    case .failedCredentialPoolExhausted:
+      return .init(state: .failed, label: "Credential pool exhausted")
     case .failed(_, _, let terminalModelCall):
       if let terminalModelCall, case .unknown(let value) = terminalModelCall.disposition {
         let label = SignalboxProcessPresentation.retainedLabel(

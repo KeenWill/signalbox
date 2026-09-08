@@ -11,12 +11,16 @@ use signalbox_process_protocol::{
     encode_server_line,
 };
 
-use crate::{connection::Connection, error::ClientError};
+use crate::{
+    connection::{Connection, ProcessClient},
+    error::ClientError,
+};
 
 #[derive(Debug)]
 pub(crate) struct TranscriptSnapshot {
     cursor: u64,
     runner: Option<RunnerProjection>,
+    repository_watch: Option<signalbox_process_protocol::RepositoryWatchProvenance>,
     spool: File,
 }
 
@@ -27,6 +31,12 @@ impl TranscriptSnapshot {
 
     pub(crate) const fn runner(&self) -> Option<&RunnerProjection> {
         self.runner.as_ref()
+    }
+
+    pub(crate) fn repository_watch(
+        &self,
+    ) -> Option<&signalbox_process_protocol::RepositoryWatchProvenance> {
+        self.repository_watch.as_ref()
     }
 
     pub(crate) fn replay(&mut self) -> Result<SnapshotReplay<'_>, ClientError> {
@@ -78,6 +88,7 @@ impl TranscriptSnapshot {
                         | TurnState::ActiveAwaitingToolApproval { .. }
                         | TurnState::ActiveAwaitingChild { .. }
                         | TurnState::ActiveAwaitingToolRecovery { .. }
+                        | TurnState::ActiveAwaitingCredentialAvailability { .. }
                         | TurnState::ActiveAwaitingRunnerRecovery { .. }
                 )
             {
@@ -115,6 +126,7 @@ impl TranscriptSnapshot {
         Ok(Self {
             cursor,
             runner,
+            repository_watch: None,
             spool,
         })
     }
@@ -209,15 +221,19 @@ impl Iterator for SnapshotReplay<'_> {
 }
 
 pub(crate) async fn read_snapshot(
+    client: &mut ProcessClient,
     connection: &mut Connection,
     expected_session: CanonicalUuid,
 ) -> Result<TranscriptSnapshot, ClientError> {
-    let (session_id, cursor, runner) = match connection.message().await? {
+    let (session_id, cursor, runner, repository_watch) = match connection.message().await? {
         ServerMessage::TranscriptSnapshotStart {
             session_id,
             cursor,
             runner,
-        } if session_id == expected_session => (session_id, cursor.value(), runner),
+            repository_watch,
+        } if session_id == expected_session => {
+            (session_id, cursor.value(), runner, repository_watch)
+        }
         ServerMessage::Error {
             code,
             message,
@@ -248,6 +264,7 @@ pub(crate) async fn read_snapshot(
             ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position,
+                state,
                 ..
             } if !model_calls_started && !entries_started => {
                 let position = acceptance_position.value();
@@ -258,6 +275,23 @@ pub(crate) async fn read_snapshot(
                     return Err(ClientError::Protocol(
                         "snapshot turns were not unique acceptance-order projections",
                     ));
+                }
+                if let TurnState::FailedCredentialPoolExhausted {
+                    pool_policy_id,
+                    policy_members,
+                    members,
+                    ..
+                } = &state
+                {
+                    crate::credential_pool::validate(
+                        client,
+                        expected_session,
+                        turn_id,
+                        *pool_policy_id,
+                        policy_members,
+                        members,
+                    )
+                    .await?;
                 }
                 prior_acceptance_position = Some(position);
                 model_call_order.push_turn(turn_id)?;
@@ -367,6 +401,7 @@ pub(crate) async fn read_snapshot(
                 return Ok(TranscriptSnapshot {
                     cursor,
                     runner,
+                    repository_watch,
                     spool,
                 });
             }

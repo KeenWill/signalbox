@@ -507,6 +507,22 @@ where
             })
             .await
         }
+        ClientRequest::ReadCredentialPoolPolicy {
+            session_id,
+            turn_id,
+            pool_policy_id,
+        } => {
+            credential_pool::handle_read_policy(
+                writer,
+                version,
+                request_id,
+                session_id,
+                turn_id,
+                pool_policy_id,
+                services,
+            )
+            .await
+        }
         ClientRequest::CancelProgramRun { command_id, run_id } => {
             Box::pin(async move {
                 handle_cancel_program_run(writer, version, request_id, command_id, run_id, services)
@@ -1162,6 +1178,7 @@ where
                     session_id,
                     &services.pool,
                     &services.model_configuration,
+                    services.configuration_reload.as_ref(),
                     snapshot_permit,
                 )
                 .await
@@ -1180,6 +1197,7 @@ where
                     session_id,
                     &services.pool,
                     &services.model_configuration,
+                    services.configuration_reload.as_ref(),
                     &services.fanouts,
                     shutdown,
                     snapshot_permit,

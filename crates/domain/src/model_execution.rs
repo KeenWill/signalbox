@@ -92,8 +92,8 @@ pub struct ModelCallExecutionReconstitutionInput {
     pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
     calls: Vec<ModelCallReconstitutionInput>,
     tool_result_correlations: Vec<ToolResultAttemptCorrelation>,
-    tool_denial_correlations: Vec<ToolApprovalResolution>,
-    tool_inadmissible_correlations: Vec<crate::ToolRequest>,
+    tool_denial_correlations: Vec<ToolDenialCorrelation>,
+    tool_inadmissible_correlations: Vec<ToolInadmissibleCorrelation>,
     uncommitted_tool_result_projection: Option<PreparedToolResultProjection>,
     availability_successor: bool,
 }
@@ -144,20 +144,19 @@ impl ModelCallExecutionReconstitutionInput {
         self
     }
 
-    /// Supplies the exact durable denial resolution for every denied request
-    /// Supplies request-level terminal evidence for inadmissible result entries.
+    /// Supplies request ownership and inadmissibility facts for result entries.
     pub fn with_tool_inadmissible_correlations(
         mut self,
-        requests: Vec<crate::ToolRequest>,
+        requests: Vec<ToolInadmissibleCorrelation>,
     ) -> Self {
         self.tool_inadmissible_correlations = requests;
         self
     }
 
-    /// referenced by the current frontier.
+    /// Supplies request identity and denial status for every denied result entry.
     pub fn with_tool_denial_correlations(
         mut self,
-        correlations: Vec<ToolApprovalResolution>,
+        correlations: Vec<ToolDenialCorrelation>,
     ) -> Self {
         self.tool_denial_correlations = correlations;
         self
@@ -201,7 +200,7 @@ impl ModelCallExecutionReconstitutionInput {
     }
 
     /// Supplies durable proof that a call-free pinned attempt is the distinct
-    /// successor of an availability-failed predecessor.
+    /// successor of an availability-failed predecessor or a durable credential wait.
     pub fn with_availability_successor(mut self) -> Self {
         self.availability_successor = true;
         self
@@ -211,6 +210,39 @@ impl ModelCallExecutionReconstitutionInput {
     pub fn reconstitute(self) -> Result<ModelCallExecution, ModelCallExecutionReconstitutionError> {
         reconstitute(self)
     }
+}
+
+/// Request identity and decision status for a denied result entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolDenialCorrelation {
+    /// The logical request named by the decision.
+    pub request: crate::ToolRequestId,
+    /// Whether its recorded decision is a denial.
+    pub denied: bool,
+}
+
+impl From<ToolApprovalResolution> for ToolDenialCorrelation {
+    fn from(resolution: ToolApprovalResolution) -> Self {
+        Self {
+            request: resolution.request(),
+            denied: matches!(resolution.decision(), ToolApprovalDecision::Deny { .. }),
+        }
+    }
+}
+
+/// Request ownership and inadmissibility status for a result entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolInadmissibleCorrelation {
+    /// The logical request named by the result.
+    pub request: crate::ToolRequestId,
+    /// The session owning the request.
+    pub session: SessionId,
+    /// The turn owning the request.
+    pub turn: TurnId,
+    /// The model call that proposed the request.
+    pub producing_call: ModelCallId,
+    /// Whether the request records an inadmissibility reason.
+    pub inadmissible: bool,
 }
 
 /// Stored ownership facts for one tool attempt referenced by model input.
@@ -358,6 +390,22 @@ pub struct ModelCallExecution {
 }
 
 impl ModelCallExecution {
+    /// Borrows the exact frontier that a call-free admission consumes or retains.
+    pub const fn admission_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.current_snapshot
+    }
+    /// Ends a call-free admission attempt while retaining its transcript and turn slot.
+    pub fn yield_to_credential_availability(
+        &self,
+    ) -> Result<EndedTurnAttempt, ModelCallClosureError> {
+        if self.current_call.is_some() || !self.attempt_accepts_prepared_call() {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        self.current_attempt
+            .clone()
+            .end_without_stop(UnstoppedAttemptDisposition::YieldedToDurableWait)
+            .map_err(|_| ModelCallClosureError::CallStateMismatch)
+    }
     /// Borrows the checked active-turn facts that establish ownership.
     pub const fn active_turn(&self) -> &ActivatedTurn {
         &self.active_turn
@@ -993,6 +1041,7 @@ impl ModelCallExecution {
             .end_without_stop(UnstoppedAttemptDisposition::KnownFailure)
             .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
         Ok(AvailabilitySuccessorModelCallTurn {
+            non_acceptance_proven: observation.non_acceptance_proven(),
             session: self.session,
             turn: self.turn,
             predecessor_call: ended_call,
@@ -1629,7 +1678,7 @@ fn reconstitute(
         }
         (Some(stored), Some(_), None, false)
         | (Some(stored), Some(_), None, true)
-        | (Some(stored), None, Some(_), false)
+        | (Some(stored), None, Some(_), _)
         | (Some(stored), None, None, true) => {
             let Some(pinned) = stored.reconstitute_for_turn(turn) else {
                 return Err(fail(
@@ -1639,7 +1688,7 @@ fn reconstitute(
             };
             Some(pinned)
         }
-        (Some(_), Some(_), Some(_), _) | (Some(_), None, Some(_), true) => {
+        (Some(_), Some(_), Some(_), _) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::ContinuationSnapshotUnexpected,
@@ -1742,9 +1791,7 @@ fn reconstitute(
         .collect::<Vec<_>>();
     let mut tool_denial_correlations = BTreeSet::new();
     for correlation in &input.tool_denial_correlations {
-        if !matches!(correlation.decision(), ToolApprovalDecision::Deny { .. })
-            || !tool_denial_correlations.insert(correlation.request())
-        {
+        if !correlation.denied || !tool_denial_correlations.insert(correlation.request) {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::ToolDenialCorrelationMismatch,
@@ -1763,13 +1810,13 @@ fn reconstitute(
     }
     let mut tool_inadmissible_correlations = BTreeSet::new();
     for request in &input.tool_inadmissible_correlations {
-        if request.inadmissible_reason().is_none()
-            || !tool_inadmissible_correlations.insert(request.id())
+        if !request.inadmissible
+            || !tool_inadmissible_correlations.insert(request.request)
             || !input.frontier_entries.iter().any(|entry| {
-                entry.source_session() == request.session()
+                entry.source_session() == request.session
                     && entry.payload()
                         == &SemanticTranscriptEntryPayload::ToolInadmissible {
-                            request: request.id(),
+                            request: request.request,
                         }
             })
         {
@@ -2007,7 +2054,16 @@ fn frontier_closes_latest_tool_round(
             return Ok(false);
         }
     }
-    Ok(suffix[results_end..].iter().all(|entry| {
+    let mut continuation = &suffix[results_end..];
+    if continuation.first().is_some_and(|entry| {
+        matches!(
+            entry.payload(),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+        )
+    }) {
+        continuation = &continuation[1..];
+    }
+    Ok(continuation.iter().all(|entry| {
         matches!(
             entry.payload(),
             SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }

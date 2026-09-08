@@ -514,6 +514,7 @@ enum RuntimeDrainOutcome {
 enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     FencedPoolFloor,
+    CredentialInvocations,
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
@@ -844,8 +845,17 @@ async fn disarm_staging_sweep_unless_guarded(
 /// I/O, and join-error prose is never formatted into the classification.
 fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailureClass {
     use signalbox_persistence::outbox::OutboxDispatchError;
+    use signalbox_persistence::runner_protocol::{RunnerProtocolStoreError, RunnerRecoveryError};
 
     match error {
+        ProcessRuntimeError::RunnerRecoveryCommands(RunnerRecoveryError::Store(
+            RunnerProtocolStoreError::CommitAmbiguous(_),
+        )) => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: true,
+        },
+        ProcessRuntimeError::RunnerRecoveryCommands(RunnerRecoveryError::Store(
+            RunnerProtocolStoreError::Corruption(_),
+        )) => OperatorFailureClass::FailClosedCorruption,
         ProcessRuntimeError::OauthRecovery(error) => OperatorFailureClass::Infrastructure {
             commit_ambiguous: matches!(error, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError::CommitAmbiguous),
         },
@@ -853,7 +863,8 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
         | ProcessRuntimeError::SpoolIo(_)
         | ProcessRuntimeError::InsufficientPoolCapacity
         | ProcessRuntimeError::CleanupSocket(_)
-        | ProcessRuntimeError::RunnerRecoveryNotifications(_)
+        | ProcessRuntimeError::DatabaseNotifications(_)
+        | ProcessRuntimeError::RunnerRecoveryCommands(_)
         | ProcessRuntimeError::Dispatch(OutboxDispatchError::Database(_)) => {
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
@@ -977,6 +988,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
         | Ok(RuntimeTaskExit::FencedPoolFloor)
+        | Ok(RuntimeTaskExit::CredentialInvocations)
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
@@ -1147,7 +1159,6 @@ async fn run_hub(
             SanitizedStartupCause::WebHttpConfiguration(&error),
         )
     })?;
-    let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
     let on_disk = fs::read_to_string(configuration.model_configuration_file()).map_err(|_| {
         erase_startup_cause(
             RuntimePhase::Configuration,
@@ -1446,6 +1457,7 @@ async fn run_hub(
                 )
             })?;
     }
+    let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1554,6 +1566,11 @@ async fn run_hub(
         reconciliation_sweep_interval,
         nudge_buffer_capacity,
     );
+    let invocation_processes =
+        signalboxd::credential_invocations::CredentialInvocationProcesses::new(
+            pool.clone(),
+            eligibility_nudge.clone(),
+        );
 
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
@@ -1607,6 +1624,7 @@ async fn run_hub(
             .roots()
             .to_vec(),
     );
+    let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
@@ -1622,9 +1640,29 @@ async fn run_hub(
     };
     let scan_runner_service = runner_service.clone();
     let migration_oauth_registrations = model_configuration.oauth_registrations();
+    let invocation_registrations = model_configuration.credential_invocation_registrations();
     let scan_pool = pool.clone();
     let startup = migrate_scan_then_schedule(
-        install_oauth_registrations(&pool, &migration_oauth_registrations),
+        async {
+            install_oauth_registrations(&pool, &migration_oauth_registrations).await?;
+            invocation_processes.recover().await.map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("credential_invocation_recovery_failed"),
+                )
+            })?;
+            signalbox_persistence::credential_invocations::replace_registrations(
+                &pool,
+                &invocation_registrations,
+            )
+            .await
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("credential_capacity_registration_failed"),
+                )
+            })
+        },
         async move {
             scan_runner_service
                 .mark_orphaned_connections_lost()
@@ -1646,6 +1684,16 @@ async fn run_hub(
                 let turn = error.repository_error().corruption_turn();
                 erase_startup_scan_cause(failure_class, cause_code, session, turn)
             })?;
+            scan_runner_service
+                .recovery_store()
+                .resume_runner_replacements()
+                .await
+                .map_err(|_| {
+                    erase_startup_cause(
+                        RuntimePhase::StartupScan,
+                        SanitizedStartupCause::Static("runner_replacement_recovery_failed"),
+                    )
+                })?;
             tracing::info!(
                 phase = ?RuntimePhase::StartupScan,
                 recovered_turn_count = outcome.recovered_turn_count(),
@@ -1870,9 +1918,16 @@ async fn run_hub(
     let repository_watch_runtime = {
         let start = async {
             let module_pool = connect_repository_watch_pool(&pool).await?;
+            signalboxd::repo_watch_dispatch::scavenge_checkouts(
+                &signalbox_module_repo_watch_v2::RepoWatchStore::new(module_pool.clone()),
+                &pool,
+            )
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
             Ok::<_, RepositoryWatchRuntimeError>(RepositoryWatchRuntime::unstarted(
                 module_pool,
                 RepositoryWatchServices {
+                    checkout_runner: checkout_runner.clone(),
                     core_pool: pool.clone(),
                     models: Arc::new(model_configuration.clone()),
                     templates: Arc::new(template_configuration.clone()),
@@ -2004,6 +2059,9 @@ async fn run_hub(
     let web_http_runtime = web_http_listener
         .into_runtime(process_runtime.monitor(), eligibility_nudge.clone())
         .with_configuration_reload(configuration_reload.clone());
+    let runner_recovery = runner_service
+        .recovery_store()
+        .with_recovery_notifications(process_runtime.runner_recovery_notifications());
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let text_deltas = process_runtime.provider_text_delta_sink();
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
@@ -2012,6 +2070,7 @@ async fn run_hub(
         process_runtime.with_recovery_reporter(execution_supervisor.recovery_reporter());
     let pass_pool = scheduler_pool.clone();
     let pass_nudge = eligibility_nudge.clone();
+    let pass_invocation_processes = invocation_processes.clone();
     let pass_blobs = blob_store_registry.clone();
     let compose_pass = move |model_configuration: &HubModelConfiguration| {
         let runtime_models = model_configuration.runtime_model_catalog();
@@ -2028,7 +2087,8 @@ async fn run_hub(
             runtime_models.clone(),
             diagnostic_model_identity_limit,
         )
-        .with_text_delta_sink(text_deltas.clone());
+        .with_text_delta_sink(text_deltas.clone())
+        .with_invocation_process_observer(pass_invocation_processes.clone());
         let counter = AttachmentPreparingModelCallProvider::for_counting(
             provider.clone(),
             pass_pool.clone(),
@@ -2042,6 +2102,7 @@ async fn run_hub(
         )
         .with_session_credentials(model_configuration.credential_family_catalog())
         .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
+        .with_runner_recovery(runner_recovery.clone())
         .with_same_credential_attempt_bound(same_credential_attempt_bound)
         .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
         .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
@@ -2058,6 +2119,7 @@ async fn run_hub(
             model_configuration.clone(),
             compaction.clone(),
         )
+        .with_blob_store_registry(pass_blobs.clone())
         .with_repository_watch_continuation(pass_nudge.clone(), tool_dispatch_gate.clone());
         let execution = execution_supervisor.with_execution(
             PostgresProviderModelExecution::new(
@@ -2090,6 +2152,7 @@ async fn run_hub(
                 compaction,
                 execution,
             )
+            .with_blob_store_registry(pass_blobs.clone())
             .with_reported_usage_compaction(reported_usage_compaction)
             .with_workspace_instructions(workspace_instruction_runtime.clone())
             .with_occupancy_recovery(
@@ -2218,6 +2281,11 @@ async fn run_hub(
             )
         });
     }
+    let invocation_shutdown = turn_liveness_shutdown_receiver.clone();
+    runtime_tasks.spawn(async move {
+        invocation_processes.run(invocation_shutdown).await;
+        RuntimeTaskExit::CredentialInvocations
+    });
     runtime_tasks.spawn(async move {
         turn_liveness_runtime
             .run(turn_liveness_shutdown_receiver)
@@ -2303,6 +2371,10 @@ async fn run_hub(
                         report_runtime_task_defect(
                             RuntimeTaskDefect::LifecycleMetricsCompletedBeforeShutdown,
                         );
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::CredentialInvocations)) => {
+                        tracing::error!("invocation reservation reconciliation completed before shutdown");
                         RuntimeStopCause::RuntimeDefect
                     }
                     Some(Ok(RuntimeTaskExit::TurnLiveness)) => {

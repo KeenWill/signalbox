@@ -3551,7 +3551,7 @@ fn configuration_rejects_an_empty_credential_home_with_a_typed_member_error() {
 }
 
 #[test]
-fn configuration_rejects_a_credential_home_concurrency_bound_until_reservations_exist() {
+fn configuration_admits_a_credential_home_concurrency_bound() {
     let temporary = tempfile::tempdir().expect("synthetic home root is created");
     let home = temporary.path().join("account-a");
     std::fs::create_dir(&home).expect("synthetic home is created");
@@ -3564,9 +3564,15 @@ fn configuration_rejects_a_credential_home_concurrency_bound_until_reservations_
             ),
         );
 
-    assert_eq!(
-        HubModelConfiguration::parse(&credential_home).err(),
-        Some(HubModelConfigurationError::InvalidCredentialDelivery)
+    let configuration =
+        HubModelConfiguration::parse(&credential_home).expect("bounded home is admitted");
+    assert!(
+        configuration
+            .credential_invocation_registrations()
+            .iter()
+            .any(|(profile, bound)| profile == CODEX_SUBSCRIPTION_PROFILE
+                && bound.map(std::num::NonZeroU32::get)
+                    == Some(MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS))
     );
 }
 
@@ -5752,7 +5758,7 @@ reasoning_replay_family = "shared"
     let (effective, _) = catalog
         .resolve(&selected)
         .expect("selected target")
-        .effective_target(&selected, signalbox_model_runtime::FastMode::Enabled)
+        .effective_target(&selected, signalbox_model_runtime::FastMode::Enabled, None)
         .expect("fast target");
     assert_eq!(
         catalog

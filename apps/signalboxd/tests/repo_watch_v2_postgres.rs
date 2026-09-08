@@ -1505,6 +1505,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(retained_origin.rule_id(), rule.id());
     assert_eq!(retained_origin.rule_revision(), rule.version());
     assert_eq!(retained_origin.event_id(), event.id());
+    assert_eq!(retained_origin.event_kind(), event.kind().name());
     let mismatched_retained_reaction = plan_retained_lifecycle_reaction_for_test(
         NonZeroU64::new(44).expect("forty-four is positive"),
         SessionId::from_uuid(Uuid::from_u128(81)),
@@ -2710,6 +2711,7 @@ async fn repository_watch_creation_records_its_module_issuer() -> Result<(), Box
     let (eligibility_nudge, _work_source) =
         InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
     let mut sink = RepositoryWatchCommandSink {
+        checkout_runner: None,
         pool: pool.clone(),
         models: Arc::new(models),
         eligibility_nudge,
@@ -3015,6 +3017,7 @@ system_prompt = "Inspect repository activity."
         module_pool.clone(),
         models.repository_watch().cloned(),
         RepositoryWatchServices {
+            checkout_runner: None,
             core_pool: core_pool.clone(),
             models: Arc::new(models),
             templates: Arc::new(templates),
@@ -3516,6 +3519,7 @@ system_prompt = "Inspect workflow failures."
     let (eligibility_nudge, _work_source) =
         InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(core_pool.clone()));
     let services = || RepositoryWatchServices {
+        checkout_runner: None,
         core_pool: core_pool.clone(),
         models: models.clone(),
         templates: templates.clone(),
@@ -3710,6 +3714,7 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     let runtime = RepositoryWatchRuntime::unstarted(
         module_pool.clone(),
         RepositoryWatchServices {
+            checkout_runner: None,
             core_pool: core_pool.clone(),
             models: Arc::new(models.clone()),
             templates: Arc::new(templates.clone()),

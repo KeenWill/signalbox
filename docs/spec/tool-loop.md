@@ -374,7 +374,8 @@ evidence commits as soon as execution ends, independently of semantic
 projection.
 
 Once every request in a running batch is resolved, one continuation transaction
-appends exactly one result entry per request in proposal order, consumes every
+appends exactly one result entry per request in proposal order, installs any
+staged runner replacement and appends its relocation boundary, consumes every
 pending steering input in ascending acceptance position and appends its entry
 after the results, derives the exact prefix-preserving frontier extension, and
 creates the next round's `Prepared` model call against that frontier. These
@@ -389,11 +390,13 @@ its `Prepared` call, and model execution closes that call `KnownFailed` before
 capability preparation or send.
 
 At most 256 MiB of projected frontier content may be rendered into one call's
-provider messages. The bound counts every kind of content the render clones, not
-tool evidence alone, and it is enforced once the projection names its entries
-and before any content is cloned, so an over-bound frontier is refused rather
-than materialized. The refusal closes the turn through the tool-round-limit
-terminal cause before capability preparation or send.
+provider messages. The bound counts cloned content and per-message and per-part
+representation overhead; tool evidence is also checked before its payloads are
+loaded, charging each request payload for every projected entry that retains a
+copy. It is enforced once the projection names its entries and before any
+content is cloned, so an over-bound frontier is refused rather than
+materialized. The refusal closes the turn through the tool-round-limit terminal
+cause before capability preparation or send.
 
 The result projection a stop consumes is bound to the interrupted turn: reusing
 the turn's current frontier identity is not sufficient, and a projection
@@ -426,6 +429,10 @@ the parked batch and the ended dispatch fence, or authenticates the returned
 correlation against the ended attempt; absent or cross-wired evidence fails
 closed. A delegation effect commits in the same transaction as its terminal
 tool-attempt row.
+
+The parent receives delegation content from the child's terminal result record.
+A child completion concatenates its completed call's ordered assistant text
+without a separator; absent or oversized text records `ChildResultUnavailable`.
 
 The provider bridge derives the provider-visible tool-call correlation from
 `ToolRequestId`, so provider-native identifier types and messages never cross
@@ -472,26 +479,30 @@ rejected as a changed-file patch path. A returned node id, head revision, or
 continuation is admitted by the same predicate as its argument counterpart, so
 it can be passed back as an argument. Every returned URL is one absolute
 credential-free HTTPS location. No code-host result has more than 100 collection
-members or more than 512 KiB of encoded JSON. Every bounded review-log list
-reports whether it is truncated together with its continuation cursor, and a
-verdict never treats a partial evidence page as complete. The code-host
-convergence-state and review-gate tools return the `signalbox-convergence`
-verdict from one complete snapshot and the daemon's `[convergence]` policy.
-Their repository argument must match that policy's repository without regard to
-case. Census and history updates are serialized per pull request. Failed and
-cancelled censuses release entries without successful history after their last
-waiter exits. Stack and thread-inventory tools remain separate reads. The
-authenticated job-log endpoint is the sole redirect-shaped exchange: after one
-302 the adapter validates the location, pins a wholly public destination set,
-and downloads credential-free. A read transport or server failure is an executor
-infrastructure failure, while a mutation transport loss, server failure, or
-malformed acknowledgement is commit-ambiguous. `change_request_thread_reply` and
-`change_request_thread_resolve` query thread ownership before they mutate, and a
-failure of that query classifies the mutation as not dispatched rather than
-ambiguous. HTTP failures retain content-free authentication, permission,
-rate-limit, not-found, conflict, validation, and server classes. Authentication
-refusals use the credential-unavailable detail. The adapter never returns
-code-host response bodies as error detail.
+members or more than 512 KiB of encoded JSON. Configured lower item limits size
+provider inventory pages, and repository content obeys both its own and the
+general result-text bound. Zero-sized collection policy is rejected at GitHub
+transport construction; escaped job-log text reserves its result metadata. Every
+bounded review-log list reports whether it is truncated together with its
+continuation cursor, and a verdict never treats a partial evidence page as
+complete. The code-host convergence-state and review-gate tools return the
+`signalbox-convergence` verdict from one complete snapshot and the daemon's
+`[convergence]` policy. Their repository argument must match that policy's
+repository without regard to case. Census and history updates are serialized per
+pull request. Failed and cancelled censuses release entries without successful
+history after their last waiter exits. Stack and thread-inventory tools remain
+separate reads. The authenticated job-log endpoint is the sole redirect-shaped
+exchange: after one 302 the adapter validates the location, pins a wholly public
+destination set, and downloads credential-free. A read transport or server
+failure is an executor infrastructure failure, while a mutation transport loss,
+server failure, or malformed acknowledgement is commit-ambiguous.
+`change_request_thread_reply` and `change_request_thread_resolve` query thread
+ownership before they mutate, and a failure of that query classifies the
+mutation as not dispatched rather than ambiguous. HTTP failures retain
+content-free authentication, permission, rate-limit, not-found, conflict,
+validation, and server classes. Authentication refusals use the
+credential-unavailable detail. The adapter never returns code-host response
+bodies as error detail.
 
 Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round
@@ -523,8 +534,6 @@ the hint until a full nudge buffer has capacity.
 - Instruction admission: the commit-result and continuation transactions append
   an `InstructionAdmission` and a successor instruction manifest for a
   successful `instructions_read`; see
-  [tool-loop design](../design/tool-loop.md).
-- Delivery of a delegated child's terminal result to the parent: see
   [tool-loop design](../design/tool-loop.md).
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).

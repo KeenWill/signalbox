@@ -13,6 +13,7 @@ mod blob;
 mod configuration;
 mod context_compaction;
 mod context_frontier;
+mod credential_availability;
 mod delivery_request;
 mod fatal_mismatch;
 mod git_remote;
@@ -24,6 +25,9 @@ mod model_call;
 mod model_execution;
 mod model_settings;
 mod program_journal;
+pub mod program_registration;
+/// Host-verified program session attribution.
+pub mod program_session;
 mod provider_evidence;
 mod queue_order;
 mod rate_limit;
@@ -55,7 +59,7 @@ pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
     SteeringBinding, SteeringReclassificationReason,
 };
-pub use actor::Actor;
+pub use actor::{Actor, ProgramActor};
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
 pub use blob::{
     BlobDerivation, BlobDerivationError, BlobDerivationProducer, BlobDigest, BlobDigestParseError,
@@ -82,6 +86,7 @@ pub use context_frontier::{
     ContextFrontier, ContextFrontierId, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
 };
+pub use credential_availability::{CredentialAvailabilityWait, CredentialAvailabilityWaitCause};
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use git_remote::{
     ConfiguredGitRemoteRecord, GitRemoteName, GitRemoteTextError, GitRemoteUrl,
@@ -153,8 +158,9 @@ pub use model_execution::{
     ProviderModelCallFailureCause, ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
     ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     RefusedModelCallTurnIdentities, ResolvedModelSelection, StopRequestedModelCallTurn,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,
-    ToolResultAttemptCorrelation, ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolDenialCorrelation,
+    ToolInadmissibleCorrelation, ToolResponsePartIdentity, ToolResultAttemptCorrelation,
+    ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
 };
 pub use model_settings::{
     AdjustedModelSettings, AnthropicServiceTier, CodexCliServiceTier, CompatibleModelSettings,
@@ -564,6 +570,11 @@ define_identity!(
 define_identity!(
     /// Identifies one command-bound runner workspace provisioning authorization.
     RunnerProvisioningAuthorizationId
+);
+
+define_identity!(
+    /// Identifies one immutable program registration.
+    ProgramRegistrationId
 );
 
 define_identity!(

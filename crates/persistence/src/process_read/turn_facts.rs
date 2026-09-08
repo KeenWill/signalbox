@@ -339,6 +339,9 @@ pub(super) async fn load_next_transcript_turn(
             turn.starting_frontier_id,
             turn.terminal_frontier_id,
             turn.active_phase_kind,
+            credential_wait.wait_attempt_id AS credential_wait_attempt_id,
+            credential_wait.frontier_id AS credential_wait_frontier_id,
+            credential_wait.cause AS credential_wait_cause,
             turn.child_wait_request_id,
             turn.current_attempt_id,
             turn.terminal_disposition_kind,
@@ -351,7 +354,15 @@ pub(super) async fn load_next_transcript_turn(
             turn.runner_recovery_tool_attempt_id,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
+            EXISTS (
+                SELECT 1 FROM credential_pool_terminal_exhaustion AS exhausted
+                 WHERE exhausted.session_id = turn.session_id
+                   AND exhausted.turn_id = turn.turn_id
+                   AND exhausted.terminal_model_call_id IS NULL
+            ) AS credential_pool_exhausted,
             turn.terminal_tool_attempt_id,
+            wait_failure.predecessor_model_call_id AS wait_failure_predecessor_call_id,
+            wait_predecessor.terminal_provider_failure_cause AS wait_failure_provider_cause,
             terminal_call.terminal_disposition_kind
                 AS terminal_model_call_disposition_kind,
             terminal_call.terminal_provider_failure_cause
@@ -488,6 +499,23 @@ pub(super) async fn load_next_transcript_turn(
            LEFT JOIN automatic_reconciliation AS automatic_reconciliation
              ON automatic_reconciliation.turn_id = turn.turn_id
             AND automatic_reconciliation.session_id = turn.session_id
+            AND NOT turn.delegation_runtime_terminal
+           LEFT JOIN credential_availability_wait AS credential_wait
+             ON credential_wait.turn_id = turn.turn_id AND credential_wait.session_id = turn.session_id
+            AND credential_wait.consumed_by_attempt_id IS NULL
+           LEFT JOIN credential_availability_wait_failure AS wait_failure
+             ON wait_failure.turn_attempt_id = turn.terminal_attempt_id
+           LEFT JOIN credential_availability_wait_release AS wait_release
+             ON wait_release.turn_attempt_id = turn.terminal_attempt_id
+           LEFT JOIN credential_availability_wait AS released_wait
+             ON released_wait.wait_attempt_id = wait_release.wait_attempt_id
+            AND released_wait.consumed_by_attempt_id = turn.terminal_attempt_id
+            AND released_wait.predecessor_model_call_id = wait_failure.predecessor_model_call_id
+           LEFT JOIN model_call AS wait_predecessor
+             ON wait_predecessor.model_call_id = released_wait.predecessor_model_call_id
+            AND wait_predecessor.turn_id = turn.turn_id AND wait_predecessor.session_id = turn.session_id
+            AND wait_predecessor.state_kind = 'terminal'
+            AND wait_predecessor.terminal_disposition_kind = 'known_failed'
            LEFT JOIN model_call AS terminal_call
              ON terminal_call.model_call_id = turn.terminal_model_call_id
             AND terminal_call.turn_attempt_id = turn.terminal_attempt_id

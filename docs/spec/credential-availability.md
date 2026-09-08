@@ -38,11 +38,12 @@ the operator surface that clears them is on
 Pool policies have immutable identities; each clearable exclusion retains its
 generation and origin, and selection ignores cleared generations.
 
-A selection attempt reaches one of five endings: selected, pre-call fail,
-post-failure fail, successor and terminal. They split on whether selection
-admitted a member, whether the attempt that met exhaustion was call-free, and
-whether a failed call's cause, pinned action and proof authorize a successor.
-Every exhaustion fails, whatever exhaustion value the pool configures.
+An admission selects a member, selects a credential wait, or fails. A bound
+same-credential retry whose credential has a durable availability exclusion
+before preparation fails before wait selection; `park` applies only to pool
+admission. A released wait that selects no member or wait fails through a fresh
+attempt, retaining a predecessor provider cause exactly when its chain issued a
+call.
 
 ## Design decisions
 
@@ -90,6 +91,15 @@ ending carries no terminal evidence, because the attempt that ends issued no
 provider request and no other attempt's call is its evidence; its terminal cause
 is pool exhaustion, never a provider failure.
 
+The pre-call exhaustion record names the pool-policy revision the admission
+resolved and carries contiguous member rows in policy order, each naming the
+member's exclusion, widest scope first. Partial, foreign or stale evidence fails
+reconstitution closed. The terminalizing commit emits `turn_failed` and
+`turn_credential_pool_exhausted`; its header retains the resolved pool-policy
+identity and member evidence rows attach in a separate table. A pre-projection
+header with a null pool-policy identity and no member rows reconstitutes as the
+ordinary failed turn without an exhaustion projection.
+
 Post-failure fail: the observation that closes a qualifying provider failure
 finds every member excluded. The turn terminalizes Failed and adds no further
 attempt; the predecessor attempt has already ended KnownFailure. The terminal
@@ -123,7 +133,9 @@ preparation skips that credential until the reset passes; after it passes, the
 member is admitted again. A chain exclusion is written when a failure rotates
 the pool and removes that member for the remainder of the turn. If another
 durable action excludes a retry successor's credential before preparation, that
-successor exhausts instead of selecting another member.
+successor fails instead of selecting another member; when a fallback member
+remains admissible, the failure keeps the generic failed projection and records
+no pool exhaustion.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
@@ -132,7 +144,10 @@ increasing jittered delay, each capped at five minutes
 successor after a quota failure is immediate. Quota and authentication failures
 bypass same-credential retry and apply their pinned actions immediately. A
 same-credential retry derives local backoff from that credential's recorded
-attempt count; rotation starts the successor's backoff count at one.
+attempt count; rotation starts the successor's backoff count at one. Wait
+release honors the parked successor's retry deadline before consuming the wait.
+An early wake stays pending, and scheduling eligibility begins only when that
+retry deadline expires.
 
 The required finite positive
 `numeric_bounds.max_same_credential_attempts_per_turn` bounds recorded calls on
@@ -145,30 +160,93 @@ proof except for credential-rejection rotation, non-transient cause without
 `switch_now`, or transient cause at its bound without `switch_now` authorizes no
 successor.
 
-## Planned
+Exhausted-wait: no member is admissible and the frozen policy selects a wait.
+Exhaustion under `fail` never selects a wait; `park` selects one only when some
+member's every active exclusion can be cleared by a wake. A chain exclusion
+never qualifies. The attempt ends call-free WithoutStop(YieldedToDurableWait),
+the active turn keeps its session slot, and the transaction appends no
+transcript entry.
 
-- Contended-wait: an exhaustion in which at least one member was skipped only
-  for its concurrency bound parks the turn with closed cause contended
-  ([design](../design/credential-availability.md)).
-- Exhausted-wait: an exhaustion in which nothing was skipped for a bound, and a
-  wait is selected, parks the turn with closed cause exhausted
-  ([design](../design/credential-availability.md)).
-- Wait-transition fail (no call): a released wait that finds the pool exhausted
-  before this chain issued a call terminalizes the turn Failed through a fresh
-  call-free attempt ([design](../design/credential-availability.md)).
-- Wait-transition fail (after call): the same release and exhaustion after this
-  chain issued a call; a fresh call-free attempt is opened and ended
-  KnownFailure ([design](../design/credential-availability.md)).
-- Park selects a wait only when some member's every active exclusion is one a
-  wake can clear ([design](../design/credential-availability.md)).
-- Releasing a parked wait resumes the chain that parked and re-evaluates
-  admission from current state ([design](../design/credential-availability.md)).
-- Every exclusion a wait recorded other than a chain exclusion is re-read from
-  its current active state at release, so a passed reset or an authorized clear
-  readmits that member ([design](../design/credential-availability.md)).
-- The typed `turn_credential_pool_exhausted` live event for the pre-call
-  exhaustion ending ([design](../design/credential-availability.md)).
-- Per-member exclusion evidence rows on the pre-call exhaustion record
-  ([design](../design/credential-availability.md)).
-- Honoring `on_pool_exhausted = "park"` on the pre-call path
-  ([design](../design/credential-availability.md)).
+A fresh availability chain resolves the current catalog; calls and waits retain
+the policy identity governing their chain. The wait retains its latest frontier,
+complete member exclusion snapshot and optional deadline. A member contributes a
+deadline only when every active exclusion expires: its deadline is their latest
+reset, and the wait's is the earliest member deadline. Chain exclusions,
+displacements and quarantines do not expire by time passage. If the refreshed
+admission read finds a member admissible, the availability successor continues
+to credential selection instead of terminalizing pool exhaustion.
+
+An eligible wait reruns admission against current exclusions under the session
+lock. Re-parking rewrites the same wait's evidence and deadline without another
+attempt. Successful release consumes the wait and prepares the selected call on
+a fresh immediate-successor attempt in one transaction. Its wait-release origin
+retains any predecessor call and non-acceptance proof; release never readmits a
+chain-excluded member.
+
+A release that selects neither a member nor another wait consumes the wait,
+opens a fresh call-free attempt, ends it KnownFailure, reclassifies pending
+steering as queued successors, and terminalizes Failed. Without a predecessor
+call its producer and evidence are pre-call exhaustion's; with a predecessor
+call its cause is that provider failure, never pool exhaustion. An accepted stop
+instead consumes the wait, opens a fresh immediate successor with its applied
+interrupt proof, ends it AfterCancellation(Cancelled), and appends TurnCancelled
+after the wait frontier while reclassifying pending steering.
+
+A due deadline makes a wait eligible. Commit-time wait notifications nudge the
+scheduler; periodic invocation recovery also nudges eligible waits, including
+deadlines and dropped hints, without a configured reconciliation sweep. A
+durable member-availability update or a successful operator clear grants
+eligibility to waits naming that member in the same transaction. Eligibility
+prepares no call and consumes no wait. Startup alone leaves exhausted waits
+unchanged; deadline-free waits have no timer. Pooled capacity observations and
+wait admission acquire the model-call order guard, profile action locks and
+invocation-capacity locks before updating waits.
+
+Contended-wait: no member is admitted and at least one otherwise-admissible
+member is skipped only for its configured invocation bound. Either exhaustion
+policy enters the same call-free wait with cause contended, retaining every
+bounded member and its reservation identities alongside excluded members. A
+same-credential retry blocked only by its invocation bound enters this wait and
+retains its retry binding.
+
+Process registration and completion observation apply only to calls with a
+retained invocation-capacity reservation.
+
+Preparation reserves only its selected `codex_home` member; invocation
+completion releases that reservation and grants eligibility to contended waits
+naming that bounded member in one transaction. Competing releases admit only the
+waiter that acquires capacity. Re-parking recomputes all exclusions, reservation
+identities and the deadline. When every bounded member becomes excluded,
+admission reruns the exhaustion policy and converts to exhausted-wait in place
+or terminalizes. Startup re-evaluates contended waits against current
+registrations and retained reservations; restart alone grants no eligibility.
+Invocation identity retains the process-group ID and its leader's start time; a
+reused numeric ID does not retain the prior invocation's reservation. The daemon
+rechecks retained invocation groups until their exit permits reservation
+release. Release and periodic invocation recovery nudge eligible waits even
+without a configured reconciliation sweep; recovery retries dropped hints and
+wakes deferred by retry deadlines. Startup and periodic recovery release
+null-group reservations once the call is terminal; live calls retain their
+reservations. Failed registration retains the observed group through cleanup so
+proven group exit releases capacity while the call retains its proven-unsent
+outcome when registration aborts before request delivery.
+
+A parked turn projects `active_awaiting_credential_availability` with its ended
+wait attempt and closed cause. Committed wait changes require connected
+followers to resynchronize their snapshots; no transcript entry is appended.
+Transcript reads and initial follow snapshots retain the active turn and its
+slot without rejection detail. Release admission, call preparation, and send
+authorization use the wait's retained effective target with its retained policy;
+a missing current selection leaves the wait unconsumed. Release pins a pre-call
+wait's retained target on its turn, and domain call preparation retains that pin
+across catalog reloads. The rendered provider operation uses that retained
+target. A post-failure wait retains its already mapped serving target separately
+from the turn's base-target pin; successor delivery does not apply a reloaded
+fast-mode mapping to that pin. Parking retains the exclusions that selected the
+wait. An exclusion with an absent or zero record generation is the oldest
+generation and cannot make its member wakeable by an operator clear.
+
+A terminal release after a predecessor call projects
+`failed_after_credential_wait` with the fresh terminal attempt and the
+predecessor's provider failure. A release without a predecessor uses the typed
+pre-call exhaustion state and live event.

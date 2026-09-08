@@ -19,6 +19,8 @@ mod repo_watch;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
+mod scheduler_slot;
+pub use scheduler_slot::with_scheduler_slot_released;
 mod search;
 mod session_delegation;
 mod session_live;
@@ -92,17 +94,19 @@ pub use model_execution::{
     AuthorizeModelCallTransaction, AvailabilitySuccessorOutcome,
     CommitModelCallObservationTransaction, CredentialPoolExhaustedOutcome,
     FailPreparedModelCallTransaction, InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit,
-    ModelAttachmentStub, ModelCallAuthorizationReread, ModelCallCapabilityPreparation,
-    ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
-    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
-    ModelCallInputTokenCounter, ModelCallObservationCommitOutcome, ModelCallProvider,
-    ModelCallTerminalIdentityCandidates, ModelConversationMessage, ModelFrontierRenderingError,
-    ModelToolResultContent, ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, PreparedModelCallFailureCause, PreparedModelOperation,
-    ProviderReasoningProvenance, RetainedModelCallExecutionState,
-    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallCapability,
-    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
-    UuidV7ModelCallExecutionIdGenerator, render_model_user_content,
+    MAX_RENDERED_ATTACHMENT_STUB_BYTES, MAX_RETAINED_FRONTIER_CONTENT_BYTES, ModelAttachmentStub,
+    ModelCallAuthorizationReread, ModelCallCapabilityPreparation, ModelCallCredentialReference,
+    ModelCallExecutionError, ModelCallExecutionIdGenerator, ModelCallExecutionOutcome,
+    ModelCallExecutionService, ModelCallInputTokenCount, ModelCallInputTokenCounter,
+    ModelCallObservationCommitOutcome, ModelCallProvider, ModelCallTerminalIdentityCandidates,
+    ModelConversationMessage, ModelFrontierRenderingError, ModelToolResultContent,
+    ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome, PrepareModelCallTransaction,
+    PreparedModelCallFailureCause, PreparedModelOperation, ProviderReasoningProvenance,
+    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus, ScriptedModelCallCapability, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
+    projected_frontier_container_bytes, projected_frontier_content_bytes,
+    render_model_user_content,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
@@ -152,7 +156,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
-    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, with_released_scheduler_admission,
 };
 pub use search::{
     MAX_SEARCH_HIGHLIGHTS_PER_RESULT, SearchArtifactId, SearchArtifactProjection,
@@ -180,11 +184,19 @@ pub use session_timeline::{
     ReadSessionTimelineService, SessionTimelineBounds, SessionTimelineDescriptor,
     SessionTimelineDetail, SessionTimelineDetailBody, SessionTimelineDetailPage,
     SessionTimelineEventKind, SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts,
-    SessionTimelineWindow, SessionWorkFacts, TimelineAddress, TimelineBlobReference,
-    TimelineBodyContinuation, TimelineBodyField, TimelineContinuation, TimelineDetailContinuation,
+    SessionTimelineWindow, SessionWorkFacts, TimelineAddress, TimelineApprovalActor,
+    TimelineApprovalDecision, TimelineBlobReference, TimelineBodyContinuation, TimelineBodyField,
+    TimelineBoundChildAction, TimelineContinuation, TimelineDelegationDetail,
+    TimelineDelegationOutcome, TimelineDelegationPolicy, TimelineDelegationProvenance,
+    TimelineDelegationReason, TimelineDelegationWaitMode, TimelineDetailContinuation,
     TimelineDetailCursor, TimelineDetailLimitError, TimelineDetailLimits,
-    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage, TimelineTextExcerpt,
-    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimitError,
+    TimelineGoalBlockedReason, TimelineGoalEvent, TimelineImportedEvidence,
+    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelSettingsDetail,
+    TimelineModelUsage, TimelineOwnershipTransition, TimelineReconciliationOperation,
+    TimelineRunnerSandboxPosture, TimelineRunnerState, TimelineSessionOutcome,
+    TimelineSessionState, TimelineTextExcerpt, TimelineToolApprovalPosture, TimelineToolAttempt,
+    TimelineToolBatchState, TimelineToolEffectPosture, TimelineToolSandboxPosture,
+    TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimitError,
     TimelineWindowLimits, max_timeline_detail_bytes, max_timeline_detail_items,
     max_timeline_window_bytes, max_timeline_window_items, min_timeline_detail_bytes,
     min_timeline_window_bytes, timeline_detail_envelope_bytes,
@@ -254,3 +266,6 @@ pub use workspace_instructions::{
     InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
     InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
 };
+
+/// Verified host-side session attribution for program input.
+pub mod program_session;

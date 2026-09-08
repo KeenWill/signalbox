@@ -118,6 +118,8 @@ pub struct ModelOperation<C> {
     pub requested_target: RequestedTarget,
     /// The exact hub-resolved model identifier this operation must use.
     pub resolved_target: ResolvedTarget,
+    /// Durable mapped serving target; adapters skip catalog remapping for this call.
+    pub retained_mapped_target: Option<ResolvedTarget>,
     /// System instructions, when the caller supplies any.
     pub system: Option<String>,
     /// Conversation history, oldest first.
@@ -159,6 +161,7 @@ impl<C> ModelOperation<C> {
             credential_reference,
             requested_target,
             resolved_target,
+            retained_mapped_target: None,
             system: None,
             messages,
             settings,

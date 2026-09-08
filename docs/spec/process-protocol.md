@@ -78,7 +78,9 @@ an event kind with no projection advances that cursor and reaches no follower. A
 database-scoped advisory guard and a generation fence in
 `crates/persistence/src/hub_fence.rs` enforce one active daemon process per
 database, and therefore one dispatcher and its fan-outs. The guard is taken on a
-dedicated connection before migrations run and held until shutdown.
+dedicated connection before migrations run and held until shutdown. A committed
+credential-wait change sends `resync_required` to that session's followers; the
+database notification listener reconnecting requires all followers to resync.
 
 ## Design decisions
 
@@ -221,6 +223,10 @@ part of the canonical decision payload; the session named by
 `override_denied_tool_request` is part of its canonical payload because the
 recorded override is a session-scoped standing fact.
 
+A decision on the earliest delegated request without terminal judge evidence
+records an `awaiting_approval_judge` rejection and returns
+`tool_request_awaiting_approval_judge`.
+
 A one-segment root path is legal only under the `root_global_read` placement,
 which records the explicit intent that the session gains global conversation
 read. The client accepts a placement receipt only when the session and placement
@@ -253,8 +259,10 @@ review-findings listing takes its run and its findings from separate
 transactions. Every reported duration is clamped nonnegative and sampled against
 the database transaction timestamp, not a client clock.
 
-Every read that holds a pooled connection across more than one statement takes
-one snapshot-reader admission; the single-statement defaults read takes none.
+Except for immutable credential-pool policy validation, every read that holds a
+pooled connection across more than one statement takes one snapshot-reader
+admission; the single-statement defaults read takes none. Pool-policy validation
+takes no admission so a follower can validate its snapshot while holding one.
 Every request states its admission class before dispatch, so no read verb
 reaches the pool by omission. The reader budget leaves at least two pool
 connections outside snapshot work.
@@ -290,9 +298,14 @@ values, and a client never infers the semantic arm by reparsing either string.
 The projection resolves the domain's reference-only tool entries before crossing
 the wire, so a client never needs private storage access. A physically ambiguous
 tool attempt never becomes an execution result; it projects as `tool_closed`,
-carrying the tool request identity and the closure content and omitting the
-attempt identity. `operator_action_required` is false while automatic recovery
-is scheduled or attempting and true only after the recovery budget in
+carrying the tool request identity, closure content, and required Boolean
+`approved_before_close`, and omitting the attempt identity.
+`approved_before_close` is true exactly when the request had a recorded approval
+before closure; an undecided request closed by turn end carries false. A
+`tool_denied` entry carries required Boolean `override_recorded`, true when that
+denial has its one permitted user override, including after retirement.
+`operator_action_required` is false while automatic recovery is scheduled or
+attempting and true only after the recovery budget in
 [turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md) is
 exhausted.
 
@@ -571,9 +584,62 @@ belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
 version-1 encoding, and the closed receipt algebra belong here, and a later
 incompatible shape requires a new protocol version.
 
+Transcript snapshot starts include nullable `repository_watch` provenance
+resolved from the retained dispatch ledger.
+
+If counted-activation revalidation selects pre-call exhaustion failure,
+activation and terminalization commit together before execution resumes.
+
+When no pool member is admissible, pre-call exhaustion projects
+`failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
+as a `transcript_turn` state variant,
+`turn_credential_pool_exhausted { turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id, pool_policy_id, policy_members, members }`
+as its live event, and the read
+`read_credential_pool_policy { session_id, turn_id, pool_policy_id }` answered
+by `credential_pool_policy { pool_policy_id, policy_members }`. The read is
+admitted only when the caller may read the named session and its named turn
+references that exact immutable policy; a mismatch is `unknown_pool_policy`, and
+the response reconstitutes the policy header and membership rows directly rather
+than copying either failure projection. `policy_members` is the immutable
+policy's complete ordered array of profile references; `members` has the same
+length, and each evidence item's `profile` equals the same-ordinal
+`policy_members` value. Each item carries `profile`, a nullable
+`reset_at_unix_ms`, and one closed `exclusion`:
+`profile_quarantine { record_generation }`,
+`membership_exclusion { record_generation }`,
+`session_displacement { record_generation }`,
+`chain_exclusion { predecessor_model_call_id }`,
+`transient_exclusion { observation_model_call_id }`, or
+`headroom_reserve { observed_headroom_percent, reserve_percent }` without a
+generation. A member satisfying several exclusions reports exactly one, chosen
+in that order, widest scope first, so two producers cannot describe one
+exhaustion differently. `reset_at_unix_ms` is present only when every exclusion
+active for the member at the failure commit expires at the reset it reports, and
+is then the latest of them. The snapshot and event carry no credential bytes,
+path, provider prose, or current-configuration lookup, and the projection is
+never paginated or truncated; configuration admission bounds each profile and
+pool name to 256 UTF-8 bytes and each pool to 1,024 members so the duplicated
+evidence fits one frame under worst-case JSON escaping. The non-null
+`record_generation` is zero, the oldest generation, for an active action without
+a projection generation. OAuth quarantine writes retain a profile-quarantine
+exclusion tied to the authorization generation; reauthorization retires its
+active state.
+
+In the exhaustion projection, `members` and `policy_members` are equal in length
+and order, the snapshot state and the live event carry identical `members`, the
+policy read returns the same inventory, and the client exposes the terminal
+state only after those checks pass.
+
+Credential admission waits project the active turn state
+`active_awaiting_credential_availability`, carrying the call-free ended
+`wait_attempt_id` and the closed `contended` or `exhausted` cause. The terminal
+client keeps following that turn.
+
+A terminal credential wait release after a provider call projects
+`failed_after_credential_wait`, naming the fresh call-free terminal attempt and
+its known-failed predecessor with the retained provider cause. Its live terminal
+event is `turn_failed`; it emits no pool-exhaustion event.
+
 ## Planned
 
-- Runner creation and status requests, and the status read's failure evidence:
-  [design](../design/process-protocol.md).
-- Typed projection of credential-pool exhaustion and of the
-  credential-availability wait: [design](../design/process-protocol.md).
+None.

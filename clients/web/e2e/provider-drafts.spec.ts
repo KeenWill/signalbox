@@ -112,6 +112,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
         latest_address: { event_sequence: '41' },
         observed_through: holdLive ? '42' : '41',
         work: { active_turn_count: holdLive ? '0' : '1', queued_turn_count: '0' },
+        repository_watch: null,
         sizes: {
           item_count: '1',
           projected_text_bytes: '0',
@@ -124,8 +125,8 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
   )
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/sessions?workspace=true')
-  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionId)
-  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await page.getByRole('textbox', { name: 'Session ID' }).fill(sessionId)
+  await page.getByRole('button', { name: 'Open', exact: true }).click()
   await expect(page.getByText('Following live session')).toBeVisible()
   await page.waitForFunction(() => Reflect.get(window, 'fixtureFollowReady') === true)
   await page.evaluate(

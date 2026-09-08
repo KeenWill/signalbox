@@ -903,6 +903,10 @@ impl ActiveTurnSchedulingReconstitutionInput {
         interrupted_tool_attempt: option::Option<ToolAttemptId>,
         source_frontier: option::Option<ContextFrontierId>,
     ) -> Self;
+    pub const fn awaiting_credential_availability(
+        owning_turn: TurnId,
+        wait: CredentialAvailabilityWait,
+    ) -> Self;
     pub const fn owning_turn(&self) -> TurnId;
 }
 ```
@@ -1027,7 +1031,10 @@ impl ContinuationRoundReconstitutionInput {
 pub struct AcceptedInputSchedulingReconstitutionInput {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl AcceptedInputSchedulingReconstitutionInput {
-    pub fn with_inadmissible_requests(self, requests: vec::Vec<ToolRequest>) -> Self;
+    pub fn with_inadmissible_requests(
+        self,
+        requests: vec::Vec<ToolInadmissibleCorrelation>,
+    ) -> Self;
     pub fn with_runner_placement_frontiers(self, frontiers: vec::Vec<ContextFrontierId>) -> Self;
     pub fn new(
         session: Session,

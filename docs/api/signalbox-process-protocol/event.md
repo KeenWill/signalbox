@@ -79,6 +79,15 @@ pub enum SessionEvent {
         completion_entry_id: CanonicalUuid,
         terminal_frontier_id: CanonicalUuid,
     },
+    TurnCredentialPoolExhausted {
+        turn_id: CanonicalUuid,
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        failure_entry_id: CanonicalUuid,
+        pool_policy_id: CanonicalUuid,
+        policy_members: vec::Vec<string::String>,
+        members: vec::Vec<CredentialPoolMemberEvidence>,
+    },
     TurnFailed {
         turn_id: CanonicalUuid,
         failure_entry_id: CanonicalUuid,

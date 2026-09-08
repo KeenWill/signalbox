@@ -1,5 +1,5 @@
 import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
+import { ChevronDown, ChevronRight, SkipBack, SkipForward } from 'lucide-react'
 import {
   type FormEvent,
   type KeyboardEvent,
@@ -11,10 +11,10 @@ import {
   useState,
 } from 'react'
 import { invokeCommand } from './commands'
-import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
+import { SessionItemDetail } from './SessionItemDetail'
 import { SessionTranscriptText } from './SessionTranscriptText'
 import {
   BoundedSessionHistory,
@@ -120,6 +120,7 @@ export const pruneExpandedSessionItems = (
 export function SessionWorkspaceSurface({
   initialSessionId,
   onSessionOpen,
+  onReturnToCatalog,
   onSelectionEvidence,
   onTimelineIds,
   onTimelineWindowAvailable,
@@ -132,6 +133,7 @@ export function SessionWorkspaceSurface({
 }: {
   initialSessionId?: string
   onSessionOpen: (sessionId: string) => void
+  onReturnToCatalog: () => void
   onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
@@ -154,6 +156,7 @@ export function SessionWorkspaceSurface({
     initialSessionId === undefined ? undefined : app.lastLogicalPositions[initialSessionId],
   )
   const [refetchRequest, setRefetchRequest] = useState(0)
+  const [showEvents, setShowEvents] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const manualAnchorRef = useRef<SessionWindowAnchor | null>(null)
@@ -267,7 +270,10 @@ export function SessionWorkspaceSurface({
     })
   }, [timelineIds])
 
-  useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
+  useEffect(
+    () => onTimelineIds(showEvents ? timelineIds : []),
+    [onTimelineIds, timelineIds, showEvents],
+  )
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
     const preferred =
@@ -286,7 +292,7 @@ export function SessionWorkspaceSurface({
       (item) => item.address.event_sequence === app.selectedTimeline,
     )
     onSelectionEvidence(
-      sessionId !== null && selectedItem !== undefined
+      showEvents && sessionId !== null && selectedItem !== undefined
         ? {
             sessionId,
             eventSequence: selectedItem.address.event_sequence,
@@ -295,7 +301,13 @@ export function SessionWorkspaceSurface({
           }
         : null,
     )
-  }, [app.selectedTimeline, displayedSession?.window.items, onSelectionEvidence, sessionId])
+  }, [
+    app.selectedTimeline,
+    displayedSession?.window.items,
+    onSelectionEvidence,
+    sessionId,
+    showEvents,
+  ])
   useEffect(() => () => onSelectionEvidence(null), [onSelectionEvidence])
   useEffect(() => {
     setExpanded((current) =>
@@ -418,6 +430,7 @@ export function SessionWorkspaceSurface({
       toggleTimelineExpansion: toggleSelectedExpansion,
     })
   const handleTimelineKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target instanceof Element && event.target.closest('.session-item-detail')) return
     if ((event.key === 'Enter' || event.key === ' ') && selected !== null) {
       event.preventDefault()
       invokeTimelineCommand('selection.toggleExpansion')
@@ -453,13 +466,19 @@ export function SessionWorkspaceSurface({
     <div className="surface-body session-workspace-surface">
       <form className="session-open-form" onSubmit={submitSession}>
         <label>
-          Exact session ID
+          Session ID
           <input
             ref={entryInput}
-            aria-label="Exact session ID"
+            aria-label="Session ID"
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}
             onChange={(event) => setDraftId(event.target.value.trim())}
+            onKeyDown={(event) => {
+              if (event.key !== 'Escape') return
+              event.preventDefault()
+              event.stopPropagation()
+              onReturnToCatalog()
+            }}
             pattern={NATIVE_SESSION_ID_PATTERN}
             required
           />
@@ -468,38 +487,25 @@ export function SessionWorkspaceSurface({
           type="submit"
           disabled={!isCanonicalSessionId(draftId.trim()) || timelineCapability !== 'available'}
         >
-          Open workspace
+          Open
         </button>
       </form>
 
-      {sessionId === null ? (
-        <section className="surface-empty session-entry" aria-labelledby="session-entry-heading">
-          <Radio aria-hidden="true" />
-          <div>
-            <span
-              className={`availability-tag ${timelineCapability === 'available' ? 'ready' : ''}`}
-            >
-              {timelineCapability === 'checking'
-                ? 'Checking timeline capability'
-                : timelineCapability === 'available'
-                  ? 'Timeline reads available'
-                  : 'Timeline reads unavailable'}
-            </span>
-            <h2 id="session-entry-heading">Open a known session by immutable identity</h2>
-            <p>
-              {timelineCapability === 'available'
-                ? 'Enter an exact server-issued ID to read bounded history, follow live updates, and send a message.'
-                : 'The validated daemon bootstrap has not authorized bounded session timeline reads. Signalbox will not call or advertise that surface until the capability is available.'}
-            </p>
-          </div>
-        </section>
+      {sessionId === null || timelineCapability !== 'available' ? (
+        <p className="session-entry" role="status">
+          {timelineCapability === 'checking'
+            ? 'Connecting…'
+            : timelineCapability === 'unavailable'
+              ? 'Sessions unavailable'
+              : 'Session ID required'}
+        </p>
       ) : session.isError ? (
         <p className="session-load-state" role="alert">
-          The daemon could not provide this bounded session window: {session.error.message}
+          Session unavailable: {session.error.message}
         </p>
       ) : displayedSession === undefined ? (
         <p className="session-load-state" role="status">
-          Loading descriptor and bounded history…
+          Loading session…
         </p>
       ) : (
         <section className="session-workspace" aria-labelledby="session-workspace-heading">
@@ -508,16 +514,8 @@ export function SessionWorkspaceSurface({
           </p>
           <header className="session-workspace-header">
             <div>
-              <span className="eyebrow">Stable timeline identity</span>
               <h2 id="session-workspace-heading">{sessionId}</h2>
-              <p>
-                {displayedSession.active ? 'Active' : 'Inactive'} ·{' '}
-                {displayedSession.anchor.kind === 'first'
-                  ? 'opened at first'
-                  : displayedSession.anchor.kind === 'latest'
-                    ? 'opened near latest'
-                    : 'restored logical position'}
-              </p>
+              <p>{displayedSession.active ? 'Active' : 'Inactive'}</p>
             </div>
             <dl className="session-telemetry">
               <div>
@@ -538,6 +536,28 @@ export function SessionWorkspaceSurface({
               </div>
             </dl>
           </header>
+          {displayedSession.descriptor.repository_watch && (
+            <section className="session-provenance" aria-label="Repository watch origin">
+              Repository watch · {displayedSession.descriptor.repository_watch.repository}
+              {displayedSession.descriptor.repository_watch.pull_request !== null &&
+                ` #${displayedSession.descriptor.repository_watch.pull_request}`}
+              {' · Rule '}
+              {displayedSession.descriptor.repository_watch.rule_id}
+              {' v'}
+              {displayedSession.descriptor.repository_watch.rule_revision}
+              {' · '}
+              {displayedSession.descriptor.repository_watch.event_kind.replaceAll('_', ' ')}
+              <details>
+                <summary>Dispatch provenance</summary>
+                <p>
+                  Dispatch {displayedSession.descriptor.repository_watch.dispatch_id}
+                  {' · Action '}
+                  {displayedSession.descriptor.repository_watch.action_ordinal}
+                </p>
+                <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
+              </details>
+            </section>
+          )}
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
             <button
               type="button"
@@ -562,7 +582,7 @@ export function SessionWorkspaceSurface({
                 }
               }}
             >
-              Previous window
+              Previous
             </button>
             <button
               type="button"
@@ -575,10 +595,10 @@ export function SessionWorkspaceSurface({
                 }
               }}
             >
-              Next window
+              Next
             </button>
             <span>
-              {displayedSession.window.items.length} bounded items ·{' '}
+              {displayedSession.window.items.length} events ·{' '}
               {displayedSession.window.projected_structured_bytes} B
             </span>
           </div>
@@ -624,8 +644,12 @@ export function SessionWorkspaceSurface({
               ))}
             </section>
           )}
-          {transcriptAvailable &&
-            displayedSession.descriptor.sizes.projected_text_bytes !== '0' && (
+          <section
+            ref={showEvents ? undefined : timelineRef}
+            tabIndex={showEvents ? -1 : 0}
+            aria-label="Conversation"
+          >
+            {transcriptAvailable ? (
               <SessionTranscriptText
                 sessionId={sessionId ?? ''}
                 first={
@@ -639,8 +663,21 @@ export function SessionWorkspaceSurface({
                 observed={displayedSession.descriptor.observed_through}
                 limits={transcriptLimits}
               />
+            ) : (
+              <p>Conversation unavailable</p>
             )}
+          </section>
+          <label className="session-events-toggle">
+            <input
+              type="checkbox"
+              checked={showEvents}
+              onChange={(event) => setShowEvents(event.target.checked)}
+            />
+            Events
+          </label>
+          {/* biome-ignore lint/a11y/useSemanticElements: The bounded timeline uses a scrollable ARIA grid. */}
           <div
+            hidden={!showEvents}
             className={`session-timeline presentation-${app.detail}`}
             aria-label="Session timeline"
             aria-activedescendant={
@@ -648,8 +685,8 @@ export function SessionWorkspaceSurface({
                 ? `session-timeline-option-${selected}`
                 : undefined
             }
-            ref={timelineRef}
-            role="listbox"
+            ref={showEvents ? timelineRef : undefined}
+            role="grid"
             tabIndex={0}
             onKeyDown={handleTimelineKeyDown}
           >
@@ -657,25 +694,33 @@ export function SessionWorkspaceSurface({
               const id = item.address.event_sequence
               const isExpanded = expanded.has(id)
               return (
+                // biome-ignore lint/a11y/useSemanticElements: Expanded timeline rows use the scrollable grid layout.
                 <div
                   id={`session-timeline-option-${id}`}
                   key={id}
-                  role="option"
+                  role="row"
                   aria-controls={`session-timeline-detail-${id}`}
                   aria-describedby={`session-timeline-disclosure-${id}`}
                   aria-selected={selected === id}
+                  aria-expanded={isExpanded}
                   tabIndex={-1}
                   ref={(node) => {
                     if (node) rowRefs.current.set(id, node)
                     else rowRefs.current.delete(id)
                   }}
                   className={selected === id ? 'selected' : undefined}
-                  onClick={() => {
+                  onClick={(event) => {
+                    if (
+                      event.target instanceof Element &&
+                      event.target.closest('.session-item-detail')
+                    )
+                      return
                     select(id)
                     invokeTimelineCommand('selection.toggleExpansion')
                     timelineRef.current?.focus()
                   }}
                   onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return
                     if (event.key !== 'Enter' && event.key !== ' ') return
                     event.preventDefault()
                     event.stopPropagation()
@@ -684,42 +729,37 @@ export function SessionWorkspaceSurface({
                     timelineRef.current?.focus()
                   }}
                 >
-                  <span id={`session-timeline-disclosure-${id}`} className="sr-only">
-                    {isExpanded ? 'Expanded' : 'Collapsed'}
-                  </span>
-                  <div className="session-item-summary">
-                    {isExpanded ? (
-                      <ChevronDown aria-hidden="true" />
-                    ) : (
-                      <ChevronRight aria-hidden="true" />
-                    )}
-                    <span className="session-address">{id}</span>
-                    <strong>{item.kind.replaceAll('_', ' ')}</strong>
-                    <small>{item.projected_structured_bytes} B</small>
-                  </div>
-                  {isExpanded && (
-                    <>
-                      <dl id={`session-timeline-detail-${id}`} className="session-item-detail">
-                        <div>
-                          <dt>Address</dt>
-                          <dd>
-                            {sessionId}:{id}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt>Projection</dt>
-                          <dd>
-                            {transcriptAvailable
-                              ? 'Durable event metadata; message text appears in the transcript above'
-                              : 'Durable event metadata; transcript text is unavailable'}
-                          </dd>
-                        </div>
-                      </dl>
-                      {item.kind === 'input_accepted' && (
-                        <MissingAttachmentState placement="transcript" />
+                  {/* biome-ignore lint/a11y/useSemanticElements: Detail content uses the scrollable grid layout. */}
+                  <div role="gridcell" tabIndex={-1}>
+                    <span id={`session-timeline-disclosure-${id}`} className="sr-only">
+                      {isExpanded ? 'Expanded' : 'Collapsed'}
+                    </span>
+                    <div className="session-item-summary">
+                      {isExpanded ? (
+                        <ChevronDown aria-hidden="true" />
+                      ) : (
+                        <ChevronRight aria-hidden="true" />
                       )}
-                    </>
-                  )}
+                      <span className="session-address">{id}</span>
+                      <strong>{item.kind.replaceAll('_', ' ')}</strong>
+                      <small>{item.projected_structured_bytes} B</small>
+                    </div>
+                    {isExpanded && sessionId !== null && (
+                      <div id={`session-timeline-detail-${id}`} className="session-item-detail">
+                        {transcriptAvailable ? (
+                          <SessionItemDetail
+                            key={`${sessionId}:${id}`}
+                            sessionId={sessionId}
+                            item={item}
+                            limits={transcriptLimits}
+                            onComplete={() => timelineRef.current?.focus()}
+                          />
+                        ) : (
+                          <p>Timeline detail is unavailable.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )
             })}
@@ -733,6 +773,7 @@ export function SessionWorkspaceSurface({
           activeState={live ? (live.active?.state.kind ?? null) : undefined}
           stateUnavailable={followFailed && live === null}
           onAccepted={refetchSession}
+          onEscape={() => entryInput.current?.focus()}
         />
       )}
     </div>

@@ -41,12 +41,17 @@
 //!   session lock.
 //!
 //! Advisory-lock protocols:
+//! - `oauth_credential`: the `oauth-registration-catalog` transaction advisory lock is
+//!   exclusive for registration replacement and shared for readers, before profile row locks.
+//!   Exchange completion takes its `durable_command` row between the catalog and profile locks.
 //! - `hub_fence::advance_hub_fence`: after `HUB_FENCE_GENERATION`, exclusive
 //!   `pg_advisory_xact_lock` on the prior generation's `advisory_key`, then `pg_try_advisory_lock`
 //!   on that same key to retain it across commit. `AdvancedHubFence::connect_pool` takes
 //!   `pg_advisory_lock_shared` on the pool generation for each connection's lifetime;
 //!   `retire_hub_fence_generation` takes exclusive `pg_advisory_lock` on it.
 //! - The following use exclusive `pg_advisory_xact_lock` with `hashtextextended(key, 0)`:
+//!   - `model_execution::reserve_frontier_write_identities`: candidate identity keys
+//!     in sorted lock-key order, before the frontier writer's ordering guard.
 //!   - `model_execution::acquire_model_call_outbox_order_guard`: the
 //!     `MODEL_CALL_OUTBOX_ORDER_GUARD` key before credential or outbox locks;
 //!     `lock_credential_pool_action_head`: `credential_pool_action_head:` plus profile reference,
@@ -55,6 +60,10 @@
 //!     and pull-request number, before target admission or release.
 //!   - `search::SearchRepository::publish`: source kind and artifact identity joined with
 //!     `chr(31)`, before identity checks/write.
+//!
+//! - `credential_invocations::lock_profiles`: capacity rows `FOR UPDATE` in profile byte order,
+//!   after credential action heads. `release_credential_invocation` and
+//!   `guard_credential_invocation_reservation`: the selected profile capacity row `FOR UPDATE`.
 //!
 //! SQL lock sites below name functions in migration files, grouped by family.
 //! Arrows describe acquisition within a function; row sets name their SQL sort
@@ -102,6 +111,9 @@
 //!   UPDATE`.
 //!
 //! `runners`:
+//! - `RunnerProtocolStore::settle_replacement_at_boundary`,
+//!   `retire_replacement_for_terminal_batch`: caller-held session and scheduler locks ->
+//!   `runner_replacement_stage FOR UPDATE`; installation then takes runner authority locks.
 //! - `lock_replacement_enrollments`: loss identity locks in runner order -> the lost, candidate,
 //!   and candidate predecessor `runner_enrollment FOR UPDATE` in enrollment order -> their
 //!   `runner_connection_authority_head FOR SHARE` in enrollment order.
@@ -669,8 +681,8 @@ pub(crate) const UPDATE_SESSION_PLACEMENT_HEAD: &str = "SELECT session_row.ances
          ON native_creation.command_id = event.provenance_command_id
         AND native_creation.created_session_id = event.session_id
         AND native_creation.command_kind = 'create_session'
-        AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8)
-        AND (native_creation.storage_version IN (6, 7, 8)
+        AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8, 9)
+        AND (native_creation.storage_version IN (6, 7, 8, 9)
              OR (native_creation.storage_version IN (1, 2, 3, 4)
                  AND event.placement_path IS NULL
                  AND NOT event.root_global_read_intent))
@@ -1060,3 +1072,53 @@ pub(crate) const SEARCH_ARTIFACT_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
                      0
                  )
              )";
+
+/// Capacity rows follow all credential action heads in profile byte order.
+pub(crate) const CREDENTIAL_INVOCATION_CAPACITY_LOCK: &str = "SELECT profile FROM credential_invocation_capacity WHERE profile = ANY($1) ORDER BY profile COLLATE \"C\" FOR UPDATE";
+
+pub(crate) const OAUTH_CREDENTIAL_PROFILE_GENERATION: &str =
+    "SELECT generation FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE";
+
+pub(crate) const OAUTH_REGISTRATION_CATALOG_WRITE: &str =
+    "SELECT pg_advisory_xact_lock(hashtextextended('oauth-registration-catalog', 0))";
+
+pub(crate) const OAUTH_REGISTRATION_CATALOG_READ: &str =
+    "SELECT pg_advisory_xact_lock_shared(hashtextextended('oauth-registration-catalog', 0))";
+
+pub(crate) const OAUTH_CREDENTIAL_PROFILE: &str =
+    "SELECT profile FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE";
+
+pub(crate) const OAUTH_EXCHANGE_COMMAND: &str =
+    "SELECT command_id FROM durable_command WHERE command_id = $1 FOR UPDATE";
+
+pub(crate) const OAUTH_REGISTERED_CREDENTIAL_PROFILES: &str =
+    "SELECT p.profile FROM oauth_credential_profile p
+         JOIN oauth_credential_registration r USING (profile)
+         WHERE p.profile = ANY($1) ORDER BY p.profile COLLATE \"C\"
+         FOR UPDATE OF p";
+
+pub(crate) const LOST_RUNNER_TOOL_REQUESTS: &str = "SELECT request.request_id FROM tool_request AS request
+         JOIN runner_current_session_placement AS head ON head.session_id = request.session_id
+         JOIN runner_session_placement_record AS placement
+           ON placement.session_id = head.session_id AND placement.event_ordinal = head.event_ordinal
+         WHERE request.session_id = $1 AND request.producing_model_call_id = $2
+           AND request.inadmissible_reason IS NULL
+           AND placement.state_kind IN ('runner_lost', 'runner_lost_before_pin')
+           AND (EXISTS (SELECT 1 FROM runner_session_placement_tool AS declared
+                        WHERE declared.session_id = head.session_id AND declared.event_ordinal = head.event_ordinal
+                          AND declared.tool_name = request.tool_name AND declared.runner_required)
+                OR (placement.state_kind = 'runner_lost_before_pin' AND EXISTS (
+                    SELECT 1 FROM runner_enrollment AS enrollment
+                    JOIN runner_connection_loss_epoch AS loss ON loss.enrollment_id = enrollment.enrollment_id
+                        AND loss.loss_epoch = COALESCE(placement.observed_runner_loss_epoch, 0) + 1
+                    JOIN runner_registration_tool AS declared ON declared.enrollment_id = loss.enrollment_id
+                        AND declared.registration_revision = COALESCE(loss.registration_revision,
+                            (SELECT current.registration_revision FROM runner_current_registration AS current
+                             WHERE current.enrollment_id = loss.enrollment_id))
+                    WHERE enrollment.runner_id = placement.lost_runner_id
+                      AND declared.tool_name = request.tool_name AND declared.loci_kind = 'runner_only')))
+           AND NOT EXISTS (SELECT 1 FROM runner_tool_request_lease_binding AS lease WHERE lease.request_id = request.request_id)
+           AND NOT EXISTS (SELECT 1 FROM tool_attempt AS attempt WHERE attempt.request_id = request.request_id AND attempt.state_kind <> 'prepared')
+           AND (request.request_id = $3 OR NOT EXISTS (SELECT 1 FROM tool_approval_decision AS decision WHERE decision.request_id = request.request_id AND decision.decision_kind = 'deny'))
+           AND NOT EXISTS (SELECT 1 FROM tool_approval_judge_model_call AS judge WHERE judge.request_id = request.request_id AND judge.state_kind = 'in_flight')
+         ORDER BY request.request_ordinal FOR UPDATE OF request";

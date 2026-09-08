@@ -11,9 +11,8 @@
 //! File delivery resolves one credential during preparation and materializes it
 //! only in a private request-scoped settings store beneath the child-selected
 //! `CLAUDE_CONFIG_DIR`; the direct key is never part of the adapter-assembled
-//! child environment. Provider-controlled output is sanitized for
-//! credential-shaped material and, for file delivery, the exact request value
-//! before it crosses the adapter boundary.
+//! child environment. Ambient output passes through unmodified. File delivery
+//! redacts the exact request credential before output crosses the adapter boundary.
 
 #[allow(dead_code)]
 mod bridge;
@@ -22,6 +21,8 @@ mod event;
 mod runtime;
 mod status;
 mod translate;
+
+pub use translate::serialized_message_bytes;
 mod wire;
 
 pub use config::ClaudeCliConfig;

@@ -124,6 +124,19 @@ impl<'a> Output<'a> {
                     automatic_reconciliation_attempts.value()
                 )
             }
+            TurnState::ActiveAwaitingCredentialAvailability {
+                wait_attempt_id,
+                cause,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=active_awaiting_credential_availability attempt={wait_attempt_id} cause={}",
+                match cause {
+                    signalbox_process_protocol::CredentialAvailabilityWaitCause::Contended =>
+                        "contended",
+                    signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted =>
+                        "exhausted",
+                },
+            ),
             TurnState::ActiveAwaitingRunnerRecovery {
                 runner_id,
                 placement_revision,
@@ -142,6 +155,35 @@ impl<'a> Output<'a> {
                     placement_revision.value()
                 ),
             },
+            TurnState::FailedAfterCredentialWait {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                predecessor_model_call,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=failed_after_credential_wait frontier={terminal_frontier_id} attempt={terminal_attempt_id} predecessor_call={} predecessor_cause={}",
+                predecessor_model_call.model_call_id(),
+                predecessor_model_call
+                    .cause()
+                    .map_or("none", failed_model_call_cause)
+            ),
+            TurnState::FailedCredentialPoolExhausted {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                failure_entry_id,
+                pool_policy_id,
+                policy_members,
+                members,
+            } => {
+                write!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=failed_credential_pool_exhausted frontier={terminal_frontier_id} attempt={terminal_attempt_id} entry={failure_entry_id} pool_policy={pool_policy_id} policy_members="
+                )?;
+                self.json_value(policy_members)?;
+                write!(self.stdout, " members=")?;
+                self.json_value(members)?;
+                writeln!(self.stdout)
+            }
             TurnState::Failed {
                 terminal_frontier_id,
                 terminal_attempt_id,
@@ -463,6 +505,7 @@ impl<'a> Output<'a> {
             SnapshotEntryKind::Marker(TranscriptEntry::ToolDenied {
                 tool_request_id,
                 content,
+                ..
             }) => writeln!(
                 self.stdout,
                 "tool_denied request={tool_request_id} content={} source={} entry={}",
@@ -492,6 +535,7 @@ impl<'a> Output<'a> {
             SnapshotEntryKind::Marker(TranscriptEntry::ToolClosed {
                 tool_request_id,
                 content,
+                ..
             }) => writeln!(
                 self.stdout,
                 "tool_closed request={tool_request_id} content={} source={} entry={}",

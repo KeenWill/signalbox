@@ -26,21 +26,20 @@ use signalbox_domain::{
     ActiveTurnPhase, CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
     DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
     DecideToolRequestResult, DelegateApprovalRecommendation, DelegateToolApproval,
-    DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
-    DelegationProvenanceReconstitutionInput, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, EndedToolAttempt, FastMode, GoalGeneration, NormalizedToolArguments,
-    OverrideDeniedToolRequest, OverrideDeniedToolRequestResult, PreparedDecideToolRequest,
-    PreparedOverrideDeniedToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
-    ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
-    ToolAttemptDispatchCorrelation, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
-    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchAuthority, ToolDispatchGeneration,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
-    ToolResultText, TurnId,
+    DelegationContent, DelegationOutcome, DelegationOutcomeKind,
+    DelegationProvenanceReconstitutionInput, DirectModelSelection, DurableCommandId,
+    EndedToolAttempt, GoalGeneration, NormalizedToolArguments, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestResult, PreparedDecideToolRequest, PreparedOverrideDeniedToolRequest,
+    PreparedToolBatchDecision, PreparedToolResultProjection, ReconstitutedToolAttempt,
+    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
+    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -65,8 +64,8 @@ use crate::{
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{
-        insert_prepared_call, insert_snapshot, lock_delegated_child_endpoint_sessions,
-        lock_delegated_turn_terminal_frontier, prepared_serving_evidence,
+        insert_snapshot, lock_delegated_child_endpoint_sessions,
+        lock_delegated_turn_terminal_frontier,
     },
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
@@ -259,6 +258,7 @@ impl ClassifyOperatorFailure for ToolLoopRepositoryError {
 #[derive(Clone, Debug)]
 pub struct PostgresToolLoopRepository {
     pool: PgPool,
+    runner_recovery: Option<crate::runner_protocol::RunnerProtocolStore>,
     continuation_targets: Option<signalbox_domain::ModelTargetCatalog>,
     continuation_credential: Option<ModelCallCredentialReference>,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
@@ -272,6 +272,7 @@ impl PostgresToolLoopRepository {
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
+            runner_recovery: None,
             continuation_targets: None,
             continuation_credential: None,
             credential_families: None,
@@ -290,6 +291,7 @@ impl PostgresToolLoopRepository {
     ) -> Self {
         Self {
             pool,
+            runner_recovery: None,
             continuation_targets: Some(targets),
             continuation_credential: Some(credential_reference),
             credential_families: None,
@@ -297,6 +299,14 @@ impl PostgresToolLoopRepository {
             cache_inclusive_input_targets: HashSet::new(),
             continuation_usage_limits: Default::default(),
         }
+    }
+
+    pub(crate) fn with_runner_recovery(
+        mut self,
+        runner: Option<crate::runner_protocol::RunnerProtocolStore>,
+    ) -> Self {
+        self.runner_recovery = runner;
+        self
     }
 
     pub(crate) fn with_cache_inclusive_input_targets(
@@ -361,6 +371,11 @@ impl PostgresToolLoopRepository {
                 AND state_kind = 'active'
                 AND goal_turn_is_runtime_relevant(session_id, turn_id)
                 AND (
+                    EXISTS (SELECT 1 FROM credential_availability_wait waiting
+                        WHERE waiting.turn_id = turn_lifecycle.turn_id
+                          AND waiting.session_id = turn_lifecycle.session_id
+                          AND credential_wait_is_eligible(waiting.wait_attempt_id))
+                    OR
                     EXISTS (
                         SELECT 1
                           FROM model_call AS prepared
@@ -644,6 +659,34 @@ impl PostgresToolLoopRepository {
                     let batch = load_active_batch_from_connection(&mut transaction, session, turn)
                         .await?
                         .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+                    let awaiting_judge: bool = sqlx::query_scalar(
+                        "SELECT request.approval_posture = 'delegated'
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM tool_approval_judge_model_call AS judge
+                                     WHERE judge.request_id = request.request_id
+                                       AND judge.state_kind = 'terminal'
+                                )
+                           FROM tool_request AS request WHERE request.request_id = $1",
+                    )
+                    .bind(tool_request_id_to_uuid(command.request()))
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                    if batch
+                        .awaiting_approval()
+                        .is_some_and(|wait| wait.request() == command.request())
+                        && awaiting_judge
+                    {
+                        let prepared = command.prepare_awaiting_approval_judge();
+                        persist_decision_command(
+                            &mut transaction,
+                            &prepared,
+                            signalbox_domain::CommandPrincipal::Operator,
+                        )
+                        .await?;
+                        settle_decision_injection(&mut transaction, session, turn, &prepared)
+                            .await?;
+                        return Ok(prepared);
+                    }
                     let continuation_attempt = batch
                         .awaiting_approval()
                         .filter(|waiting| waiting.request() == command.request())
@@ -1260,127 +1303,6 @@ impl PostgresToolLoopRepository {
         finish_commit(transaction, result).await
     }
 
-    /// Atomically commits result projection, steering consumption, and the
-    /// next prepared model call for the same logical turn.
-    pub async fn commit_result_and_prepare_continuation(
-        &self,
-        producing_call: signalbox_domain::ModelCallId,
-        projection: &PreparedToolResultProjection,
-        prepared: &signalbox_domain::PreparedInitialModelCall,
-        credential_reference: &ModelCallCredentialReference,
-    ) -> Result<(), ToolLoopRepositoryError> {
-        let session = prepared.session();
-        let turn = prepared.turn();
-        let mut transaction = self.pool.begin().await?;
-        let result = async {
-            lock_tool_session(&mut transaction, session).await?;
-            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
-                .await?
-                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
-            if batch.producing_call() != producing_call
-                || batch.yielded_snapshot().frontier().owning_session() != session
-                || !matches!(
-                    batch.phase(),
-                    signalbox_domain::ToolBatchPhase::Executing { turn_attempt }
-                        if turn_attempt == prepared.attempt()
-                )
-            {
-                return Err(ToolLoopCorruption::Inconsistent("continuation batch").into());
-            }
-            let projection_frontier = projection.snapshot().frontier();
-            let call_frontier = prepared.call().frontier();
-            let frontier_matches = match prepared.steering_snapshot() {
-                Some(steering_snapshot) => {
-                    projection
-                        .snapshot()
-                        .is_semantic_prefix_of(steering_snapshot)
-                        && call_frontier == steering_snapshot.frontier()
-                }
-                None => call_frontier == projection_frontier,
-            };
-            if projection_frontier.owning_session() != session || !frontier_matches {
-                return Err(ToolLoopCorruption::Inconsistent("continuation call frontier").into());
-            }
-
-            persist_result_entries(&mut transaction, projection).await?;
-            insert_snapshot(&mut transaction, projection.snapshot())
-                .await
-                .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
-            outbox::append(
-                &mut transaction,
-                OutboxEvent::ToolBatchTransition {
-                    session,
-                    turn,
-                    producing_call,
-                    state: ToolBatchOutboxState::ResultsProjected(
-                        projection.snapshot().frontier().snapshot(),
-                    ),
-                },
-            )
-            .await?;
-            let fast_mode: String = sqlx::query_scalar(
-                "SELECT resolved_model_settings #>> '{effective,fast_mode}'
-                   FROM turn_model_settings_resolved
-                  WHERE session_id = $1
-                    AND turn_id = $2",
-            )
-            .bind(session_id_to_uuid(session))
-            .bind(turn_id_to_uuid(turn))
-            .fetch_one(&mut *transaction)
-            .await?;
-            let fast_mode = match fast_mode.as_str() {
-                "disabled" => FastMode::Disabled,
-                "enabled" => FastMode::Enabled,
-                _ => {
-                    return Err(ToolLoopCorruption::Inconsistent(
-                        "continuation effective fast mode",
-                    )
-                    .into());
-                }
-            };
-            let serving_evidence = prepared_serving_evidence(
-                self.credential_families.as_ref(),
-                &self.continuation_usage_limits,
-                prepared.call().target(),
-                fast_mode,
-            );
-            insert_prepared_call(
-                &mut transaction,
-                prepared,
-                credential_reference,
-                None,
-                self.cache_inclusive_input_targets
-                    .contains(&prepared.call().target()),
-                serving_evidence,
-            )
-            .await
-            .map_err(map_model_call_error)?;
-            let rows = sqlx::query(
-                "UPDATE turn_lifecycle
-                    SET active_tool_round_call_id = NULL,
-                        approval_tool_request_id = NULL,
-                        recovery_tool_attempt_id = NULL
-                  WHERE turn_id = $1
-                    AND session_id = $2
-                    AND current_attempt_id = $3
-                    AND state_kind = 'active'
-                    AND active_phase_kind = 'running'
-                    AND active_tool_round_call_id = $4",
-            )
-            .bind(turn_id_to_uuid(turn))
-            .bind(session_id_to_uuid(session))
-            .bind(prepared.attempt().into_uuid())
-            .bind(producing_call.into_uuid())
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-            require_single(rows, "tool result continuation call")?;
-            Ok(())
-        }
-        .await;
-        finish_commit(transaction, result).await
-    }
-
     /// Atomically derives and commits result projection, consumes all pending
     /// steering, and prepares the next same-turn model call.
     pub async fn prepare_continuation<NextSteering>(
@@ -1389,7 +1311,7 @@ impl PostgresToolLoopRepository {
         turn: TurnId,
         producing_call: signalbox_domain::ModelCallId,
         identities: ToolContinuationIdentities,
-        next_steering: NextSteering,
+        mut next_steering: NextSteering,
     ) -> Result<PrepareToolContinuationOutcome, ToolLoopRepositoryError>
     where
         NextSteering: FnMut(
@@ -1406,120 +1328,198 @@ impl PostgresToolLoopRepository {
                 "tool continuation credential reference is not configured",
             ),
         )?;
-        let mut transaction = self.pool.begin().await?;
-        let result = async {
-            lock_delegated_child_endpoint_sessions(&mut transaction, session)
-                .await
-                .map_err(map_model_call_error)?;
-            lock_tool_session(&mut transaction, session).await?;
-            let Some(batch) =
-                load_active_batch_from_connection(&mut transaction, session, turn).await?
-            else {
-                return Ok(PrepareToolContinuationOutcome::NoWork);
-            };
-            let turn_attempt = match batch.phase() {
-                signalbox_domain::ToolBatchPhase::Executing { turn_attempt }
-                    if batch.producing_call() == producing_call =>
-                {
-                    turn_attempt
-                }
-                _ => return Ok(PrepareToolContinuationOutcome::NoWork),
-            };
-            let child_wait =
-                batch
-                    .requests()
-                    .iter()
-                    .find_map(|request| match batch.attempt(request.id()) {
-                        Some(ReconstitutedToolAttempt::Ended(attempt)) => match attempt.end() {
-                            ToolAttemptEnd::AwaitingChild {
-                                spawning_request,
-                                child,
-                            } => Some((request.id(), *spawning_request, *child)),
-                            ToolAttemptEnd::Completed { .. }
-                            | ToolAttemptEnd::KnownFailed { .. }
-                            | ToolAttemptEnd::Ambiguous => None,
-                        },
-                        Some(ReconstitutedToolAttempt::Current(_)) | None => None,
-                    });
-            let projection = match child_wait {
-                Some((awaiting_request, spawning_request, child)) => batch
-                    .prepare_delegation_result_projection(
-                        identities.result_entries().to_vec(),
-                        identities.result_frontier(),
-                        load_foreground_delegation_outcome(
-                            &mut transaction,
-                            session,
-                            awaiting_request,
-                            spawning_request,
-                            child,
-                        )
-                        .await?,
-                    ),
-                None => batch.prepare_result_projection(
-                    identities.result_entries().to_vec(),
-                    identities.result_frontier(),
-                ),
-            }
-            .map_err(|_| {
-                ToolLoopRepositoryError::InvalidTransition(
-                    "tool batch is not ready for continuation",
-                )
-            })?;
-            persist_result_entries(&mut transaction, &projection).await?;
-            insert_snapshot(&mut transaction, projection.snapshot())
-                .await
-                .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
-            // Full frontier reconstruction can scan a long-lived session. Keep
-            // that read outside the global writer guard while the session lock
-            // preserves the transaction-local result projection unchanged.
-            let execution = crate::model_execution::load_tool_continuation_execution(
-                &mut transaction,
-                session,
-                targets,
-                &projection,
-            )
-            .await
-            .map_err(map_model_call_error)?;
-            let outbox_order_guard =
-                crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+        let mut notifications = self
+            .runner_recovery
+            .as_ref()
+            .and_then(crate::runner_protocol::RunnerProtocolStore::recovery_notifications);
+        loop {
+            let mut waiting_for_replacement = false;
+            let mut transaction = self.pool.begin().await?;
+            let result = async {
+                lock_delegated_child_endpoint_sessions(&mut transaction, session)
                     .await
                     .map_err(map_model_call_error)?;
-            outbox::append(
-                &mut transaction,
-                OutboxEvent::ToolBatchTransition {
+                lock_tool_session(&mut transaction, session).await?;
+                let Some(batch) =
+                    load_active_batch_from_connection(&mut transaction, session, turn).await?
+                else {
+                    return Ok(PrepareToolContinuationOutcome::NoWork);
+                };
+                let turn_attempt = match batch.phase() {
+                    signalbox_domain::ToolBatchPhase::Executing { turn_attempt }
+                        if batch.producing_call() == producing_call =>
+                    {
+                        turn_attempt
+                    }
+                    _ => return Ok(PrepareToolContinuationOutcome::NoWork),
+                };
+                let child_wait =
+                    batch
+                        .requests()
+                        .iter()
+                        .find_map(|request| match batch.attempt(request.id()) {
+                            Some(ReconstitutedToolAttempt::Ended(attempt)) => match attempt.end() {
+                                ToolAttemptEnd::AwaitingChild {
+                                    spawning_request,
+                                    child,
+                                } => Some((request.id(), *spawning_request, *child)),
+                                ToolAttemptEnd::Completed { .. }
+                                | ToolAttemptEnd::KnownFailed { .. }
+                                | ToolAttemptEnd::Ambiguous => None,
+                            },
+                            Some(ReconstitutedToolAttempt::Current(_)) | None => None,
+                        });
+                let mut projection = match child_wait {
+                    Some((awaiting_request, spawning_request, child)) => batch
+                        .prepare_delegation_result_projection(
+                            identities.result_entries().to_vec(),
+                            identities.result_frontier(),
+                            load_foreground_delegation_outcome(
+                                &mut transaction,
+                                session,
+                                awaiting_request,
+                                spawning_request,
+                                child,
+                            )
+                            .await?,
+                        ),
+                    None => batch.prepare_result_projection(
+                        identities.result_entries().to_vec(),
+                        identities.result_frontier(),
+                    ),
+                }
+                .map_err(|_| {
+                    ToolLoopRepositoryError::InvalidTransition(
+                        "tool batch is not ready for continuation",
+                    )
+                })?;
+                let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT accepted_input_id FROM accepted_input
+                      WHERE session_id = $1 AND expected_active_turn_id = $2
+                        AND disposition_kind = 'pending_steering'
+                      ORDER BY acceptance_position",
+                )
+                .bind(session.into_uuid())
+                .bind(turn.into_uuid())
+                .fetch_all(&mut *transaction)
+                .await?;
+                let steering_candidates = pending_inputs
+                    .into_iter()
+                    .map(|input| {
+                        let input = signalbox_domain::AcceptedInputId::from_uuid(input);
+                        (input, next_steering(input))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                crate::model_execution::reserve_frontier_write_identities(
+                    &mut transaction,
+                    identities
+                        .result_entries()
+                        .iter()
+                        .map(|entry| entry.into_uuid())
+                        .chain(
+                            steering_candidates
+                                .values()
+                                .map(|(entry, _)| entry.into_uuid()),
+                        )
+                        .chain([
+                            identities.result_frontier().into_uuid(),
+                            identities.steering_frontier().into_uuid(),
+                            identities.target_failure().failure_entry().into_uuid(),
+                            identities.target_failure().terminal_frontier().into_uuid(),
+                        ]),
+                )
+                .await
+                .map_err(map_model_call_error)?;
+                persist_result_entries(&mut transaction, &projection).await?;
+                insert_snapshot(&mut transaction, projection.snapshot())
+                    .await
+                    .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+                if let Some(runner) = &self.runner_recovery {
+                    let (settled, boundary) = runner
+                        .settle_replacement_at_boundary(
+                            &mut transaction,
+                            session,
+                            Some(projection.snapshot()),
+                        )
+                        .await
+                        .map_err(map_runner_replacement_error)?;
+                    if !settled {
+                        waiting_for_replacement = true;
+                        return Ok(PrepareToolContinuationOutcome::NoWork);
+                    }
+                    if let Some(boundary) = boundary {
+                        projection = projection
+                            .with_runner_placement_boundary(&boundary)
+                            .map_err(|_| {
+                                ToolLoopCorruption::Inconsistent("replacement result frontier")
+                            })?;
+                    }
+                } else if sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM runner_replacement_stage WHERE session_id = $1)",
+                )
+                .bind(session.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await?
+                {
+                    return Err(ToolLoopRepositoryError::InvalidTransition(
+                        "runner replacement authority is not configured",
+                    ));
+                }
+                sqlx::raw_sql(
+                    "SET CONSTRAINTS context_frontier_requires_complete_membership IMMEDIATE;
+                     SET CONSTRAINTS context_frontier_requires_complete_membership DEFERRED;",
+                )
+                .execute(&mut *transaction)
+                .await?;
+                // Full frontier reconstruction can scan a long-lived session. Keep
+                // that read outside the global writer guard while the session lock
+                // preserves the transaction-local result projection unchanged.
+                let execution = crate::model_execution::load_tool_continuation_execution(
+                    &mut transaction,
+                    session,
+                    targets,
+                    &projection,
+                )
+                .await
+                .map_err(map_model_call_error)?;
+                let outbox_order_guard =
+                    crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+                        .await
+                        .map_err(map_model_call_error)?;
+                outbox::append(
+                    &mut transaction,
+                    OutboxEvent::ToolBatchTransition {
+                        session,
+                        turn,
+                        producing_call,
+                        state: ToolBatchOutboxState::ResultsProjected(identities.result_frontier()),
+                    },
+                )
+                .await?;
+                let outcome = crate::model_execution::prepare_tool_continuation_call(
+                    &mut transaction,
+                    outbox_order_guard,
+                    execution,
                     session,
                     turn,
+                    targets,
+                    credential_reference,
+                    self.credential_families.as_ref(),
+                    &self.credential_pools,
+                    &self.cache_inclusive_input_targets,
+                    &self.continuation_usage_limits,
+                    &projection,
                     producing_call,
-                    state: ToolBatchOutboxState::ResultsProjected(
-                        projection.snapshot().frontier().snapshot(),
-                    ),
-                },
-            )
-            .await?;
-            let outcome = crate::model_execution::prepare_tool_continuation_call(
-                &mut transaction,
-                outbox_order_guard,
-                execution,
-                session,
-                turn,
-                targets,
-                credential_reference,
-                self.credential_families.as_ref(),
-                &self.credential_pools,
-                &self.cache_inclusive_input_targets,
-                &self.continuation_usage_limits,
-                &projection,
-                producing_call,
-                identities.call(),
-                identities.target_failure().clone(),
-                identities.steering_frontier(),
-                next_steering,
-            )
-            .await
-            .map_err(map_model_call_error)?;
-            if matches!(outcome, PrepareToolContinuationOutcome::Checkpointed(_)) {
-                let rows = sqlx::query(
-                    "UPDATE turn_lifecycle
+                    identities.call(),
+                    identities.target_failure().clone(),
+                    identities.steering_frontier(),
+                    steering_candidates,
+                )
+                .await
+                .map_err(map_model_call_error)?;
+                if matches!(outcome, PrepareToolContinuationOutcome::Checkpointed(_)) {
+                    let rows = sqlx::query(
+                        "UPDATE turn_lifecycle
                         SET active_tool_round_call_id = NULL,
                             approval_tool_request_id = NULL,
                             recovery_tool_attempt_id = NULL
@@ -1529,20 +1529,37 @@ impl PostgresToolLoopRepository {
                         AND state_kind = 'active'
                         AND active_phase_kind = 'running'
                         AND active_tool_round_call_id = $4",
-                )
-                .bind(turn_id_to_uuid(turn))
-                .bind(session_id_to_uuid(session))
-                .bind(turn_attempt.into_uuid())
-                .bind(producing_call.into_uuid())
-                .execute(&mut *transaction)
-                .await?
-                .rows_affected();
-                require_single(rows, "tool continuation call boundary")?;
+                    )
+                    .bind(turn_id_to_uuid(turn))
+                    .bind(session_id_to_uuid(session))
+                    .bind(turn_attempt.into_uuid())
+                    .bind(producing_call.into_uuid())
+                    .execute(&mut *transaction)
+                    .await?
+                    .rows_affected();
+                    require_single(rows, "tool continuation call boundary")?;
+                }
+                Ok(outcome)
             }
-            Ok(outcome)
+            .await;
+            if waiting_for_replacement {
+                transaction.rollback().await?;
+                notifications
+                    .as_mut()
+                    .ok_or(ToolLoopRepositoryError::InvalidTransition(
+                        "runner recovery notifications are not configured",
+                    ))?
+                    .changed()
+                    .await
+                    .map_err(|_| {
+                        ToolLoopRepositoryError::InvalidTransition(
+                            "runner recovery notifications closed",
+                        )
+                    })?;
+                continue;
+            }
+            return finish_commit(transaction, result).await;
         }
-        .await;
-        finish_commit(transaction, result).await
     }
 }
 
@@ -1709,6 +1726,15 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
             next_steering,
         )
         .await
+    }
+}
+
+fn map_runner_replacement_error(
+    error: crate::runner_protocol::RunnerProtocolStoreError,
+) -> ToolLoopRepositoryError {
+    match error {
+        crate::runner_protocol::RunnerProtocolStoreError::Database(source) => source.into(),
+        _ => ToolLoopCorruption::Inconsistent("runner replacement boundary").into(),
     }
 }
 
@@ -3595,7 +3621,8 @@ async fn persist_batch_decision(
         }
         ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(ToolLoopRepositoryError::InvalidTransition(
                 "approval command cannot enter recovery",
             ));
@@ -3626,6 +3653,11 @@ async fn settle_decision_injection(
     prepared: &PreparedDecideToolRequest,
 ) -> Result<(), ToolLoopRepositoryError> {
     let outcome = match prepared.result() {
+        DecideToolRequestResult::Rejected(
+            DecideToolRequestRejectedResult::AwaitingApprovalJudge { .. },
+        ) => outbox::InjectionOutcomeOutbox::Rejected {
+            kind: "awaiting_approval_judge",
+        },
         DecideToolRequestResult::Applied(_) => {
             outbox::InjectionOutcomeOutbox::Delivered { turn: Some(turn) }
         }
@@ -3661,6 +3693,9 @@ async fn persist_decision_command(
     let command = prepared.command();
     let (decision_kind, denial_reason) = encode_approval(command.decision());
     let (result_kind, rejection_kind, earliest) = match prepared.result() {
+        DecideToolRequestResult::Rejected(
+            DecideToolRequestRejectedResult::AwaitingApprovalJudge { .. },
+        ) => ("rejected", Some("awaiting_approval_judge"), None),
         DecideToolRequestResult::Applied(_) => ("applied", None, None),
         DecideToolRequestResult::Rejected(DecideToolRequestRejectedResult::RequestNotFound {
             ..
@@ -3755,6 +3790,7 @@ async fn load_decision_receipt(
         }
         ("rejected", Some("request_not_found")) => command.prepare_request_not_found(),
         ("rejected", Some("already_resolved")) => command.prepare_already_resolved(),
+        ("rejected", Some("awaiting_approval_judge")) => command.prepare_awaiting_approval_judge(),
         ("rejected", Some("not_earliest_undecided")) => command.prepare_not_earliest(
             tool_request_id_from_uuid(required(&row, "result_earliest_undecided_request_id")?),
         ),
@@ -4144,6 +4180,18 @@ pub(crate) async fn load_foreground_delegation_outcome(
     .ok_or_else(|| ToolLoopCorruption::Missing("foreground child result").into())
 }
 
+#[derive(sqlx::FromRow)]
+struct ForegroundOutcomeRow {
+    outcome_kind: Option<String>,
+    content_text: Option<String>,
+    reason_kind: Option<String>,
+    provenance_kind: Option<String>,
+    provenance_session_id: Option<Uuid>,
+    provenance_turn_id: Option<Uuid>,
+    provenance_goal_generation: Option<Decimal>,
+    provenance_command_id: Option<Uuid>,
+}
+
 pub(crate) async fn load_optional_foreground_delegation_outcome(
     connection: &mut PgConnection,
     parent: SessionId,
@@ -4151,7 +4199,7 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
     spawning_request: ToolRequestId,
     child: SessionId,
 ) -> Result<Option<DelegationOutcome>, ToolLoopRepositoryError> {
-    let row = sqlx::query(
+    let row = sqlx::query_as::<_, ForegroundOutcomeRow>(
         "SELECT result.outcome_kind, result.content_text,
                 event.reason_kind, event.provenance_kind,
                 event.provenance_session_id, event.provenance_turn_id,
@@ -4183,49 +4231,56 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
     let Some(row) = row else {
         return Ok(None);
     };
-    let kind = match required::<String>(&row, "outcome_kind")?.as_str() {
-        "result_returned" => DelegationOutcomeKind::ResultReturned,
-        "child_failed" => DelegationOutcomeKind::ChildFailed,
-        "child_stopped" => DelegationOutcomeKind::ChildStopped,
-        "child_cancelled" => DelegationOutcomeKind::ChildCancelled,
-        value => {
-            return Err(ToolLoopCorruption::Unsupported {
-                field: "delegation outcome",
-                value: value.to_owned(),
+    decode_foreground_outcome(row).map(Some)
+}
+
+fn decode_foreground_outcome(
+    row: ForegroundOutcomeRow,
+) -> Result<DelegationOutcome, ToolLoopRepositoryError> {
+    let outcome_kind = row
+        .outcome_kind
+        .ok_or(ToolLoopCorruption::Missing("outcome_kind"))?;
+    let reason_kind = row
+        .reason_kind
+        .ok_or(ToolLoopCorruption::Missing("reason_kind"))?;
+    let provenance_kind = row
+        .provenance_kind
+        .ok_or(ToolLoopCorruption::Missing("provenance_kind"))?;
+    let provenance_session_id = row
+        .provenance_session_id
+        .ok_or(ToolLoopCorruption::Missing("provenance_session_id"))?;
+    let kind = crate::mapping::delegation_outcome_kind_from_str(&outcome_kind)
+        .filter(|kind| match kind {
+            DelegationOutcomeKind::ResultReturned
+            | DelegationOutcomeKind::ChildFailed
+            | DelegationOutcomeKind::ChildStopped
+            | DelegationOutcomeKind::ChildCancelled => true,
+            DelegationOutcomeKind::AlreadyTerminal | DelegationOutcomeKind::ContinueRunning => {
+                false
             }
-            .into());
-        }
-    };
+        })
+        .ok_or_else(|| ToolLoopCorruption::Unsupported {
+            field: "delegation outcome",
+            value: outcome_kind.clone(),
+        })?;
     let content = row
-        .try_get::<Option<String>, _>("content_text")?
+        .content_text
         .map(DelegationContent::try_new)
         .transpose()
         .map_err(|_| ToolLoopCorruption::Inconsistent("delegation result content"))?;
-    let reason = match required::<String>(&row, "reason_kind")?.as_str() {
-        "child_completed" => DelegationOutcomeReason::ChildCompleted,
-        "child_execution_failed" => DelegationOutcomeReason::ChildExecutionFailed,
-        "child_result_unavailable" => DelegationOutcomeReason::ChildResultUnavailable,
-        "child_cancelled" => DelegationOutcomeReason::ChildCancelled,
-        "parent_stopped_parent_and_descendants" => DelegationOutcomeReason::ParentStopped {
-            scope: DescendantTerminationScope::ParentAndDescendants,
-        },
-        "parent_cancelled_parent_and_descendants" => DelegationOutcomeReason::ParentCancelled {
-            scope: DescendantTerminationScope::ParentAndDescendants,
-        },
-        value => {
-            return Err(ToolLoopCorruption::Unsupported {
+    let reason =
+        crate::mapping::delegation_outcome_reason_from_str(&reason_kind).ok_or_else(|| {
+            ToolLoopCorruption::Unsupported {
                 field: "delegation outcome reason",
-                value: value.to_owned(),
+                value: reason_kind.clone(),
             }
-            .into());
-        }
-    };
-    let provenance_session = session_id_from_uuid(required(&row, "provenance_session_id")?);
+        })?;
+    let provenance_session = session_id_from_uuid(provenance_session_id);
     let provenance = match (
-        required::<String>(&row, "provenance_kind")?.as_str(),
-        row.try_get::<Option<Uuid>, _>("provenance_turn_id")?,
-        row.try_get::<Option<Decimal>, _>("provenance_goal_generation")?,
-        row.try_get::<Option<Uuid>, _>("provenance_command_id")?,
+        provenance_kind.as_str(),
+        row.provenance_turn_id,
+        row.provenance_goal_generation,
+        row.provenance_command_id,
     ) {
         ("child_turn", Some(turn), None, None) => {
             DelegationProvenanceReconstitutionInput::ChildTurn {
@@ -4270,7 +4325,6 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
         }
     };
     DelegationOutcome::reconstitute(kind, content, reason, provenance)
-        .map(Some)
         .ok_or_else(|| ToolLoopCorruption::Inconsistent("delegation result outcome").into())
 }
 
@@ -4404,27 +4458,51 @@ async fn admit_tool_preauthorization(
             decoded_bytes,
         } => (digest, Some(decoded_bytes)),
     };
+    let frontier: Uuid = sqlx::query_scalar(
+        "SELECT call.context_frontier_id FROM tool_request AS request
+           JOIN model_call AS call
+             ON call.model_call_id = request.producing_model_call_id
+            AND call.session_id = request.session_id
+          WHERE request.request_id = $1 AND request.session_id = $2 AND request.turn_id = $3",
+    )
+    .bind(tool_request_id_to_uuid(request))
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(ToolLoopCorruption::Missing(
+        "blob authorization producing frontier",
+    ))?;
+    let members = crate::context_compaction::projected_frontier_membership(
+        transaction,
+        session,
+        signalbox_domain::ContextFrontierId::from_uuid(frontier),
+    )
+    .await
+    .map_err(crate::model_execution::map_projected_membership_error)
+    .map_err(map_model_call_error)?;
+    let sources = members
+        .iter()
+        .map(|member| member.source_session().into_uuid())
+        .collect::<Vec<_>>();
+    let entries = members
+        .iter()
+        .map(|member| member.entry().into_uuid())
+        .collect::<Vec<_>>();
     let visible: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1
-              FROM tool_request AS request
-              JOIN model_call AS call
-                ON call.model_call_id = request.producing_model_call_id
-               AND call.session_id = request.session_id
-              JOIN context_frontier_member AS member
-                ON member.owning_session_id = call.session_id
-               AND member.context_frontier_id = call.context_frontier_id
+              FROM unnest($1::uuid[], $2::uuid[]) AS member(source_session_id, semantic_entry_id)
               JOIN semantic_transcript_entry AS entry
                 ON entry.source_session_id = member.source_session_id
                AND entry.semantic_entry_id = member.semantic_entry_id
               JOIN accepted_input_content_part AS part
                 ON part.accepted_input_id = entry.origin_accepted_input_id
-             WHERE request.request_id = $1
-               AND part.part_kind = 'attachment'
-               AND part.blob_digest = $2
+             WHERE part.part_kind = 'attachment' AND part.blob_digest = $3
         )",
     )
-    .bind(tool_request_id_to_uuid(request))
+    .bind(&sources)
+    .bind(&entries)
     .bind(digest.as_bytes().as_slice())
     .fetch_one(&mut **transaction)
     .await?;
@@ -4594,5 +4672,29 @@ mod blob_read_budget_tests {
             ),
             BlobReadAdmission::TurnReadCountExceeded
         );
+    }
+}
+
+#[cfg(test)]
+mod foreground_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn missing_foreground_reason_is_typed_corruption() {
+        let error = decode_foreground_outcome(ForegroundOutcomeRow {
+            outcome_kind: Some("result_returned".to_owned()),
+            content_text: Some("child result".to_owned()),
+            reason_kind: None,
+            provenance_kind: Some("child_turn".to_owned()),
+            provenance_session_id: Some(Uuid::from_u128(1)),
+            provenance_turn_id: Some(Uuid::from_u128(2)),
+            provenance_goal_generation: None,
+            provenance_command_id: None,
+        })
+        .expect_err("missing reason must fail closed as corruption");
+        assert!(matches!(
+            error,
+            ToolLoopRepositoryError::Corruption(ToolLoopCorruption::Missing("reason_kind"))
+        ));
     }
 }

@@ -60,6 +60,10 @@ pub fn validate_oauth_authorization(
 
 ```rust
 pub enum ServerMessage {
+    CredentialPoolPolicy {
+        pool_policy_id: CanonicalUuid,
+        policy_members: vec::Vec<string::String>,
+    },
     RunnerStatusStart {},
     RunnerStatus {
         status: RunnerStatusFact,
@@ -382,6 +386,7 @@ pub enum ServerMessage {
         entry_count: CanonicalU64,
     },
     TranscriptSnapshotStart {
+        repository_watch: option::Option<RepositoryWatchProvenance>,
         session_id: CanonicalUuid,
         cursor: CanonicalU64,
         runner: option::Option<RunnerProjection>,

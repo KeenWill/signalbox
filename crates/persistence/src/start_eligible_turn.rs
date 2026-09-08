@@ -182,6 +182,8 @@ pub struct PreparedActivationPreview {
 pub enum CommitActivationPreviewOutcome {
     /// The exact preview still matched and was atomically activated.
     Activated(Box<ActivatedTurn>),
+    /// The counted preview activated and terminalized with no admissible pool member.
+    PoolExhausted(TurnId),
     /// Authoritative state changed after preview; the caller must restart the pass.
     Stale,
 }
@@ -196,10 +198,11 @@ pub enum CommitCompactionFailurePreviewOutcome {
     Stale,
 }
 
-/// Outcome of atomically activating and closing the exact prospective call
-/// after definitive attachment failure during provider-native counting.
+/// Outcome of admitting a counted activation after definitive attachment failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommitCountedAttachmentFailurePreviewOutcome {
+    /// Credential admission parked the activated turn without preparing a call.
+    CredentialWait(TurnId),
     /// The exact preview activated and its Prepared call terminalized as failed.
     Failed(TurnId),
     /// Authoritative state changed after preview; the caller must restart the pass.
@@ -277,13 +280,14 @@ impl StartEligibleTurnRepository {
         )))
     }
 
-    /// Revalidates one counted preview and atomically commits both its
-    /// activation and exact no-steering Prepared initial call.
+    /// Revalidates one counted preview and atomically commits its activation
+    /// with the prepared initial call, credential wait, or pool-exhaustion closure.
     pub async fn commit_counted_preview(
         &self,
         preview: PreparedActivationPreview,
         prospective: crate::model_execution::ProspectiveModelCall,
         model_calls: &crate::model_execution::PostgresModelCallRepository,
+        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
         instruction_evidence: Option<CountedActivationInstructionEvidence<'_>>,
     ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
         let session = preview.prepared.turn().session();
@@ -293,6 +297,9 @@ impl StartEligibleTurnRepository {
             .await
             .map_err(StartEligibleTurnRepositoryError::from)
             .map_err(CommitActivationPreviewError::Activation)?;
+        lock_delegated_child_endpoint_sessions(&mut transaction, session)
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
         let session_uuid = session_id_to_uuid(session);
         let (session_exists, scheduler_session) =
             sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
@@ -333,6 +340,12 @@ impl StartEligibleTurnRepository {
                 .map_err(CommitActivationPreviewError::Activation)?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
+        reserve_preview_frontier_identities(
+            &mut transaction,
+            preview.identities,
+            &failure_identities,
+        )
+        .await?;
         let outbox_order_guard =
             crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
                 .await
@@ -348,7 +361,7 @@ impl StartEligibleTurnRepository {
             .await
             .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
         }
-        let _ = model_calls
+        let checkpoint = model_calls
             .checkpoint_counted_activation_in_transaction(
                 &mut transaction,
                 &activated,
@@ -357,19 +370,35 @@ impl StartEligibleTurnRepository {
             )
             .await
             .map_err(CommitActivationPreviewError::ModelCall)?;
+        let outcome = match checkpoint {
+            crate::model_execution::CountedActivationCheckpointOutcome::Prepared
+            | crate::model_execution::CountedActivationCheckpointOutcome::CredentialWait => {
+                CommitActivationPreviewOutcome::Activated(Box::new(activated))
+            }
+            crate::model_execution::CountedActivationCheckpointOutcome::PoolExhausted(policy) => {
+                model_calls
+                    .fail_counted_pool_exhaustion_in_transaction(
+                        &mut transaction,
+                        &activated,
+                        &policy,
+                        failure_identities,
+                    )
+                    .await
+                    .map_err(CommitActivationPreviewError::ModelCall)?;
+                CommitActivationPreviewOutcome::PoolExhausted(activated.turn())
+            }
+        };
         transaction.commit().await.map_err(|error| {
             let commit_ambiguous = commit_failure_is_ambiguous(&error);
             CommitActivationPreviewError::Activation(
                 StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous),
             )
         })?;
-        Ok(CommitActivationPreviewOutcome::Activated(Box::new(
-            activated,
-        )))
+        Ok(outcome)
     }
 
-    /// Revalidates one counted preview and atomically commits its activation,
-    /// exact Prepared call, and definitive attachment-failure closure.
+    /// Revalidates counted activation and commits either its credential wait
+    /// or definitive attachment-failure closure.
     pub async fn commit_counted_attachment_failure_preview(
         &self,
         preview: PreparedActivationPreview,
@@ -429,6 +458,8 @@ impl StartEligibleTurnRepository {
                 .map_err(CommitActivationPreviewError::Activation)?;
             return Ok(CommitCountedAttachmentFailurePreviewOutcome::Stale);
         }
+        reserve_preview_frontier_identities(&mut transaction, preview.identities, &identities)
+            .await?;
         let outbox_order_guard =
             crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
                 .await
@@ -445,7 +476,7 @@ impl StartEligibleTurnRepository {
             .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
         }
         let turn = activated.turn();
-        model_calls
+        let failed = model_calls
             .fail_counted_attachment_in_transaction(
                 &mut transaction,
                 &activated,
@@ -462,7 +493,11 @@ impl StartEligibleTurnRepository {
                 StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous),
             )
         })?;
-        Ok(CommitCountedAttachmentFailurePreviewOutcome::Failed(turn))
+        Ok(if failed.is_some() {
+            CommitCountedAttachmentFailurePreviewOutcome::Failed(turn)
+        } else {
+            CommitCountedAttachmentFailurePreviewOutcome::CredentialWait(turn)
+        })
     }
 
     /// Revalidates one preview and atomically closes it as a call-free failed
@@ -528,6 +563,8 @@ impl StartEligibleTurnRepository {
                 .map_err(CommitActivationPreviewError::Activation)?;
             return Ok(CommitCompactionFailurePreviewOutcome::Stale);
         }
+        reserve_preview_frontier_identities(&mut transaction, preview.identities, &identities)
+            .await?;
         let _outbox_order_guard =
             crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
                 .await
@@ -638,6 +675,9 @@ async fn prepare_preview(
     requested_session: SessionId,
     identities: AcceptedInputTurnActivationIdentities,
 ) -> Result<Option<PreparedTurnActivation>, StartEligibleTurnRepositoryError> {
+    if session_runner_is_lost(connection, requested_session).await? {
+        return Ok(None);
+    }
     let session = match load_session_from_connection(connection, requested_session).await {
         Ok(Some(session)) => session,
         Ok(None) => return Ok(None),
@@ -974,6 +1014,14 @@ async fn prepare_delegated_wake_preview(
     })
 }
 
+async fn session_runner_is_lost(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, StartEligibleTurnRepositoryError> {
+    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_current_session_placement AS head JOIN runner_session_placement_record AS record USING (session_id, event_ordinal) WHERE head.session_id = $1 AND record.state_kind IN ('runner_lost', 'runner_lost_before_pin'))")
+        .bind(session.into_uuid()).fetch_one(&mut *connection).await?)
+}
+
 /// Whether the locked session is suspended in place.
 /// A held start gate keeps queued input from activating until `release_start`,
 /// including across a module park and resume.
@@ -1046,6 +1094,7 @@ async fn handle_in_transaction(
     // that lock rather than racing it.
     if session_refuses_new_work(connection, requested_session).await?
         || session_start_gate_is_held(connection, requested_session).await?
+        || session_runner_is_lost(connection, requested_session).await?
     {
         return Ok(TransactionDecision::Rollback(
             StartEligibleTurnOutcome::NoEligibleTurn,
@@ -1328,7 +1377,8 @@ async fn insert_prepared_accepted_activation(
         | ActiveTurnPhase::AwaitingApproval { .. }
         | ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared initial active phase",
             ));
@@ -1540,7 +1590,8 @@ async fn insert_prepared_delegated_activation(
         | ActiveTurnPhase::AwaitingApproval { .. }
         | ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared delegated initial phase",
             ));
@@ -1733,6 +1784,25 @@ fn semantic_entry_insert_error(
         }
         _ => error.into(),
     }
+}
+
+async fn reserve_preview_frontier_identities(
+    connection: &mut sqlx::PgConnection,
+    activation: AcceptedInputTurnActivationIdentities,
+    failure: &signalbox_domain::FailedModelCallTurnIdentities,
+) -> Result<(), CommitActivationPreviewError> {
+    crate::model_execution::reserve_frontier_write_identities(
+        connection,
+        [
+            activation.model_identity_entry().into_uuid(),
+            activation.origin_entry().into_uuid(),
+            activation.starting_frontier().into_uuid(),
+            failure.failure_entry().into_uuid(),
+            failure.terminal_frontier().into_uuid(),
+        ],
+    )
+    .await
+    .map_err(CommitActivationPreviewError::ModelCall)
 }
 
 #[cfg(test)]

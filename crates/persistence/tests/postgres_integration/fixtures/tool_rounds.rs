@@ -280,6 +280,11 @@ pub(crate) fn announcement_for(
     fixture_call: ModelCallId,
 ) -> AmbiguityAnnouncement {
     match kind {
+        DispatchedOutboxEventKind::CredentialPoolExhausted(evidence)
+            if evidence.turn_id == fixture_turn.into_uuid() =>
+        {
+            AmbiguityAnnouncement::DefinitiveTurnOutcome
+        }
         DispatchedOutboxEventKind::ToolBatchTransition {
             turn,
             producing_call,
@@ -300,6 +305,7 @@ pub(crate) fn announcement_for(
                 | DispatchedTurnTerminalDisposition::Cancelled { .. },
         } if *turn == fixture_turn => AmbiguityAnnouncement::DefinitiveTurnOutcome,
         DispatchedOutboxEventKind::ToolBatchTransition { .. }
+        | DispatchedOutboxEventKind::CredentialPoolExhausted(_)
         | DispatchedOutboxEventKind::TurnTerminal { .. }
         | DispatchedOutboxEventKind::SessionCreated(_)
         | DispatchedOutboxEventKind::SessionStateChanged(_)
@@ -408,9 +414,10 @@ pub(crate) fn announces_a_definitive_turn_outcome(
 /// Drives one checkpoint-confirmed tool round through approval, execution,
 /// and the steering-free continuation transaction, then authorizes the
 /// prepared continuation call for send, leaving it durably in flight.
-pub(crate) async fn authorize_continuation_after_completed_round(
+pub(crate) async fn authorize_continuation_after_terminal_round(
     pool: &PgPool,
     seed: u128,
+    preflight_error: Option<ToolExecutionError>,
 ) -> Result<
     (
         RestartModelCallFixture,
@@ -443,21 +450,27 @@ pub(crate) async fn authorize_continuation_after_completed_round(
             ToolEffectClass::EffectFree,
         )
         .await?;
-    let authorized_attempt = tool_repository
-        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
-        .await?;
-    tool_repository
-        .commit_observation(
-            authorized_attempt
-                .executor_fence()
-                .bind(ToolAttemptObservation::Completed {
-                    result: ToolResultContent::Text(
-                        ToolResultText::try_new(String::from("2026-07-26T12:00:00Z"))
-                            .expect("bounded result"),
-                    ),
-                }),
-        )
-        .await?;
+    if let Some(error) = preflight_error {
+        tool_repository
+            .commit_preflight_error(fixture.session, fixture.turn, tool_attempt, error)
+            .await?;
+    } else {
+        let authorized_attempt = tool_repository
+            .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+            .await?;
+        tool_repository
+            .commit_observation(
+                authorized_attempt
+                    .executor_fence()
+                    .bind(ToolAttemptObservation::Completed {
+                        result: ToolResultContent::Text(
+                            ToolResultText::try_new(String::from("2026-07-26T12:00:00Z"))
+                                .expect("bounded result"),
+                        ),
+                    }),
+            )
+            .await?;
+    }
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
     let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(

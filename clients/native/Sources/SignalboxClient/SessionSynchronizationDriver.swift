@@ -40,6 +40,7 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
 
   private let requester: any SignalboxProcessRequesting
   private let sessionID: SignalboxCanonicalUUID
+  private let snapshotCapacity: SignalboxSynchronizationSnapshotCapacity
   private let updates: @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
   private var machine: SignalboxSessionSynchronizationMachine
 
@@ -62,6 +63,7 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
   ) {
     self.requester = requester
     self.sessionID = sessionID
+    self.snapshotCapacity = policy.snapshotCapacity
     self.machine = SignalboxSessionSynchronizationMachine(
       sessionID: sessionID,
       policy: policy
@@ -184,6 +186,104 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
     }
   }
 
+  private func validatePoolEvidence(_ message: SignalboxProcessServerMessage) async throws {
+    let turnID: SignalboxCanonicalUUID
+    let evidence: SignalboxCredentialPoolExhaustion
+    switch message {
+    case .transcriptTurn(let turn):
+      guard case .failedCredentialPoolExhausted(let captured) = turn.state else { return }
+      turnID = turn.turnID
+      evidence = captured
+    case .sessionEvent(let event):
+      switch event.event {
+      case .turnCredentialPoolExhausted(let turn, let captured):
+        turnID = turn
+        evidence = captured
+        _ = try await validatePoolEvent(event, turnID: turn, evidence: captured)
+      case .turnFailed(let turn, _, _):
+        guard let captured = try await validatePoolEvent(event, turnID: turn, evidence: nil)
+        else { return }
+        turnID = turn
+        evidence = captured
+      default: return
+      }
+    default: return
+    }
+    let exchange = try await requester.open(.readCredentialPoolPolicy(sessionID: sessionID, turnID: turnID, poolPolicyID: evidence.poolPolicyID))
+    do {
+      guard let frame = try await exchange.next(),
+        case .credentialPoolPolicy(let policy) = frame.message,
+        policy.poolPolicyID == evidence.poolPolicyID,
+        policy.policyMembers.map({ Data($0.utf8) }) == evidence.policyMembers.map({ Data($0.utf8) })
+      else { throw SignalboxProcessServiceError.unexpectedMessage("Exhaustion does not match its immutable pool policy.") }
+      try Task.checkCancellation()
+      await exchange.close()
+    } catch {
+      await exchange.close()
+      throw error
+    }
+  }
+
+  private func validatePoolEvent(
+    _ event: SignalboxFollowedSessionEvent,
+    turnID: SignalboxCanonicalUUID,
+    evidence: SignalboxCredentialPoolExhaustion?
+  ) async throws -> SignalboxCredentialPoolExhaustion? {
+    let mismatch = SignalboxProcessServiceError.unexpectedMessage(
+      "Pool exhaustion event disagrees with its authoritative transcript."
+    )
+    guard event.sessionID == sessionID else { throw mismatch }
+    let exchange = try await requester.open(.readTranscript(sessionID: sessionID))
+    do {
+      guard let first = try await exchange.next(),
+        case .transcriptSnapshotStart(let boundary) = first.message,
+        boundary.sessionID == sessionID, boundary.cursor >= event.cursor
+      else { throw mismatch }
+      var accumulator = SignalboxSnapshotAccumulator(boundary: boundary, capacity: snapshotCapacity)
+      while let frame = try await exchange.next() {
+        try Task.checkCancellation()
+        switch accumulator.ingest(frame.message, expectedSessionID: sessionID) {
+        case .accepted, .diagnostic(_, nil): continue
+        case .completed(let snapshot):
+          for record in snapshot.records {
+            guard case .turn(let turn) = record, turn.turnID == turnID else { continue }
+            switch turn.state {
+            case .failedCredentialPoolExhausted(let actual):
+              if let evidence {
+                guard actual == evidence,
+                  actual.policyMembers.map({ Data($0.utf8) })
+                    == evidence.policyMembers.map({ Data($0.utf8) })
+                else { throw mismatch }
+              } else {
+                guard case .turnFailed(_, let failureEntryID, let terminalFrontierID) = event.event,
+                  actual.failureEntryID == failureEntryID,
+                  actual.terminalFrontierID == terminalFrontierID
+                else { throw mismatch }
+              }
+              await exchange.close()
+              return actual
+            case .failed(let terminalFrontierID, _, _),
+              .failedAfterCredentialWait(let terminalFrontierID, _, _):
+              guard evidence == nil,
+                case .turnFailed(_, _, let eventFrontierID) = event.event,
+                terminalFrontierID == eventFrontierID
+              else { throw mismatch }
+              await exchange.close()
+              return nil
+            default: throw mismatch
+            }
+          }
+          throw mismatch
+        case .diagnostic, .remoteFailure, .invalid: throw mismatch
+        }
+      }
+      throw mismatch
+    } catch {
+      await exchange.close()
+      throw error
+    }
+  }
+
   private func openFollow(generation: UInt64) {
     primaryTask?.cancel()
     primaryTask = Task { [weak self] in
@@ -201,6 +301,7 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       primaryExchange = exchange
       await process(.connected(generation: generation))
       while !Task.isCancelled, let frame = try await exchange.next() {
+        try await validatePoolEvidence(frame.message)
         await process(.frame(generation: generation, message: frame.message))
       }
       guard !Task.isCancelled, isStarted else {
@@ -252,6 +353,7 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       }
       sideExchange = exchange
       while !Task.isCancelled, let frame = try await exchange.next() {
+        try await validatePoolEvidence(frame.message)
         let isTerminalBoundary: Bool
         if case .transcriptSnapshotEnd = frame.message {
           isTerminalBoundary = true

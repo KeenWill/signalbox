@@ -284,9 +284,11 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         };
         let mut request_fast_mode = operation.settings.fast_mode;
         if let Some(capabilities) = capabilities {
-            let (target, effective_request_fast_mode) = match capabilities
-                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
-            {
+            let (target, effective_request_fast_mode) = match capabilities.effective_target(
+                &operation.resolved_target,
+                operation.settings.fast_mode,
+                operation.retained_mapped_target.as_ref(),
+            ) {
                 Ok(application) => application,
                 Err(error) => {
                     return PreparationOutcome::Failed {

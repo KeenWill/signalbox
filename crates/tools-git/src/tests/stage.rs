@@ -244,7 +244,10 @@ fn stage_rejects_an_entry_that_would_exceed_the_index_budget() {
 
     let failure = executor
         .stage(
-            &repository,
+            &executor
+                .repository_authority
+                .open_repository_shell()
+                .expect("repository shell opens"),
             GitStageArguments {
                 paths: vec![UNTRACKED_PATH.to_owned()],
             },
@@ -490,11 +493,13 @@ fn stage_rejects_intermediate_symlink_escape() {
     fs::write(outside.path().join("outside.txt"), CHANGED_CONTENT).expect("outside file writes");
     symlink(outside.path(), fixture.root().join("escape")).expect("escaping symlink constructs");
     let executor = fixture.executor();
-    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
 
     let failure = executor
         .stage(
-            &repository,
+            &executor
+                .repository_authority
+                .open_repository_shell()
+                .expect("repository shell opens"),
             GitStageArguments {
                 paths: vec!["escape/outside.txt".to_owned()],
             },

@@ -67,7 +67,7 @@ pub(crate) const fn issuer_columns(
 }
 
 pub(crate) const fn create_session_storage_version_is_supported(version: i16) -> bool {
-    matches!(version, 1..=4 | 6..=8)
+    matches!(version, 1..=4 | 6..=9)
 }
 
 pub(crate) const fn imported_session_storage_version_is_supported(version: i16) -> bool {
@@ -166,7 +166,7 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 25] = [
         spelling: SUBMIT_INPUT_KIND,
         typed_table: "submit_input_command",
         minimum_version: 3,
-        maximum_version: 3,
+        maximum_version: 4,
     },
     CommandKindDefinition {
         kind: CommandKind::DecideToolRequest,

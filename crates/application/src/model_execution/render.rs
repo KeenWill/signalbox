@@ -440,54 +440,114 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
     Ok(messages.into_boxed_slice())
 }
 
-/// Sums the model-visible content one render would clone into messages.
-///
-/// Every term mirrors exactly what `render_frontier_messages` clones for that
-/// entry shape, across both content sources it draws from: the projected
-/// payloads themselves and the resolved tool evidence they name. Payloads
-/// contribute attested imported text, origin and steering user content,
-/// delegated task and peer-message content, delivered delegation-outcome
-/// content, context-summary text, and assistant text; evidence contributes a
-/// proposal's request arguments, a result's result text or error detail, and a
-/// denial's reason. Counting only the tool evidence would leave assistant text
-/// — which carries no length bound of its own — outside a ceiling that clones
-/// it, so the sum has to span every kind the renderer clones or the bound is
-/// not the bound it names.
-///
-/// A shape the renderer skips or refuses contributes nothing, because it clones
-/// nothing: unattested or non-text imported content, a delegation result whose
-/// wait mode contradicts its delivery position, and turn markers all render no
-/// content. A result entry contributes no arguments because its message carries
-/// only the request identity, so a request's arguments are counted once through
-/// its proposal. Fixed-width identities and the separately bounded tool name a
-/// proposal carries are outside the sum: they do not scale with admitted
-/// content, and the ceiling exists to bound what does.
-///
-/// Reading the lengths of already-resident durable facts allocates nothing,
-/// which is what lets the ceiling be enforced before the clone rather than
-/// after it.
-///
-/// Sums the text a user-content part array carries.
-///
-/// Ordered user content holds text parts and attachment parts. Only the text
-/// parts carry bytes that scale with what the renderer clones; an attachment
-/// part carries a fixed-width digest, a bounded media-type declaration, and an
-/// optional bounded display filename, all of which sit outside this sum for the
-/// same reason the fixed-width identities do. Exactly one text part reduces
-/// this to the single-text length the ceiling counted before user content grew
-/// a part array, so the bound does not move for content that did not change
-/// shape.
-fn user_content_text_bytes(content: &UserContent) -> usize {
-    content
-        .parts()
-        .iter()
-        .fold(0_usize, |total, part| match part {
-            UserContentPart::Text { value } => total.saturating_add(value.as_str().len()),
-            UserContentPart::Attachment { .. } => total,
-        })
+/// Counts message and user-part containers emitted for projected payloads.
+/// Imported entries without attested user/assistant text and turn terminal
+/// markers emit no message and contribute no container bytes.
+pub fn projected_frontier_container_bytes<'a>(
+    entries: impl IntoIterator<Item = &'a SemanticTranscriptEntryPayload>,
+    mut origin_content: impl FnMut(AcceptedInputId) -> Option<&'a UserContent>,
+) -> usize {
+    entries.into_iter().fold(0_usize, |total, payload| {
+        let parts = match payload {
+            SemanticTranscriptEntryPayload::Imported {
+                source_speaker:
+                    ImportedSourceAttestation::Attested(
+                        ImportedSpeaker::User | ImportedSpeaker::Assistant,
+                    ),
+                content: ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(_)),
+                ..
+            } => 0,
+            SemanticTranscriptEntryPayload::Imported { .. }
+            | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. }
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => return total,
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+                origin_content(*accepted_input).map_or(0, |content| content.parts().len())
+            }
+            SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
+            | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+            | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
+            | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { .. } => 0,
+        };
+        total
+            .saturating_add(std::mem::size_of::<ModelConversationMessage>())
+            .saturating_add(parts.saturating_mul(std::mem::size_of::<ModelUserContentPart>()))
+    })
 }
 
-pub(super) fn projected_frontier_content_bytes<'a>(
+/// Counts heap-backed user content without cloning its text or metadata.
+/// Attachment length uses the widest u64 spelling, reserving at most nineteen
+/// extra bytes per stub before catalog evidence is consulted by rendering.
+pub(super) fn user_content_retained_bytes(content: &UserContent) -> usize {
+    content.parts().iter().fold(0_usize, |total, part| {
+        let bytes = match part {
+            UserContentPart::Text { value } => value.as_str().len(),
+            UserContentPart::Attachment {
+                digest,
+                kind,
+                media_type,
+                display_filename,
+            } => {
+                let mut counter = SerializedByteCount(0);
+                let envelope = SerializedAttachmentEnvelope {
+                    signalbox_attachment: SerializedAttachmentStub {
+                        kind: match kind {
+                            AttachmentKind::Image => "image",
+                            AttachmentKind::Document => "document",
+                            AttachmentKind::File => "file",
+                        },
+                        media_type: media_type.as_str(),
+                        display_filename: display_filename
+                            .as_ref()
+                            .map(signalbox_domain::AttachmentDisplayFilename::as_str),
+                        byte_length: u64::MAX.to_string(),
+                        digest: digest.to_string(),
+                    },
+                };
+                if serde_json::to_writer(&mut counter, &envelope).is_err() {
+                    return usize::MAX;
+                }
+                counter
+                    .0
+                    .saturating_add(media_type.as_str().len())
+                    .saturating_add(
+                        display_filename
+                            .as_ref()
+                            .map_or(0, |name| name.as_str().len()),
+                    )
+            }
+        };
+        total.saturating_add(bytes)
+    })
+}
+
+struct SerializedByteCount(usize);
+
+impl std::io::Write for SerializedByteCount {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Bounds projected heap content retained by rendering, including attachment
+/// stubs, their metadata, and resolved tool content.
+pub fn projected_frontier_content_bytes<'a>(
     entries: impl IntoIterator<
         Item = (
             SemanticTranscriptEntryRef,
@@ -513,7 +573,7 @@ pub(super) fn projected_frontier_content_bytes<'a>(
             SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
                 // Absent origin content refuses the render instead of cloning.
-                origin_content(*accepted_input).map_or(0, user_content_text_bytes)
+                origin_content(*accepted_input).map_or(0, user_content_retained_bytes)
             }
             SemanticTranscriptEntryPayload::DelegatedTask { content, .. }
             | SemanticTranscriptEntryPayload::DelegationMessage { content, .. } => {

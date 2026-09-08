@@ -1,7 +1,5 @@
 use std::collections::HashSet;
 
-use git2::Repository;
-
 use crate::arguments::GitLogArguments;
 use crate::bounded::{
     bounded_bytes, find_bounded_commit, resolve_bounded_commit, validate_object_header,
@@ -9,11 +7,11 @@ use crate::bounded::{
 use crate::failure::LocalGitFailure;
 use crate::layout::validate_live_shallow;
 use crate::limits::{MAX_LOG_IDENTITY_BYTES, MAX_LOG_MESSAGE_BYTES, MAX_WORKTREE_INSPECTIONS};
-use crate::pinning::PinnedRepository;
+use crate::pinning::{PinnedRepository, RepositoryShell};
 use crate::result::{LogEntry, LogResult};
 
 pub(super) fn log(
-    repository: &Repository,
+    repository: &RepositoryShell,
     authority: &PinnedRepository,
     arguments: GitLogArguments,
 ) -> Result<LogResult, LocalGitFailure> {
@@ -51,7 +49,7 @@ pub(super) fn log(
 }
 
 pub(super) fn bounded_topological_page(
-    repository: &Repository,
+    repository: &RepositoryShell,
     start: git2::Oid,
     limit: usize,
     shallow: &HashSet<git2::Oid>,
@@ -94,7 +92,7 @@ pub(super) fn bounded_topological_page(
 }
 
 pub(super) fn select_topological_candidate(
-    repository: &Repository,
+    repository: &RepositoryShell,
     frontier: &[git2::Oid],
     shallow: &HashSet<git2::Oid>,
     inspections: &mut usize,
@@ -118,7 +116,7 @@ pub(super) fn select_topological_candidate(
 }
 
 pub(super) fn bounded_commit_reaches(
-    repository: &Repository,
+    repository: &RepositoryShell,
     descendant: git2::Oid,
     ancestor: git2::Oid,
     shallow: &HashSet<git2::Oid>,

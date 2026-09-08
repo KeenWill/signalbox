@@ -9,9 +9,9 @@ deleted when the work lands.
 The daemon prices a call against dated rate windows, declares each model's input
 modalities and workspace-instruction capacity, records the workspace roots it
 derives, binds a session to its workspace before its first turn when a template
-asks for it. Credential exclusions expire, coalesce, and clear; sessions carry
-the complete pool policy they were created under; and a runner reads, injects,
-and scrubs a granted credential for the work it dispatches.
+asks for it. Credential exclusions expire and coalesce; sessions carry the
+complete pool policy they were created under; and a runner reads, injects, and
+scrubs a granted credential for the work it dispatches.
 
 ## Design
 
@@ -152,18 +152,15 @@ Database restore transactionally quarantines every restored `oauth` profile
 before signalboxd may start against the restored state; an ordinary restart does
 not.
 
-`max_concurrent_invocations` on a `codex_home` profile is a reserved field with
-the range 1 through 1,024. Capacity reservations, contention waits, and
-refresh-race coordination become admissible together; no accepted bound is
-inert. `round_robin` owns one durable global cursor per interned pool-policy
-revision and priority value. The repository interns the policy's complete
-canonical structural value, pool name, ordered members, each member's expected
-adapter and delivery kind, membership settings, tie-break, exhaustion rule, and
-trigger actions, under a uniqueness constraint on that value, so an unchanged
-document reuses one revision across restarts and an exact reversion reuses the
-old one; hashes accelerate lookup but never establish equality. The cursor names
-one member ordinal in that priority's declaration order. An admissible sticky
-member is still preferred; otherwise selection starts at the cursor and walks
+`round_robin` owns one durable global cursor per interned pool-policy revision
+and priority value. The repository interns the policy's complete canonical
+structural value, pool name, ordered members, each member's expected adapter and
+delivery kind, membership settings, tie-break, exhaustion rule, and trigger
+actions, under a uniqueness constraint on that value, so an unchanged document
+reuses one revision across restarts and an exact reversion reuses the old one;
+hashes accelerate lookup but never establish equality. The cursor names one
+member ordinal in that priority's declaration order. An admissible sticky member
+is still preferred; otherwise selection starts at the cursor and walks
 cyclically, skipping inadmissible members, and the transaction that commits that
 `Prepared` record advances the cursor to the next declared member even when that
 member is excluded. A sticky selection advances nothing. Preparation locks the
@@ -199,9 +196,7 @@ preparation never resolves it through the current document's pool table. Before
 credential resolution, preparation requires the selected member's frozen adapter
 to equal the resolved target's adapter and requires the current registration to
 retain both that adapter and delivery kind; absence or mismatch is a typed
-pre-send credential-configuration failure that blocks scheduling. Each call pins
-the interned `pool_policy_id` at the `Prepared` insert beside its credential
-reference, and observation commit reloads that pinned policy. The one-time
+pre-send credential-configuration failure that blocks scheduling. The one-time
 migration of existing family-to-reference entries is deterministic: each entry
 becomes a singleton policy retaining exactly the stored reference, one member at
 priority 1, no headroom reserve, `first_listed`, `on_pool_exhausted = "fail"`,
@@ -247,15 +242,14 @@ work.
 
 ## Compatibility constraints
 
-The configuration grammar already admits the `codex_cli` `file` spelling,
-`max_concurrent_invocations`, and `round_robin`, and rejects each at startup as
-unsupported. Supplying a surface for any of them changes no grammar.
+The configuration grammar already admits the `codex_cli` `file` spelling and
+`round_robin`, and rejects each at startup as unsupported. Supplying a surface
+for any of them changes no grammar.
 
 The session credential record and entry rows are append-only behind a guarded
 head. Any update appends one complete event and advances the head by one.
 
-The workspace table and its constraints exist and nothing writes them; the
-per-session derivation must never start reading them.
+The per-session derivation must never read the workspace table to choose a root.
 
 Every durable action row is appended per observation under the profile's
 action-head lock and never updated, except the `switch_next_turn` displacement a
@@ -293,17 +287,16 @@ model-provider names; runner credential execution adds no such field.
 - A template selector binds the workspace before first activation, and the
   install-and-activate transition commits atomically and fails closed after
   restart on a changed root.
-- `max_concurrent_invocations` is admitted together with the reservation that
-  gives it effect, and `round_robin` selects through its durable cursor.
+- `round_robin` selects through its durable cursor.
 - An exclusion with a reported reset clears when it passes, an operator clear or
   zero-cost probe ends an indefinite policy-origin generation while a
   delivery-origin one ends by re-provisioning or deletion except a `codex_home`
   quarantine, which an operator clears once the store is repaired, and repeated
   triggers of one origin coalesce onto one generation.
-- Session credential history carries the complete pool policy, each call pins
-  its policy id, every existing entry whose profile is still registered migrates
-  to a singleton policy that resolves the same credential it did before, and an
-  entry naming no current registration blocks scheduling.
+- Session credential history carries the complete pool policy, every existing
+  entry whose profile is still registered migrates to a singleton policy that
+  resolves the same credential it did before, and an entry naming no current
+  registration blocks scheduling.
 - An explicit credential update appends one event and advances the head by one.
 - A runner injects a granted credential only under the configured environment
   name inside the sandbox, the Git helper answers only the matching canonical

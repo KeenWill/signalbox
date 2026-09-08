@@ -50,7 +50,7 @@ fn object_publication_rejects_growth_beyond_the_live_database_budget() {
         .repository()
         .expect("pinned fixture repository opens");
     repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .expect("fixture object database installs");
     let new_object_content = b"new object outside the captured database\n";
     let object = repository
@@ -118,7 +118,7 @@ fn failed_unborn_commit_removes_its_new_reference_directories() {
         .add_new_mempack_backend(1000)
         .expect("fixture memory pack attaches");
     pinned_repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .expect("fixture writable object database installs");
 
     let failure = commit(
@@ -211,7 +211,7 @@ fn log_rejects_a_nonempty_shallow_snapshot() {
         .add_to(&object_database)
         .expect("fixture objects attach");
     repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .expect("fixture object database installs");
     let shallow_content = format!("{}\n", fixture.initial);
     fs::write(fixture.root().join(".git/shallow"), &shallow_content)

@@ -6,9 +6,12 @@
 //! method holds a database transaction across provider work.
 
 mod continuation;
-mod credential_pool;
+pub(crate) mod credential_pool;
+#[path = "credential_pool_evidence.rs"]
+mod credential_pool_evidence;
 #[path = "credential_pool_records.rs"]
 mod credential_pool_records;
+pub(crate) mod credential_wait;
 mod delegated_result;
 mod delegation_lock;
 mod live_turn;
@@ -24,7 +27,6 @@ mod reread;
 mod transaction_impls;
 
 pub(crate) use credential_pool::acquire_model_call_outbox_order_guard;
-pub(crate) use credential_pool::prepared_serving_evidence;
 pub(crate) use delegation_lock::lock_delegated_child_endpoint_sessions;
 pub(crate) use delegation_lock::lock_delegated_turn_terminal_frontier;
 pub(crate) use live_turn::load_call_snapshot;
@@ -36,8 +38,6 @@ pub(crate) use persist_terminal::persist_automatic_reconciliation;
 pub(crate) use persist_terminal::persist_stop_requested;
 pub(crate) use persist_terminal::persist_terminal_outcome;
 pub(crate) use persist_terminal::persist_tool_reconciliation_required;
-
-pub(crate) use prepared::insert_prepared_call;
 
 pub(crate) use persist_disposition::SnapshotAppend;
 pub(crate) use persist_disposition::SnapshotAppendError;
@@ -158,18 +158,21 @@ pub struct ProspectiveModelCall {
 /// visible and are not part of the next request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProspectiveModelInput<'a> {
+    /// Projected entries measured through the effective adapter's serializer,
+    /// including entries that an activation preview has not committed.
+    Rendered(&'a std::collections::BTreeMap<SemanticTranscriptEntryRef, u64>),
     /// One committed frontier, projected from its durable membership.
     Committed(ContextFrontierId),
     /// One uncommitted activation preview.
     ///
     /// A preview's starting frontier and the entries it mints exist only in
     /// memory — its transaction is discarded before any caller can read them —
-    /// so the preview carries its own projected membership and the exact
-    /// content bytes of the entries no durable row can score.
+    /// so the preview carries its own projected membership and a conservative
+    /// byte allowance for the entries no durable row can score.
     Preview {
         /// Model-visible members in projected order.
         projected_members: &'a [SemanticTranscriptEntryRef],
-        /// UTF-8 content bytes of the members the preview minted.
+        /// UTF-8 text bytes and attachment-stub allowances for preview members.
         uncommitted_content_bytes: u64,
     },
 }
@@ -599,6 +602,7 @@ pub struct PostgresModelCallRepository {
     pool: PgPool,
     targets: ModelTargetCatalog,
     credential_reference: ModelCallCredentialReference,
+    runner_recovery: Option<crate::runner_protocol::RunnerProtocolStore>,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: CredentialPoolRuntimeCatalog,
     same_credential_attempt_bound: NonZeroUsize,
@@ -612,6 +616,7 @@ pub(crate) struct ModelCallOutboxOrderGuard {
 }
 
 pub(crate) enum CountedActivationCheckpointOutcome {
+    CredentialWait,
     Prepared,
     PoolExhausted(CredentialPoolRuntimePolicy),
 }
@@ -640,6 +645,22 @@ const fn prepared_failure_cause(
     }
 }
 
+pub(crate) async fn retire_terminal_batch_replacement(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), ModelCallRepositoryError> {
+    crate::runner_protocol::retire_replacement_for_terminal_batch(connection, session, turn)
+        .await
+        .map_err(|error| match error {
+            crate::runner_protocol::RunnerProtocolStoreError::Database(source) => {
+                ModelCallRepositoryError::from(source)
+            }
+            _ => ModelCallCorruption::Inconsistent("terminal batch runner replacement").into(),
+        })?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn terminalize_lifecycle(
     connection: &mut PgConnection,
@@ -651,6 +672,7 @@ async fn terminalize_lifecycle(
     terminal_attempt: Option<signalbox_domain::TurnAttemptId>,
     terminal_call: Option<ModelCallId>,
 ) -> Result<(), ModelCallRepositoryError> {
+    retire_terminal_batch_replacement(connection, session, turn).await?;
     let runner_recovery_terminal_attempt: Option<Uuid> = sqlx::query_scalar(
         "SELECT yielded_turn_attempt_id
            FROM turn_runner_recovery_interrupt_effect
@@ -844,8 +866,8 @@ async fn finish_optional_commit<T>(
 /// its committed equivalent.
 ///
 /// Each arm mirrors the payload-kind term `latest_reported_usage` applies to a
-/// committed member: accepted input sums its text parts and leaves attachment
-/// stubs to their own accounting, and delegated material carries the exact
+/// committed member: accepted input includes text and attachment stubs,
+/// and delegated material carries the exact
 /// delivered content. Kinds a preview never mints contribute nothing.
 fn preview_entry_content_bytes(
     entry: &SemanticTranscriptEntry,
@@ -857,7 +879,7 @@ fn preview_entry_content_bytes(
             origin_contents
                 .iter()
                 .find(|origin| origin.accepted_input() == *accepted_input)
-                .map_or(0, |origin| accepted_input_text_bytes(origin.content()))
+                .map_or(0, |origin| accepted_input_content_bytes(origin.content()))
         }
         SemanticTranscriptEntryPayload::DelegatedTask { content, .. }
         | SemanticTranscriptEntryPayload::DelegationMessage { content, .. } => {
@@ -884,8 +906,8 @@ fn preview_entry_content_bytes(
     }
 }
 
-/// Sums the text parts of one accepted input, as `octet_length` does durably.
-fn accepted_input_text_bytes(content: &UserContent) -> u64 {
+/// Reserves text bytes and the bounded rendered stub for every attachment.
+fn accepted_input_content_bytes(content: &UserContent) -> u64 {
     content
         .parts()
         .iter()
@@ -893,7 +915,10 @@ fn accepted_input_text_bytes(content: &UserContent) -> u64 {
             signalbox_domain::UserContentPart::Text { value } => {
                 total.saturating_add(utf8_byte_length(value.as_str()))
             }
-            signalbox_domain::UserContentPart::Attachment { .. } => total,
+            signalbox_domain::UserContentPart::Attachment { .. } => total.saturating_add(
+                u64::try_from(signalbox_application::MAX_RENDERED_ATTACHMENT_STUB_BYTES)
+                    .unwrap_or(u64::MAX),
+            ),
         })
 }
 
@@ -901,7 +926,7 @@ fn utf8_byte_length(value: &str) -> u64 {
     u64::try_from(value.len()).unwrap_or(u64::MAX)
 }
 
-fn map_projected_membership_error(
+pub(crate) fn map_projected_membership_error(
     error: crate::context_compaction::ContextCompactionRepositoryError,
 ) -> ModelCallRepositoryError {
     use crate::context_compaction::ContextCompactionRepositoryError as ProjectionError;
@@ -973,3 +998,49 @@ where
 
 #[cfg(test)]
 mod tests;
+
+/// Serializes colliding frontier candidates before their writers take the
+/// global credential/outbox guard.
+pub(crate) async fn reserve_frontier_write_identities(
+    connection: &mut PgConnection,
+    identities: impl IntoIterator<Item = Uuid>,
+) -> Result<(), ModelCallRepositoryError> {
+    let identities = identities.into_iter().collect::<Vec<_>>();
+    if identities.is_empty() {
+        return Ok(());
+    }
+    let keys: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT hashtextextended('model_call_frontier_write:' || identity::text, 0) AS lock_key
+           FROM unnest($1::uuid[]) AS identity ORDER BY lock_key",
+    ).bind(&identities).fetch_all(&mut *connection).await?;
+    for key in keys {
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(key)
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod prospective_content_tests {
+    use super::*;
+
+    #[test]
+    fn prospective_attachment_reserves_its_stub_alongside_utf8_text() {
+        let content = UserContent::try_parts(vec![
+            signalbox_domain::UserContentPart::Text {
+                value: signalbox_domain::NonEmptyUnicodeText::try_new("界".to_owned()).unwrap(),
+            },
+            signalbox_domain::UserContentPart::Attachment {
+                digest: signalbox_domain::BlobDigest::digest(b"fixture"),
+                kind: signalbox_domain::AttachmentKind::File,
+                media_type: signalbox_domain::DeclaredMediaType::try_new("text/plain".to_owned())
+                    .unwrap(),
+                display_filename: None,
+            },
+        ])
+        .unwrap();
+        assert_eq!(accepted_input_content_bytes(&content), 2307);
+    }
+}
