@@ -814,10 +814,28 @@ export const validateDetailContinuation = (
       prior.body.type === 'tool_batch' &&
       initial.body.type === 'tool_batch' &&
       prior.body.projected_member_index === initial.body.projected_member_index &&
-      cursor.field !== 'goal_text' &&
-      prior.body.tools[0]?.request_id !== initial.body.tools[0]?.request_id
-    )
-      throw new TypeError('Continued detail changed its tool member identity')
+      cursor.field !== 'goal_text'
+    ) {
+      const priorTool = prior.body.tools[0]
+      const nextTool = initial.body.tools[0]
+      if (priorTool?.request_id !== nextTool?.request_id)
+        throw new TypeError('Continued detail changed its tool member identity')
+      const before = priorTool?.evidence
+      const after = nextTool?.evidence
+      if (
+        before?.type !== after?.type ||
+        (before?.type === 'physical_attempt' &&
+          after?.type === 'physical_attempt' &&
+          (before.attempt_id !== after.attempt_id ||
+            before.state !== after.state ||
+            before.effect_posture !== after.effect_posture ||
+            (before.sandbox_posture ?? null) !== (after.sandbox_posture ?? null) ||
+            before.result_present !== after.result_present ||
+            before.failure_present !== after.failure_present ||
+            (before.cause ?? null) !== (after.cause ?? null)))
+      )
+        throw new TypeError('Continued detail changed its immutable tool attempt evidence')
+    }
     const priorExcerpt = detailExcerptAt(prior.body, cursor)
     if (priorExcerpt && priorExcerpt.total_bytes !== excerpt.total_bytes)
       throw new TypeError('Continued detail changed its immutable total byte length')

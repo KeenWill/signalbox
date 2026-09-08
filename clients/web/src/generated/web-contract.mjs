@@ -7776,7 +7776,8 @@ function assertTimelineDetailPage(value) {
         if (
           (item.body.detail.type === "child_spawned" ||
             item.body.detail.type === "child_waiting" ||
-            item.body.detail.type === "child_result") &&
+            item.body.detail.type === "child_result" ||
+            item.body.detail.type === "child_lifecycle_disposition") &&
           item.body.detail.child_session_id === value.session_id
         ) {
           fail(

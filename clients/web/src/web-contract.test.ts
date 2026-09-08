@@ -185,7 +185,7 @@ const variants: Array<[WebSessionTimelineDetail['kind'], WebSessionTimelineDetai
       detail: {
         type: 'child_lifecycle_disposition',
         relationship_id: detailSessionId,
-        child_session_id: detailSessionId,
+        child_session_id: '00000000-0000-0000-0000-000000000992',
         event_ordinal: '1',
         outcome: 'child_cancelled',
         reason: 'parent_cancelled_with_descendants',

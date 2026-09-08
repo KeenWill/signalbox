@@ -3227,3 +3227,18 @@ test("injection settlements reject contradictory delivery evidence", () => {
     }
   }
 });
+
+test("child lifecycle disposition cannot name its parent as the child", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "delegation_update";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  page.items[0].body = { type: "delegation", detail: {
+    type: "child_lifecycle_disposition", relationship_id: page.session_id,
+    child_session_id: "00000000-0000-0000-0000-000000000992", event_ordinal: "1",
+    outcome: "child_cancelled", reason: "parent_cancelled_with_descendants",
+    provenance: { type: "parent_lifecycle_command", session_id: page.session_id, command_id: page.session_id },
+  } };
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.detail.child_session_id = page.session_id;
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /child_session_id must be a session other than the relationship parent/);
+});
