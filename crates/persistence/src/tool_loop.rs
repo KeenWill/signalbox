@@ -26,21 +26,20 @@ use signalbox_domain::{
     ActiveTurnPhase, CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
     DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
     DecideToolRequestResult, DelegateApprovalRecommendation, DelegateToolApproval,
-    DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
-    DelegationProvenanceReconstitutionInput, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, EndedToolAttempt, FastMode, GoalGeneration, NormalizedToolArguments,
-    OverrideDeniedToolRequest, OverrideDeniedToolRequestResult, PreparedDecideToolRequest,
-    PreparedOverrideDeniedToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
-    ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
-    ToolAttemptDispatchCorrelation, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
-    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchAuthority, ToolDispatchGeneration,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
-    ToolResultText, TurnId,
+    DelegationContent, DelegationOutcome, DelegationOutcomeKind,
+    DelegationProvenanceReconstitutionInput, DirectModelSelection, DurableCommandId,
+    EndedToolAttempt, FastMode, GoalGeneration, NormalizedToolArguments, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestResult, PreparedDecideToolRequest, PreparedOverrideDeniedToolRequest,
+    PreparedToolBatchDecision, PreparedToolResultProjection, ReconstitutedToolAttempt,
+    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
+    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -4216,6 +4215,18 @@ pub(crate) async fn load_foreground_delegation_outcome(
     .ok_or_else(|| ToolLoopCorruption::Missing("foreground child result").into())
 }
 
+#[derive(sqlx::FromRow)]
+struct ForegroundOutcomeRow {
+    outcome_kind: Option<String>,
+    content_text: Option<String>,
+    reason_kind: Option<String>,
+    provenance_kind: Option<String>,
+    provenance_session_id: Option<Uuid>,
+    provenance_turn_id: Option<Uuid>,
+    provenance_goal_generation: Option<Decimal>,
+    provenance_command_id: Option<Uuid>,
+}
+
 pub(crate) async fn load_optional_foreground_delegation_outcome(
     connection: &mut PgConnection,
     parent: SessionId,
@@ -4223,7 +4234,7 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
     spawning_request: ToolRequestId,
     child: SessionId,
 ) -> Result<Option<DelegationOutcome>, ToolLoopRepositoryError> {
-    let row = sqlx::query(
+    let row = sqlx::query_as::<_, ForegroundOutcomeRow>(
         "SELECT result.outcome_kind, result.content_text,
                 event.reason_kind, event.provenance_kind,
                 event.provenance_session_id, event.provenance_turn_id,
@@ -4255,49 +4266,56 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
     let Some(row) = row else {
         return Ok(None);
     };
-    let kind = match required::<String>(&row, "outcome_kind")?.as_str() {
-        "result_returned" => DelegationOutcomeKind::ResultReturned,
-        "child_failed" => DelegationOutcomeKind::ChildFailed,
-        "child_stopped" => DelegationOutcomeKind::ChildStopped,
-        "child_cancelled" => DelegationOutcomeKind::ChildCancelled,
-        value => {
-            return Err(ToolLoopCorruption::Unsupported {
-                field: "delegation outcome",
-                value: value.to_owned(),
+    decode_foreground_outcome(row).map(Some)
+}
+
+fn decode_foreground_outcome(
+    row: ForegroundOutcomeRow,
+) -> Result<DelegationOutcome, ToolLoopRepositoryError> {
+    let outcome_kind = row
+        .outcome_kind
+        .ok_or(ToolLoopCorruption::Missing("outcome_kind"))?;
+    let reason_kind = row
+        .reason_kind
+        .ok_or(ToolLoopCorruption::Missing("reason_kind"))?;
+    let provenance_kind = row
+        .provenance_kind
+        .ok_or(ToolLoopCorruption::Missing("provenance_kind"))?;
+    let provenance_session_id = row
+        .provenance_session_id
+        .ok_or(ToolLoopCorruption::Missing("provenance_session_id"))?;
+    let kind = crate::mapping::delegation_outcome_kind_from_str(&outcome_kind)
+        .filter(|kind| match kind {
+            DelegationOutcomeKind::ResultReturned
+            | DelegationOutcomeKind::ChildFailed
+            | DelegationOutcomeKind::ChildStopped
+            | DelegationOutcomeKind::ChildCancelled => true,
+            DelegationOutcomeKind::AlreadyTerminal | DelegationOutcomeKind::ContinueRunning => {
+                false
             }
-            .into());
-        }
-    };
+        })
+        .ok_or_else(|| ToolLoopCorruption::Unsupported {
+            field: "delegation outcome",
+            value: outcome_kind.clone(),
+        })?;
     let content = row
-        .try_get::<Option<String>, _>("content_text")?
+        .content_text
         .map(DelegationContent::try_new)
         .transpose()
         .map_err(|_| ToolLoopCorruption::Inconsistent("delegation result content"))?;
-    let reason = match required::<String>(&row, "reason_kind")?.as_str() {
-        "child_completed" => DelegationOutcomeReason::ChildCompleted,
-        "child_execution_failed" => DelegationOutcomeReason::ChildExecutionFailed,
-        "child_result_unavailable" => DelegationOutcomeReason::ChildResultUnavailable,
-        "child_cancelled" => DelegationOutcomeReason::ChildCancelled,
-        "parent_stopped_parent_and_descendants" => DelegationOutcomeReason::ParentStopped {
-            scope: DescendantTerminationScope::ParentAndDescendants,
-        },
-        "parent_cancelled_parent_and_descendants" => DelegationOutcomeReason::ParentCancelled {
-            scope: DescendantTerminationScope::ParentAndDescendants,
-        },
-        value => {
-            return Err(ToolLoopCorruption::Unsupported {
+    let reason =
+        crate::mapping::delegation_outcome_reason_from_str(&reason_kind).ok_or_else(|| {
+            ToolLoopCorruption::Unsupported {
                 field: "delegation outcome reason",
-                value: value.to_owned(),
+                value: reason_kind.clone(),
             }
-            .into());
-        }
-    };
-    let provenance_session = session_id_from_uuid(required(&row, "provenance_session_id")?);
+        })?;
+    let provenance_session = session_id_from_uuid(provenance_session_id);
     let provenance = match (
-        required::<String>(&row, "provenance_kind")?.as_str(),
-        row.try_get::<Option<Uuid>, _>("provenance_turn_id")?,
-        row.try_get::<Option<Decimal>, _>("provenance_goal_generation")?,
-        row.try_get::<Option<Uuid>, _>("provenance_command_id")?,
+        provenance_kind.as_str(),
+        row.provenance_turn_id,
+        row.provenance_goal_generation,
+        row.provenance_command_id,
     ) {
         ("child_turn", Some(turn), None, None) => {
             DelegationProvenanceReconstitutionInput::ChildTurn {
@@ -4342,7 +4360,6 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
         }
     };
     DelegationOutcome::reconstitute(kind, content, reason, provenance)
-        .map(Some)
         .ok_or_else(|| ToolLoopCorruption::Inconsistent("delegation result outcome").into())
 }
 
@@ -4690,5 +4707,29 @@ mod blob_read_budget_tests {
             ),
             BlobReadAdmission::TurnReadCountExceeded
         );
+    }
+}
+
+#[cfg(test)]
+mod foreground_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn missing_foreground_reason_is_typed_corruption() {
+        let error = decode_foreground_outcome(ForegroundOutcomeRow {
+            outcome_kind: Some("result_returned".to_owned()),
+            content_text: Some("child result".to_owned()),
+            reason_kind: None,
+            provenance_kind: Some("child_turn".to_owned()),
+            provenance_session_id: Some(Uuid::from_u128(1)),
+            provenance_turn_id: Some(Uuid::from_u128(2)),
+            provenance_goal_generation: None,
+            provenance_command_id: None,
+        })
+        .expect_err("missing reason must fail closed as corruption");
+        assert!(matches!(
+            error,
+            ToolLoopRepositoryError::Corruption(ToolLoopCorruption::Missing("reason_kind"))
+        ));
     }
 }
