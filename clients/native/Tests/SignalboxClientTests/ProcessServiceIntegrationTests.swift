@@ -4,6 +4,32 @@ import XCTest
 
 final class ProcessServiceIntegrationTests: XCTestCase {
   @MainActor
+  func testRequestedNativeSessionDoesNotSelectAnImportedUUIDCollision() async throws {
+    let sessionID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let summary = try SignalboxProcessServerFrame.decode(from: Data(
+      #"{"version":1,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"\#(sessionID.rawValue)","title":null,"entry_count":"1","source_format":"claude_code_session_jsonl_v1"}}}"#.utf8))
+    let requester = ImportedCollisionRequester(frames: [
+      try ProcessDriverFixture.conversationPageStart(), summary,
+      try ProcessDriverFixture.conversationPageEnd(),
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    await viewModel.refresh()
+    let imported = try XCTUnwrap(viewModel.conversations.first)
+    XCTAssertEqual(imported.conversationID, sessionID)
+    XCTAssertNil(viewModel.nativeConversation(sessionID: sessionID))
+
+    await viewModel.revealSession(sessionID)
+
+    let native = try XCTUnwrap(viewModel.nativeConversation(sessionID: sessionID))
+    XCTAssertEqual(native.origin, .native)
+    XCTAssertEqual(native.conversationID, sessionID)
+    XCTAssertNotEqual(native.id, imported.id)
+    XCTAssertEqual(viewModel.conversation(id: imported.id), imported)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
   func testConversationRefreshKeepsTheDisplayedPageCursor() async throws {
     let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
     let viewModel = ProcessSessionListViewModel { service }
@@ -5750,6 +5776,21 @@ private actor OrderedProcessDriverUpdateRecorder {
       return nil
     }
     return event.cursor.rawValue
+  }
+}
+
+private struct ImportedCollisionRequester: SignalboxProcessRequesting {
+  let frames: [SignalboxProcessServerFrame]
+  private let fallback = SignalboxProcessClient(
+    connectionFactory: MockProcessProtocolConnectionFactory())
+
+  init(frames: [SignalboxProcessServerFrame]) { self.frames = frames }
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    if case .listConversations = request {
+      return StaticProcessExchange(frames: frames)
+    }
+    return try await fallback.open(request)
   }
 }
 

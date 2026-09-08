@@ -83,9 +83,11 @@ final class ProcessSessionListViewModel: ObservableObject {
       ?? requestedConversation.flatMap { $0.id == id ? $0 : nil }
   }
 
-  func conversation(conversationID: SignalboxCanonicalUUID) -> SignalboxProcessConversation? {
-    conversations.first { $0.conversationID == conversationID }
-      ?? requestedConversation.flatMap { $0.conversationID == conversationID ? $0 : nil }
+  func nativeConversation(sessionID: SignalboxCanonicalUUID) -> SignalboxProcessConversation? {
+    conversations.first { $0.origin == .native && $0.conversationID == sessionID }
+      ?? requestedConversation.flatMap {
+        $0.origin == .native && $0.conversationID == sessionID ? $0 : nil
+      }
   }
 
   func revealSession(_ sessionID: SignalboxCanonicalUUID) async {
@@ -369,10 +371,10 @@ struct ProcessSessionsScreen: View {
     guard selectedConversationID == nil,
       let requested = requestedLocalSessionID ?? coordinator.selectedProcessSessionID
     else { return }
-    if viewModel.conversation(conversationID: requested) == nil {
+    if viewModel.nativeConversation(sessionID: requested) == nil {
       await viewModel.revealSession(requested)
     }
-    guard let conversation = viewModel.conversation(conversationID: requested) else { return }
+    guard let conversation = viewModel.nativeConversation(sessionID: requested) else { return }
     if requestedLocalSessionID == requested {
       requestedLocalSessionID = nil
     } else if coordinator.selectedProcessSessionID == requested {
