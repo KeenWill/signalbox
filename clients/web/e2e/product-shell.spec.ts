@@ -1778,3 +1778,62 @@ for (const entry of ['button', 'palette'] as const) {
     ).toHaveCount(0)
   })
 }
+
+for (const outcome of ['success', 'rejection'] as const) {
+  test(`keeps a restored import continuation ${outcome} visible while discovery fails`, async ({
+    page,
+  }) => {
+    const problems = watchBrowser(page)
+    await useDeterministicBootstrap(page)
+    await useDeterministicImportApi(page)
+    const requests: string[] = []
+    await page.route('**/api/imports/*/continuations', (route) => {
+      requests.push(route.request().postData() ?? '')
+      if (requests.length === 1) return route.abort('failed')
+      return outcome === 'success'
+        ? route.fallback()
+        : route.fulfill({
+            status: 400,
+            json: {
+              error: {
+                kind: 'application',
+                code: 'invalid_import_request',
+                message: 'Request rejected.',
+              },
+            },
+          })
+    })
+    await page.goto(importsProductFixture.path)
+    await page
+      .getByRole('textbox', { name: 'Initial model selection UUID' })
+      .fill('00000000-0000-7000-8000-000000000777')
+    await page.getByRole('button', { name: 'Resume', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
+    await page.route('**/api/imports/**', (route) =>
+      new URL(route.request().url()).pathname.replace(/\/$/, '') === '/api/imports'
+        ? route.fulfill({ status: 503, body: 'unavailable' })
+        : route.fallback(),
+    )
+    await page.reload()
+    await expect(page.getByText('Imports unavailable', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(
+      page.getByText(outcome === 'success' ? 'Session created:' : 'Request rejected.', {
+        exact: false,
+      }),
+    ).toBeVisible()
+    await expect(page.getByText('Imports unavailable', { exact: true })).toBeVisible()
+    await expect(page.locator('.import-inspector')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: /Settings/ })).not.toHaveAttribute(
+      'aria-disabled',
+      'true',
+    )
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toBe(requests[0])
+    expect(
+      await page.evaluate(() => sessionStorage.getItem('signalbox.import-continuation.production')),
+    ).toBeNull()
+    expect(problems.pageErrors).toEqual([])
+  })
+}

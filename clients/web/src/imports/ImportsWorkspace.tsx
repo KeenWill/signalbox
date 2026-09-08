@@ -496,7 +496,8 @@ export function ImportsWorkspace({
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
   const retainedCommandNeedsAction = pendingCommand !== null && !continuation.isPending
-  const inspectorVisible = selectedImport !== null || hasRetainedCommand
+  const inspectorVisible =
+    selectedImport !== null || hasRetainedCommand || continuation.isSuccess || continuation.isError
 
   return (
     <>
