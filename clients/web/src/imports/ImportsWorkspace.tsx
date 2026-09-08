@@ -21,7 +21,13 @@ import type {
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
 import { selectApp, store, useAppSelector } from '../state'
-import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
+import {
+  correlateImportDescriptor,
+  correlateImportFrontiers,
+  type ImportApi,
+  ImportApiError,
+  ImportReceiptCorrelationError,
+} from './api'
 import { ImportedArtifactView } from './ImportedArtifactView'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
@@ -89,6 +95,11 @@ export function ImportsWorkspace({
   }, [app.density, app.theme])
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
+  const [settledSourceSession, setSettledSourceSession] = useState(sourceSession)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettledSourceSession(sourceSession), 200)
+    return () => window.clearTimeout(timer)
+  }, [sourceSession])
   const [sourceSessionFilterEnabled, setSourceSessionFilterEnabled] = useState(false)
   const [after, setAfter] = useState<string | undefined>()
   const [selectedImport, setSelectedImport] = useState<string | null>(null)
@@ -126,9 +137,9 @@ export function ImportsWorkspace({
       after,
       limit: IMPORT_PAGE_ITEMS,
       format: format || undefined,
-      source_session_id: sourceSessionFilterEnabled ? sourceSession : undefined,
+      source_session_id: sourceSessionFilterEnabled ? settledSourceSession : undefined,
     }),
-    [after, format, sourceSession, sourceSessionFilterEnabled],
+    [after, format, settledSourceSession, sourceSessionFilterEnabled],
   )
   const importsQuery = useQuery({
     queryKey: ['imports', queryScope, 'catalog', listRequest],
@@ -152,23 +163,44 @@ export function ImportsWorkspace({
     }
   }, [firstImport, hasRetainedCommand, imports, selectedImport])
 
+  const selectedSummary = imports?.items.find(
+    (item) => item.imported_conversation_id === selectedImport,
+  )
   const descriptorQuery = useQuery({
-    queryKey: ['imports', queryScope, selectedImport, 'descriptor'],
-    queryFn: ({ signal }) => api.descriptor(selectedImport ?? '', signal),
-    enabled: selectedImport !== null,
+    queryKey: ['imports', queryScope, selectedImport, 'descriptor', selectedSummary],
+    queryFn: async ({ signal }) => {
+      if (!selectedSummary) throw new Error('Selected import is absent from the catalog')
+      return correlateImportDescriptor(
+        await api.descriptor(selectedSummary.imported_conversation_id, signal),
+        selectedSummary,
+      )
+    },
+    enabled: selectedSummary !== undefined,
     gcTime: 0,
   })
   const descriptor =
     importsQuery.isError || descriptorQuery.isError ? undefined : descriptorQuery.data
   const windowQuery = useQuery({
-    queryKey: ['imports', queryScope, selectedImport, 'entries', windowRequest],
-    queryFn: ({ signal }) =>
-      api.entries(
-        selectedImport ?? '',
-        windowRequest,
-        signal,
-        descriptor?.timeline.latest.position,
-      ),
+    queryKey: [
+      'imports',
+      queryScope,
+      selectedImport,
+      'entries',
+      windowRequest,
+      descriptor?.timeline,
+    ],
+    queryFn: async ({ signal }) => {
+      if (!descriptor) throw new Error('Import descriptor is unavailable')
+      return correlateImportFrontiers(
+        await api.entries(
+          selectedImport ?? '',
+          windowRequest,
+          signal,
+          descriptor.timeline.latest.position,
+        ),
+        descriptor.timeline,
+      )
+    },
     gcTime: 0,
     enabled: selectedImport !== null && descriptor !== undefined,
   })
@@ -322,16 +354,20 @@ export function ImportsWorkspace({
   // The product shell registers every product command itself, so publishing the surface context is
   // the whole seam there. Registering these bindings again would advance the selection twice.
   useHotkeys(
-    (presentation === 'standalone' ? [...surfaceHotkeyBindings, ...importHotkeyBindings] : []).map(
-      (binding) => ({
-        hotkey: binding.hotkey,
-        callback: () => invokeCommand(binding.commandId, commandContext),
-      }),
-    ),
+    (presentation === 'standalone' && app.overlay === null
+      ? [...surfaceHotkeyBindings, ...(hasRetainedCommand ? [] : importHotkeyBindings)]
+      : []
+    ).map((binding) => ({
+      hotkey: binding.hotkey,
+      callback: () => invokeCommand(binding.commandId, commandContext),
+    })),
   )
   useHotkeySequences(
-    (presentation === 'standalone'
-      ? [...surfaceHotkeySequenceBindings, ...importHotkeySequenceBindings]
+    (presentation === 'standalone' && app.overlay === null
+      ? [
+          ...(hasRetainedCommand ? [] : surfaceHotkeySequenceBindings),
+          ...(hasRetainedCommand ? [] : importHotkeySequenceBindings),
+        ]
       : []
     ).map((binding) => ({
       sequence: binding.sequence,
