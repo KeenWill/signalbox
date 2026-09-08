@@ -1,5 +1,5 @@
 use super::load::{
-    decode_pending_session_summary, load_process_runner_projection,
+    decode_pending_session_summary, load_process_runner_projection_batch,
     map_session_placement_read_error,
 };
 use super::reader::ProcessTranscriptReader;
@@ -263,7 +263,7 @@ pub(super) fn decode_session_defaults_value(
 pub struct ProcessSessionSummaryReader {
     pub(super) transaction: Option<Transaction<'static, Postgres>>,
     pub(super) next_session_after: Option<Uuid>,
-    pub(super) pending: VecDeque<PendingSessionSummary>,
+    pub(super) pending: VecDeque<ProcessSessionSummary>,
     pub(super) summary_count: u64,
     pub(super) committed_summary_count: Option<u64>,
 }
@@ -312,14 +312,7 @@ impl ProcessSessionSummaryReader {
             self.next_session_after = next_session_after;
         }
 
-        if let Some(pending) = self.pending.front() {
-            let session = pending.session;
-            let runner = load_process_runner_projection(self.transaction_mut()?, session).await?;
-            let summary = self
-                .pending
-                .pop_front()
-                .ok_or(ProcessReadCorruption::Missing("pending session summary"))?
-                .with_runner(runner);
+        if let Some(summary) = self.pending.pop_front() {
             self.summary_count =
                 self.summary_count
                     .checked_add(1)
@@ -348,7 +341,7 @@ impl ProcessSessionSummaryReader {
 async fn load_session_summary_page(
     transaction: &mut Transaction<'static, Postgres>,
     next_session_after: Option<Uuid>,
-) -> Result<(VecDeque<PendingSessionSummary>, Option<Uuid>), ProcessReadError> {
+) -> Result<(VecDeque<ProcessSessionSummary>, Option<Uuid>), ProcessReadError> {
     let rows = sqlx::query(
         "SELECT
             session_row.session_id,
@@ -381,13 +374,17 @@ async fn load_session_summary_page(
     let mut placements = crate::session_placement::load_current_batch(transaction, &sessions)
         .await
         .map_err(map_session_placement_read_error)?;
+    let mut runners = load_process_runner_projection_batch(transaction, &sessions).await?;
     let mut pending = VecDeque::with_capacity(rows.len());
     for row in rows {
         let session_uuid = required(&row, "session_id")?;
         let placement = placements
             .remove(&session_uuid)
             .ok_or(ProcessReadCorruption::Missing("session placement"))?;
-        pending.push_back(decode_pending_session_summary(&row, placement)?);
+        pending.push_back(
+            decode_pending_session_summary(&row, placement)?
+                .with_runner(runners.remove(&session_uuid)),
+        );
     }
     if !placements.is_empty() {
         return Err(ProcessReadCorruption::Inconsistent("session placement batch").into());

@@ -1108,15 +1108,27 @@ fn git_object_entry_inventory_accepts_an_exact_pack_publication() -> EvalResult 
         finished: current_filesystem_recorded_time()?,
     };
 
-    assert!(git_object_entry_inventory_matches(
-        suite.workspace.path(),
-        &suite.git_seed_fixture.object_entries,
-        &suite.git_seed_fixture.object_modified_times,
-        &suite.git_seed_fixture.object_entry_identities,
-        &[object_id],
-        &suite.git_seed_fixture,
-        Some(execution_window),
-    )?);
+    assert!(
+        git_object_entry_inventory_matches(
+            suite.workspace.path(),
+            &suite.git_seed_fixture.object_entries,
+            &suite.git_seed_fixture.object_modified_times,
+            &suite.git_seed_fixture.object_entry_identities,
+            &[object_id],
+            &suite.git_seed_fixture,
+            Some(execution_window),
+        )?,
+        "pack inventory mismatch: allowed object={object_id}, window={execution_window:?}\n\
+         baseline entries={:#?}\nactual entries={:#?}\n\
+         baseline modified times={:#?}\nactual modified times={:#?}\n\
+         baseline identities={:#?}\nactual identities={:#?}",
+        suite.git_seed_fixture.object_entries,
+        git_object_entries(suite.workspace.path())?,
+        suite.git_seed_fixture.object_modified_times,
+        git_object_modified_times(suite.workspace.path())?,
+        suite.git_seed_fixture.object_entry_identities,
+        git_object_entry_identities(suite.workspace.path())?,
+    );
     Ok(())
 }
 

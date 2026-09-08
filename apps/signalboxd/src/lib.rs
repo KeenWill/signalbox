@@ -1574,6 +1574,16 @@ const fn progressing_turn_is_handed_off(admission: FreshPassAdmission) -> bool {
     )
 }
 
+async fn nudge_after_admission(
+    admission: impl Future<Output = FreshPassAdmission>,
+    nudge: impl FnOnce(),
+) -> FreshPassAdmission {
+    let admission = admission.await;
+    // A newly admitted pass can consume the resumable state immediately.
+    nudge();
+    admission
+}
+
 /// Says what a refused under-lock recovery actually observed.
 ///
 /// [`PostgresTurnLivenessRepository::recover_observed_slot_held_turn`] answers
@@ -1660,13 +1670,15 @@ async fn recover_expired_scheduler_pass(
                         // question: the nudge re-drives only a turn a fresh pass
                         // can resume, and durable progress can leave a turn in a
                         // shape that clears no re-admission predicate at all.
-                        recovery.nudge(session);
-                        let admission = fresh_pass_admission(
-                            &resumption,
-                            session,
-                            expected_turn,
-                            attempt,
-                            policy.attempt_bound,
+                        let admission = nudge_after_admission(
+                            fresh_pass_admission(
+                                &resumption,
+                                session,
+                                expected_turn,
+                                attempt,
+                                policy.attempt_bound,
+                            ),
+                            || recovery.nudge(session),
                         )
                         .await;
                         if progressing_turn_is_handed_off(admission) {
@@ -3406,9 +3418,10 @@ mod tests {
         WorkspaceInstructionPreparedExecution, WorkspaceInstructionRuntime,
         activation_session_matches, classify_expired_pass_observation,
         correlate_expired_scheduler_pass, expired_pass_recovery_retry_delay,
-        matches_exact_slot_held_turn, progressing_turn_is_handed_off, reconcile_retained_once,
-        render_dispatch_authority, render_judge_request_payload, render_session_authority_context,
-        reported_usage_compaction_failure, supervise_execution, supervise_execution_for_session,
+        matches_exact_slot_held_turn, nudge_after_admission, progressing_turn_is_handed_off,
+        reconcile_retained_once, render_dispatch_authority, render_judge_request_payload,
+        render_session_authority_context, reported_usage_compaction_failure, supervise_execution,
+        supervise_execution_for_session,
     };
 
     fn example_expired_pass_policy() -> ExpiredPassRecoveryPolicy {
@@ -5275,6 +5288,29 @@ mod tests {
             *observed.lock().expect("active resume observer lock"),
             vec![turn]
         );
+    }
+
+    #[tokio::test]
+    async fn a_nudged_pass_consuming_resumability_does_not_strand_the_handoff() {
+        let resumability = std::cell::Cell::new(FreshPassAdmission::Admissible);
+        let (complete_read, read_completed) = tokio::sync::oneshot::channel::<()>();
+        let handoff = nudge_after_admission(
+            async {
+                read_completed.await.expect("resumability read completes");
+                resumability.get()
+            },
+            || resumability.set(FreshPassAdmission::Stranded),
+        );
+        tokio::pin!(handoff);
+
+        assert!(futures_util::poll!(&mut handoff).is_pending());
+        assert_eq!(resumability.get(), FreshPassAdmission::Admissible);
+        complete_read.send(()).expect("release resumability read");
+        let admission = handoff.await;
+
+        assert_eq!(resumability.get(), FreshPassAdmission::Stranded);
+        assert_eq!(admission, FreshPassAdmission::Admissible);
+        assert!(progressing_turn_is_handed_off(admission));
     }
 
     /// A turn a fresh pass resumes leaves this path: the pass owns it, and only

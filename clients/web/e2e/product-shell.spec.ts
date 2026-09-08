@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { ScenarioImportApi } from '../src/imports/scenario'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, type Page, test } from './fontTest'
 import { useDeterministicImportApi } from './import-api-fixture'
@@ -443,6 +445,23 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   ).toBeChecked()
   await expect(page.getByRole('group', { name: 'Remote media' })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('clears the session inspector description when navigating to Imports', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await useDeterministicImportApi(page)
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('option', { name: /43 turn completed/ }).click()
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector).toContainText(
+    'Bounded server-provided timeline projection for the selected record.',
+  )
+  await page.getByRole('link', { name: /Imports/ }).click()
+  await expect(inspector).toContainText(
+    'Select an available operational record to inspect its server-provided evidence.',
+  )
+  await expect(inspector).not.toContainText('Bounded server-provided timeline projection')
 })
 
 test('opens and inspects a bounded production session without a mouse', async ({ page }) => {
@@ -1373,6 +1392,51 @@ test('locks product navigation while an ambiguous continuation command is retain
   expect(problems.consoleErrors.every((error) => error === expectedResourceError)).toBe(true)
 })
 
+test('retains exact retry after a lost acknowledgement and corrupt continuation receipt', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  const requests: string[] = []
+  await page.route('**/api/imports/*/continuations', (route) => {
+    requests.push(route.request().postData() ?? '')
+    if (requests.length === 1) return route.abort('failed')
+    if (requests.length > 2) return route.fallback()
+    return route.fulfill({
+      status: 500,
+      json: {
+        error: { kind: 'application', code: 'continuation_corrupt', message: 'Corrupt evidence.' },
+      },
+    })
+  })
+  await page.goto(importsProductFixture.path)
+  await page
+    .getByRole('textbox', { name: 'Initial model selection UUID' })
+    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  const corruptReceipt = page.waitForResponse((response) => response.status() === 500)
+  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await corruptReceipt
+  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Settings/ })).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  )
+  await page.getByRole('link', { name: /Settings/ }).click({ force: true })
+  await expect(page).toHaveURL(/\/imports$/)
+  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await expect(page.getByText('Session created:', { exact: false })).toBeVisible()
+  expect(requests).toHaveLength(3)
+  expect(requests[1]).toBe(requests[0])
+  expect(requests[2]).toBe(requests[0])
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toHaveCount(0)
+  expect(problems.pageErrors).toEqual([])
+})
+
 test('runs advertised product navigation sequences', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -1580,4 +1644,56 @@ test('trims the session identity before native form validation', async ({ page }
   await expect(input).toHaveValue(sessionWorkspaceFixture.id)
   await input.press('Enter')
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+})
+
+test('starts the settled exact import filter without the previous page cursor', async ({
+  page,
+}) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  const firstPage = await new ScenarioImportApi().list({ limit: 100 })
+  const requests: { source: string; after: string | null }[] = []
+  await page.route('**/api/imports/searches?**', async (route) => {
+    const url = new URL(route.request().url())
+    const source = route.request().postData() ?? ''
+    const after = url.searchParams.get('after')
+    requests.push({ source, after })
+    const digest = createHash('sha256').update(source).digest('hex')
+    const hasPage = source === 'source-session-0' && after === null
+    await route.fulfill({
+      json: {
+        items: hasPage
+          ? firstPage.items.map((item) => ({
+              ...item,
+              source_session_id: { leading_text: source, completeness: 'complete' },
+              source_session_id_sha256: digest,
+            }))
+          : [],
+        next_cursor: hasPage ? firstPage.next_cursor : undefined,
+        search_correlation: url.searchParams.get('search_correlation'),
+        exact_source_session_id_sha256: digest,
+      },
+    })
+  })
+  await page.goto('/imports')
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1_000))
+  const input = page.getByRole('textbox', {
+    name: 'Filter imports by exact source session evidence',
+  })
+  await input.fill('source-session-0')
+  await page.clock.runFor(200)
+  await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
+  await expect.poll(() => requests.at(-1)?.source).toBe('source-session-0')
+  await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled()
+  await input.fill('source-session-1')
+  await page.getByRole('button', { name: 'Next page', exact: true }).click()
+  await expect
+    .poll(() =>
+      requests.some((request) => request.source === 'source-session-0' && request.after !== null),
+    )
+    .toBe(true)
+  await page.clock.runFor(200)
+  await expect.poll(() => requests.at(-1)).toEqual({ source: 'source-session-1', after: null })
 })
