@@ -1167,13 +1167,14 @@ impl LivenessTransactionSetup {
         bounds: TurnLivenessPersistenceBounds,
     ) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
         let connection = self.connection.as_mut().ok_or(sqlx::Error::PoolClosed)?;
-        let mut transaction = connection.begin().await?;
-        optional_timeout(
-            bounds.acquire_wait,
+        let transaction = optional_timeout(bounds.acquire_wait, async {
+            let mut transaction = connection.begin().await?;
             sqlx::query("SELECT set_config('lock_timeout', $1, true)")
                 .bind(postgres_lock_timeout(bounds.lock_wait))
-                .execute(&mut *transaction),
-        )
+                .execute(&mut *transaction)
+                .await?;
+            Ok(transaction)
+        })
         .await
         .unwrap_or(Err(sqlx::Error::PoolTimedOut))?;
         self.discard_on_drop = false;
