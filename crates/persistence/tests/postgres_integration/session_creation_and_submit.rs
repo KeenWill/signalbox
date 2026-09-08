@@ -5233,7 +5233,9 @@ async fn creation_runner_placement_replay_compares_explicit_and_template_payload
     let defaults = SessionConfigurationDefaults::complete(
         ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(next_test_submit_uuid())),
         signalbox_domain::DangerousToolAutoApproval::Disabled,
-        Some(SessionSystemPrompt::try_new("placement fixture prompt".to_owned())?),
+        Some(SessionSystemPrompt::try_new(
+            "placement fixture prompt".to_owned(),
+        )?),
     );
     // The digest is arbitrary; template name is the pre-existing template replay key.
     let template = SessionTemplateProvenance::new(

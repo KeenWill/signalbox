@@ -75,7 +75,7 @@ impl CreateSession {
         self,
         placement: option::Option<SessionRunnerPlacementRequest>,
     ) -> Self;
-    pub const fn runner_placement(&self) -> option::Option<&SessionRunnerPlacementRequest>;
+    pub fn runner_placement(&self) -> option::Option<&SessionRunnerPlacementRequest>;
     pub const fn new(
         command_id: DurableCommandId,
         provenance: SessionCreationProvenance,
@@ -155,7 +155,7 @@ impl CreateSessionFromImportedFrontier {
         self,
         placement: option::Option<SessionRunnerPlacementRequest>,
     ) -> Self;
-    pub const fn runner_placement(&self) -> option::Option<&SessionRunnerPlacementRequest>;
+    pub fn runner_placement(&self) -> option::Option<&SessionRunnerPlacementRequest>;
     pub const fn new(
         command_id: DurableCommandId,
         imported_frontier: ImportedTranscriptFrontier,
