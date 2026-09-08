@@ -172,10 +172,24 @@ fn exact_api_snapshots_keep_their_recorded_rate_sets() {
 }
 
 #[test]
-fn launch_turbo_alias_resolves_its_recorded_snapshot_rates() {
+fn turbo_alias_pricing_starts_at_general_availability() {
     let catalog = bundled_catalog().unwrap();
+    for date in ["2023-11-06", "2024-04-08"] {
+        assert_eq!(
+            catalog
+                .resolve(
+                    Provider::Openai,
+                    "gpt-4-turbo",
+                    date,
+                    CommercialChannel::Api
+                )
+                .unwrap(),
+            ReferenceResolution::Unknown,
+            "{date}"
+        );
+    }
     assert_eq!(
-        api_model_rate_set_ids(&catalog, "gpt-4-turbo", "2023-11-06"),
+        api_model_rate_set_ids(&catalog, "gpt-4-turbo", "2024-04-09"),
         Some(vec![String::from("oai-gpt4-turbo-launch")])
     );
 }
@@ -697,12 +711,19 @@ fn missing_price_is_unknown_not_zero() {
 #[test]
 fn query_after_the_evidence_horizon_is_unknown() {
     let catalog = bundled_catalog().unwrap();
+    let next_day = catalog
+        .verified_through(Provider::Openai)
+        .parse::<jiff::civil::Date>()
+        .unwrap()
+        .checked_add(jiff::Span::new().days(1))
+        .unwrap()
+        .to_string();
 
     let resolution = catalog
         .resolve(
             Provider::Openai,
             "gpt-5.6-sol",
-            "2026-09-04",
+            &next_day,
             CommercialChannel::Api,
         )
         .unwrap();

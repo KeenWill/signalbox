@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "verified_through": {"openai": "2026-09-03", "anthropic": "2026-09-02"},
+  "verified_through": {"openai": "2026-09-08", "anthropic": "2026-09-02"},
   "sources": [
     {
       "id": "oai-gpt35-launch-2023-03-01",
@@ -523,6 +523,15 @@
       "published": null,
       "retrieved": "2026-09-02",
       "evidence": "The 2.1.257 entry adding Claude Fable 5.1 under the exact spelling claude-fable-5-1 and making it the default Fable model."
+    },
+    {
+      "id": "oai-gpt4-turbo-ga-2024-04-09",
+      "provider": "openai",
+      "title": "OpenAI API changelog: April 9, 2024",
+      "url": "https://developers.openai.com/api/docs/changelog#april-2024",
+      "published": "2024-04-09",
+      "retrieved": "2026-09-08",
+      "evidence": "The April 9 entry records GPT-4 Turbo with Vision reaching general availability in the API."
     }
   ],
   "models": [
@@ -538,7 +547,7 @@
     {"id":"openai:gpt-4-0314","provider":"openai","provider_model_id":"gpt-4-0314","display_name":"GPT-4 0314","identity_kind":"dated_snapshot","family":"openai:gpt-4-family","priced_as":null,"available_from":"2023-03-14","available_until":"2024-06-14","capabilities":[],"source_ids":["oai-gpt4-launch-2023-03-14","oai-api-update-2023-06-13"]},
     {"id":"openai:gpt-4-32k","provider":"openai","provider_model_id":"gpt-4-32k","display_name":"GPT-4 32k rolling alias","identity_kind":"rolling_alias","family":"openai:gpt-4-family","priced_as":"openai:gpt-4-32k-0314","available_from":"2023-03-14","available_until":null,"capabilities":[],"source_ids":["oai-gpt4-launch-2023-03-14"]},
     {"id":"openai:gpt-4-32k-0314","provider":"openai","provider_model_id":"gpt-4-32k-0314","display_name":"GPT-4 32k 0314","identity_kind":"dated_snapshot","family":"openai:gpt-4-family","priced_as":null,"available_from":"2023-03-14","available_until":"2024-06-14","capabilities":[],"source_ids":["oai-gpt4-launch-2023-03-14","oai-api-update-2023-06-13"]},
-    {"id":"openai:gpt-4-turbo","provider":"openai","provider_model_id":"gpt-4-turbo","display_name":"GPT-4 Turbo rolling alias","identity_kind":"rolling_alias","family":"openai:gpt-4-family","priced_as":"openai:gpt-4-1106-preview","available_from":"2023-11-06","available_until":null,"capabilities":[],"source_ids":["oai-devday-2023-11-06"]},
+    {"id":"openai:gpt-4-turbo","provider":"openai","provider_model_id":"gpt-4-turbo","display_name":"GPT-4 Turbo rolling alias","identity_kind":"rolling_alias","family":"openai:gpt-4-family","priced_as":"openai:gpt-4-1106-preview","available_from":"2024-04-09","available_until":null,"capabilities":[],"source_ids":["oai-devday-2023-11-06","oai-gpt4-turbo-ga-2024-04-09"]},
     {"id":"openai:gpt-4-1106-preview","provider":"openai","provider_model_id":"gpt-4-1106-preview","display_name":"GPT-4 Turbo 1106 preview","identity_kind":"dated_snapshot","family":"openai:gpt-4-family","priced_as":null,"available_from":"2023-11-06","available_until":null,"capabilities":[],"source_ids":["oai-devday-2023-11-06"]},
 
     {"id":"openai:gpt-4o-family","provider":"openai","provider_model_id":null,"display_name":"GPT-4o family","identity_kind":"family","family":null,"priced_as":null,"available_from":"2024-05-13","available_until":null,"capabilities":[],"source_ids":["oai-gpt4o-api-2024-05-13"]},
