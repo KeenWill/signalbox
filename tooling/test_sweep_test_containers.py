@@ -613,6 +613,38 @@ class SweepTestContainersTest(unittest.TestCase):
                 self.assertEqual(len(sites), 1)
                 self.assertEqual(len(unmarked), expected_unmarked)
 
+    def test_only_the_owner_removes_sweep_scratch(self) -> None:
+        cleanup = re.search(
+            r"^cleanup\(\) \{\n.*?^\}", SWEEP.read_text(), re.MULTILINE | re.DOTALL
+        ).group()
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory) / "sweep-scratch"
+            scratch.mkdir()
+            run = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    cleanup + "\n" + """
+set -e
+readonly sweep_pid=$$
+scratch=$1
+bounded_worker=""
+bounded_deadline=""
+(cleanup)
+test -d "$scratch"
+cleanup
+test ! -e "$1"
+""",
+                    "cleanup-fixture",
+                    str(scratch),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=SWEEP_TIMEOUT_SECONDS,
+            )
+
+        self.assertEqual(run.returncode, 0, run.stderr)
+
     def test_the_listing_asks_for_this_repository_s_disposable_label_alone(self) -> None:
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],

@@ -13,6 +13,7 @@ exports_files([
     ".cargo/config.toml",
     "Cargo.lock",
     "Cargo.toml",
+    "rust-toolchain.toml",
     "__subpackages__",
     "config/session-templates.example.toml",
     "config/signalbox-runner.example.toml",

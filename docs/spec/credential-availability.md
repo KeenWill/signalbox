@@ -90,6 +90,13 @@ ending carries no terminal evidence, because the attempt that ends issued no
 provider request and no other attempt's call is its evidence; its terminal cause
 is pool exhaustion, never a provider failure.
 
+The pre-call exhaustion record names the pool-policy revision the admission
+resolved and carries contiguous member rows in policy order, each naming the
+member's exclusion, widest scope first. Partial, foreign or stale evidence fails
+reconstitution closed. The terminalizing commit emits `turn_failed` and
+`turn_credential_pool_exhausted`; its header retains the resolved pool-policy
+identity and member evidence rows attach in a separate table.
+
 Post-failure fail: the observation that closes a qualifying provider failure
 finds every member excluded. The turn terminalizes Failed and adds no further
 attempt; the predecessor attempt has already ended KnownFailure. The terminal
@@ -123,7 +130,9 @@ preparation skips that credential until the reset passes; after it passes, the
 member is admitted again. A chain exclusion is written when a failure rotates
 the pool and removes that member for the remainder of the turn. If another
 durable action excludes a retry successor's credential before preparation, that
-successor exhausts instead of selecting another member.
+successor fails instead of selecting another member; when a fallback member
+remains admissible, the failure keeps the generic failed projection and records
+no pool exhaustion.
 
 A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
@@ -166,9 +175,5 @@ successor.
 - Every exclusion a wait recorded other than a chain exclusion is re-read from
   its current active state at release, so a passed reset or an authorized clear
   readmits that member ([design](../design/credential-availability.md)).
-- The typed `turn_credential_pool_exhausted` live event for the pre-call
-  exhaustion ending ([design](../design/credential-availability.md)).
-- Per-member exclusion evidence rows on the pre-call exhaustion record
-  ([design](../design/credential-availability.md)).
 - Honoring `on_pool_exhausted = "park"` on the pre-call path
   ([design](../design/credential-availability.md)).

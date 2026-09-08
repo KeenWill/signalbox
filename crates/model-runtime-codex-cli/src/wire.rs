@@ -29,9 +29,9 @@ pub(crate) struct EnvelopeToolCall {
     /// as an object member. The envelope therefore carries the arguments
     /// inside a string. The schema requests an argument object, but the
     /// adapter does not hold the text to that shape: it checks only the shared
-    /// JSON nesting bound and hands the text onward byte-verbatim when it is
-    /// credential-shape clean, so malformed and non-object text reaches the
-    /// caller as proposal material for the shared typed decoders to classify.
+    /// JSON nesting bound and hands the text onward byte-verbatim, so malformed
+    /// and non-object text reaches the caller as proposal material for the shared
+    /// typed decoders to classify.
     pub(crate) arguments: String,
 }
 
