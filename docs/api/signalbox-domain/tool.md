@@ -175,6 +175,7 @@ impl DecideToolRequest {
     ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
     pub const fn prepare_request_not_found(self) -> PreparedDecideToolRequest;
     pub const fn prepare_already_resolved(self) -> PreparedDecideToolRequest;
+    pub const fn prepare_awaiting_approval_judge(self) -> PreparedDecideToolRequest;
     pub const fn prepare_not_earliest(self, earliest: ToolRequestId) -> PreparedDecideToolRequest;
 }
 impl cmp::PartialEq for DecideToolRequest {
@@ -220,6 +221,9 @@ impl DecideToolRequestAppliedResult {
 
 ```rust
 pub enum DecideToolRequestRejectedResult {
+    AwaitingApprovalJudge {
+        request: ToolRequestId,
+    },
     RequestNotFound {
         request: ToolRequestId,
     },

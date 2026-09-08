@@ -580,3 +580,62 @@ impl ConversationSummary {
         }
     }
 }
+
+/// Retained repository-watch creation origin, resolved from its dispatch ledger.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryWatchProvenance {
+    /// Exact retained dispatch.
+    pub dispatch_id: CanonicalUuid,
+    /// Position in the dispatch's action batch.
+    pub action_ordinal: crate::PositiveCanonicalU64,
+    /// Watched repository.
+    pub repository: String,
+    /// Retained rule identity.
+    pub rule_id: String,
+    /// Retained rule revision.
+    pub rule_revision: crate::PositiveCanonicalU64,
+    /// Triggering immutable event.
+    pub event_id: CanonicalUuid,
+    /// Triggering event category.
+    pub event_kind: RepositoryWatchEventKind,
+    /// Triggering pull request, absent for branch events.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub pull_request: Option<crate::PositiveCanonicalU64>,
+}
+
+/// Closed repository-watch event categories.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryWatchEventKind {
+    /// The `pull_request_opened` event.
+    PullRequestOpened,
+    /// The `pull_request_closed` event.
+    PullRequestClosed,
+    /// The `pull_request_merged` event.
+    PullRequestMerged,
+    /// The `head_changed` event.
+    HeadChanged,
+    /// The `mergeable_state_changed` event.
+    MergeableStateChanged,
+    /// The `checks_completed` event.
+    ChecksCompleted,
+    /// The `check_run_completed` event.
+    CheckRunCompleted,
+    /// The `branch_workflow_run_completed` event.
+    BranchWorkflowRunCompleted,
+    /// The `review_submitted` event.
+    ReviewSubmitted,
+    /// The `thread_opened` event.
+    ThreadOpened,
+    /// The `thread_resolved` event.
+    ThreadResolved,
+    /// The `labeled` event.
+    Labeled,
+    /// The `unlabeled` event.
+    Unlabeled,
+    /// The `base_advanced` event.
+    BaseAdvanced,
+    /// The `reaction_changed` event.
+    ReactionChanged,
+}

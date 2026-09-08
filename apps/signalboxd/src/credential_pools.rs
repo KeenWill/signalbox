@@ -229,9 +229,6 @@ impl CredentialDelivery {
                     })?;
                 admit_credential_home(name, &path)?;
                 let max_concurrent_invocations = parse_max_concurrent_invocations(profile)?;
-                if max_concurrent_invocations.is_some() {
-                    return Err(HubModelConfigurationError::InvalidCredentialDelivery);
-                }
                 Ok(Self::CodexHome {
                     path,
                     max_concurrent_invocations,

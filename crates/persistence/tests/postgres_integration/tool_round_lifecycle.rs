@@ -404,14 +404,90 @@ async fn lock_tool_continuation_outbox_allocator(
     Ok(transaction)
 }
 
-async fn lock_tool_continuation_result_writes(
+async fn lock_tool_continuation_frontier_reads(
     pool: &sqlx::PgPool,
-) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, Box<dyn Error>> {
-    let mut transaction = pool.begin().await?;
-    sqlx::query("LOCK TABLE semantic_transcript_entry IN SHARE MODE")
-        .execute(&mut *transaction)
+    frontier: ContextFrontierId,
+) -> Result<
+    (
+        sqlx::Transaction<'_, sqlx::Postgres>,
+        sqlx::Transaction<'_, sqlx::Postgres>,
+    ),
+    Box<dyn Error>,
+> {
+    for function in [
+        "assert_context_frontier_complete_membership",
+        "resolve_context_frontier_members",
+    ] {
+        let definition: String =
+            sqlx::query_scalar("SELECT pg_get_functiondef(to_regprocedure($1))")
+                .bind(format!("{function}(uuid,uuid)"))
+                .fetch_one(pool)
+                .await?;
+        let copy =
+            definition.replacen(&format!("{function}("), &format!("unprobed_{function}("), 1);
+        sqlx::raw_sql(sqlx::AssertSqlSafe(copy.as_str()))
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query("CREATE TABLE tool_continuation_probe (frontier uuid NOT NULL)")
+        .execute(pool)
         .await?;
-    Ok(transaction)
+    sqlx::query("INSERT INTO tool_continuation_probe VALUES ($1)")
+        .bind(frontier.into_uuid())
+        .execute(pool)
+        .await?;
+    sqlx::raw_sql(r#"
+        CREATE OR REPLACE FUNCTION assert_context_frontier_complete_membership(checked_owning_session_id uuid, checked_context_frontier_id uuid)
+        RETURNS void LANGUAGE plpgsql AS $$
+        BEGIN
+            PERFORM set_config('signalbox.test_validating_frontier', 'on', true);
+            IF checked_context_frontier_id = (SELECT frontier FROM tool_continuation_probe) THEN
+                PERFORM pg_advisory_xact_lock(137501);
+            END IF;
+            PERFORM unprobed_assert_context_frontier_complete_membership(checked_owning_session_id, checked_context_frontier_id);
+            IF checked_context_frontier_id = (SELECT frontier FROM tool_continuation_probe) THEN
+                PERFORM set_config('signalbox.test_result_validated', 'on', true);
+            END IF;
+            PERFORM set_config('signalbox.test_validating_frontier', 'off', true);
+        END;
+        $$;
+        CREATE OR REPLACE FUNCTION resolve_context_frontier_members(requested_owning_session_id uuid, requested_context_frontier_id uuid)
+        RETURNS TABLE(owning_session_id uuid, context_frontier_id uuid, member_position numeric, source_session_id uuid, semantic_entry_id uuid)
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF current_setting('signalbox.test_result_validated', true) = 'on'
+               AND current_setting('signalbox.test_validating_frontier', true) IS DISTINCT FROM 'on' THEN
+                PERFORM pg_advisory_xact_lock(137502);
+            END IF;
+            RETURN QUERY SELECT * FROM unprobed_resolve_context_frontier_members(requested_owning_session_id, requested_context_frontier_id);
+        END;
+        $$;
+    "#).execute(pool).await?;
+    let mut validation = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(137501)")
+        .execute(&mut *validation)
+        .await?;
+    let mut reconstruction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(137502)")
+        .execute(&mut *reconstruction)
+        .await?;
+    Ok((validation, reconstruction))
+}
+
+async fn frontier_probe_reached(pool: &PgPool, key: i64) -> Result<bool, Box<dyn Error>> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = 0 AND objid::bigint = $1)",
+        ).bind(key).fetch_one(pool).await?;
+        if waiting {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 }
 
 async fn tool_continuation_order_guard_is_available(
@@ -510,6 +586,53 @@ async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn E
     let targets =
         ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
             .expect("one continuation target forms a catalog");
+    let initial_session = SessionId::from_uuid(Uuid::from_u128(seed + 0x102));
+    let initial_turn = TurnId::from_uuid(Uuid::from_u128(seed + 0x104));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed + 0x101, seed + 0x102, direct(seed + 5)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x103,
+                seed + 0x102,
+                "initial origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x105)),
+            Some(initial_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: initial_session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x106),
+            starting_frontier: Uuid::from_u128(seed + 0x107),
+            initial_attempt: Uuid::from_u128(seed + 0x108),
+        },
+    )
+    .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x110)),
+                initial_session,
+                UserContent::try_text("pending steering".to_owned()).expect("fixture text"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: initial_turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x111)),
+            None,
+        )
+        .await?;
+    let initial_repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    );
     let continuing_repository = PostgresToolLoopRepository::with_model_calls(
         pool.clone(),
         targets,
@@ -519,7 +642,11 @@ async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn E
     let turn = fixture.turn;
     let producing_call = fixture.call;
     let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
-    let result_holder = lock_tool_continuation_result_writes(&pool).await?;
+    let (validation_holder, reconstruction_holder) = lock_tool_continuation_frontier_reads(
+        &pool,
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+    )
+    .await?;
     let allocator_holder = lock_tool_continuation_outbox_allocator(&pool).await?;
     let continuation = tokio::spawn(async move {
         continuing_repository
@@ -543,10 +670,42 @@ async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn E
             )
             .await
     });
-    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(
+        frontier_probe_reached(&pool, 137501).await?,
+        "result-frontier validation must run before the ordering guard"
+    );
     assert!(tool_continuation_order_guard_is_available(&pool).await?);
-    result_holder.rollback().await?;
-    assert!(blocked_backends_reached(&pool, 1).await?);
+    validation_holder.rollback().await?;
+    assert!(
+        frontier_probe_reached(&pool, 137502).await?,
+        "reconstruction reaches its own probe"
+    );
+    let initial = tokio::spawn(async move {
+        initial_repository
+            .prepare_initial_call(
+                initial_session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x114)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x115)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x116)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x112)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 0x113)),
+                    )
+                },
+            )
+            .await
+    });
+    assert!(blocked_backends_reached(&pool, 2).await?);
+    assert!(
+        tool_continuation_order_guard_is_available(&pool).await?,
+        "a colliding initial writer must wait before the global guard"
+    );
+    reconstruction_holder.rollback().await?;
+    assert!(blocked_backends_reached(&pool, 2).await?);
     assert!(!tool_continuation_order_guard_is_available(&pool).await?);
     allocator_holder.rollback().await?;
     assert_eq!(
@@ -554,8 +713,485 @@ async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn E
         signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation_call)
     );
 
+    assert!(
+        matches!(
+            initial.await?,
+            Err(ModelCallRepositoryError::IdentityCollision(_))
+        ),
+        "the colliding initial frontier must report an identity collision"
+    );
     pool.close().await;
     drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tool_continuation_reserves_steering_before_a_colliding_result()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let seed = 0x1375_0000;
+    let (first, first_repository) = completed_continuation_fixture(&pool, seed).await?;
+    let (second, second_repository) = completed_continuation_fixture(&pool, seed + 0x100).await?;
+    let pending = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x40));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x41)),
+                first.session,
+                UserContent::try_text("pending steering".to_owned()).unwrap(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: first.turn,
+                },
+            ),
+            pending,
+            None,
+        )
+        .await?;
+    let shared_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x42));
+    let candidates = |offset, result_entry| {
+        signalbox_application::ToolContinuationIdentities::new(
+            vec![result_entry],
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + offset + 0x27)),
+            ModelCallId::from_uuid(Uuid::from_u128(seed + offset + 0x28)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + offset + 0x29)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + offset + 0x2a)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + offset + 0x2b)),
+        )
+    };
+    let first_candidates = candidates(
+        0,
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x26)),
+    );
+    let first_call = first_candidates.call();
+    let second_candidates = candidates(0x100, shared_entry);
+    let (validation, reconstruction) =
+        lock_tool_continuation_frontier_reads(&pool, first_candidates.result_frontier()).await?;
+    let allocator = lock_tool_continuation_outbox_allocator(&pool).await?;
+    let first_preparation = tokio::spawn(async move {
+        let mut generated = 0;
+        let result = first_repository
+            .tool_loop_repository()
+            .prepare_continuation(
+                first.session,
+                first.turn,
+                first.call,
+                first_candidates,
+                |input| {
+                    assert_eq!(input, pending);
+                    generated += 1;
+                    (
+                        shared_entry,
+                        TurnId::from_uuid(Uuid::from_u128(seed + 0x43)),
+                    )
+                },
+            )
+            .await;
+        assert_eq!(generated, 1, "the reserved steering candidate is reused");
+        result
+    });
+    assert!(frontier_probe_reached(&pool, 137501).await?);
+    let second_preparation = tokio::spawn(async move {
+        second_repository
+            .tool_loop_repository()
+            .prepare_continuation(
+                second.session,
+                second.turn,
+                second.call,
+                second_candidates,
+                |_| panic!("second fixture has no pending steering"),
+            )
+            .await
+    });
+    assert!(blocked_backends_reached(&pool, 2).await?);
+    assert!(
+        tool_continuation_order_guard_is_available(&pool).await?,
+        "the colliding result waits for the steering reservation before the guard"
+    );
+    validation.rollback().await?;
+    assert!(frontier_probe_reached(&pool, 137502).await?);
+    reconstruction.rollback().await?;
+    allocator.rollback().await?;
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), first_preparation).await???,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(first_call),
+    );
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), second_preparation).await??,
+        Err(signalbox_persistence::tool_loop::ToolLoopRepositoryError::IdentityCollision)
+    ));
+    Ok(())
+}
+
+async fn completed_continuation_fixture(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<(RestartModelCallFixture, PostgresModelCallRepository), Box<dyn Error>> {
+    let (fixture, repository, _, request) =
+        checkpoint_confirmed_tool_round(pool, seed, "current_time", "{}").await?;
+    let tools = repository.tool_loop_repository();
+    tools
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tools
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tools
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    tools
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new("ok".to_owned()).unwrap(),
+                    ),
+                }),
+        )
+        .await?;
+    Ok((fixture, repository))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn frontier_writer_reservations_cover_counted_pool_failure() -> Result<(), Box<dyn Error>> {
+    assert_preview_failure_reservation(PreviewFailureWriter::Counted).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn frontier_writer_reservations_cover_counted_attachment_failure()
+-> Result<(), Box<dyn Error>> {
+    assert_preview_failure_reservation(PreviewFailureWriter::Attachment).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn frontier_writer_reservations_cover_compaction_failure() -> Result<(), Box<dyn Error>> {
+    assert_preview_failure_reservation(PreviewFailureWriter::Compaction).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn frontier_writer_reservations_cover_terminal_capacity_observation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let seed = 0x1377_0000;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let shared = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x40));
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed)
+        .with_rate_limits(Some(signalbox_domain::ProviderRateLimitSnapshot::new(
+            std::time::SystemTime::now(),
+            Vec::new(),
+        )));
+    assert_frontier_writer_collision(&pool, shared, async move {
+        repository
+            .apply_terminal_observation(
+                fixture.session,
+                observation,
+                ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                    shared,
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x41)),
+                )),
+                |_| panic!("terminal fixture has no steering"),
+            )
+            .await
+            .map(|_| ())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn frontier_writer_reservations_cover_credential_wait_release() -> Result<(), Box<dyn Error>>
+{
+    use super::model_call_execution_and_recovery::credential_wait::{
+        park_policy, prepare_wait_admission,
+    };
+    use super::model_call_execution_and_recovery::{
+        active_credential_pool_fixture, prepare_and_authorize_pool_call,
+    };
+    let (_container, pool, _) = migrated_postgres().await?;
+    let source_seed = 0x1377_0000;
+    let seed = 0x1378_0000;
+    let pool_name = "wait-collision-pool";
+    let member = "wait-collision-member";
+    let (source_session, _, source_repository) = active_credential_pool_fixture(
+        &pool,
+        source_seed,
+        pool_name,
+        &[member],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let (source, _) =
+        prepare_and_authorize_pool_call(&source_repository, source_session, source_seed + 100)
+            .await?;
+    let observation = source.observation_correlation().call().into_uuid();
+    sqlx::query("INSERT INTO credential_pool_transient_exclusion (observation_model_call_id, credential_reference, cause_kind, reset_at) VALUES ($1,$2,'overloaded',transaction_timestamp() + interval '1 hour')")
+        .bind(observation).bind(member).execute(&pool).await?;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        pool_name,
+        &[member],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4)));
+    let repository = repository.with_credential_pools(std::collections::HashMap::from([(
+        target,
+        park_policy(pool_name, &[member]),
+    )]));
+    let PrepareInitialModelCallOutcome::CredentialWait(wait) =
+        prepare_wait_admission(&repository, session, seed + 100).await?
+    else {
+        panic!("excluded credential parks the initial preparation");
+    };
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 110)),
+                session,
+                UserContent::try_text("steering during credential wait".to_owned()).unwrap(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 111)),
+            None,
+        )
+        .await?;
+    sqlx::query("UPDATE credential_pool_transient_exclusion SET reset_at = transaction_timestamp() WHERE observation_model_call_id = $1")
+        .bind(observation).execute(&pool).await?;
+    sqlx::query(
+        "UPDATE credential_availability_wait SET eligible = true WHERE wait_attempt_id = $1",
+    )
+    .bind(wait.attempt().into_uuid())
+    .execute(&pool)
+    .await?;
+    let shared = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 112));
+    assert_frontier_writer_collision(&pool, shared, async move {
+        let mut generated = 0;
+        let result = repository
+            .prepare_initial_call(
+                session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 120)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 123)),
+                |_| {
+                    generated += 1;
+                    (shared, TurnId::from_uuid(Uuid::from_u128(seed + 124)))
+                },
+            )
+            .await
+            .map(|_| ());
+        assert_eq!(
+            generated, 1,
+            "wait release reuses its reserved steering candidate"
+        );
+        result
+    })
+    .await
+}
+
+enum PreviewFailureWriter {
+    Counted,
+    Attachment,
+    Compaction,
+}
+
+async fn assert_preview_failure_reservation(
+    kind: PreviewFailureWriter,
+) -> Result<(), Box<dyn Error>> {
+    use super::model_call_execution_and_recovery::{
+        active_credential_pool_fixture, prepare_and_authorize_pool_call,
+    };
+    let (_container, pool, _) = migrated_postgres().await?;
+    let seed = 0x1377_0000;
+    let pool_name = "preview-collision-pool";
+    let member = "preview-collision-member";
+    let (observed_session, observed_turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        pool_name,
+        &[member],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 50));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 51));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed + 52, seed + 50, direct(seed + 3)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 53,
+                seed + 50,
+                "preview collision",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 54)),
+            Some(turn),
+        )
+        .await?;
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 55)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 56)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 57)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 58)),
+            ),
+        )
+        .await?
+        .expect("queued preview");
+    let prospective = repository
+        .preview_activation_operation(
+            preview.prepared(),
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 59)),
+        )
+        .await?
+        .expect("credential is initially admitted");
+    let (observed_call, _) =
+        prepare_and_authorize_pool_call(&repository, observed_session, seed + 100).await?;
+    sqlx::query(
+        "INSERT INTO credential_pool_member_action
+            (pool_name, credential_reference, action_kind, observed_session_id,
+             observed_turn_id, observation_model_call_id, cause_kind)
+         VALUES ($1, $2, 'quarantine', $3, $4, $5, 'credential_rejected')",
+    )
+    .bind(pool_name)
+    .bind(member)
+    .bind(observed_session.into_uuid())
+    .bind(observed_turn.into_uuid())
+    .bind(observed_call.observation_correlation().call().into_uuid())
+    .execute(&pool)
+    .await?;
+    let shared = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 60));
+    let failure = FailedModelCallTurnIdentities::new(
+        shared,
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 61)),
+    );
+    assert_frontier_writer_collision(&pool, shared, async move {
+        let result = match kind {
+            PreviewFailureWriter::Counted => activation
+                .commit_counted_preview(preview, prospective, &repository, failure, None)
+                .await
+                .map(|_| ()),
+            PreviewFailureWriter::Attachment => activation
+                .commit_counted_attachment_failure_preview(
+                    preview,
+                    prospective,
+                    &repository,
+                    AttachmentPreparationFailure::Missing,
+                    failure,
+                    None,
+                )
+                .await
+                .map(|_| ()),
+            PreviewFailureWriter::Compaction => activation
+                .commit_compaction_failure_preview(
+                    preview,
+                    &repository,
+                    failure,
+                    signalbox_domain::TurnTerminalCause::ContextCompactionWall,
+                    None,
+                )
+                .await
+                .map(|_| ()),
+        };
+        result.map_err(|error| match error {
+            signalbox_persistence::start_eligible_turn::CommitActivationPreviewError::ModelCall(
+                error,
+            ) => error,
+            other => panic!("unexpected preview error: {other:?}"),
+        })
+    })
+    .await
+}
+
+async fn assert_frontier_writer_collision(
+    pool: &PgPool,
+    shared: SemanticTranscriptEntryId,
+    writer: impl std::future::Future<Output = Result<(), ModelCallRepositoryError>> + Send + 'static,
+) -> Result<(), Box<dyn Error>> {
+    let seed = 0x1376_0000;
+    let (fixture, repository) = completed_continuation_fixture(pool, seed).await?;
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27));
+    let (validation, reconstruction) =
+        lock_tool_continuation_frontier_reads(pool, frontier).await?;
+    let allocator = lock_tool_continuation_outbox_allocator(pool).await?;
+    let continuation = tokio::spawn(async move {
+        repository
+            .tool_loop_repository()
+            .prepare_continuation(
+                fixture.session,
+                fixture.turn,
+                fixture.call,
+                signalbox_application::ToolContinuationIdentities::new(
+                    vec![shared],
+                    frontier,
+                    call,
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+                ),
+                |_| panic!("continuation fixture has no steering"),
+            )
+            .await
+    });
+    assert!(frontier_probe_reached(pool, 137501).await?);
+    let writer = tokio::spawn(writer);
+    assert!(blocked_backends_reached(pool, 2).await?);
+    assert!(
+        tool_continuation_order_guard_is_available(pool).await?,
+        "the colliding writer must wait before acquiring the global guard"
+    );
+    validation.rollback().await?;
+    assert!(frontier_probe_reached(pool, 137502).await?);
+    reconstruction.rollback().await?;
+    allocator.rollback().await?;
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), continuation).await???,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(call)
+    );
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), writer).await??,
+        Err(ModelCallRepositoryError::IdentityCollision(_))
+    ));
     Ok(())
 }
 

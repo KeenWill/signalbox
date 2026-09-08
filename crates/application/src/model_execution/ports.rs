@@ -38,6 +38,10 @@ pub enum PrepareModelCallOutcome {
         request: Box<PreparedModelCallRequest>,
         /// Non-secret credential reference captured with the call.
         credential_reference: ModelCallCredentialReference,
+        /// Retained mapped serving target whose fast-mode mapping is already applied.
+        retained_mapped_target: Option<signalbox_domain::ResolvedProviderTarget>,
+        /// Whether this exact call holds a durable invocation-capacity reservation.
+        invocation_capacity_reserved: bool,
         /// Frozen dangerous blanket posture for initial request decisions.
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         /// Recorded, not-yet-consumed user overrides of delegate denials, frozen

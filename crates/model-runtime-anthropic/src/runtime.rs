@@ -184,8 +184,11 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .model_capabilities
             .validate_explicit(&operation.resolved_target, &operation.settings)?;
         if let Some(capabilities) = capabilities {
-            let (target, effective_request_fast_mode) = capabilities
-                .effective_target(&operation.resolved_target, operation.settings.fast_mode)?;
+            let (target, effective_request_fast_mode) = capabilities.effective_target(
+                &operation.resolved_target,
+                operation.settings.fast_mode,
+                operation.retained_mapped_target.as_ref(),
+            )?;
             operation.resolved_target = target.clone();
             request_fast_mode = effective_request_fast_mode;
         }

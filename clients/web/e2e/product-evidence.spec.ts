@@ -93,6 +93,7 @@ const useDeterministicSession = (page: Page) =>
     return route.fulfill({
       json: {
         session_id: sessionEvidenceFixture.id,
+        repository_watch: null,
         sizes: {
           item_count: sessionEvidenceFixture.itemCount,
           projected_text_bytes: '48000000',

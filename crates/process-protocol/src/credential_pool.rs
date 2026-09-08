@@ -10,23 +10,20 @@ pub const MAX_HEADROOM_RESERVE_PERCENT: i64 = 99;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CredentialPoolExclusion {
-    /// A credential-wide quarantine; null names an action predating projections.
+    /// A credential-wide quarantine.
     ProfileQuarantine {
-        /// Exact generation, or null for an action without a projection.
-        #[serde(deserialize_with = "deserialize_required_nullable")]
-        record_generation: Option<CanonicalU64>,
+        /// Exact generation, or zero for an action without a projection.
+        record_generation: CanonicalU64,
     },
     /// An exclusion from this immutable pool membership.
     MembershipExclusion {
-        /// Exact generation, or null for an action without a projection.
-        #[serde(deserialize_with = "deserialize_required_nullable")]
-        record_generation: Option<CanonicalU64>,
+        /// Exact generation, or zero for an action without a projection.
+        record_generation: CanonicalU64,
     },
     /// A displacement of this session from this pool member.
     SessionDisplacement {
-        /// Exact generation, or null for an action without a projection.
-        #[serde(deserialize_with = "deserialize_required_nullable")]
-        record_generation: Option<CanonicalU64>,
+        /// Exact generation, or zero for an action without a projection.
+        record_generation: CanonicalU64,
     },
     /// A predecessor excluded this credential for the current turn.
     ChainExclusion {
@@ -84,11 +81,10 @@ pub fn valid_credential_pool_evidence(
         && policy_members.iter().zip(members).all(|(profile, member)| {
             profile == &member.profile
                 && match &member.exclusion {
-                    CredentialPoolExclusion::ProfileQuarantine { record_generation }
-                    | CredentialPoolExclusion::MembershipExclusion { record_generation }
-                    | CredentialPoolExclusion::SessionDisplacement { record_generation } => {
+                    CredentialPoolExclusion::ProfileQuarantine { .. }
+                    | CredentialPoolExclusion::MembershipExclusion { .. }
+                    | CredentialPoolExclusion::SessionDisplacement { .. } => {
                         member.reset_at_unix_ms.is_none()
-                            && record_generation.is_none_or(|generation| generation.value() > 0)
                     }
                     CredentialPoolExclusion::HeadroomReserve {
                         observed_headroom_percent,

@@ -37,12 +37,10 @@ after an alias retarget or a daemon restart. The rows that serialization takes,
 and their order, belong to the lock protocol in
 [persistence-protocol](../spec/persistence-protocol.md).
 
-Program creation causes. The creation-cause vocabulary gains workflow and eval
-variants for sessions created by registered programs. Each names the creating
-program run, and the eval variant also names the trial identity the
-[evaluation system](../spec/eval-system.md) defines. Both are constructible only
-by the program substrate's host-side session capability and join the stored
-closed-discriminator convention beside the three present spellings.
+Program creation causes. The creation-cause vocabulary gains an eval variant
+naming the creating program run and the trial identity the
+[evaluation system](../spec/eval-system.md) defines. It is constructible only by
+the program substrate's host-side session capability.
 
 Timeline blob relation. A durable timeline-to-blob relation supplies the
 referenced blob count and byte length reported by the session summary read. The
@@ -113,22 +111,21 @@ A replacement against a session with a nonempty admitted set and a selection
 lacking transport or capacity is rejected with a typed rejection that leaves
 defaults and admitted set unchanged, a compatible selection succeeds, and a
 concurrent admission is ordered wholly before or after the replacement. A
-program-created session stores a workflow or eval cause naming its program run
-and, for eval, its trial; the three present spellings decode unchanged, and no
-surface outside the host-side capability can construct the new causes. The
-session summary read reports referenced blob count and byte length equal to the
-relation's totals, nonzero for a session whose timeline references blobs, and no
-detail read fetches blob bytes. Attachment filename, media metadata, and
-derived-text classes appear in search results with reveal addresses only after
-their source committed. Every pinned replacement and every user-directed move
-appends exactly one relocation entry, the next model call reads a frontier
-containing it, each fail-closed case is rejected, and the entry carries no
-runner, workspace, credential, or tool content. Delegation result sealing reads
-one sealed projection and has no raw-identity path. A turn that fails at
-eligibility carries its origin entries, one for an accepted input, every
-coalesced delivery in sequence for a delegation wake, and the checked
-delegated-task entry for a delegated child's first turn, and one failed marker
-committed together with a turn-failed event and no attempt row. A turn released
-from a wait with an exhausted pool and an already-issued predecessor call
-carries one failed marker committed with a fresh call-free ended attempt, a
-turn-failed event, and no terminal model call.
+program-created eval session stores its program run and trial; no surface
+outside the host-side capability can construct that cause. The session summary
+read reports referenced blob count and byte length equal to the relation's
+totals, nonzero for a session whose timeline references blobs, and no detail
+read fetches blob bytes. Attachment filename, media metadata, and derived-text
+classes appear in search results with reveal addresses only after their source
+committed. Every pinned replacement and every user-directed move appends exactly
+one relocation entry, the next model call reads a frontier containing it, each
+fail-closed case is rejected, and the entry carries no runner, workspace,
+credential, or tool content. Delegation result sealing reads one sealed
+projection and has no raw-identity path. A turn that fails at eligibility
+carries its origin entries, one for an accepted input, every coalesced delivery
+in sequence for a delegation wake, and the checked delegated-task entry for a
+delegated child's first turn, and one failed marker committed together with a
+turn-failed event and no attempt row. A turn released from a wait with an
+exhausted pool and an already-issued predecessor call carries one failed marker
+committed with a fresh call-free ended attempt, a turn-failed event, and no
+terminal model call.

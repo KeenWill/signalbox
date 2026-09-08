@@ -367,6 +367,11 @@ system_prompt = "Inspect repository activity."
         })
     }
 
+    async fn dispatch(&mut self) {
+        self.submit_without_lifecycle_settlement().await;
+        self.settle().await;
+    }
+
     async fn submit_without_lifecycle_settlement(&mut self) {
         let configuration = self
             .sink
@@ -384,8 +389,7 @@ system_prompt = "Inspect repository activity."
         .expect("dispatch with checkout");
     }
 
-    async fn dispatch(&mut self) {
-        self.submit_without_lifecycle_settlement().await;
+    async fn settle(&self) {
         let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(self.core.clone());
         while let Some(event) = lifecycle.next().await.expect("next lifecycle event") {
             self.store
@@ -685,6 +689,117 @@ async fn fork_heads_are_fetched_without_the_watched_repository_credential()
         checkout.head()?.target().expect("head").to_string(),
         fixture.head.as_str()
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatched_git_tools_accept_large_unrelated_loose_objects() -> Result<(), Box<dyn Error>> {
+    assert_dispatched_git_tools(ArchiveStorage::Loose).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatched_git_tools_accept_large_unrelated_packed_objects() -> Result<(), Box<dyn Error>>
+{
+    assert_dispatched_git_tools(ArchiveStorage::Packed).await
+}
+
+enum ArchiveStorage {
+    Loose,
+    Packed,
+}
+
+async fn assert_dispatched_git_tools(storage: ArchiveStorage) -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::TurnId;
+    let mut fixture = CheckoutFixture::new().await?;
+    let remote = git2::Repository::open_bare(&fixture.runner.bare)?;
+    // The current checkout is small; another branch exceeds the object-content read bound.
+    let blob = remote.blob(&vec![b'x'; 1024 * 1024 + 1])?;
+    let mut tree = remote.treebuilder(None)?;
+    tree.insert("archive.bin", blob, 0o100644)?;
+    let tree = remote.find_tree(tree.write()?)?;
+    let signature = git2::Signature::now("Checkout fixture", "checkout@example.test")?;
+    remote.commit(
+        Some("refs/heads/archive"),
+        &signature,
+        &signature,
+        "Archived data",
+        &tree,
+        &[],
+    )?;
+    if matches!(storage, ArchiveStorage::Packed) {
+        // The authority supports pack/index pairs without optional Git sidecar indexes.
+        let output = std::process::Command::new("git")
+            .args(["-c", "pack.writeReverseIndex=false"])
+            .arg("-C")
+            .arg(&fixture.runner.bare)
+            .args(["repack", "-ad", "--no-write-bitmap-index"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()?;
+        assert!(output.status.success(), "pack fixture: {output:?}");
+    }
+    let (catalog, executor) = fixture.daemon_tools()?;
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let root = fixture.root(session);
+    assert!(!root.join("archive.bin").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("review.txt"))?,
+        "retained head\n"
+    );
+    let turn = TurnId::from_uuid(Uuid::now_v7());
+    let status = run_git_tool(&catalog, &executor, session, turn, "git_status", "{}").await;
+    assert_eq!(status["branch"], "review");
+    assert_eq!(status["head"], fixture.head.as_str());
+    let log = run_git_tool(&catalog, &executor, session, turn, "git_log", "{}").await;
+    assert_eq!(log["commits"][0]["commit"], fixture.head.as_str());
+    std::fs::write(root.join("review.txt"), "reviewed head\n")?;
+    let diff = run_git_tool(
+        &catalog,
+        &executor,
+        session,
+        turn,
+        "git_diff",
+        r#"{"scope":"worktree"}"#,
+    )
+    .await;
+    assert!(
+        diff["patch"]
+            .as_str()
+            .expect("patch")
+            .contains("+reviewed head")
+    );
+    let staged = run_git_tool(
+        &catalog,
+        &executor,
+        session,
+        turn,
+        "git_stage",
+        r#"{"paths":["review.txt"]}"#,
+    )
+    .await;
+    assert_eq!(staged["staged_paths"], 1);
+    let committed = run_git_tool(
+        &catalog,
+        &executor,
+        session,
+        turn,
+        "git_create_commit",
+        r#"{"message":"Review completed"}"#,
+    )
+    .await;
+    let next_turn = TurnId::from_uuid(Uuid::now_v7());
+    let status = run_git_tool(&catalog, &executor, session, next_turn, "git_status", "{}").await;
+    assert_eq!(status["head"], committed["commit"]);
+    assert_eq!(status["entries"], serde_json::json!([]));
+    drop(executor);
+    // Reconstruct the daemon composition against the persisted session checkout.
+    let (catalog, restarted) = fixture.daemon_tools()?;
+    let status = run_git_tool(&catalog, &restarted, session, next_turn, "git_status", "{}").await;
+    assert_eq!(status["head"], committed["commit"]);
+    assert_eq!(status["entries"], serde_json::json!([]));
     Ok(())
 }
 
@@ -1999,8 +2114,343 @@ async fn assert_git_status(
         .execute(batch.session(), batch.turn())
         .await
         .expect("execute git_status");
-    assert!(matches!(
-        recorded.take(),
-        Some(ToolExecutorEvidence::CompletedText(_))
-    ));
+    let evidence = recorded.take();
+    assert!(
+        matches!(evidence, Some(ToolExecutorEvidence::CompletedText(_))),
+        "git_status evidence: {evidence:?}"
+    );
+}
+
+impl CheckoutFixture {
+    fn daemon_tools(
+        &self,
+    ) -> Result<
+        (
+            signalboxd::DaemonToolCatalog,
+            impl signalbox_application::ToolExecutor<Error = signalboxd::DaemonToolExecutorError>
+            + Clone
+            + Send
+            + use<>,
+        ),
+        Box<dyn Error>,
+    > {
+        use signalbox_tools_code_host::{CodeHostNumericBounds, GitHubCodeHostTransport};
+        use signalboxd::{DaemonTools, FileCredentialAccess, MappedDaemonCredentialInputs};
+        let configuration = self.sink.models.daemon_tools().expect("tool configuration");
+        let unused_credentials = FileCredentialAccess::new(
+            self._files.path().join("unused-tool-credential"),
+            signalbox_model_runtime::CredentialReference::new("unused-checkout-tool-credential"),
+        );
+        let (nudge, _) =
+            InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(self.core.clone()));
+        let tools = DaemonTools::try_new_production(
+            signalbox_tools_basic::SystemCurrentTimeClock,
+            self.core.clone(),
+            nudge,
+            MappedDaemonCredentialInputs {
+                web_search: unused_credentials.clone(),
+                code_host: unused_credentials.clone(),
+                github: unused_credentials,
+            },
+            GitHubCodeHostTransport::try_new(CodeHostNumericBounds::new(
+                None, None, None, None, None, None,
+            ))?,
+            configuration.github_egress_policy(),
+            configuration.workspace_root(),
+            configuration.git_identity().clone(),
+            configuration.exec_supervisor_executable(),
+            configuration.cargo_registry_cache(),
+            self.sink.models.web_fetch_egress_policy(),
+        )?;
+        Ok(tools.into_parts())
+    }
+}
+
+async fn run_git_tool(
+    catalog: &signalboxd::DaemonToolCatalog,
+    executor: &(
+         impl signalbox_application::ToolExecutor<Error = signalboxd::DaemonToolExecutorError>
+         + Clone
+         + Send
+     ),
+    session: SessionId,
+    turn: signalbox_domain::TurnId,
+    name: &str,
+    arguments: &str,
+) -> serde_json::Value {
+    use signalbox_application::*;
+    use signalbox_domain::{
+        ContextFrontierId, ModelCallId, ToolAttemptId, ToolRequestId, TurnAttemptId,
+    };
+    let name = signalbox_domain::ToolName::try_new(name.to_owned()).expect("tool name");
+    let definition = catalog.definition(&name).expect("daemon Git declaration");
+    let batch = prepared_single_attempt_batch(
+        PreparedAttemptIdentities {
+            session,
+            turn,
+            producing_call: ModelCallId::from_uuid(Uuid::now_v7()),
+            request: ToolRequestId::from_uuid(Uuid::now_v7()),
+            attempt: ToolAttemptId::from_uuid(Uuid::now_v7()),
+            issuing_turn_attempt: TurnAttemptId::from_uuid(Uuid::now_v7()),
+            frontier: ContextFrontierId::from_uuid(Uuid::now_v7()),
+        },
+        PreparedAttemptProposal {
+            name: name.clone(),
+            arguments: signalbox_domain::NormalizedToolArguments::try_from_provider_text(
+                arguments.to_owned(),
+            )
+            .expect("arguments"),
+            effect_class: definition.effect_class(),
+            approval: PreparedAttemptApproval::UserConfirmation {
+                command: DurableCommandId::from_uuid(Uuid::now_v7()),
+            },
+        },
+    );
+    let (executor, recorded) = RecordingToolExecutor::new(executor.clone());
+    let mut service = ToolExecutionService::new(
+        UuidV7ToolLoopIdGenerator,
+        FixtureToolExecutionTransaction::new(
+            batch.clone(),
+            FixtureTransactionFailures {
+                domain_rejection: signalbox_tools_git::LocalGitExecutorError,
+                declined_crash_classification: signalbox_tools_git::LocalGitExecutorError,
+            },
+        ),
+        catalog.clone(),
+        executor,
+        InProcessToolDispatchGate::default(),
+    );
+    service
+        .execute(session, turn)
+        .await
+        .expect("execute daemon Git tool");
+    match recorded.take() {
+        Some(ToolExecutorEvidence::CompletedText(text)) => {
+            serde_json::from_str(&text).expect("Git result JSON")
+        }
+        evidence => panic!("{} evidence: {evidence:?}", name.as_str()),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatched_session_projects_retained_origin_after_rule_removal()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::new().await?;
+    let planned = fixture
+        .store
+        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+        .await?[0]
+        .clone();
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let stored = signalbox_persistence::session::SessionRepository::new(fixture.core.clone())
+        .load_session(session)
+        .await?
+        .expect("created session");
+    assert_eq!(
+        stored.creation_provenance().cause(),
+        SessionCreationCause::ModuleDispatched {
+            dispatch: ModuleDispatch::RepositoryWatch {
+                dispatch: planned.dispatch()
+            }
+        }
+    );
+    let actor: (String, Option<String>) = sqlx::query_as(
+        "SELECT actor_kind, actor_module FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(
+        actor,
+        (String::from("module"), Some(String::from("repo_watch")))
+    );
+    fixture
+        .store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(planned.repository(), &[])],
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    let origin = restarted
+        .reaction_origin_for_session(session)
+        .await?
+        .expect("retained origin");
+    assert_eq!(origin.dispatch(), planned.dispatch());
+    assert_eq!(origin.event_id(), planned.event_id());
+    assert_eq!(origin.rule_id(), planned.rule_id());
+    assert_eq!(origin.action_ordinal().get(), planned.action_ordinal());
+    assert_eq!(origin.pull_request().map(PullRequestNumber::get), Some(1));
+    assert_eq!(
+        origin.event_kind(),
+        RepoWatchEventKindNameV1::PullRequestOpened
+    );
+
+    assert_projected_origin(&fixture, &planned, session).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatched_session_projects_origin_before_ledger_settlement() -> Result<(), Box<dyn Error>>
+{
+    let mut fixture = CheckoutFixture::new().await?;
+    let planned = fixture
+        .store
+        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+        .await?[0]
+        .clone();
+    fixture.submit_without_lifecycle_settlement().await;
+    let session = SessionId::from_uuid(
+        sqlx::query_scalar(
+            "SELECT created_session_id FROM create_session_command WHERE command_id = $1",
+        )
+        .bind(fixture.command.into_uuid())
+        .fetch_one(&fixture.core)
+        .await?,
+    );
+    let ledger: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, created_session_id FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert_eq!(ledger, (String::from("pending"), None));
+    assert_projected_origin(&fixture, &planned, session).await?;
+    fixture.settle().await;
+    assert_eq!(fixture.session().await, session);
+    assert_projected_origin(&fixture, &planned, session).await
+}
+
+async fn assert_projected_origin(
+    fixture: &CheckoutFixture,
+    planned: &signalbox_module_repo_watch_v2::PlannedCommand,
+    session: SessionId,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{
+        CanonicalUuid, ClientFrame, ClientRequest, ProtocolVersion, RequestId, ServerMessage,
+        decode_server_line, encode_client_line,
+    };
+    use signalbox_web_contract::WebSessionTimelineDescriptor;
+    use signalboxd::{
+        LocalProcessListener, ProcessRuntime,
+        repo_watch_runtime::{RepositoryWatchRuntime, RepositoryWatchServices},
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tower::ServiceExt;
+
+    let models = (*fixture.sink.models).clone();
+    let templates = signalboxd::SessionTemplateConfiguration::default();
+    let watch = RepositoryWatchRuntime::unstarted(
+        fixture.module.clone(),
+        RepositoryWatchServices {
+            core_pool: fixture.core.clone(),
+            checkout_runner: None,
+            models: Arc::new(models.clone()),
+            templates: Arc::new(templates.clone()),
+            eligibility_nudge: fixture.sink.eligibility_nudge.clone(),
+            tool_dispatch_gate: fixture.sink.tool_dispatch_gate.clone(),
+        },
+    );
+    let reload = signalboxd::configuration_reload::ConfigurationReload::new(
+        fixture.core.clone(),
+        models.clone(),
+        templates,
+        fixture._files.path().join("models.toml"),
+        fixture._files.path().join("templates.toml"),
+        None,
+    )
+    .expect("reload composition")
+    .with_repository_watch(watch);
+    let router = signalboxd::web_http::production_router(
+        None,
+        Some(fixture.core.clone()),
+        None,
+        Some(models.clone()),
+        None,
+        None,
+        None,
+    )
+    .layer(axum::Extension(reload.clone()));
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/api/sessions/{}", session.into_uuid()))
+                .header("host", "127.0.0.1")
+                .body(axum::body::Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let descriptor: WebSessionTimelineDescriptor = serde_json::from_slice(&bytes)?;
+    let web = descriptor.repository_watch.expect("browser origin");
+    assert_eq!(
+        serde_json::to_value(&web.dispatch_id)?,
+        planned.dispatch().into_uuid().to_string()
+    );
+    assert_eq!(
+        serde_json::to_value(&web.event_id)?,
+        planned.event_id().into_uuid().to_string()
+    );
+    assert_eq!(
+        web.action_ordinal.as_str(),
+        planned.action_ordinal().to_string()
+    );
+    assert_eq!(web.rule_id, planned.rule_id().as_str());
+    assert_eq!(web.repository, planned.repository().as_str());
+    assert_eq!(
+        web.pull_request.as_ref().map(|number| number.as_str()),
+        Some("1")
+    );
+
+    let sockets = tempfile::tempdir_in("/tmp")?;
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(sockets.path(), std::fs::Permissions::from_mode(0o700))?;
+    let socket = sockets.path().join("hub.sock");
+    let runtime = ProcessRuntime::new(
+        LocalProcessListener::bind(&socket)?,
+        fixture.core.clone(),
+        fixture.sink.eligibility_nudge.clone(),
+        fixture.sink.tool_dispatch_gate.clone(),
+        models,
+    )
+    .with_configuration_reload(reload);
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(runtime.run(receiver));
+    let stream = tokio::net::UnixStream::connect(&socket).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let request = ClientFrame::try_new_for_version(
+        ProtocolVersion::One,
+        RequestId::try_new(1)?,
+        ClientRequest::ReadTranscript {
+            session_id: CanonicalUuid::from_uuid(session.into_uuid()),
+        },
+    )?;
+    writer.write_all(&encode_client_line(&request)?).await?;
+    let mut line = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), reader.read_until(b'\n', &mut line)).await??;
+    let frame = decode_server_line(&line)?;
+    let ServerMessage::TranscriptSnapshotStart {
+        repository_watch: Some(wire),
+        ..
+    } = frame.message()
+    else {
+        panic!(
+            "snapshot must expose retained origin: {:?}",
+            frame.message()
+        );
+    };
+    assert_eq!(wire.dispatch_id.into_uuid(), planned.dispatch().into_uuid());
+    assert_eq!(wire.event_id.into_uuid(), planned.event_id().into_uuid());
+    assert_eq!(wire.action_ordinal.value(), planned.action_ordinal());
+    assert_eq!(wire.rule_id, planned.rule_id().as_str());
+    assert_eq!(wire.repository, planned.repository().as_str());
+    assert_eq!(wire.pull_request.map(|number| number.value()), Some(1));
+    shutdown.send(true)?;
+    drop(writer);
+    drop(reader);
+    task.await??;
+    Ok(())
 }

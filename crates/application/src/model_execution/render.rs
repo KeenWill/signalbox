@@ -489,7 +489,7 @@ pub fn projected_frontier_container_bytes<'a>(
 /// Counts heap-backed user content without cloning its text or metadata.
 /// Attachment length uses the widest u64 spelling, reserving at most nineteen
 /// extra bytes per stub before catalog evidence is consulted by rendering.
-fn user_content_retained_bytes(content: &UserContent) -> usize {
+pub(super) fn user_content_retained_bytes(content: &UserContent) -> usize {
     content.parts().iter().fold(0_usize, |total, part| {
         let bytes = match part {
             UserContentPart::Text { value } => value.as_str().len(),

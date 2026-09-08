@@ -627,7 +627,13 @@ pub(crate) struct CommittedBlobReadFixture {
 
 impl CommittedBlobReadFixture {
     pub(crate) async fn start(bytes: &'static [u8]) -> Result<Self, Box<dyn Error>> {
-        let runtime = RunningRuntime::start_with_blob_storage().await?;
+        Self::from_runtime(RunningRuntime::start_with_blob_storage().await?, bytes).await
+    }
+
+    pub(crate) async fn from_runtime(
+        runtime: RunningRuntime,
+        bytes: &'static [u8],
+    ) -> Result<Self, Box<dyn Error>> {
         let digest = BlobDigest::digest(bytes);
         let wire_digest = CanonicalBlobDigest::from_digest(digest);
         let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);

@@ -50,10 +50,11 @@ documents the lock order stated under Contracts. Row locks issued inline
 elsewhere in Rust are stated at the statement that takes them, and locks taken
 inside triggers are stated in the migrations that define them.
 
-A program capability answer is appended to the program journal inside the
-transaction that commits its consequence. The append locks that run's journal
-sequence FOR UPDATE, inserts the frame, and advances the sequence, so the
-consequence and the answer commit together.
+A program journal append locks that run's sequence FOR UPDATE, inserts the
+frame, and advances the sequence. An effect's consequence can commit before its
+answer; recovery adopts a proven outcome, reissues a declared-idempotent
+operation, or journals ambiguity as [program substrate](program-substrate.md)
+defines.
 
 Reconstitution turns rows back into domain values and returns one complete value
 or a typed corruption error. Failures that reach an operator are classified in
@@ -593,15 +594,26 @@ predecessor call, qualifying cause, and non-acceptance evidence atomically. What
 these rows mean is owned by
 [credential-availability](credential-availability.md).
 
-Credential admission freezes the session's policy revision before its first call
-or wait. A credential wait records that revision, every member's exclusion
-evidence, the latest frontier and optional deadline. Its released successor
-names the consumed wait and retains any predecessor call and non-acceptance
-proof. Release commits the successor's prepared call or terminal disposition
-with wait consumption; re-parking replaces evidence and deadline in place.
-Member-availability updates and successful exclusion clears grant named waits
-eligibility in their committing transactions; replayed or ineffective clears
-grant none. The scheduler rechecks due deadlines and eligible waits.
+Each fresh availability chain resolves the current catalog and freezes its
+policy revision before its first call or wait. A credential wait records that
+revision, every member's exclusion evidence, the latest frontier and optional
+deadline. Its released successor names the consumed wait and retains any
+predecessor call and non-acceptance proof. Release commits the successor's
+prepared call or terminal disposition with wait consumption; re-parking replaces
+evidence and deadline in place. Member-availability updates and successful
+exclusion clears grant named waits eligibility in their committing transactions;
+replayed or ineffective clears grant none. Wait inserts and changes publish a
+transactional database notification for scheduler nudges and follower
+resynchronization. The scheduler rechecks due deadlines and eligible waits.
+
+A contended wait additionally retains the complete bounded-member set and each
+member's invocation reservations. Admission locks capacity rows in profile byte
+order after every credential action head and retains them through counting,
+selection, wait insertion or rewrite, and commit. Reservation release holds the
+member's capacity row through its wait-eligibility update. A reservation records
+the process group before request delivery; completion and startup release it
+only after proving that group absent, or without a process when dispatch is
+proven unsent.
 
 Runner replacement and abandonment commit the placement move, terminal command
 result, and one runner-state-transition event per affected session atomically.
@@ -656,5 +668,5 @@ retaining registration and history.
   [persistence-protocol design](../design/persistence-protocol.md).
 - Instruction admitted-set storage and its locks:
   [persistence-protocol design](../design/persistence-protocol.md).
-- Credential-pool state, capacity reservations, and availability-wait storage:
+- Credential-pool action-head and cursor storage:
   [persistence-protocol design](../design/persistence-protocol.md).

@@ -227,6 +227,8 @@ pub(crate) async fn insert_prepared_call(
     .bind(instruction_manifest_id.into_uuid())
     .execute(&mut *connection)
     .await?;
+    crate::credential_invocations::reserve(connection, call.id(), credential_reference.as_str())
+        .await?;
     freeze_recorded_user_overrides(connection, prepared.session(), call.id()).await?;
     if let Some(policy) = credential_pool_policy {
         persist_call_pool_policy(connection, call.id(), policy).await?;

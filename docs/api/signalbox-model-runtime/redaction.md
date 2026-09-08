@@ -14,6 +14,11 @@ impl<'a, C: clone::Clone> CredentialRedactingSink<'a, C> {
     pub fn flush(&mut self);
 }
 impl<C: clone::Clone> ObservationSink<C> for CredentialRedactingSink<'_, C> {
+    fn register_process(
+        &mut self,
+        correlation: C,
+        process_group: u32,
+    ) -> pin::Pin<boxed::Box<dyn future::Future<Output = bool> + marker::Send + '_>>;
     fn observe_rate_limits(&mut self, correlation: C, snapshot: RateLimitSnapshot);
     fn observe(&mut self, observation: Observation<C>);
 }

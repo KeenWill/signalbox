@@ -1124,7 +1124,6 @@ async fn load_availability_predecessor_snapshot(
            ) AS relocation ON true
           WHERE successor.successor_turn_attempt_id = $1
           UNION ALL SELECT waiting.frontier_id FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1",
-
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)

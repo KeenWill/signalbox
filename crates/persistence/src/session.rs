@@ -136,6 +136,8 @@ pub(crate) async fn load_session_from_connection(
         "SELECT
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
+            s.creating_program_run_id AS stored_program_run,
+            (SELECT run_id FROM program_run_registration WHERE run_id = s.creating_program_run_id) AS stored_verified_program_run,
             s.ancestry_kind AS stored_ancestry,
             s.spawning_tool_request_id AS stored_spawning_request_id,
             s.dispatching_module AS stored_dispatching_module,
@@ -277,7 +279,7 @@ pub(crate) async fn load_session_from_connection(
             &row,
             "current_placement_later_event_exists",
         )?);
-    let session = decode_complete(row, requested_session)?;
+    let session = decode_complete(row, requested_session).await?;
     crate::session_placement::authenticate_loaded_current(
         connection,
         requested_session,
@@ -289,10 +291,22 @@ pub(crate) async fn load_session_from_connection(
     Ok(Some(session))
 }
 
-fn decode_complete(
+async fn decode_complete(
     row: PgRow,
     requested_session: SessionId,
 ) -> Result<Session, SessionRepositoryError> {
+    let program = crate::program_session::recorded_capability(
+        row.try_get("stored_program_run")?,
+        row.try_get("stored_verified_program_run")?,
+    )
+    .await
+    .map_err(|()| SessionCorruption::Inconsistent("workflow program reference"))?;
+    if program.is_some()
+        && (!matches!(row.try_get::<Option<i16>, _>("create_storage_version")?, Some(version) if version >= crate::create_session::WORKFLOW_FROM_STORAGE_VERSION)
+            || row.try_get::<String, _>("stored_cause")? != "workflow")
+    {
+        return Err(SessionCorruption::Inconsistent("workflow creation version or cause").into());
+    }
     let ancestry: String = required(&row, "stored_ancestry")?;
     let settings_authentication = authenticate_defaults_settings_version(&row, &ancestry);
     if ancestry == "imported_conversation" {
@@ -340,6 +354,7 @@ fn decode_complete(
         row.try_get("stored_spawning_request_id")?,
         row.try_get("stored_dispatching_module")?,
         row.try_get("stored_dispatch_ref")?,
+        program,
     )?;
     let template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
@@ -645,7 +660,20 @@ fn decode_provenance(
     spawning_request: Option<Uuid>,
     dispatching_module: Option<String>,
     dispatch_ref: Option<Uuid>,
+    program: Option<signalbox_domain::program_session::ProgramSessionCapability>,
 ) -> Result<SessionCreationProvenance, SessionRepositoryError> {
+    if let Some(program) = program {
+        return if cause == "workflow"
+            && ancestry == NO_ANCESTRY
+            && spawning_request.is_none()
+            && dispatching_module.is_none()
+            && dispatch_ref.is_none()
+        {
+            Ok(SessionCreationProvenance::workflow(program))
+        } else {
+            Err(SessionCorruption::Inconsistent("workflow creation provenance").into())
+        };
+    }
     if ancestry != NO_ANCESTRY {
         return Err(SessionCorruption::Unsupported {
             field: "ancestry kind",
@@ -681,6 +709,7 @@ fn decode_provenance(
         }
         (
             SessionCreationCauseStorageKind::Interactive
+            | SessionCreationCauseStorageKind::Workflow
             | SessionCreationCauseStorageKind::Delegated
             | SessionCreationCauseStorageKind::ModuleDispatched,
             _,
@@ -735,6 +764,7 @@ fn validate_imported_creation_provenance(
         (SessionCreationCauseStorageKind::Interactive, None, None, None) => Ok(()),
         (
             SessionCreationCauseStorageKind::Interactive
+            | SessionCreationCauseStorageKind::Workflow
             | SessionCreationCauseStorageKind::Delegated
             | SessionCreationCauseStorageKind::ModuleDispatched,
             _,
@@ -850,6 +880,7 @@ mod tests {
             Some(request),
             None,
             None,
+            None,
         )
         .expect("the complete delegated storage shape decodes");
 
@@ -874,6 +905,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect_err("delegated provenance without its request is corrupt");
 
@@ -892,6 +924,7 @@ mod tests {
             )),
             String::from(NO_ANCESTRY),
             Some(spawning_request()),
+            None,
             None,
             None,
         )
@@ -937,6 +970,7 @@ mod tests {
                 )),
                 String::from(NON_NONE_ANCESTRY),
                 Some(spawning_request()),
+                None,
                 None,
                 None,
             )

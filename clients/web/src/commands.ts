@@ -27,6 +27,7 @@ export interface CommandContext {
   continueImport?: (relationship: 'resume' | 'fork') => void
   canRetryImport?: boolean
   retryImport?: () => void
+  retryImportDiscovery?: () => void
   canAbandonImport?: boolean
   abandonImport?: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
@@ -482,8 +483,17 @@ export const commandRegistry = [
     run: (context) => context.continueImport?.('fork'),
   },
   {
+    id: 'imports.discovery.retry',
+    title: 'Retry imports',
+    description: 'Import discovery',
+    category: 'Imports',
+    bindings: [],
+    available: (context) => context.retryImportDiscovery !== undefined,
+    run: (context) => context.retryImportDiscovery?.(),
+  },
+  {
     id: 'imports.continue.retry',
-    title: 'Retry exact imported continuation',
+    title: 'Retry import continuation',
     description: 'Replay the retained imported-continuation command without changing its payload.',
     category: 'Imports',
     bindings: [],
@@ -492,7 +502,7 @@ export const commandRegistry = [
   },
   {
     id: 'imports.continue.abandon',
-    title: 'Abandon exact imported continuation',
+    title: 'Abandon import continuation',
     description: 'Discard the retained imported-continuation command after explicit confirmation.',
     category: 'Imports',
     bindings: [],

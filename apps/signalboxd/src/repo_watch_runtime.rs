@@ -140,6 +140,42 @@ pub(crate) struct PreparedRepositoryWatchReload {
 }
 
 impl RepositoryWatchRuntime {
+    pub(crate) async fn session_origin(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> Result<
+        Option<signalbox_module_repo_watch_v2::RetainedDispatchAction>,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        let (store, core) = {
+            let state = self.state.lock().await;
+            (state.store.clone(), state.core_pool.clone())
+        };
+        let origin: Option<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+            "SELECT session.dispatch_ref, creation.command_id
+               FROM session
+               JOIN create_session_command AS creation
+                 ON creation.created_session_id = session.session_id
+              WHERE session.session_id = $1
+                AND session.creation_cause = 'module_dispatched'
+                AND session.dispatching_module = 'repo_watch'",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(&core)
+        .await?;
+        let Some((dispatch, command)) = origin else {
+            return Ok(None);
+        };
+        store
+            .origin_for_create_command(
+                signalbox_ownership_seam::RepoWatchDispatchId::from_uuid(dispatch),
+                signalbox_ownership_seam::DurableCommandId::from_uuid(command),
+            )
+            .await?
+            .map(Some)
+            .ok_or(signalbox_module_repo_watch_v2::StoreError::InvalidRetainedCommand)
+    }
+
     /// Reconciles the configured revision set before starting repository tasks.
     pub async fn new(
         module_pool: PgPool,

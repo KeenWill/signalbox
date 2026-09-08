@@ -872,9 +872,11 @@ pub(crate) const fn creation_actor(cause: &SessionCreationCause) -> LifecycleAct
         // identity is session-scoped; the child's own row already records that
         // request as its creation provenance, so naming it here again would
         // be a second, cross-session copy of one fact.
-        SessionCreationCause::Delegated { .. } => LifecycleActor::Core {
-            agency: CoreAgency::Daemon,
-        },
+        SessionCreationCause::Delegated { .. } | SessionCreationCause::Workflow { .. } => {
+            LifecycleActor::Core {
+                agency: CoreAgency::Daemon,
+            }
+        }
     }
 }
 

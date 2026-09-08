@@ -10,7 +10,7 @@ fn nonzero_priority(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("fixture membership priority is non-zero")
 }
 
-async fn active_credential_pool_fixture(
+pub(super) async fn active_credential_pool_fixture(
     pool: &sqlx::PgPool,
     seed: u128,
     pool_name: &str,
@@ -364,7 +364,7 @@ async fn exercise_counted_attachment_pool_race(park: bool) -> Result<(), Box<dyn
     Ok(())
 }
 
-async fn prepare_and_authorize_pool_call(
+pub(super) async fn prepare_and_authorize_pool_call(
     repository: &PostgresModelCallRepository,
     session: SessionId,
     seed: u128,
@@ -5061,7 +5061,7 @@ async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
 }
 
 #[path = "credential_wait.rs"]
-mod credential_wait;
+pub(super) mod credential_wait;
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn exhausted_page_settles_attempt_outside_abandoned_page() -> Result<(), Box<dyn Error>> {

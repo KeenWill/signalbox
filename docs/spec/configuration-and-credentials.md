@@ -819,6 +819,11 @@ delivery-origin quarantine and cached access; failure preserves both. Deletion
 holds the dispatch profile lock while removing authorization and cached access,
 advances the retained generation, and preserves registration and history.
 
+A `codex_home` profile accepts `max_concurrent_invocations` from 1 through
+1,024. The startup registration bounds per-member invocation reservations; an
+omitted bound leaves the profile unbounded. Saturation participates in
+credential pool admission as [contention](credential-availability.md).
+
 ## Planned
 
 - Input-modality declarations on model and serving-target records, and the blob
@@ -837,8 +842,7 @@ advances the retained generation, and preserves registration and history.
   [design](../design/configuration-and-credentials.md).
 - Codex CLI `file` delivery and OAuth database-restore rules:
   [design](../design/configuration-and-credentials.md).
-- Bounded credential-home concurrency and round-robin selection:
-  `max_concurrent_invocations` and `round_robin`:
+- Round-robin selection (`round_robin`):
   [design](../design/configuration-and-credentials.md).
 - Credential-exclusion lifecycle: reset-aware expiry, probe recovery, and
   coalescing action-head generations:

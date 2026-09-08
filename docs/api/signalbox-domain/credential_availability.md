@@ -6,6 +6,7 @@
 
 ```rust
 pub enum CredentialAvailabilityWaitCause {
+    Contended,
     Exhausted,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq

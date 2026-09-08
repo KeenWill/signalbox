@@ -138,6 +138,17 @@ pub enum ProcessModelCallRecoveryPrecondition {
 /// Authoritative lifecycle state for one projected turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTurnState {
+    /// Admission release failed a call-free attempt with its predecessor's provider cause.
+    FailedAfterCredentialWait {
+        /// Exact terminal semantic frontier.
+        terminal_frontier: ContextFrontierId,
+        /// Fresh call-free terminal attempt.
+        terminal_attempt: TurnAttemptId,
+        /// Predecessor whose provider failure remains authoritative.
+        predecessor_call: ModelCallId,
+        /// Definitive provider failure retained by the predecessor.
+        provider_cause: ProcessProviderModelCallFailureCause,
+    },
     /// Credential admission yielded its call-free attempt and retains the active slot.
     ActiveAwaitingCredentialAvailability {
         /// Ended wait attempt, its frontier and closed cause.
