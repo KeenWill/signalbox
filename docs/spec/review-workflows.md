@@ -228,8 +228,8 @@ The publication result must cover the surviving inventory exactly; any failed,
 blocked, or cancelled member yields an incomplete publication outcome, never a
 complete one.
 
-Review-command digests hash the current wire serialization with findings sorted
-by identity.
+Review-command equality is computed over the validated semantic request, with
+findings sorted by identity.
 
 Every review mutation carries a user-global command identity under the claim
 protocol
