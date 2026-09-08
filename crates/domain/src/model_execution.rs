@@ -1629,7 +1629,7 @@ fn reconstitute(
         }
         (Some(stored), Some(_), None, false)
         | (Some(stored), Some(_), None, true)
-        | (Some(stored), None, Some(_), false)
+        | (Some(stored), None, Some(_), _)
         | (Some(stored), None, None, true) => {
             let Some(pinned) = stored.reconstitute_for_turn(turn) else {
                 return Err(fail(
@@ -1639,7 +1639,7 @@ fn reconstitute(
             };
             Some(pinned)
         }
-        (Some(_), Some(_), Some(_), _) | (Some(_), None, Some(_), true) => {
+        (Some(_), Some(_), Some(_), _) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::ContinuationSnapshotUnexpected,
@@ -2007,7 +2007,16 @@ fn frontier_closes_latest_tool_round(
             return Ok(false);
         }
     }
-    Ok(suffix[results_end..].iter().all(|entry| {
+    let mut continuation = &suffix[results_end..];
+    if continuation.first().is_some_and(|entry| {
+        matches!(
+            entry.payload(),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+        )
+    }) {
+        continuation = &continuation[1..];
+    }
+    Ok(continuation.iter().all(|entry| {
         matches!(
             entry.payload(),
             SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }

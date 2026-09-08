@@ -541,6 +541,12 @@ impl BoundaryLossCode {
             LossCause::TransportFailed(_) => Self::TransportFailed,
             LossCause::ResponseBodyLost(_) => Self::ResponseBodyLost,
             LossCause::ResponseUnintelligible { .. } => Self::ResponseUnintelligible,
+            LossCause::ResponseEnvelopeRejected { stage, .. } => match stage {
+                signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers => {
+                    Self::StreamProtocolViolation
+                }
+                _ => Self::ResponseUnintelligible,
+            },
             LossCause::UnexpectedHttpStatus => Self::UnexpectedHttpStatus,
             LossCause::StreamEndedWithoutTerminalMarker { .. } => {
                 Self::StreamEndedWithoutTerminalMarker
@@ -1542,6 +1548,7 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
                 session_id = %telemetry.session.as_uuid(),
                 turn_id = %telemetry.turn.as_uuid(),
                 model_call_id = %telemetry.call.as_uuid(),
+                stage = classified.envelope_stage.map(signalbox_model_runtime::ResponseEnvelopeRejectionStage::as_str),
                 "model call produced no assistant material"
             );
         }
@@ -1998,6 +2005,7 @@ pub fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
 /// explain it to an operator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TerminalClassification {
+    envelope_stage: Option<signalbox_model_runtime::ResponseEnvelopeRejectionStage>,
     observation: ModelCallTerminalObservation,
     cause: ModelCallCauseCode,
     /// The concrete provider identity that served the exchange, retained
@@ -2062,8 +2070,17 @@ fn classify_terminal(
         }
     }
 
+    let envelope_stage = match &evidence {
+        TerminalEvidence::BoundaryLoss(signalbox_model_runtime::BoundaryLossEvidence {
+            cause: LossCause::ResponseEnvelopeRejected { stage, .. },
+            ..
+        }) => Some(*stage),
+        _ => None,
+    };
+
     let classify = |observation, cause| {
         Ok(TerminalClassification {
+            envelope_stage,
             observation,
             cause,
             concrete_target: concrete_target.clone(),
@@ -2452,10 +2469,9 @@ mod tests {
     }
 
     #[test]
-    fn capacity_bridge_retains_latest_snapshot_through_both_redacting_sinks() {
+    fn capacity_bridge_retains_latest_snapshot_through_exact_redaction() {
         use signalbox_model_runtime::{
             CredentialRedactingSink, CredentialValue, RateLimitSnapshot, RateLimitWindow,
-            RedactingSink,
         };
         use std::time::{Duration, SystemTime};
 
@@ -2476,8 +2492,7 @@ mod tests {
         let credential = CredentialValue::new(b"synthetic-capacity-test-secret".to_vec());
         {
             let mut exact = CredentialRedactingSink::new(&mut sink, &credential);
-            let mut shaped = RedactingSink::new(&mut exact);
-            shaped.observe_rate_limits(
+            exact.observe_rate_limits(
                 call(),
                 RateLimitSnapshot {
                     observed_at,
@@ -2500,9 +2515,7 @@ mod tests {
             correlation: call(),
             fact: ObservationFact::UsageReported(TokenUsage::unreported()),
         });
-        let retained = sink
-            .rate_limits
-            .expect("capacity survives both redacting sinks");
+        let retained = sink.rate_limits.expect("capacity survives exact redaction");
         assert_eq!(*retained.observed_at(), observed_at);
         assert_eq!(retained.windows().len(), 2);
         assert_eq!(*retained.windows()[0].remaining_percent(), 23);
@@ -3691,7 +3704,7 @@ mod tests {
         );
     }
 
-    /// A CLI-redacted argument object becomes an inert domain proposal so the
+    /// A suppressed argument object becomes an inert domain proposal so the
     /// application can record its runtime-safety denial and continue the turn.
     #[test]
     fn fully_suppressed_tool_arguments_cross_as_inert_proposal() {
@@ -4255,6 +4268,58 @@ mod tests {
         fn enter(&self, _: &tracing::span::Id) {}
 
         fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn envelope_rejection_logs_one_correlated_stage_without_provider_detail() {
+        let log = InputCountLog::default();
+        let telemetry = telemetry();
+        let classified = classify_terminal(
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause: LossCause::ResponseEnvelopeRejected {
+                    stage:
+                        signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,
+                    detail: String::from("provider-controlled rejection detail"),
+                },
+                exchange: ExchangeFacts::default(),
+                reported_model: None,
+                finish_reported: None,
+                tool_calls: ToolCallsAtLoss::Unobserved,
+                usage: TokenUsage::unreported(),
+            }),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("envelope rejection remains ambiguous");
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::Ambiguous
+        );
+        tracing::subscriber::with_default(log.clone(), || {
+            super::report_classified_outcome(telemetry, &classified);
+        });
+        let records = log.0.lock().expect("test log lock");
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.level, tracing::Level::WARN);
+        assert_eq!(record.fields["stage"], "\"duplicate_members\"");
+        assert_eq!(
+            record.fields["cause_code"],
+            "\"boundary_loss_stream_protocol_violation\""
+        );
+        assert_eq!(
+            record.fields["session_id"],
+            telemetry.session.as_uuid().to_string()
+        );
+        assert_eq!(
+            record.fields["turn_id"],
+            telemetry.turn.as_uuid().to_string()
+        );
+        assert_eq!(
+            record.fields["model_call_id"],
+            telemetry.call.as_uuid().to_string()
+        );
+        assert!(!format!("{record:?}").contains("provider-controlled rejection detail"));
     }
 
     #[test]

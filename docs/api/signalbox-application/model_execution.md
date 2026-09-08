@@ -2,6 +2,12 @@
 
 # model_execution
 
+## MAX_RENDERED_ATTACHMENT_STUB_BYTES
+
+```rust
+pub const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize;
+```
+
 ## ModelCallCredentialReference
 
 ```rust

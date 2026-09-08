@@ -18,12 +18,11 @@ impl OauthCredentialRepository {
             return Ok(outcome);
         }
         provisioning::read_catalog(&mut transaction).await?;
-        let generation: Option<i64> = sqlx::query_scalar(
-            "SELECT generation FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE",
-        )
-        .bind(&command.profile)
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let generation: Option<i64> =
+            sqlx::query_scalar(crate::lock_inventory::OAUTH_CREDENTIAL_PROFILE_GENERATION)
+                .bind(&command.profile)
+                .fetch_optional(&mut *transaction)
+                .await?;
         let retained: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM oauth_credential_registration WHERE profile = $1)
                 OR EXISTS (SELECT 1 FROM oauth_credential_authorization WHERE profile = $1)

@@ -20,8 +20,7 @@
 //! Credential discipline: this test never reads, receives, or logs credential
 //! material. The CLI resolves its own login from `CODEX_HOME`, exactly as in
 //! production. The version probe discards the child's stderr rather than
-//! reporting it, and every other failure message carries only evidence the
-//! adapter has already run through its credential-shape redaction.
+//! reporting it; other failures report adapter evidence.
 
 #![allow(
     clippy::expect_used,
@@ -446,8 +445,6 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             exchange: refused.exchange,
             usage: refused.usage,
         },
-        // Adapter-produced evidence is already credential-shape redacted, so
-        // printing it here cannot surface credential material.
         other => panic!("the pinned Codex CLI returned no decoded response: {other:?}"),
     }
 }
@@ -641,7 +638,7 @@ async fn assert_pinned_version(executable: &std::path::Path) {
         .stdout(Stdio::piped())
         // Discarded rather than reported: a version probe has no need to
         // surface provider-controlled diagnostics, and this text does not pass
-        // through the adapter's redaction.
+        // through the adapter.
         .stderr(Stdio::null())
         // Dropping the timed-out future kill-on-drops the direct launcher;
         // its own process group lets the timeout path signal a native

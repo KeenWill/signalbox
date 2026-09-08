@@ -29,6 +29,9 @@ reader, and validates through that reader. It ends as a validated file, as
 unknown bytes with no views, or as a typed failure. A read selects one declared
 view and returns bounded UTF-8 or JSON with a completeness or continuation fact.
 
+Archive ZIP parsing bounds cumulative bytes visited, including rescans and
+nested-content detection; exhausted scan work is a limit failure.
+
 Each format family is one adapter crate implementing `FileMediaProvider`,
 compiled into its own worker executable.
 `signalbox-file-media-processor-runtime` implements the processor port by
@@ -44,6 +47,10 @@ exactly one input: object options for a first read, or the cursor a truncated
 result returned. `signalbox-file-media-provider-runtime` supplies the
 registry-backed service behind both and authorizes each request through an
 injected `FileUseResolver`.
+
+PDF preflight charges recursive length-carrier decoding against the aggregate
+object-stream budget. Text reads charge page content and font CMaps against one
+read-wide decoding budget and accept bounded indirect content arrays.
 
 ## Design decisions
 
@@ -63,9 +70,10 @@ Configuration can disable a provider or lower a bound; it cannot add a
 media-type mapping, an alias, an executable, or a precedence rule. Why:
 configuration must never become a source of type authority or executable code.
 
-Registration order never settles conflicting probe claims; incompatible claims
-return ambiguity. Why: detection must give the same answer for any adapter set
-and any probe completion order.
+The daemon derives probe byte counts from brokered reads. Registration order
+never settles conflicting probe claims; incompatible claims return ambiguity
+before validation envelopes are applied. Why: detection must give the same
+answer for any adapter set and any probe completion order.
 
 The service repeats inspection for every read, and `file_read` accepts no
 model-supplied media type or reader identity. Why: no classification from an

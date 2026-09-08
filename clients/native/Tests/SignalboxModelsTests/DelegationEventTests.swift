@@ -7,6 +7,48 @@ final class DelegationEventTests: XCTestCase {
   private let child = "22222222-2222-4222-8222-222222222222"
   private let request = "33333333-3333-4333-8333-333333333333"
 
+  func testDelegationOutcomeSpellingsPreserveEveryVariant() throws {
+    for expected in SignalboxDelegationOutcome.allCases {
+      let spelling = expectedSpelling(expected)
+      let data = try JSONEncoder().encode(spelling)
+      let decoded = try SignalboxJSONCoding.decoder().decode(SignalboxDelegationOutcome.self, from: data)
+      XCTAssertEqual(decoded, expected, spelling)
+      XCTAssertEqual(decoded.rawValue, spelling)
+    }
+  }
+
+  func testDelegationReasonSpellingsPreserveEveryVariant() throws {
+    for expected in SignalboxDelegationReason.allCases {
+      let spelling = expectedSpelling(expected)
+      let data = try JSONEncoder().encode(spelling)
+      let decoded = try SignalboxJSONCoding.decoder().decode(SignalboxDelegationReason.self, from: data)
+      XCTAssertEqual(decoded, expected, spelling)
+      XCTAssertEqual(decoded.rawValue, spelling)
+    }
+  }
+
+  private func expectedSpelling(_ value: SignalboxDelegationOutcome) -> String {
+    switch value {
+    case .returned: "returned"
+    case .failed: "failed"
+    case .stopped: "stopped"
+    case .cancelled: "cancelled"
+    case .continueRunning: "continue_running"
+    case .alreadyTerminal: "already_terminal"
+    }
+  }
+
+  private func expectedSpelling(_ value: SignalboxDelegationReason) -> String {
+    switch value {
+    case .childCompleted: "child_completed"
+    case .childExecutionFailed: "child_execution_failed"
+    case .childResultUnavailable: "child_result_unavailable"
+    case .childCancelled: "child_cancelled"
+    case .parentStopped: "parent_stopped"
+    case .parentCancelled: "parent_cancelled"
+    }
+  }
+
   private func decode(_ event: String, recipient: String? = nil) throws -> SignalboxFollowedSessionEvent {
     try SignalboxJSONCoding.decoder().decode(SignalboxFollowedSessionEvent.self,
       from: Data(#"{"cursor":"2","session_id":"\#(recipient ?? parent)","event":\#(event)}"#.utf8))

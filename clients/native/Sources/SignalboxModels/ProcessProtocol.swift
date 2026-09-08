@@ -4,6 +4,7 @@ public enum SignalboxProcessProtocol {
   public static let currentVersion = SignalboxProcessProtocolVersion.one
   public static let maximumFrameBytes = 8 * 1024 * 1024
   public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
+  public static let maximumHeadroomReservePercent: UInt8 = 99
   // docs/spec/process-protocol.md owns the metadata and conversation-list bounds.
   public static let maximumMetadataTags = 256
   public static let maximumMetadataAttributes = 256
@@ -563,6 +564,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64
   )
+  case readCredentialPoolPolicy(sessionID: SignalboxCanonicalUUID, turnID: SignalboxCanonicalUUID, poolPolicyID: SignalboxCanonicalUUID)
   case readTranscript(sessionID: SignalboxCanonicalUUID)
   case followSession(sessionID: SignalboxCanonicalUUID)
   case listSessionMetadata(
@@ -639,6 +641,11 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(SignalboxUserInputContent.text(content), forKey: "content")
       try container.encode(expectedVersion, forKey: "expected_defaults_version")
       try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+    case .readCredentialPoolPolicy(let sessionID, let turnID, let poolPolicyID):
+      try container.encode("read_credential_pool_policy", forKey: "type")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(turnID, forKey: "turn_id")
+      try container.encode(poolPolicyID, forKey: "pool_policy_id")
     case .readTranscript(let sessionID):
       try container.encode("read_transcript", forKey: "type")
       try container.encode(sessionID, forKey: "session_id")
@@ -1042,6 +1049,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case modelAliasesStart
   case modelAliasSummary(SignalboxModelAliasSummary)
   case modelAliasesEnd(aliasCount: SignalboxCanonicalUInt64)
+  case credentialPoolPolicy(SignalboxCredentialPoolPolicy)
   case transcriptSnapshotStart(SignalboxTranscriptSnapshotBoundary)
   case transcriptTurn(SignalboxTranscriptTurn)
   case transcriptModelCallUsage(SignalboxTranscriptModelCallUsage)
@@ -1170,6 +1178,8 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
       case "model_aliases_end":
         try tagged.rejectUnadmittedFields(["type", "alias_count"], decoder: decoder)
         self = .modelAliasesEnd(aliasCount: try decoder.decode("alias_count"))
+      case "credential_pool_policy":
+        self = .credentialPoolPolicy(try SignalboxCredentialPoolPolicy(from: decoder))
       case "transcript_snapshot_start":
         try tagged.rejectUnadmittedFields(
           ["type", "session_id", "cursor", "runner"],
@@ -2960,6 +2970,7 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
     recoveryToolAttemptID: SignalboxCanonicalUUID,
     automaticReconciliationAttempts: SignalboxCanonicalUInt64,
     operatorActionRequired: Bool)
+  case failedCredentialPoolExhausted(SignalboxCredentialPoolExhaustion)
   case failed(
     terminalFrontierID: SignalboxCanonicalUUID,
     terminalAttemptID: SignalboxCanonicalUUID?,
@@ -3113,6 +3124,9 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
             "automatic_reconciliation_attempts"),
           operatorActionRequired: try decoder.decode("operator_action_required")
         )
+      case "failed_credential_pool_exhausted":
+        try tagged.rejectUnadmittedFields(["type", "terminal_frontier_id", "terminal_attempt_id", "failure_entry_id", "pool_policy_id", "policy_members", "members"], decoder: decoder)
+        self = .failedCredentialPoolExhausted(try SignalboxCredentialPoolExhaustion(from: decoder))
       case "failed":
         try tagged.rejectUnadmittedFields(
           ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_model_call"],
@@ -3403,7 +3417,7 @@ public enum SignalboxDelegationWaitMode: String, Decodable, Equatable, Sendable 
   case background
 }
 
-public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable {
+public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable, CaseIterable {
   case returned
   case failed
   case stopped
@@ -3412,7 +3426,7 @@ public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable {
   case alreadyTerminal = "already_terminal"
 }
 
-public enum SignalboxDelegationReason: String, Decodable, Equatable, Sendable {
+public enum SignalboxDelegationReason: String, Decodable, Equatable, Sendable, CaseIterable {
   case childCompleted = "child_completed"
   case childExecutionFailed = "child_execution_failed"
   case childResultUnavailable = "child_result_unavailable"
@@ -4180,6 +4194,7 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   case turnCompleted(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     completionEntryID: SignalboxCanonicalUUID, terminalFrontierID: SignalboxCanonicalUUID)
+  case turnCredentialPoolExhausted(turnID: SignalboxCanonicalUUID, evidence: SignalboxCredentialPoolExhaustion)
   case turnFailed(
     turnID: SignalboxCanonicalUUID, failureEntryID: SignalboxCanonicalUUID,
     terminalFrontierID: SignalboxCanonicalUUID)
@@ -4367,6 +4382,9 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
           completionEntryID: try decoder.decode("completion_entry_id"),
           terminalFrontierID: try decoder.decode("terminal_frontier_id")
         )
+      case "turn_credential_pool_exhausted":
+        try tagged.rejectUnadmittedFields(["type", "turn_id", "terminal_frontier_id", "terminal_attempt_id", "failure_entry_id", "pool_policy_id", "policy_members", "members"], decoder: decoder)
+        self = .turnCredentialPoolExhausted(turnID: try decoder.decode("turn_id"), evidence: try SignalboxCredentialPoolExhaustion(from: decoder))
       case "turn_failed":
         try tagged.rejectUnadmittedFields(
           ["type", "turn_id", "failure_entry_id", "terminal_frontier_id"],
@@ -5331,6 +5349,129 @@ extension Decoder {
       Value.self,
       forKey: SignalboxDynamicCodingKey(key)
     )
+  }
+}
+
+
+public enum SignalboxCredentialPoolExclusion: Decodable, Equatable, Sendable {
+  case profileQuarantine(recordGeneration: SignalboxCanonicalUInt64?)
+  case membershipExclusion(recordGeneration: SignalboxCanonicalUInt64?)
+  case sessionDisplacement(recordGeneration: SignalboxCanonicalUInt64?)
+  case chainExclusion(predecessorModelCallID: SignalboxCanonicalUUID)
+  case transientExclusion(observationModelCallID: SignalboxCanonicalUUID)
+  case headroomReserve(observedHeadroomPercent: Int64, reservePercent: UInt8)
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let kind: String = try decoder.decode("kind")
+    switch kind {
+    case "profile_quarantine", "membership_exclusion", "session_displacement":
+      try payload.rejectUnadmittedFields(["kind", "record_generation"], decoder: decoder)
+      try payload.requireFields(["record_generation"], decoder: decoder)
+      let generation: SignalboxCanonicalUInt64? = try decoder.decodeIfPresent("record_generation")
+      if let generation, generation.rawValue == 0 { throw poolEvidenceError(decoder) }
+      switch kind {
+      case "profile_quarantine": self = .profileQuarantine(recordGeneration: generation)
+      case "membership_exclusion": self = .membershipExclusion(recordGeneration: generation)
+      default: self = .sessionDisplacement(recordGeneration: generation)
+      }
+    case "chain_exclusion":
+      try payload.rejectUnadmittedFields(["kind", "predecessor_model_call_id"], decoder: decoder)
+      self = .chainExclusion(predecessorModelCallID: try decoder.decode("predecessor_model_call_id"))
+    case "transient_exclusion":
+      try payload.rejectUnadmittedFields(["kind", "observation_model_call_id"], decoder: decoder)
+      self = .transientExclusion(observationModelCallID: try decoder.decode("observation_model_call_id"))
+    case "headroom_reserve":
+      try payload.rejectUnadmittedFields(["kind", "observed_headroom_percent", "reserve_percent"], decoder: decoder)
+      let observed: Int64 = try decoder.decode("observed_headroom_percent")
+      let reserve: UInt8 = try decoder.decode("reserve_percent")
+      guard reserve <= SignalboxProcessProtocol.maximumHeadroomReservePercent,
+        observed <= Int64(reserve)
+      else { throw poolEvidenceError(decoder) }
+      self = .headroomReserve(observedHeadroomPercent: observed, reservePercent: reserve)
+    default: throw poolEvidenceError(decoder)
+    }
+  }
+}
+
+public struct SignalboxCredentialPoolMemberEvidence: Decodable, Equatable, Sendable {
+  public let profile: String
+  public let resetAtUnixMS: Int64?
+  public let exclusion: SignalboxCredentialPoolExclusion
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(["profile", "reset_at_unix_ms", "exclusion"], decoder: decoder)
+    try payload.requireFields(["reset_at_unix_ms"], decoder: decoder)
+    profile = try decoder.decode("profile")
+    resetAtUnixMS = try decoder.decodeIfPresent("reset_at_unix_ms")
+    exclusion = try decoder.decode("exclusion")
+    switch exclusion {
+    case .profileQuarantine, .membershipExclusion, .sessionDisplacement, .chainExclusion:
+      guard resetAtUnixMS == nil else { throw poolEvidenceError(decoder) }
+    case .transientExclusion, .headroomReserve:
+      guard resetAtUnixMS != nil else { throw poolEvidenceError(decoder) }
+    }
+  }
+}
+
+public struct SignalboxCredentialPoolPolicy: Decodable, Equatable, Sendable {
+  public let poolPolicyID: SignalboxCanonicalUUID
+  public let policyMembers: [String]
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxTaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(["type", "pool_policy_id", "policy_members"], decoder: decoder)
+    poolPolicyID = try decoder.decode("pool_policy_id")
+    policyMembers = try decoder.decode("policy_members")
+    guard validPoolMembers(policyMembers) else { throw poolEvidenceError(decoder) }
+  }
+}
+
+public struct SignalboxCredentialPoolExhaustion: Decodable, Equatable, Sendable {
+  public let terminalFrontierID: SignalboxCanonicalUUID
+  public let terminalAttemptID: SignalboxCanonicalUUID
+  public let failureEntryID: SignalboxCanonicalUUID
+  public let poolPolicyID: SignalboxCanonicalUUID
+  public let policyMembers: [String]
+  public let members: [SignalboxCredentialPoolMemberEvidence]
+
+  public init(from decoder: Decoder) throws {
+    terminalFrontierID = try decoder.decode("terminal_frontier_id")
+    terminalAttemptID = try decoder.decode("terminal_attempt_id")
+    failureEntryID = try decoder.decode("failure_entry_id")
+    poolPolicyID = try decoder.decode("pool_policy_id")
+    policyMembers = try decoder.decode("policy_members")
+    members = try decoder.decode("members")
+    guard validPoolMembers(policyMembers), policyMembers.count == members.count,
+      zip(policyMembers, members).allSatisfy({ $0.0.utf8.elementsEqual($0.1.profile.utf8) })
+    else { throw poolEvidenceError(decoder) }
+  }
+
+  public var retainedUTF8Bytes: UInt {
+    policyMembers.reduce(UInt(0)) { $0 + UInt($1.utf8.count) }
+      + members.reduce(UInt(0)) { $0 + UInt($1.profile.utf8.count) + $1.exclusion.retainedUTF8Bytes }
+      + UInt(members.count * MemoryLayout<SignalboxCredentialPoolMemberEvidence>.stride)
+      + [terminalFrontierID, terminalAttemptID, failureEntryID, poolPolicyID].reduce(UInt(0)) { $0 + UInt($1.rawValue.utf8.count) }
+  }
+}
+
+private func validPoolMembers(_ members: [String]) -> Bool {
+  !members.isEmpty && members.count <= 1024
+    && members.allSatisfy { !$0.isEmpty && $0.utf8.count <= 256 }
+    && Set(members.map { Data($0.utf8) }).count == members.count
+}
+
+private func poolEvidenceError(_ decoder: Decoder) -> DecodingError {
+  .dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid credential pool evidence."))
+}
+
+extension SignalboxCredentialPoolExclusion {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .chainExclusion(let identity), .transientExclusion(let identity): return UInt(identity.rawValue.utf8.count)
+    case .profileQuarantine, .membershipExclusion, .sessionDisplacement, .headroomReserve: return 0
+    }
   }
 }
 

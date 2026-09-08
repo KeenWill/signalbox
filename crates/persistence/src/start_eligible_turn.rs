@@ -182,6 +182,8 @@ pub struct PreparedActivationPreview {
 pub enum CommitActivationPreviewOutcome {
     /// The exact preview still matched and was atomically activated.
     Activated(Box<ActivatedTurn>),
+    /// The counted preview activated and terminalized with no admissible pool member.
+    PoolExhausted(TurnId),
     /// Authoritative state changed after preview; the caller must restart the pass.
     Stale,
 }
@@ -278,12 +280,14 @@ impl StartEligibleTurnRepository {
     }
 
     /// Revalidates one counted preview and atomically commits both its
-    /// activation and exact no-steering Prepared initial call.
+    /// activation and exact no-steering Prepared initial call, or the pool
+    /// exhaustion closure when no member remains admissible.
     pub async fn commit_counted_preview(
         &self,
         preview: PreparedActivationPreview,
         prospective: crate::model_execution::ProspectiveModelCall,
         model_calls: &crate::model_execution::PostgresModelCallRepository,
+        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
         instruction_evidence: Option<CountedActivationInstructionEvidence<'_>>,
     ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
         let session = preview.prepared.turn().session();
@@ -293,6 +297,9 @@ impl StartEligibleTurnRepository {
             .await
             .map_err(StartEligibleTurnRepositoryError::from)
             .map_err(CommitActivationPreviewError::Activation)?;
+        lock_delegated_child_endpoint_sessions(&mut transaction, session)
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
         let session_uuid = session_id_to_uuid(session);
         let (session_exists, scheduler_session) =
             sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
@@ -348,7 +355,7 @@ impl StartEligibleTurnRepository {
             .await
             .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
         }
-        let _ = model_calls
+        let checkpoint = model_calls
             .checkpoint_counted_activation_in_transaction(
                 &mut transaction,
                 &activated,
@@ -357,15 +364,30 @@ impl StartEligibleTurnRepository {
             )
             .await
             .map_err(CommitActivationPreviewError::ModelCall)?;
+        let outcome = match checkpoint {
+            crate::model_execution::CountedActivationCheckpointOutcome::Prepared => {
+                CommitActivationPreviewOutcome::Activated(Box::new(activated))
+            }
+            crate::model_execution::CountedActivationCheckpointOutcome::PoolExhausted(policy) => {
+                model_calls
+                    .fail_counted_pool_exhaustion_in_transaction(
+                        &mut transaction,
+                        &activated,
+                        &policy,
+                        failure_identities,
+                    )
+                    .await
+                    .map_err(CommitActivationPreviewError::ModelCall)?;
+                CommitActivationPreviewOutcome::PoolExhausted(activated.turn())
+            }
+        };
         transaction.commit().await.map_err(|error| {
             let commit_ambiguous = commit_failure_is_ambiguous(&error);
             CommitActivationPreviewError::Activation(
                 StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous),
             )
         })?;
-        Ok(CommitActivationPreviewOutcome::Activated(Box::new(
-            activated,
-        )))
+        Ok(outcome)
     }
 
     /// Revalidates one counted preview and atomically commits its activation,
@@ -638,6 +660,9 @@ async fn prepare_preview(
     requested_session: SessionId,
     identities: AcceptedInputTurnActivationIdentities,
 ) -> Result<Option<PreparedTurnActivation>, StartEligibleTurnRepositoryError> {
+    if session_runner_is_lost(connection, requested_session).await? {
+        return Ok(None);
+    }
     let session = match load_session_from_connection(connection, requested_session).await {
         Ok(Some(session)) => session,
         Ok(None) => return Ok(None),
@@ -974,6 +999,14 @@ async fn prepare_delegated_wake_preview(
     })
 }
 
+async fn session_runner_is_lost(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, StartEligibleTurnRepositoryError> {
+    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_current_session_placement AS head JOIN runner_session_placement_record AS record USING (session_id, event_ordinal) WHERE head.session_id = $1 AND record.state_kind IN ('runner_lost', 'runner_lost_before_pin'))")
+        .bind(session.into_uuid()).fetch_one(&mut *connection).await?)
+}
+
 /// Whether the locked session is suspended in place.
 /// A held start gate keeps queued input from activating until `release_start`,
 /// including across a module park and resume.
@@ -1046,6 +1079,7 @@ async fn handle_in_transaction(
     // that lock rather than racing it.
     if session_refuses_new_work(connection, requested_session).await?
         || session_start_gate_is_held(connection, requested_session).await?
+        || session_runner_is_lost(connection, requested_session).await?
     {
         return Ok(TransactionDecision::Rollback(
             StartEligibleTurnOutcome::NoEligibleTurn,

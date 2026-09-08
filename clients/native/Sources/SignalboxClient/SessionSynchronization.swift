@@ -1324,7 +1324,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
+    case .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
     case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult,
@@ -1359,7 +1359,7 @@ private enum SignalboxBufferedFollowMessage: Sendable {
   }
 }
 
-private enum SignalboxSnapshotAccumulatorOutcome {
+enum SignalboxSnapshotAccumulatorOutcome {
   case accepted
   case diagnostic(kind: String, decodingDiagnostic: SignalboxDecodingDiagnostic?)
   case completed(SignalboxSynchronizationSnapshot)
@@ -1387,7 +1387,7 @@ private enum SignalboxSnapshotRequiredModelCallOwnership {
   case owner
 }
 
-private struct SignalboxSnapshotAccumulator: Sendable {
+struct SignalboxSnapshotAccumulator: Sendable {
   let boundary: SignalboxTranscriptSnapshotBoundary
   let capacity: SignalboxSynchronizationSnapshotCapacity
   private var records: [SignalboxSynchronizationSnapshot.Record] = []
@@ -1749,7 +1749,7 @@ extension SignalboxTranscriptTurnState {
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
     case .queued, .queuedDelegated, .queuedDelegationWake: return .impossible
-    case .delegationTerminated: return .permitted
+    case .failedCredentialPoolExhausted, .delegationTerminated: return .permitted
     case .unknown: return .permitted
     case .activeAwaitingChild: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID, _, _):
@@ -1786,7 +1786,7 @@ extension SignalboxTranscriptTurnState {
         && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
-    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+    case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
       .activeRunning, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed,
@@ -1807,6 +1807,7 @@ extension SignalboxTranscriptTurnState {
     case .delegationTerminated:
       return 0
     case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
+    case .failedCredentialPoolExhausted(let evidence): return evidence.retainedUTF8Bytes
     case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
     case .unknown(let kind, let payload, let diagnostic):
       return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
@@ -2057,7 +2058,7 @@ extension SignalboxProcessSessionEvent {
     case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed,
+      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
       .turnToolReconciliationRequired, .runnerStateTransition:
       return nil
@@ -2073,6 +2074,7 @@ extension SignalboxProcessSessionEvent {
 
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
+    case .turnCredentialPoolExhausted(_, let evidence): return evidence.retainedUTF8Bytes
     case .sessionMessage(_, _, _, _, _, _, let content):
       return UInt(content.utf8.count)
     case .childResult(_, _, _, let content, _, _):
@@ -2162,7 +2164,7 @@ extension SignalboxTranscriptTurnState {
       .activeAwaitingChild,
       .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .completed, .failed, .refused, .cancelled,
+      .activeAwaitingToolRecovery, .completed, .failed, .failedCredentialPoolExhausted, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return nil
     }
