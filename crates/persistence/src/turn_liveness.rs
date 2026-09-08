@@ -18,7 +18,7 @@ use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId, SessionId,
     TurnAttemptId, TurnTerminalCause,
 };
-use sqlx::{PgConnection, PgPool, Row, types::Decimal, types::Uuid};
+use sqlx::{Connection, PgConnection, PgPool, Row, types::Decimal, types::Uuid};
 use tokio::time::timeout;
 
 use crate::mapping::{
@@ -372,7 +372,7 @@ impl PostgresTurnLivenessRepository {
         Ok(())
     }
 
-    /// Reads the current slot-held observation for one exact session.
+    /// Reads the exact running turn, including its between-operation state, for one session.
     pub async fn observed_slot_held_turn(
         &self,
         session: SessionId,
@@ -401,9 +401,13 @@ impl PostgresTurnLivenessRepository {
     where
         Generator: signalbox_application::StartupScanIdGenerator + Send,
     {
-        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+        let mut connection = optional_timeout(self.bounds.acquire_wait, self.pool.acquire())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let mut transaction = connection
+            .begin()
+            .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         sqlx::query("SELECT set_config('lock_timeout', $1, true)")
             .bind(postgres_lock_timeout(self.bounds.lock_wait))
@@ -468,9 +472,13 @@ impl PostgresTurnLivenessRepository {
         session: SessionId,
         abandoned_call: ModelCallId,
     ) -> Result<Option<StartupScanSessionOutcome>, TurnLivenessRepositoryError> {
-        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+        let mut connection = optional_timeout(self.bounds.acquire_wait, self.pool.acquire())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let mut transaction = connection
+            .begin()
+            .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         sqlx::query("SELECT set_config('lock_timeout', $1, true)")
             .bind(postgres_lock_timeout(self.bounds.lock_wait))
@@ -519,9 +527,13 @@ impl PostgresTurnLivenessRepository {
     where
         Generator: signalbox_application::StartupScanIdGenerator + Send,
     {
-        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+        let mut connection = optional_timeout(self.bounds.acquire_wait, self.pool.acquire())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let mut transaction = connection
+            .begin()
+            .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         // Bounded before anything is read or written, so the only statement it
         // can interrupt is the one waiting for the scheduler row. A bound that
@@ -827,6 +839,8 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
       ORDER BY active.session_id
       LIMIT $3";
 
+/// Exact-session reads also retain the between-operation state for expiry recovery.
+///
 /// Outer watchdog inventory for a pass that still holds an active running
 /// turn after every component deadline should have ended. Approval and other
 /// durable waits are excluded by the phase predicate; live calls and tools are
@@ -880,7 +894,8 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
         AND tenure.end_variant IS NULL
         AND tenure.end_disposition IS NULL
         AND (
-            tenure.state_kind = 'stop_requested'
+            $1::uuid IS NOT NULL
+            OR tenure.state_kind = 'stop_requested'
             OR EXISTS (
                 SELECT 1
                   FROM model_call AS live

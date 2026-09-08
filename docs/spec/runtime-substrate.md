@@ -24,6 +24,10 @@ that counts a prospective operation's rendered input without a generation
 request, sending the same prompt- and cache-affecting controls the generation
 request would carry.
 
+An input-count failure carries caller correlation and typed stage evidence,
+including a closed credential failure or HTTP status where available, without
+provider text or credential material.
+
 Anthropic Messages generation and input-count requests do not enable tool-result
 context editing; no durable model-call fact represents its applied edits.
 
@@ -115,7 +119,8 @@ the workspace build, so a boundary violation is a reviewable diff instead of a
 silent import.
 
 The runtime holds no durable state, makes no lifecycle decisions and performs no
-logging.
+logging. A rejected Codex completion envelope carries a closed rejection stage
+as boundary-loss evidence, including duplicate-member rejection.
 
 The `RuntimeModelCallProvider` bridge sets every operation it prepares to
 streamed delivery, and buffered delivery remains available to other direct

@@ -55,7 +55,7 @@ const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded workspace-mutation argum
 const SNAPSHOT_FAILED_DETAIL: &str = "workspace mutation snapshot failed";
 const EDIT_MATCH_FAILED_DETAIL: &str = "workspace edit match requirement failed";
 const PATCH_FAILED_DETAIL: &str = "workspace patch prevalidation failed";
-const COMMIT_FAILED_DETAIL: &str = "atomic workspace mutation commit failed";
+const COMMIT_FAILED_DETAIL: &str = "workspace mutation commit failed";
 
 /// Typed `write_file` arguments.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -123,7 +123,7 @@ impl ToolContract for ApplyPatchContract {
     type Arguments = ApplyPatchArguments;
     const NAME: &'static str = APPLY_PATCH_NAME;
     const DESCRIPTION: &'static str = concat!(
-        "Atomically applies a Codex-style patch: `*** Begin Patch`; ",
+        "Applies a prevalidated Codex-style patch: `*** Begin Patch`; ",
         "`*** Add File: path` plus `+` lines, `*** Update File: path` plus `@@` hunks whose ",
         "lines start with space, `-`, or `+`, or `*** Delete File: path`; then ",
         "`*** End Patch`. Empty adds and no-final-newline edits are unsupported."
@@ -176,7 +176,7 @@ impl WorkspaceMutationPath {
     }
 }
 
-/// One file value captured before an atomic mutation.
+/// One file value captured before a workspace mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceFileSnapshot {
     /// Relative workspace path.
@@ -321,7 +321,7 @@ impl WorkspaceFileMutation {
 /// Why an adapter could not commit a prevalidated mutation batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceMutationCommitError {
-    #[error("workspace changed before atomic commit")]
+    #[error("workspace changed before commit")]
     /// A captured precondition changed before commit.
     Conflict,
     #[error("workspace path {:?} rejected: {reason}", path.as_str())]
@@ -332,20 +332,22 @@ pub enum WorkspaceMutationCommitError {
         /// Typed rejection evidence.
         reason: WorkspacePathRejection,
     },
-    #[error("atomic workspace commit failed")]
+    #[error("workspace commit failed")]
     /// The filesystem failed before any target effect was observed.
     Filesystem,
-    #[error("atomic workspace commit outcome is ambiguous")]
+    #[error("workspace commit outcome is ambiguous")]
     /// A post-effect failure made the final workspace state unknowable.
     Ambiguous,
 }
 
-/// Injected atomic filesystem authority for workspace mutation tools.
+/// Injected filesystem authority for workspace mutation tools.
 ///
 /// Implementations must resolve every `path` relative to `root` without
 /// reopening an ambient absolute pathname. `snapshot` must reject symlinks and
-/// non-regular files. `commit_atomically` must either apply every mutation or
-/// leave every captured path unchanged, and must reject changed preconditions.
+/// non-regular files. `commit_atomically` rejects changed preconditions before
+/// installing files sequentially, with in-process rollback on failure. Concurrent
+/// observers and interrupted processes can see a partial batch; a failed rollback
+/// reports an ambiguous outcome.
 pub trait WorkspaceMutationFileSystem: Clone + Send + Sync + 'static {
     /// Pinned root authority retained by the executor.
     type Root: Clone + Send + Sync + 'static;
@@ -361,7 +363,7 @@ pub trait WorkspaceMutationFileSystem: Clone + Send + Sync + 'static {
         max_file_bytes: usize,
     ) -> Result<WorkspaceMutationSnapshot, WorkspaceMutationSnapshotError>;
 
-    /// Atomically commits a prevalidated batch against its captured values.
+    /// Commits a prevalidated batch against its captured values.
     /// A known failure must leave every target unchanged; an adapter that
     /// cannot prove rollback must return `WorkspaceMutationCommitError::Ambiguous`.
     fn commit_atomically(
@@ -901,7 +903,7 @@ pub struct EditFileResult {
 /// Successful `apply_patch` result.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct ApplyPatchResult {
-    /// Number of file operations committed atomically.
+    /// Number of file operations committed.
     pub operations_applied: usize,
 }
 

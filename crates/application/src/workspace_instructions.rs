@@ -1058,7 +1058,8 @@ fn run_bounded_filesystem_task_with_wait_deadline<T: Send + 'static>(
         return Err(FilesystemTaskError::Deadline);
     };
     match receiver.recv_timeout(remaining) {
-        Ok(result) => Ok(result),
+        Ok(result) if Instant::now() < deadline => Ok(result),
+        Ok(_) => Err(FilesystemTaskError::Deadline),
         Err(mpsc::RecvTimeoutError::Timeout) => Err(FilesystemTaskError::Deadline),
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(FilesystemTaskError::Unavailable),
     }

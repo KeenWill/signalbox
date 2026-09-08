@@ -4579,6 +4579,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-github-transport"
+version = "0.0.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "signalbox-egress-transport",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-model-provider-runtime"
 version = "0.0.0"
 dependencies = [
@@ -4669,7 +4679,6 @@ dependencies = [
  "signalbox-test-bin",
  "tempfile",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4844,10 +4853,8 @@ dependencies = [
  "signalbox-application",
  "signalbox-derive",
  "signalbox-domain",
- "signalbox-persistence",
  "signalbox-tool-contract",
  "signalbox-tool-schema-derive",
- "sqlx",
  "tokio",
  "uuid",
 ]
@@ -4859,7 +4866,6 @@ dependencies = [
  "expect-test",
  "futures-util",
  "reqwest",
- "rustls",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -4868,6 +4874,7 @@ dependencies = [
  "signalbox-derive",
  "signalbox-domain",
  "signalbox-egress-transport",
+ "signalbox-github-transport",
  "signalbox-model-runtime",
  "signalbox-tool-contract",
  "tokio",
@@ -4950,14 +4957,13 @@ dependencies = [
  "futures-util",
  "gix-validate",
  "reqwest",
- "rustls",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "signalbox-application",
  "signalbox-derive",
  "signalbox-domain",
- "signalbox-egress-transport",
+ "signalbox-github-transport",
  "signalbox-model-runtime",
  "signalbox-tool-contract",
  "tokio",

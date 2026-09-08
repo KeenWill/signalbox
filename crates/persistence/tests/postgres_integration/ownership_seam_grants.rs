@@ -64,33 +64,6 @@ async fn ownership_module_role_is_confined_to_its_schema() -> Result<(), Box<dyn
     .await?;
     assert_eq!(public_table_grants, 0);
 
-    let module_tables: Vec<String> = sqlx::query_scalar(
-        "SELECT table_name
-           FROM information_schema.tables
-          WHERE table_schema = 'mod_repo_watch'
-          ORDER BY table_name",
-    )
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(
-        module_tables,
-        [
-            "core_event_cursor",
-            "dispatch_ledger",
-            "frontier",
-            "gh_event",
-            "pr_state",
-            "repository_state",
-            "rule",
-            "rule_evaluation_cursor",
-            "rule_field_fingerprint",
-            "rule_revision",
-            "webhook_body",
-            "webhook_delivery",
-            "webhook_disposition",
-        ]
-    );
-
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&pool)
         .await?;

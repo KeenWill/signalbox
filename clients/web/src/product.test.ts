@@ -238,12 +238,13 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
-  it('rejects a bootstrap response beyond the fixed JSON byte bound', async () => {
+  it('preserves the bootstrap size error when body cancellation fails', async () => {
+    const cancel = vi.fn().mockRejectedValue(new Error('cancellation failed'))
     vi.stubGlobal(
       'fetch',
       vi.fn(
         async () =>
-          new Response(JSON.stringify(bootstrapFixture), {
+          new Response(new ReadableStream({ cancel }), {
             headers: { 'content-length': '65537' },
           }),
       ),
@@ -256,6 +257,7 @@ describe('SameOriginProductTransport', () => {
     expect((failure as ProductContractError).cause).toMatchObject({
       message: expect.stringContaining('response exceeded the product JSON byte limit'),
     })
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
@@ -278,10 +280,36 @@ describe('SameOriginProductTransport', () => {
     })
 
     expect(descriptor).toEqual(imageArtifact)
+    const query = new URLSearchParams({
+      media_type: imageArtifact.declared_media_type,
+      display_filename: imageArtifact.display_filename[0] ?? '',
+    })
     expect(fetchRequest).toHaveBeenCalledWith(
-      `/api/blobs/${encodeURIComponent(imageArtifact.digest)}/descriptor?media_type=image%2Fpng&display_filename=orbital-map.png`,
+      `/api/blobs/${encodeURIComponent(imageArtifact.digest)}/descriptor?${query}`,
       expect.objectContaining({ credentials: 'same-origin' }),
     )
+  })
+
+  it('cancels a descriptor body rejected by its declared byte length', async () => {
+    const cancel = vi.fn()
+    const body = new ReadableStream({ cancel })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(body, {
+            headers: { 'Content-Length': String(MAX_PRODUCT_JSON_BYTES + 1) },
+          }),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readBlobDescriptor({
+        digest: imageArtifact.digest,
+        mediaType: imageArtifact.declared_media_type,
+      }),
+    ).rejects.toThrow('response exceeded the product JSON byte limit')
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('rejects a descriptor for a different immutable identity', async () => {

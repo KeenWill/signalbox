@@ -297,6 +297,8 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
             }}
             onError={() => {
               if (rendered.kind === 'browser_native') {
+                setVerifiedOriginalUrl(null)
+                originalQuery.discard()
                 dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
               } else {
                 setFailedAutomaticUrls((current) => {

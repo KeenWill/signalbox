@@ -1023,3 +1023,46 @@ impl VerifiedBlobSource for MemorySource {
         Box::pin(async move { outcome })
     }
 }
+
+/// Enforces the validation request envelope independently of the adapter.
+pub struct EnvelopeSource<'a> {
+    source: &'a dyn VerifiedBlobSource,
+    remaining_bytes: std::sync::atomic::AtomicU64,
+    remaining_ranges: std::sync::atomic::AtomicU32,
+}
+
+impl<'a> EnvelopeSource<'a> {
+    pub fn new(
+        source: &'a dyn VerifiedBlobSource,
+        request: &signalbox_file_media_runtime::FileMediaProviderValidationRequest,
+    ) -> Self {
+        Self {
+            source,
+            remaining_bytes: request.maximum_source_bytes.into(),
+            remaining_ranges: request.maximum_ranges.into(),
+        }
+    }
+}
+
+impl VerifiedBlobSource for EnvelopeSource<'_> {
+    fn digest(&self) -> FileDigest {
+        self.source.digest()
+    }
+    fn byte_length(&self) -> NonZeroU64 {
+        self.source.byte_length()
+    }
+    fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
+        use std::sync::atomic::Ordering::SeqCst;
+        Box::pin(async move {
+            self.remaining_ranges
+                .fetch_update(SeqCst, SeqCst, |remaining| remaining.checked_sub(1))
+                .map_err(|_| SourceReadError::RangeOutOfBounds)?;
+            self.remaining_bytes
+                .fetch_update(SeqCst, SeqCst, |remaining| {
+                    remaining.checked_sub(length.get())
+                })
+                .map_err(|_| SourceReadError::RangeOutOfBounds)?;
+            self.source.read_range(offset, length).await
+        })
+    }
+}
