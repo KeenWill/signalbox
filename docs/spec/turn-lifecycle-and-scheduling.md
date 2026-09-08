@@ -442,11 +442,11 @@ transaction or pooled connection. Interrupt or crash-loss batch terminalization
 retires the staged command before ending the turn. A model observation,
 including failure, refusal, cancellation or ambiguity, permits installation and
 retains the turn state that observation produced. A retry or credential-rotation
-successor retains any relocation appended at its predecessor's observation
-frontier before preparing its next call. A tool-round observation
-installs a ready staged replacement at its yielded frontier before classifying
-the new requests for placement loss; that round retains the relocation in its
-boundary. A delegated logical terminal retains any issued provider call as an
+successor waits for the staged replacement to settle and retains its relocation
+at the predecessor's observation frontier before preparing its next call. A
+tool-round observation installs a ready staged replacement at its yielded
+frontier before classifying the new requests for placement loss; that round
+retains the relocation in its boundary. A delegated logical terminal retains any issued provider call as an
 observation barrier; its late correlated observation retires the physical call
 without changing the logical terminal. Pre-pin installation appends no boundary.
 

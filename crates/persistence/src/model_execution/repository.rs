@@ -72,7 +72,7 @@ impl PostgresModelCallRepository {
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         session: SessionId,
         observation_frontier: Option<ContextFrontierId>,
-    ) -> Result<(), ModelCallRepositoryError> {
+    ) -> Result<bool, ModelCallRepositoryError> {
         if let Some(runner) = &self.runner_recovery {
             let boundary = match observation_frontier {
                 Some(frontier) => Some(
@@ -85,7 +85,7 @@ impl PostgresModelCallRepository {
                 ),
                 None => None,
             };
-            runner
+            let (settled, _) = runner
                 .settle_replacement_at_boundary(transaction, session, boundary.as_ref())
                 .await
                 .map_err(|error| match error {
@@ -97,8 +97,9 @@ impl PostgresModelCallRepository {
                             .into()
                     }
                 })?;
+            return Ok(settled);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Selects credentials from each session's latest append-only snapshot.
