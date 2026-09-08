@@ -55,7 +55,9 @@ beyond half the rendered bytes and falls back to the latest safe boundary that
 fits. At two points a headroom guard adds the newest reported input for the
 pinned target, a byte allowance for model-visible content that input does not
 cover, and the configured output reservation, and compares the sum with the
-configured context window. Before activating a queued turn it may spend one
+configured context window. Queued-turn allowances measure each uncovered entry
+through the effective adapter's message serializer, including framing and
+content-free messages. Before activating a queued turn it may spend one
 automatic compaction; when that compaction fails, or the request still exceeds
 the window after it, one transaction fails the queued turn with no ordinary call
 prepared. Inside the tool-result continuation transaction an exceeded bound

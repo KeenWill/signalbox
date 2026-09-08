@@ -71,6 +71,16 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
+            if let Some(wait) = super::credential_wait::prepare_release(
+                &mut transaction,
+                self,
+                session,
+                signalbox_domain::TurnAttemptId::from_uuid(call.into_uuid()),
+            )
+            .await?
+            {
+                return Ok((true, PrepareInitialModelCallOutcome::CredentialWait(wait)));
+            }
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
             if execution.current_call().is_none()
@@ -209,6 +219,13 @@ impl PostgresModelCallRepository {
                     resolved.target(),
                     fast_mode,
                 );
+                let serving_evidence = super::credential_wait::retain_serving_target(
+                    &mut transaction,
+                    execution.current_attempt().id(),
+                    self.credential_families.as_ref(),
+                    serving_evidence,
+                )
+                .await?;
                 let selected = Some(
                     select_runtime_pool_credential(
                         &mut transaction,
@@ -226,6 +243,35 @@ impl PostgresModelCallRepository {
             } else {
                 None
             };
+            if let Some(wait) = super::credential_wait::park_initial(
+                &mut transaction,
+                &execution,
+                selected.as_ref(),
+            )
+            .await?
+            {
+                return Ok((true, PrepareInitialModelCallOutcome::CredentialWait(wait)));
+            }
+            if let Some(failed) = super::credential_wait::fail_released_chain(
+                &mut transaction,
+                &execution,
+                selected.as_ref(),
+                failure_identities
+                    .clone()
+                    .with_pending_steering_reclassifications(
+                        steering_identities
+                            .iter()
+                            .map(|(_, identity)| *identity)
+                            .collect(),
+                    ),
+            )
+            .await?
+            {
+                return Ok((
+                    true,
+                    PrepareInitialModelCallOutcome::WaitFailed(Box::new(failed)),
+                ));
+            }
             if let Some(SelectedRuntimePoolCredential {
                 reference: None,
                 policy: Some(policy),
@@ -337,6 +383,13 @@ impl PostgresModelCallRepository {
                 prepared.call().target(),
                 fast_mode,
             );
+            let serving_evidence = super::credential_wait::retain_serving_target(
+                &mut transaction,
+                prepared.attempt(),
+                self.credential_families.as_ref(),
+                serving_evidence,
+            )
+            .await?;
             insert_prepared_call(
                 &mut transaction,
                 &prepared,
@@ -411,6 +464,13 @@ impl PostgresModelCallRepository {
                 current.target(),
                 fast_mode,
             );
+            let current_serving_evidence = super::credential_wait::retain_serving_target(
+                &mut transaction,
+                execution.current_attempt().id(),
+                self.credential_families.as_ref(),
+                current_serving_evidence,
+            )
+            .await?;
             let current_effective_target = current_serving_evidence.effective_target;
             let stored_serving_evidence = sqlx::query(
                 "SELECT effective_provider_model_identity_id,
@@ -477,7 +537,8 @@ impl PostgresModelCallRepository {
             ))?;
         match outcome {
             ModelCallObservationCommitOutcome::Terminal(outcome) => Ok(*outcome),
-            ModelCallObservationCommitOutcome::AvailabilitySuccessor(_) => {
+            ModelCallObservationCommitOutcome::AvailabilitySuccessor(_)
+            | ModelCallObservationCommitOutcome::CredentialWait(_) => {
                 Err(ModelCallRepositoryError::InvalidTransition(
                     "exact terminal candidates produced an availability successor",
                 ))
@@ -728,6 +789,19 @@ impl PostgresModelCallRepository {
                                     AvailabilitySuccessorOutcome::new(successor, backoff),
                                 )),
                             ));
+                        }
+                        if let Some(outcome) = super::credential_wait::park_failed(
+                            &mut transaction,
+                            &execution,
+                            &policy,
+                            &observation,
+                            successor_attempt,
+                            cause,
+                            &self.targets,
+                        )
+                        .await?
+                        {
+                            return Ok(Some(outcome));
                         }
                         insert_credential_pool_terminal_exhaustion(
                             &mut transaction,

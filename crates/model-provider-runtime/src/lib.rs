@@ -1555,6 +1555,45 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
     }
 }
 
+/// Measures each projected entry through the runtime renderer and an adapter serializer.
+///
+/// Each entry is rendered independently so its allowance includes a complete
+/// message envelope even where the final request combines adjacent entries.
+pub fn rendered_entry_bytes(
+    messages: &[ModelConversationMessage],
+    provenance: &[signalbox_application::ProviderReasoningProvenance],
+    models: &RuntimeModelCatalog,
+    mut measure: impl FnMut(&ConversationMessage) -> Option<usize>,
+) -> Option<std::collections::BTreeMap<signalbox_domain::SemanticTranscriptEntryRef, u64>> {
+    messages
+        .iter()
+        .map(|message| {
+            let source = match message {
+                ModelConversationMessage::RunnerPlacementChanged { source, .. }
+                | ModelConversationMessage::ModelIdentityChanged { source, .. }
+                | ModelConversationMessage::ContextSummary { source, .. }
+                | ModelConversationMessage::User { source, .. }
+                | ModelConversationMessage::DelegatedTask { source, .. }
+                | ModelConversationMessage::DelegationMessage { source, .. }
+                | ModelConversationMessage::BackgroundDelegationResult { source, .. }
+                | ModelConversationMessage::Assistant { source, .. }
+                | ModelConversationMessage::ProviderReasoning { source, .. }
+                | ModelConversationMessage::ProviderCompaction { source, .. }
+                | ModelConversationMessage::AssistantToolUse { source, .. }
+                | ModelConversationMessage::ToolResult { source, .. }
+                | ModelConversationMessage::ImportedUser { source, .. }
+                | ModelConversationMessage::ImportedAssistant { source, .. } => *source,
+            };
+            let rendered =
+                render_runtime_messages(std::slice::from_ref(message), provenance, models)?;
+            let bytes = rendered.iter().try_fold(0_u64, |total, message| {
+                Some(total.saturating_add(u64::try_from(measure(message)?).ok()?))
+            })?;
+            Some((source, bytes))
+        })
+        .collect()
+}
+
 fn render_runtime_messages(
     messages: &[ModelConversationMessage],
     provenance: &[signalbox_application::ProviderReasoningProvenance],

@@ -104,6 +104,9 @@ impl ReconciliationMarker {
 
 ```rust
 pub enum ActiveTurnPhase {
+    AwaitingCredentialAvailability {
+        wait: CredentialAvailabilityWait,
+    },
     Running {
         current_attempt: CurrentTurnAttempt,
     },

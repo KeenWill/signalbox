@@ -11,6 +11,7 @@ mod credential_pool;
 mod credential_pool_evidence;
 #[path = "credential_pool_records.rs"]
 mod credential_pool_records;
+pub(crate) mod credential_wait;
 mod delegated_result;
 mod delegation_lock;
 mod live_turn;
@@ -157,6 +158,9 @@ pub struct ProspectiveModelCall {
 /// visible and are not part of the next request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProspectiveModelInput<'a> {
+    /// Projected entries measured through the effective adapter's serializer,
+    /// including entries that an activation preview has not committed.
+    Rendered(&'a std::collections::BTreeMap<SemanticTranscriptEntryRef, u64>),
     /// One committed frontier, projected from its durable membership.
     Committed(ContextFrontierId),
     /// One uncommitted activation preview.
@@ -612,6 +616,7 @@ pub(crate) struct ModelCallOutboxOrderGuard {
 }
 
 pub(crate) enum CountedActivationCheckpointOutcome {
+    CredentialWait,
     Prepared,
     PoolExhausted(CredentialPoolRuntimePolicy),
 }

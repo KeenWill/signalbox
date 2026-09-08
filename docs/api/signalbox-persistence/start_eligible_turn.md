@@ -129,6 +129,7 @@ pub enum CommitCompactionFailurePreviewOutcome {
 
 ```rust
 pub enum CommitCountedAttachmentFailurePreviewOutcome {
+    CredentialWait(signalbox_domain::TurnId),
     Failed(signalbox_domain::TurnId),
     Stale,
 }

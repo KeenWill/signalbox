@@ -24,8 +24,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    ClientDeploymentLimits, MAX_INPUT_CONTENT_FRAME_BYTES, ObservedSessionDefaults,
-    SubmitInputReceipt, child_lifecycle_terminalization, command_identity,
+    MAX_INPUT_CONTENT_FRAME_BYTES, ObservedSessionDefaults, SubmitInputReceipt,
+    child_lifecycle_terminalization, command_identity,
     connection::ProcessClient,
     error::ClientError,
     presentation::{ChatTurnStatus, Output},
@@ -47,6 +47,10 @@ pub(crate) struct TerminalInput {
 }
 
 enum TerminalInputSender {
+    Rendezvous(
+        mpsc::Sender<io::Result<Vec<u8>>>,
+        std::sync::mpsc::Receiver<()>,
+    ),
     Bounded(mpsc::Sender<io::Result<Vec<u8>>>),
     Unbounded(mpsc::UnboundedSender<io::Result<Vec<u8>>>),
 }
@@ -54,6 +58,10 @@ enum TerminalInputSender {
 impl TerminalInputSender {
     fn send(&self, value: io::Result<Vec<u8>>) -> Result<(), ()> {
         match self {
+            Self::Rendezvous(sender, delivered) => {
+                sender.blocking_send(value).map_err(|_| ())?;
+                delivered.recv().map_err(|_| ())
+            }
             Self::Bounded(sender) => sender.blocking_send(value).map_err(|_| ()),
             Self::Unbounded(sender) => sender.send(value).map_err(|_| ()),
         }
@@ -61,6 +69,10 @@ impl TerminalInputSender {
 }
 
 enum TerminalInputReceiver {
+    Rendezvous(
+        mpsc::Receiver<io::Result<Vec<u8>>>,
+        std::sync::mpsc::Sender<()>,
+    ),
     Bounded(mpsc::Receiver<io::Result<Vec<u8>>>),
     Unbounded(mpsc::UnboundedReceiver<io::Result<Vec<u8>>>),
 }
@@ -68,6 +80,13 @@ enum TerminalInputReceiver {
 impl TerminalInputReceiver {
     fn poll_recv(&mut self, context: &mut Context<'_>) -> Poll<Option<io::Result<Vec<u8>>>> {
         match self {
+            Self::Rendezvous(receiver, delivered) => {
+                let polled = receiver.poll_recv(context);
+                if matches!(&polled, Poll::Ready(Some(_))) {
+                    let _ = delivered.send(());
+                }
+                polled
+            }
             Self::Bounded(receiver) => receiver.poll_recv(context),
             Self::Unbounded(receiver) => receiver.poll_recv(context),
         }
@@ -75,12 +94,31 @@ impl TerminalInputReceiver {
 }
 
 pub(crate) fn terminal_input(channel_capacity: Option<usize>) -> io::Result<TerminalInput> {
-    let (sender, receiver) = match channel_capacity {
+    let (sender, receiver) = terminal_input_channel(channel_capacity)?;
+    std::thread::Builder::new()
+        .name(String::from("signalbox-chat-stdin"))
+        .spawn(move || read_terminal_input(sender))?;
+
+    Ok(TerminalInput {
+        receiver,
+        chunk: Vec::new(),
+        consumed: 0,
+    })
+}
+
+fn terminal_input_channel(
+    channel_capacity: Option<usize>,
+) -> io::Result<(TerminalInputSender, TerminalInputReceiver)> {
+    Ok(match channel_capacity {
         Some(0) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "terminal input channel capacity must be positive or unbounded",
-            ));
+            // One offered chunk occupies the handoff slot; its producer remains
+            // blocked until the reader takes it, so no queued send can complete.
+            let (sender, receiver) = mpsc::channel(1);
+            let (delivered, acknowledged) = std::sync::mpsc::channel();
+            (
+                TerminalInputSender::Rendezvous(sender, acknowledged),
+                TerminalInputReceiver::Rendezvous(receiver, delivered),
+            )
         }
         Some(capacity) => {
             if capacity > tokio::sync::Semaphore::MAX_PERMITS {
@@ -102,15 +140,6 @@ pub(crate) fn terminal_input(channel_capacity: Option<usize>) -> io::Result<Term
                 TerminalInputReceiver::Unbounded(receiver),
             )
         }
-    };
-    std::thread::Builder::new()
-        .name(String::from("signalbox-chat-stdin"))
-        .spawn(move || read_terminal_input(sender))?;
-
-    Ok(TerminalInput {
-        receiver,
-        chunk: Vec::new(),
-        consumed: 0,
     })
 }
 
@@ -531,18 +560,25 @@ pub(crate) async fn run<R>(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
     session_id: CanonicalUuid,
-    input: R,
-    deployment_limits: ClientDeploymentLimits,
+    make_input: impl FnOnce(Option<usize>) -> io::Result<R>,
 ) -> Result<(), ClientError>
 where
     R: AsyncBufRead + Unpin,
 {
+    let mut retry = crate::connection::FollowRetry::default();
+    let (deployment_limits, initial_connection) = loop {
+        match crate::deployment_limits::follow_with_deployment_limits(client, session_id).await {
+            Ok(follow) => break follow,
+            Err(error) => tokio::time::sleep(retry.next_delay(error)?).await,
+        }
+    };
+    let input = make_input(deployment_limits.terminal_input_channel_capacity)?;
+    let mut initial_connection = Some(initial_connection);
     let mut lines = BoundedLines::new(input);
     let mut displayed_entries = SnapshotIdentitySet::new()?;
     let mut interrupts = ChatInterrupts::listen()?;
     let mut turns = ChatTurns::default();
 
-    let mut retry = crate::connection::FollowRetry::default();
     loop {
         let result: Result<(), ClientError> = async {
         let mut connection = match await_request(
@@ -550,7 +586,16 @@ where
             &mut interrupts,
             turns.status(),
             RequestKind::ReadOnly,
-            client.request(ClientRequest::FollowSession { session_id }),
+            async {
+                if let Some(connection) = initial_connection.take() { return Ok(connection); }
+                let (current_limits, connection) = crate::deployment_limits::follow_with_deployment_limits(client, session_id).await?;
+                if current_limits.max_message_utf8_bytes != deployment_limits.max_message_utf8_bytes
+                    || current_limits.terminal_input_channel_capacity != deployment_limits.terminal_input_channel_capacity
+                {
+                    return Err(ClientError::Input("daemon deployment limits changed; restart chat to apply them"));
+                }
+                Ok(connection)
+            },
         )
         .await?
         {
@@ -1369,6 +1414,39 @@ async fn refresh_approval_after_decision(
 }
 
 #[cfg(test)]
+mod encoded_input_tests {
+    #[tokio::test]
+    async fn zero_capacity_send_completes_only_after_the_reader_receives()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::AsyncReadExt;
+        let (sender, receiver) = super::terminal_input_channel(Some(0))?;
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let producer = tokio::task::spawn_blocking(move || {
+            let _ = started.send(());
+            sender.send(Ok(b"hello".to_vec()))
+        });
+        waiting.await?;
+        assert!(!producer.is_finished(), "the handoff has no reader yet");
+        let mut input = super::TerminalInput {
+            receiver,
+            chunk: Vec::new(),
+            consumed: 0,
+        };
+        let mut bytes = [0; 5];
+        input.read_exact(&mut bytes).await?;
+        assert_eq!(&bytes, b"hello");
+        assert_eq!(producer.await?, Ok(()));
+        Ok(())
+    }
+
+    #[test]
+    fn escaped_chat_input_uses_the_encoded_frame_budget() {
+        let content = "\"".repeat(crate::MAX_INPUT_CONTENT_FRAME_BYTES / 2 + 1);
+        assert!(super::validate_content(&content, "empty", None).is_err());
+    }
+}
+
+#[cfg(test)]
 fn parse_line(line: String) -> Result<ChatInput, ChatSyntaxError> {
     parse_line_with_limit(line, None)
 }
@@ -1443,8 +1521,10 @@ fn validate_content(
     if content.is_empty() {
         return Err(ChatSyntaxError(empty_message));
     }
-    if content.len() > MAX_INPUT_CONTENT_FRAME_BYTES {
-        return Err(ChatSyntaxError("input exceeds the wire-frame UTF-8 guard"));
+    if !crate::input_fits_encoded_frame(content) {
+        return Err(ChatSyntaxError(
+            "input exceeds the encoded wire-frame guard",
+        ));
     }
     if max_message_utf8_bytes.is_some_and(|maximum| content.len() > maximum) {
         return Err(ChatSyntaxError(

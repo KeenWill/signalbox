@@ -2129,6 +2129,39 @@ async fn queued_turn_activation_preview_scores_its_own_input() -> Result<(), Box
     assert!(reported.output_is_retained());
     assert_eq!(reported.projected_unreported_content_bytes(), 24);
 
+    let encoded_input = r#"[{"type":"message","role":"user","content":"queued preview suffix é"}]"#;
+    let rendered = std::collections::BTreeMap::from([
+        (
+            SemanticTranscriptEntryRef::from_source(
+                fixture.session,
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x44)),
+            ),
+            encoded_input.len() as u64,
+        ),
+        (
+            SemanticTranscriptEntryRef::from_source(
+                fixture.session,
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x20)),
+            ),
+            // This historical output remains covered by the reported usage.
+            127,
+        ),
+    ]);
+    let measured = repository
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            FastMode::Disabled,
+            false,
+            signalbox_persistence::model_execution::ProspectiveModelInput::Rendered(&rendered),
+        )
+        .await?
+        .expect("reported baseline");
+    assert_eq!(
+        measured.projected_unreported_content_bytes(),
+        encoded_input.len() as u64
+    );
+
     pool.close().await;
     drop(container);
     Ok(())

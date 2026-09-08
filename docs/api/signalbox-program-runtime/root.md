@@ -142,6 +142,13 @@ impl ProgramHost {
     pub const fn new(
         journal: signalbox_persistence::program_journal::ProgramJournalRepository,
     ) -> Self;
+    pub async fn session_capability(
+        &self,
+        run: signalbox_domain::ProgramRunId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::program_session::ProgramSessionCapability>,
+        signalbox_persistence::program_journal::ProgramJournalRepositoryError,
+    >;
     pub async fn execute(
         &self,
         run: signalbox_domain::ProgramRunId,

@@ -540,7 +540,9 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
         )
         .await?
         .expect("the committed result has a reported usage baseline");
-    let result_bytes = u64::try_from("placement_lost".len())?;
+    let result_bytes = u64::try_from(
+        r#"{"error": {"kind": "execution_failed", "detail": "placement_lost"}}"#.len(),
+    )?;
     if target_available {
         assert_eq!(
             after_result.projected_unreported_content_bytes(),
