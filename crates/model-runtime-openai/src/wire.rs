@@ -220,15 +220,18 @@ pub(crate) struct WireError {
     #[serde(rename = "type")]
     pub error_type: Option<String>,
     #[serde(default)]
-    pub code: Option<serde_json::Value>,
+    pub code: Option<Box<RawValue>>,
 }
 
 impl WireError {
     /// The native code as text, when one was carried.
     pub(crate) fn code_text(&self) -> Option<String> {
-        match &self.code {
-            Some(serde_json::Value::String(code)) => Some(code.clone()),
-            Some(serde_json::Value::Number(code)) => Some(code.to_string()),
+        let code = self.code.as_ref()?.get();
+        match code.trim_start().as_bytes().first() {
+            Some(b'"') => serde_json::from_str(code).ok(),
+            Some(b'-' | b'0'..=b'9') => serde_json::from_str::<serde_json::Number>(code)
+                .ok()
+                .map(|number| number.to_string()),
             _ => None,
         }
     }
@@ -260,4 +263,39 @@ pub(crate) struct ResponseEvent {
     pub arguments: Option<String>,
     pub code: Option<String>,
     pub message: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WireError, WireOutputItem};
+
+    #[test]
+    fn function_arguments_preserve_reserved_number_key_objects() {
+        let item: WireOutputItem = serde_json::from_str(
+            r#"{"type":"function_call","arguments":"{\"nested\":{\"$serde_json::private::Number\":\"1\"}}"}"#,
+        )
+        .expect("fixture is a function-call item");
+
+        assert_eq!(
+            item.arguments.as_deref(),
+            Some(r#"{"nested":{"$serde_json::private::Number":"1"}}"#)
+        );
+    }
+
+    #[test]
+    fn error_codes_do_not_promote_reserved_key_objects_to_numbers() {
+        let cases = [
+            (r#"{"code":{"$serde_json::private::Number":"429"}}"#, None),
+            (r#"{"code":429}"#, Some("429")),
+            (
+                r#"{"code":"rate_limit_exceeded"}"#,
+                Some("rate_limit_exceeded"),
+            ),
+        ];
+        for (input, expected) in cases {
+            let error: WireError = serde_json::from_str(input).expect("fixture is an error body");
+
+            assert_eq!(error.code_text().as_deref(), expected, "{input}");
+        }
+    }
 }

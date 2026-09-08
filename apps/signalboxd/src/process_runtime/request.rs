@@ -314,7 +314,38 @@ where
     match request {
         ClientRequest::RegisterWorkspace { command_id, root } => {
             Box::pin(async move {
-                let root = match tokio::fs::canonicalize(root).await {
+                let repository = signalbox_persistence::workspace::WorkspaceRepository::new(
+                    services.pool.clone(),
+                );
+                let domain_command_id = DurableCommandId::from_uuid(command_id.into_uuid());
+                match repository
+                    .registration_replay(domain_command_id, &root)
+                    .await
+                {
+                    Ok(None) => {}
+                    Ok(Some(outcome)) => {
+                        return write_workspace_outcome(
+                            writer,
+                            version,
+                            request_id,
+                            command_id,
+                            Ok(outcome),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        return write_workspace_outcome(
+                            writer,
+                            version,
+                            request_id,
+                            command_id,
+                            Err(error),
+                        )
+                        .await;
+                    }
+                }
+                let requested_root = root;
+                let root = match tokio::fs::canonicalize(&requested_root).await {
                     Ok(path)
                         if tokio::fs::metadata(&path)
                             .await
@@ -335,15 +366,15 @@ where
                     )
                     .await;
                 };
-                handle_workspace(
-                    writer,
-                    version,
-                    request_id,
-                    command_id,
-                    signalbox_domain::WorkspaceOperation::Register { root },
-                    &services.pool,
-                )
-                .await
+                let result = repository
+                    .register(
+                        domain_command_id,
+                        &requested_root,
+                        root,
+                        &mut signalbox_application::workspace::UuidV7WorkspaceIdentityGenerator,
+                    )
+                    .await;
+                write_workspace_outcome(writer, version, request_id, command_id, result).await
             })
             .await
         }
@@ -480,6 +511,24 @@ where
             Box::pin(async move {
                 handle_cancel_program_run(writer, version, request_id, command_id, run_id, services)
                     .await
+            })
+            .await
+        }
+        ClientRequest::ReadRunnerStatus { page_size, after } => {
+            Box::pin(async move {
+                let Some(snapshot_permit) = snapshot_permit else {
+                    return Ok(());
+                };
+                super::runner_status::handle_read_runner_status(
+                    writer,
+                    version,
+                    request_id,
+                    page_size,
+                    after,
+                    services,
+                    snapshot_permit,
+                )
+                .await
             })
             .await
         }
@@ -1989,8 +2038,8 @@ async fn handle_workspace<Writer: AsyncWrite + Unpin>(
     operation: signalbox_domain::WorkspaceOperation,
     pool: &PgPool,
 ) -> Result<(), ProcessConnectionError> {
-    use signalbox_domain::{WorkspaceCommand, WorkspaceCommandResult};
-    use signalbox_persistence::workspace::{WorkspaceOutcome, WorkspaceRepository};
+    use signalbox_domain::WorkspaceCommand;
+    use signalbox_persistence::workspace::WorkspaceRepository;
     let result = WorkspaceRepository::new(pool.clone())
         .handle(
             WorkspaceCommand::new(
@@ -2000,6 +2049,21 @@ async fn handle_workspace<Writer: AsyncWrite + Unpin>(
             &mut signalbox_application::workspace::UuidV7WorkspaceIdentityGenerator,
         )
         .await;
+    write_workspace_outcome(writer, version, request_id, command_id, result).await
+}
+
+async fn write_workspace_outcome<Writer: AsyncWrite + Unpin>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: signalbox_process_protocol::CommandId,
+    result: Result<
+        signalbox_persistence::workspace::WorkspaceOutcome,
+        signalbox_persistence::workspace::WorkspaceError,
+    >,
+) -> Result<(), ProcessConnectionError> {
+    use signalbox_domain::WorkspaceCommandResult;
+    use signalbox_persistence::workspace::{WorkspaceError, WorkspaceOutcome};
     let error = match result {
         Ok(WorkspaceOutcome::Applied(result)) => {
             let message = match result {
@@ -2018,25 +2082,17 @@ async fn handle_workspace<Writer: AsyncWrite + Unpin>(
             };
             return write_message(writer, version, request_id, message).await;
         }
-        Ok(WorkspaceOutcome::ConflictingReuse) => ErrorCode::ConflictingReuse,
-        Err(error) => {
-            use signalbox_persistence::workspace::WorkspaceError;
-            let (failure_class, code) = match error {
-                WorkspaceError::CommitAmbiguous(_) => {
-                    ("commit_ambiguous", ErrorCode::CommitAmbiguous)
-                }
-                WorkspaceError::Database(_) => ("database", ErrorCode::Unavailable),
-                WorkspaceError::Corruption(_) => ("corruption", ErrorCode::Unavailable),
-            };
-            tracing::warn!(failure_class, "workspace command failed");
-            code
+        Ok(WorkspaceOutcome::ConflictingReuse) => {
+            ProtocolError::without_detail(ErrorCode::ConflictingReuse)
         }
+        Err(WorkspaceError::Corruption(_)) => {
+            internal_protocol_error(None, InternalDiagnostic::WorkspaceCorruption)
+        }
+        Err(WorkspaceError::Rejected) => ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        Err(WorkspaceError::CommitAmbiguous(_)) => {
+            ProtocolError::without_detail(ErrorCode::CommitAmbiguous)
+        }
+        Err(WorkspaceError::Database(_)) => ProtocolError::without_detail(ErrorCode::Unavailable),
     };
-    write_error(
-        writer,
-        version,
-        request_id,
-        ProtocolError::without_detail(error),
-    )
-    .await
+    write_error(writer, version, request_id, error).await
 }

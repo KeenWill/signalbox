@@ -171,8 +171,11 @@ async fn registration_replacement_serializes_later_lease_admission() -> Result<(
         lease_result: Result<Result<(), RunnerProtocolStoreError>, tokio::time::error::Elapsed>,
     }
 
-    let (_container, pool) = migrated_postgres().await?;
-    let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
+    let deadline = tokio::time::Instant::now() + SERIALIZATION_TEST_TIMEOUT;
+    let (_container, pool) = tokio::time::timeout_at(deadline, migrated_postgres())
+        .await
+        .expect("registration replacement fixture setup must finish within its deadline")?;
+    let serialization = tokio::time::timeout_at(deadline, async {
         let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
         let mut blocker = pool.begin().await?;
         sqlx::query(
@@ -1402,6 +1405,42 @@ async fn runner_replacement_rejects_stale_workspace_generation() -> Result<(), B
 
     assert_store_corruption(corrupted, RunnerProtocolCorruption::CrossWiredReference);
     drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn claimed_retry_reservation_rejects_replacement_owned_by_another_source()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact lease fence claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed.lose().expect("claimed pure work admits retry");
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
+    let replacement =
+        authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::EffectFree).await?;
+    // Isolate the alternate unique-key collision from source-lineage validation.
+    sqlx::query("ALTER TABLE runner_claimed_retry_attempt_authority DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_claimed_retry_attempt_authority SET source_generation = source_generation + 1",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_claimed_retry_attempt_authority ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let rejected = store
+        .store_claimed_retry_attempt_authority(&loss, &replacement)
+        .await
+        .expect_err("a replacement already owned by another source conflicts");
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
     Ok(())
 }
 

@@ -462,8 +462,8 @@ impl std::fmt::Debug for CodexCliRuntime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CodexCliRuntime")
-            .field("executable", &self.executable)
-            .field("working_directory", &self.working_directory)
+            .field("executable", &"[redacted]")
+            .field("working_directory", &"[redacted]")
             .field("credential_reference", &self.credential_reference)
             .field("exchange_timeout", &self.exchange_timeout)
             .field("interrupt_grace", &self.interrupt_grace)
