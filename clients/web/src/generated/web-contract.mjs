@@ -922,6 +922,12 @@ const schemas = {
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "min_timeline_detail_bytes": {
+            "description": "Minimum projected typed-body byte budget accepted for a detail request.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -930,6 +936,7 @@ const schemas = {
           "max_timeline_window_items",
           "max_timeline_window_bytes",
           "max_timeline_detail_items",
+          "min_timeline_detail_bytes",
           "max_timeline_detail_bytes",
           "max_session_live_queued_turns",
           "max_search_query_bytes",
@@ -4097,6 +4104,9 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "cause": {
+                "$ref": "#/$defs/WebTimelineCreationCause"
+              },
               "imported_evidence": {
                 "anyOf": [
                   {
@@ -4113,7 +4123,8 @@ const schemas = {
               }
             },
             "required": [
-              "type"
+              "type",
+              "cause"
             ],
             "type": "object"
           },
@@ -4695,6 +4706,92 @@ const schemas = {
           "flex"
         ],
         "type": "string"
+      },
+      "WebTimelineCreationCause": {
+        "description": "Durable cause and originating identity of session creation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "interactive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "repository_watch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "dispatch_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "commissioned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "dispatch_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "program_run_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "workflow",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "program_run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "spawning_request_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "delegated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "spawning_request_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WebTimelineDelegationDetail": {
         "oneOf": [
@@ -7821,6 +7918,9 @@ function assertTimelineDetailPage(value) {
         if (item.kind !== "tool_approval_decided") {
           fail(`${path}.kind`, "tool_approval_decided for a tool_approval_decision body");
         }
+        if (item.body.actor.type === "user_override" && item.body.decision !== "approve") {
+          fail(`${path}.body.decision`, "approve for a user override");
+        }
         if (
           item.body.approval_judge_escalated &&
           !["user", "user_override"].includes(item.body.actor.type) &&
@@ -7937,6 +8037,12 @@ function assertTimelineDetailPage(value) {
           );
         }
         if (
+          item.body.detail.type === "session_message" &&
+          item.body.detail.sender_session_id === item.body.detail.recipient_session_id
+        ) {
+          fail(`${path}.body.detail.sender_session_id`, "a session other than the recipient");
+        }
+        if (
           (item.body.detail.type === "child_spawned" ||
             item.body.detail.type === "child_waiting" ||
             item.body.detail.type === "child_result") &&
@@ -7961,6 +8067,12 @@ function assertTimelineDetailPage(value) {
           if (!lifecycleValid) {
             fail(`${path}.body.detail`, "a durable lifecycle disposition shape");
           }
+          if (detail.child_session_id === detail.provenance.session_id) {
+            fail(`${path}.body.detail.child_session_id`, "a session other than the relationship parent");
+          }
+          if (value.session_id !== detail.provenance.session_id && value.session_id !== detail.child_session_id) {
+            fail(`${path}.body.detail`, "a lifecycle disposition on the parent or child timeline");
+          }
         }
         if (item.body.detail.type === "child_result") {
           const detail = item.body.detail;
@@ -7983,6 +8095,7 @@ function assertTimelineDetailPage(value) {
           const parentCommandValid =
             (detail.provenance.type === "parent_turn_command" ||
               detail.provenance.type === "parent_goal_command" || detail.provenance.type === "parent_lifecycle_command") &&
+            detail.provenance.session_id === value.session_id &&
             (detail.reason === "parent_stopped_with_descendants" ||
               detail.reason === "parent_cancelled_with_descendants") &&
             (detail.outcome === "child_stopped" ||

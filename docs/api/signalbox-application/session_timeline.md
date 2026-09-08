@@ -770,6 +770,7 @@ pub enum SessionTimelineDetailBody {
         transition: TimelineOwnershipTransition,
     },
     SessionCreated {
+        cause: signalbox_domain::SessionCreationCause,
         imported_evidence: option::Option<TimelineImportedEvidence>,
     },
     ModelSettings {

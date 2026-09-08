@@ -12,8 +12,8 @@ use signalbox_domain::{
     ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId, ModelChangeAdjustment,
     ModelSelectionRequest, ModelSettingsOverlay, ProviderModelCallFailureCause,
     ProviderModelIdentity, RunnerId, SemanticTranscriptEntryId,
-    SessionConfigurationDefaultsVersion, SessionId, ToolAttemptId, ToolName, ToolRequestId, TurnId,
-    ValidatedModelSettings,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, ToolAttemptId, ToolName,
+    ToolRequestId, TurnId, ValidatedModelSettings,
 };
 
 /// Returns the hard ceiling on records in one historical window.
@@ -772,6 +772,7 @@ pub enum SessionTimelineDetailBody {
 
     /// Session creation provenance, including an imported frontier when present.
     SessionCreated {
+        cause: SessionCreationCause,
         imported_evidence: Option<TimelineImportedEvidence>,
     },
     /// A model-settings projection changed at session or turn scope.

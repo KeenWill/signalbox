@@ -156,6 +156,7 @@ async fn item_and_region_details_share_the_stable_creation_address() -> Result<(
     assert!(matches!(
         item.items[0].body,
         SessionTimelineDetailBody::SessionCreated {
+            cause: signalbox_domain::SessionCreationCause::Interactive,
             imported_evidence: None
         }
     ));
@@ -1433,6 +1434,12 @@ async fn proposed_tool_detail_is_unchanged_after_attempt_preparation() -> Result
         .read_item_details(fixture.session, address, None, limits)
         .await?
         .expect("proposed detail");
+    remove_frozen_tool_members(&pool, sequence).await?;
+    let without_members = repository
+        .read_item_details(fixture.session, address, None, limits)
+        .await?
+        .expect("original proposal payload");
+    assert_eq!(without_members, before);
     let tool_loop = signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(pool.clone());
     tool_loop
         .decide(
@@ -1584,11 +1591,44 @@ async fn tool_detail_continues_at_the_next_request_member() -> Result<(), Box<dy
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn completed_tool_detail_continues_from_arguments_to_the_recorded_result()
+async fn completed_tool_detail_selects_the_recorded_attempt_after_a_retry()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _) = migrated_postgres().await?;
+    // Inject retry history at the freeze boundary to isolate detail membership
+    // from the runner's authorization and active-batch reconstruction.
+    sqlx::raw_sql(
+        "ALTER TABLE tool_attempt DISABLE TRIGGER tool_attempt_runner_retry_is_authorized;
+         CREATE FUNCTION seed_prior_detail_attempt() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             INSERT INTO tool_attempt
+                 (attempt_id, request_id, session_id, turn_id, issuing_turn_attempt_id,
+                  effect_class, dispatch_generation, state_kind)
+             SELECT '00000000-0000-0000-0000-000000995820', request_id, session_id,
+                    turn_id, issuing_turn_attempt_id, effect_class, dispatch_generation,
+                    'prepared'
+               FROM tool_attempt WHERE session_id = NEW.session_id;
+             UPDATE tool_attempt SET state_kind = 'terminal',
+                    terminal_disposition_kind = 'known_failed', error_kind = 'crash_lost',
+                    error_detail = 'earlier attempt failure'
+              WHERE attempt_id = '00000000-0000-0000-0000-000000995820';
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER seed_prior_detail_attempt
+         AFTER INSERT ON tool_batch_transition_outbox_event
+         FOR EACH ROW WHEN (NEW.transition_kind = 'results_projected')
+         EXECUTE FUNCTION seed_prior_detail_attempt();",
+    )
+    .execute(&pool)
+    .await?;
     let (fixture, _, _, _) =
         super::authorize_continuation_after_terminal_round(&pool, 0x995800, None).await?;
+    sqlx::raw_sql(
+        "DROP TRIGGER seed_prior_detail_attempt ON tool_batch_transition_outbox_event;
+         DROP FUNCTION seed_prior_detail_attempt();
+         ALTER TABLE tool_attempt ENABLE TRIGGER tool_attempt_runner_retry_is_authorized;",
+    )
+    .execute(&pool)
+    .await?;
     let sequence: i64 = sqlx::query_scalar(
         "SELECT event_sequence::bigint FROM tool_batch_transition_outbox_event
          WHERE producing_model_call_id = $1 AND transition_kind = 'results_projected'",
@@ -1596,14 +1636,52 @@ async fn completed_tool_detail_continues_from_arguments_to_the_recorded_result()
     .bind(fixture.call.into_uuid())
     .fetch_one(&pool)
     .await?;
+    let proposed_sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint FROM tool_batch_transition_outbox_event
+         WHERE producing_model_call_id = $1 AND transition_kind = 'proposed'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    remove_frozen_tool_members(&pool, proposed_sequence).await?;
+    let proposed_address = TimelineAddress::new(
+        NonZeroU64::new(u64::try_from(proposed_sequence)?).expect("proposal address"),
+    );
+    let proposal = SessionTimelineRepository::new(pool.clone())
+        .read_item_details(
+            fixture.session,
+            proposed_address,
+            None,
+            TimelineDetailLimits::new(1, 256).expect("bounded detail"),
+        )
+        .await?
+        .expect("original proposal after completion");
+    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &proposal.items[0].body else {
+        panic!("tool proposal body")
+    };
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].attempt_id, None);
+    assert_eq!(tools[0].state, None);
+    assert!(!tools[0].has_result);
+    assert!(!tools[0].has_failure);
+    assert_eq!(proposal.continuation, None);
     let recorded_result: String = sqlx::query_scalar(
-        "SELECT result_text FROM tool_attempt WHERE session_id = $1 AND state_kind = 'terminal'",
+        "SELECT result_text FROM tool_attempt WHERE session_id = $1 AND attempt_id = $2",
     )
     .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(0x995823))
     .fetch_one(&pool)
     .await?;
     let address =
         TimelineAddress::new(NonZeroU64::new(u64::try_from(sequence)?).expect("committed address"));
+    let members: Vec<(i64, Uuid)> = sqlx::query_as(
+        "SELECT member_index::bigint, attempt_id FROM tool_batch_transition_detail_member
+         WHERE event_sequence = $1 AND member_kind = 'tool' ORDER BY member_index",
+    )
+    .bind(sequence)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(members, vec![(0, Uuid::from_u128(0x995823))]);
     for frozen in [true, false] {
         if !frozen {
             remove_frozen_tool_members(&pool, sequence).await?;

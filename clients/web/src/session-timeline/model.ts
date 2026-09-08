@@ -2,7 +2,9 @@ import type {
   WebApiErrorResponse,
   WebContractBootstrap,
   WebSessionTimelineDescriptor,
+  WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
+  WebTimelineDetailContinuation,
 } from '../generated/web-contract.mjs'
 import {
   decodeWebApiErrorResponse,
@@ -684,4 +686,170 @@ export const sessionFoundationScenario = async (after: string | undefined, limit
     },
   )
   return { descriptor, window, retained: history.retained.length }
+}
+
+type DetailBody = WebSessionTimelineDetailPage['items'][number]['body']
+type BodyCursor = Extract<WebTimelineDetailContinuation, { type: 'more_body' }>['body']
+
+export const detailExcerptAt = (body: DetailBody, cursor: BodyCursor) => {
+  if (body.type === 'tool_batch') {
+    if (body.projected_member_index !== cursor.member_index) return null
+    const tool = body.tools[0]
+    const physical = tool?.evidence.type === 'physical_attempt' ? tool.evidence : null
+    switch (cursor.field) {
+      case 'tool_arguments':
+        return tool?.arguments
+      case 'tool_result':
+        return physical?.result
+      case 'tool_failure':
+        return physical?.failure
+      case 'goal_text': {
+        const goal = body.goal_events[0]
+        return goal && 'text' in goal ? goal.text : null
+      }
+      default:
+        return null
+    }
+  }
+  if (cursor.member_index !== 0) return null
+  switch (body.type) {
+    case 'user_input':
+      return cursor.field === 'input_text' ? body.text : null
+    case 'model_call':
+      return cursor.field === 'model_response' ? body.response : null
+    case 'tool_approval_decision':
+      return cursor.field === 'approval_rationale' ? body.rationale : null
+    case 'goal_event':
+      return cursor.field === 'goal_text' && 'text' in body.event ? body.event.text : null
+    case 'context_compaction':
+      return cursor.field === 'compaction_summary' ? body.summary : null
+    case 'delegation':
+      return cursor.field === 'delegation_content' && 'content' in body.detail
+        ? body.detail.content
+        : null
+    default:
+      return null
+  }
+}
+
+// Excerpt contents advance by page; their immutable byte totals are checked separately.
+const immutableDetailFacts = (value: unknown): string | undefined =>
+  JSON.stringify(value, (_key, child: unknown) => {
+    if (child == null) return undefined
+    if (typeof child !== 'object' || Array.isArray(child)) return child
+    if ('text' in child && 'offset_bytes' in child && 'total_bytes' in child) return undefined
+    return Object.fromEntries(
+      Object.entries(child).sort(([left], [right]) => left.localeCompare(right)),
+    )
+  })
+
+const bodyFacts = (body: DetailBody) =>
+  immutableDetailFacts(
+    body.type === 'tool_batch'
+      ? { ...body, projected_member_index: undefined, tools: undefined, goal_events: undefined }
+      : body,
+  )
+
+export const validateDetailContinuation = (
+  page: WebSessionTimelineDetailPage,
+  continuation: WebTimelineDetailContinuation | null,
+  previous?: Pick<WebSessionTimelineDetailPage, 'items'>,
+): void => {
+  for (const [index, item] of page.items.entries()) {
+    const cursor = index === 0 && continuation?.type === 'more_body' ? continuation.body : null
+    const body = item.body
+    if (!cursor) {
+      const fields: BodyCursor['field'][] = [
+        'input_text',
+        'model_response',
+        'tool_arguments',
+        'tool_result',
+        'tool_failure',
+        'approval_rationale',
+        'goal_text',
+        'compaction_summary',
+        'delegation_content',
+      ]
+      if (
+        body.type === 'tool_batch' &&
+        body.projected_member_index != null &&
+        body.projected_member_index !== 0
+      )
+        throw new TypeError('Initial tool detail skips a member')
+      for (const field of fields) {
+        const excerpt = detailExcerptAt(body, {
+          address: item.address,
+          field,
+          member_index: 0,
+          offset_bytes: '0',
+        })
+        if (
+          excerpt &&
+          (excerpt.offset_bytes !== '0' || field === 'tool_result' || field === 'tool_failure')
+        )
+          throw new TypeError('Initial detail skips a text field or offset')
+      }
+    }
+    if (body.type === 'tool_batch') {
+      const tool = body.tools[0]
+      const evidence = tool?.evidence
+      if (
+        tool?.arguments &&
+        tool.arguments.continuation == null &&
+        evidence?.type === 'physical_attempt'
+      ) {
+        const field = evidence.result_present
+          ? 'tool_result'
+          : evidence.failure_present
+            ? 'tool_failure'
+            : null
+        const next = page.continuation?.type === 'more_body' ? page.continuation.body : null
+        if (
+          field &&
+          (next?.field !== field ||
+            next.address.event_sequence !== item.address.event_sequence ||
+            next.member_index !== body.projected_member_index ||
+            next.offset_bytes !== '0')
+        )
+          throw new TypeError('Tool detail omits its terminal payload continuation')
+      }
+    }
+  }
+  if (continuation === null) return
+  const initial = page.items[0]
+  const address = continuation.type === 'more_at' ? continuation.address : continuation.body.address
+  if (initial?.address.event_sequence !== address.event_sequence)
+    throw new TypeError('Transcript detail does not match the requested continuation address')
+  if (continuation.type !== 'more_body') return
+  const cursor = continuation.body
+  const excerpt = detailExcerptAt(initial.body, cursor)
+  if (excerpt?.offset_bytes !== cursor.offset_bytes)
+    throw new TypeError('Transcript detail does not match the requested body continuation')
+  const prior = previous?.items.findLast(
+    (item) => item.address.event_sequence === address.event_sequence,
+  )
+  if (prior) {
+    if (prior.kind !== initial.kind) throw new TypeError('Continued detail changed its event kind')
+    if (bodyFacts(prior.body) !== bodyFacts(initial.body))
+      throw new TypeError('Continued detail changed its immutable body facts')
+    if (
+      prior.body.type === 'tool_batch' &&
+      initial.body.type === 'tool_batch' &&
+      prior.body.projected_member_index === initial.body.projected_member_index
+    ) {
+      for (const members of ['tools', 'goal_events'] as const) {
+        const before = prior.body[members]
+        const after = initial.body[members]
+        if (
+          before.length &&
+          after.length &&
+          immutableDetailFacts(before) !== immutableDetailFacts(after)
+        )
+          throw new TypeError('Continued detail changed its immutable body facts')
+      }
+    }
+    const priorExcerpt = detailExcerptAt(prior.body, cursor)
+    if (priorExcerpt && priorExcerpt.total_bytes !== excerpt.total_bytes)
+      throw new TypeError('Continued detail changed its immutable total byte length')
+  }
 }

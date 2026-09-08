@@ -3978,11 +3978,7 @@ async fn append_tool_batch_transition(
              attempt_error_kind, attempt_has_result, attempt_has_failure,
              attempt_sandbox_posture, attempt_result_text,
              attempt_error_detail)
-         SELECT $1, $2, 'tool', row_number() OVER (
-                    ORDER BY request.request_ordinal,
-                             generation.generation NULLS FIRST,
-                             attempt.attempt_id NULLS FIRST
-                ) - 1,
+         SELECT $1, $2, 'tool', request.request_ordinal,
                 request.request_id, attempt.attempt_id, EXISTS (
                     SELECT 1
                       FROM tool_approval_judge_model_call AS judge
@@ -4014,24 +4010,33 @@ async fn append_tool_batch_transition(
                      LIMIT 1
                 ),
                 attempt.result_text, attempt.error_detail
-           FROM tool_request AS request
+           FROM tool_batch_transition_outbox_event AS transition
+           JOIN tool_round AS round
+             ON round.producing_model_call_id = transition.producing_model_call_id
+           JOIN context_frontier AS boundary
+             ON boundary.context_frontier_id = round.boundary_frontier_id
+            AND boundary.owning_session_id = transition.session_id
+           JOIN tool_request AS request
+             ON request.producing_model_call_id = transition.producing_model_call_id
+           LEFT JOIN context_frontier_member AS member
+             ON transition.transition_kind = 'results_projected'
+            AND member.owning_session_id = transition.session_id
+            AND member.context_frontier_id = transition.frontier_id
+            AND member.member_position = boundary.member_count + request.request_ordinal + 1
+           LEFT JOIN semantic_transcript_entry AS payload
+             ON payload.source_session_id = member.source_session_id
+            AND payload.semantic_entry_id = member.semantic_entry_id
            LEFT JOIN tool_attempt AS attempt
-             ON attempt.request_id = request.request_id
-           LEFT JOIN LATERAL (
-                SELECT lease.generation
-                  FROM runner_physical_attempt_lease_binding AS binding
-                  JOIN runner_lease_generation AS lease
-                    ON lease.lease_id = binding.lease_id
-                   AND lease.attempt_id = binding.attempt_id
-                 WHERE binding.attempt_id = attempt.attempt_id
-                 ORDER BY lease.generation DESC
-                 LIMIT 1
-           ) AS generation ON TRUE
-          WHERE request.producing_model_call_id = $3",
+             ON attempt.attempt_id = CASE transition.transition_kind
+                 WHEN 'results_projected' THEN payload.tool_result_attempt_id
+                 WHEN 'recovery_required' THEN transition.tool_attempt_id
+             END
+            AND attempt.request_id = request.request_id
+            AND attempt.state_kind = 'terminal'
+          WHERE transition.event_sequence = $1",
     )
     .bind(event_sequence)
     .bind(session_id_to_uuid(session))
-    .bind(producing_call.into_uuid())
     .execute(&mut *connection)
     .await?;
     sqlx::query(

@@ -14,7 +14,7 @@ use signalbox_application::{
     max_search_snippet_bytes, max_session_live_queued_turns, max_timeline_detail_bytes,
     max_timeline_detail_items, max_timeline_window_bytes, max_timeline_window_items,
     max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
-    timeline_detail_envelope_bytes,
+    min_timeline_detail_bytes, timeline_detail_envelope_bytes,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -89,6 +89,8 @@ pub struct WebContractLimits {
     pub max_timeline_window_bytes: u32,
     /// Maximum detailed timeline records in one response.
     pub max_timeline_detail_items: u32,
+    /// Minimum projected typed-body byte budget accepted for a detail request.
+    pub min_timeline_detail_bytes: u32,
     /// Maximum projected typed-body bytes in one detail response.
     pub max_timeline_detail_bytes: u32,
     /// Maximum queued turn identities retained in one live snapshot.
@@ -153,6 +155,7 @@ impl WebContractBootstrap {
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
                 max_timeline_detail_items: u32::from(max_timeline_detail_items()),
+                min_timeline_detail_bytes: min_timeline_detail_bytes(),
                 max_timeline_detail_bytes: max_timeline_detail_bytes(),
                 max_session_live_queued_turns: u32::from(max_session_live_queued_turns()),
                 max_search_query_bytes: max_search_query_bytes() as u32,
@@ -1435,6 +1438,17 @@ pub enum WebTimelineDelegationDetail {
     },
 }
 
+/// Durable cause and originating identity of session creation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineCreationCause {
+    Interactive {},
+    RepositoryWatch { dispatch_id: WebSessionId },
+    Commissioned { dispatch_id: WebSessionId },
+    Workflow { program_run_id: WebSessionId },
+    Delegated { spawning_request_id: WebSessionId },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineImportedEvidence {
@@ -1672,6 +1686,7 @@ pub enum WebSessionTimelineDetailBody {
         kind: WebSessionTimelineEventKind,
     },
     SessionCreated {
+        cause: WebTimelineCreationCause,
         imported_evidence: Option<WebTimelineImportedEvidence>,
     },
     ModelSettings {
@@ -3739,6 +3754,9 @@ function assertTimelineDetailPage(value) {{
         if (item.kind !== "tool_approval_decided") {{
           fail(`${{path}}.kind`, "tool_approval_decided for a tool_approval_decision body");
         }}
+        if (item.body.actor.type === "user_override" && item.body.decision !== "approve") {{
+          fail(`${{path}}.body.decision`, "approve for a user override");
+        }}
         if (
           item.body.approval_judge_escalated &&
           !["user", "user_override"].includes(item.body.actor.type) &&
@@ -3855,6 +3873,12 @@ function assertTimelineDetailPage(value) {{
           );
         }}
         if (
+          item.body.detail.type === "session_message" &&
+          item.body.detail.sender_session_id === item.body.detail.recipient_session_id
+        ) {{
+          fail(`${{path}}.body.detail.sender_session_id`, "a session other than the recipient");
+        }}
+        if (
           (item.body.detail.type === "child_spawned" ||
             item.body.detail.type === "child_waiting" ||
             item.body.detail.type === "child_result") &&
@@ -3879,6 +3903,12 @@ function assertTimelineDetailPage(value) {{
           if (!lifecycleValid) {{
             fail(`${{path}}.body.detail`, "a durable lifecycle disposition shape");
           }}
+          if (detail.child_session_id === detail.provenance.session_id) {{
+            fail(`${{path}}.body.detail.child_session_id`, "a session other than the relationship parent");
+          }}
+          if (value.session_id !== detail.provenance.session_id && value.session_id !== detail.child_session_id) {{
+            fail(`${{path}}.body.detail`, "a lifecycle disposition on the parent or child timeline");
+          }}
         }}
         if (item.body.detail.type === "child_result") {{
           const detail = item.body.detail;
@@ -3901,6 +3931,7 @@ function assertTimelineDetailPage(value) {{
           const parentCommandValid =
             (detail.provenance.type === "parent_turn_command" ||
               detail.provenance.type === "parent_goal_command" || detail.provenance.type === "parent_lifecycle_command") &&
+            detail.provenance.session_id === value.session_id &&
             (detail.reason === "parent_stopped_with_descendants" ||
               detail.reason === "parent_cancelled_with_descendants") &&
             (detail.outcome === "child_stopped" ||

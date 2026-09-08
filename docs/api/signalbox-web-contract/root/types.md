@@ -42,6 +42,7 @@ pub struct WebContractLimits {
     pub max_timeline_window_items: u32,
     pub max_timeline_window_bytes: u32,
     pub max_timeline_detail_items: u32,
+    pub min_timeline_detail_bytes: u32,
     pub max_timeline_detail_bytes: u32,
     pub max_session_live_queued_turns: u32,
     pub max_search_query_bytes: u32,
@@ -1173,6 +1174,19 @@ pub enum WebTimelineDelegationDetail {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebTimelineCreationCause
+
+```rust
+pub enum WebTimelineCreationCause {
+    Interactive {},
+    RepositoryWatch { dispatch_id: WebSessionId },
+    Commissioned { dispatch_id: WebSessionId },
+    Workflow { program_run_id: WebSessionId },
+    Delegated { spawning_request_id: WebSessionId },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebTimelineImportedEvidence
 
 ```rust
@@ -1444,6 +1458,7 @@ pub enum WebSessionTimelineDetailBody {
         kind: WebSessionTimelineEventKind,
     },
     SessionCreated {
+        cause: WebTimelineCreationCause,
         imported_evidence: option::Option<WebTimelineImportedEvidence>,
     },
     ModelSettings {
