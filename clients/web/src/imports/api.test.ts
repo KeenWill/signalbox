@@ -964,6 +964,39 @@ describe('HttpImportApi correlation', () => {
 })
 
 describe('import request lifetimes and immutable evidence', () => {
+  it.each(['caller', 'deadline'] as const)(
+    'rejects a stalled digest when the %s aborts and ignores its late result',
+    async (source) => {
+      const caller = new AbortController()
+      const deadline = new AbortController()
+      const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal)
+      const digestResult = Promise.withResolvers<ArrayBuffer>()
+      const digest = vi.fn(() => digestResult.promise)
+      const fetch = vi.fn()
+      vi.stubGlobal('crypto', { randomUUID: () => searchCorrelation, subtle: { digest } })
+      vi.stubGlobal('fetch', fetch)
+      try {
+        const pending = new HttpImportApi(() => Promise.resolve()).list(
+          { source_session_id: 'source-session-0' },
+          caller.signal,
+        )
+        await vi.waitFor(() => expect(digest).toHaveBeenCalled())
+        const rejected = expect(pending).rejects.toHaveProperty(
+          'name',
+          source === 'caller' ? 'AbortError' : 'TimeoutError',
+        )
+        if (source === 'caller') caller.abort()
+        else deadline.abort(new DOMException('Request expired', 'TimeoutError'))
+        await rejected
+        digestResult.resolve(new ArrayBuffer(32))
+        await Promise.resolve()
+        expect(fetch).not.toHaveBeenCalled()
+      } finally {
+        timeout.mockRestore()
+      }
+    },
+  )
+
   it('cancels a hung bootstrap without poisoning a subsequent caller', async () => {
     let firstSignal: AbortSignal | undefined
     const fetch = vi.fn(async (_url: string, init?: RequestInit) => {

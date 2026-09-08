@@ -144,9 +144,20 @@ const correlateListPage = (
   return page
 }
 
-const sha256 = async (value: string): Promise<string> => {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+const sha256 = async (value: string, signal: AbortSignal): Promise<string> => {
+  signal.throwIfAborted()
+  const aborted = Promise.withResolvers<never>()
+  const onAbort = () => aborted.reject(signal.reason)
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    const digest = await Promise.race([
+      crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)),
+      aborted.promise,
+    ])
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
 }
 
 const DEFAULT_IMPORT_LIST_ITEMS = 50
@@ -331,7 +342,7 @@ export class HttpImportApi implements ImportApi {
     if (request.source_session_id !== undefined && request.source_session_id !== null) {
       const { source_session_id: sourceSessionId, ...catalogRequest } = request
       const searchCorrelation = crypto.randomUUID()
-      const exactSourceSessionDigest = await sha256(sourceSessionId)
+      const exactSourceSessionDigest = await sha256(sourceSessionId, signal)
       signal.throwIfAborted()
       const response = await fetch(
         `/api/imports/searches${queryString({
