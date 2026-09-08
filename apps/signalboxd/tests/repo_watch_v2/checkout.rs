@@ -178,15 +178,8 @@ impl CheckoutFixture {
     }
 
     async fn with_head_repository(head_repository: &str) -> Result<Self, Box<dyn Error>> {
-        Self::with_migrator(head_repository, &signalbox_persistence::MIGRATOR).await
-    }
-
-    async fn with_migrator(
-        head_repository: &str,
-        migrator: &sqlx::migrate::Migrator,
-    ) -> Result<Self, Box<dyn Error>> {
         let (container, core, url) = postgres().await?;
-        migrator.run(&core).await?;
+        migrate(&core).await?;
         sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
             .execute(&core)
             .await?;
@@ -1284,49 +1277,66 @@ async fn removal_migration_settles_existing_checkouts_without_inventing_location
             .into(),
         ..sqlx::migrate::Migrator::DEFAULT
     };
-    let mut fixture = CheckoutFixture::with_migrator("checkout/project", &parent).await?;
-    let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(fixture.core.clone());
-    fixture
-        .store
-        .submit_pending(
-            &mut RepositoryWatchCommandCodec,
-            &mut fixture.sink,
-            &lifecycle,
-        )
-        .await
-        .expect("parent command submission");
-    fixture
-        .store
-        .record_dispatch_checkout(fixture.command, &fixture.head)
+    let (container, core, url) = postgres().await?;
+    parent.run(&core).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core)
         .await?;
+    let module = module_pool(&url).await?;
+    let command = Uuid::now_v7();
+    let head = "a".repeat(40);
+    // The rule, event and command identities only need to satisfy the parent schema.
+    sqlx::query(
+        "WITH event AS (
+             INSERT INTO gh_event
+                 (event_id, content_identity, repository, event_kind, target_kind,
+                  pull_request_number, normalized_payload, recorded_at, retain_until)
+             VALUES (gen_random_uuid(), decode(repeat('00', 32), 'hex'),
+                     'checkout/project', 'pull_request_opened', 'pull_request',
+                     1, ''::bytea, now(), now() + interval '1 day')
+             RETURNING event_id
+         ), rule AS (
+             INSERT INTO rule_revision
+                 (repository, rule_id, revision, content_digest, activated_at)
+             VALUES ('checkout/project', 'checkout', 1,
+                     decode(repeat('00', 32), 'hex'), now())
+             RETURNING repository, rule_id, revision
+         )
+         INSERT INTO dispatch_ledger
+             (dispatch_ref, action_ordinal, command_id, repository, rule_id,
+              rule_revision, event_id, command_kind, command_payload,
+              created_session_id, status, issued_at, settled_at,
+              checkout_path, checkout_head_sha)
+         SELECT $1, 1, $1, rule.repository, rule.rule_id, rule.revision,
+                event.event_id, 'create_session', ''::bytea, gen_random_uuid(),
+                'applied', now(), now(), '.', $2
+         FROM event CROSS JOIN rule",
+    )
+    .bind(command)
+    .bind(&head)
+    .execute(&module)
+    .await?;
 
-    migrate(&fixture.core).await?;
+    migrate(&core).await?;
     let checkout: (String, String, bool, bool, bool) = sqlx::query_as(
         "SELECT checkout_path, checkout_head_sha, checkout_removed,
                 checkout_workspace_root IS NULL, checkout_session_id IS NULL
          FROM dispatch_ledger WHERE command_id = $1",
     )
-    .bind(fixture.command.into_uuid())
-    .fetch_one(&fixture.module)
+    .bind(command)
+    .fetch_one(&module)
     .await?;
-    assert_eq!(
-        checkout,
-        (
-            String::from("."),
-            fixture.head.as_str().to_owned(),
-            true,
-            true,
-            true
-        )
-    );
+    assert_eq!(checkout, (String::from("."), head, true, true, true));
     assert!(
-        fixture
-            .store
+        RepoWatchStore::new(module.clone())
             .checkout_removal_candidates()
             .await?
             .is_empty()
     );
-    migrate(&fixture.core).await?;
+    migrate(&core).await?;
+    module.close().await;
+    core.close().await;
+    drop(container);
     Ok(())
 }
 
