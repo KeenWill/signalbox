@@ -206,7 +206,8 @@ def rust_module_sources(crate_root: Path) -> set[Path]:
                     end += 1
                 attribute = tokens[index + 2:end - 1]
                 if attribute[:2] == ["path", "="]:
-                    explicit_path = attribute[2].strip('"')
+                    literal = attribute[2]
+                    explicit_path = literal[literal.index('"') + 1:literal.rindex('"')]
                 index = end
                 continue
             directory, path_directory = directories[-1]
@@ -629,6 +630,12 @@ class SweepTestContainersTest(unittest.TestCase):
             ("comment", {"src/lib.rs": "/* mod fixture; */", "src/fixture.rs": chain}, "", 1),
             ("string", {"src/lib.rs": 'const TEXT: &str = "mod fixture;";', "src/fixture.rs": chain}, "", 1),
         ]
+        for literal in ('r"fixture.rs"', 'r#"fixture.rs"#', 'r##"fixture.rs"##'):
+            declaration = f"#[path = {literal}] mod fixture;"
+            cases.extend([
+                (f"raw library path {literal}", {"src/lib.rs": declaration, "src/fixture.rs": chain}, "", 0),
+                (f"raw binary path {literal}", {"src/lib.rs": "mod fixture;", "src/main.rs": declaration, "src/fixture.rs": chain}, "", 1),
+            ])
         for name, files, targets, expected_unmarked in cases:
             with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
