@@ -18,12 +18,12 @@ use crate::pinning::PinnedObjectDatabase;
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
 use crate::tests::planting::{
-    oversized_commit_object, plant_index_over_blob_budget, plant_maximum_index_beneath_directory,
-    plant_over_budget_index,
+    oversized_commit_object, oversized_root_tree_commit, plant_index_over_blob_budget,
+    plant_maximum_index_beneath_directory, plant_over_budget_index,
 };
 use crate::tests::support::{
     CHANGED_CONTENT, Fixture, INITIAL_CONTENT, MODEL_MESSAGE, TRACKED_PATH, execute, identity,
-    install_deleted_conflict,
+    install_deleted_conflict, raw_commit_with_tree,
 };
 
 #[test]
@@ -305,6 +305,47 @@ fn commit_rejects_merge_head_over_the_parent_budget() {
         .expect_err("oversized merge parent set rejects commit");
 
     assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn commit_rejects_an_oversized_parent_descendant_before_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let oversized = oversized_root_tree_commit(&repository, fixture.initial);
+    let descendant = repository
+        .find_commit(oversized)
+        .expect("oversized-tree fixture commit opens")
+        .tree_id();
+    let mut root = repository
+        .treebuilder(None)
+        .expect("root tree builder opens");
+    root.insert("directory", descendant, 0o040000)
+        .expect("oversized descendant attaches to small root");
+    let root = root.write().expect("small root tree writes");
+    let parent = raw_commit_with_tree(&repository, root, fixture.initial);
+    repository
+        .head()
+        .expect("fixture HEAD opens")
+        .set_target(parent, MODEL_MESSAGE)
+        .expect("parent with oversized descendant selects");
+    let index_before = fs::read(fixture.root().join(".git/index")).expect("fixture index reads");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Commit(GitCommitArguments {
+            message: MODEL_MESSAGE.to_owned(),
+        }))
+        .expect_err("oversized parent descendant rejects commit");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        repository.head().expect("fixture HEAD remains").target(),
+        Some(parent)
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(".git/index")).expect("fixture index remains"),
+        index_before
+    );
 }
 
 #[test]

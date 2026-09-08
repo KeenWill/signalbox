@@ -249,6 +249,7 @@ where
         .collect::<Result<Vec<_>, _>>()?;
     if is_ordinary_commit && parents.len() == 1 {
         let parent_tree = find_bounded_tree(repository, parents[0].tree_id())?;
+        validate_tree_discovery(repository, &parent_tree)?;
         let changes = repository
             .diff_tree_to_index(Some(&parent_tree), Some(&index), None)
             .map_err(|_| LocalGitFailure::Operation)?;
