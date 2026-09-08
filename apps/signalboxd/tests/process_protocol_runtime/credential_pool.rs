@@ -239,7 +239,8 @@ async fn pool_projection_capacity_recovery_retains_live_groups_and_releases_ende
         .kill_on_drop(true)
         .spawn()?;
     let group = child.id().expect("spawned child has an identity");
-    let observer = CredentialInvocationProcesses::new(runtime.pool.clone());
+    let observer =
+        CredentialInvocationProcesses::new(runtime.pool.clone(), runtime.eligibility_nudge.clone());
     assert!(observer.register(call, group).await);
     observer.finished(call, None, true).await;
     observer.recover().await?;

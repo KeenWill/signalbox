@@ -214,11 +214,13 @@ registrations and retained reservations; restart alone grants no eligibility.
 Invocation identity retains the process-group ID and its leader's start time; a
 reused numeric ID does not retain the prior invocation's reservation. The daemon
 rechecks retained invocation groups until their exit permits reservation
-release. Startup and periodic recovery release null-group reservations once the
-call is terminal; live calls retain their reservations. Failed registration
-retains the observed group through cleanup so proven group exit releases
-capacity while the call retains its proven-unsent outcome when registration
-aborts before request delivery.
+release. Release and periodic invocation recovery nudge eligible waits even
+without a configured reconciliation sweep; recovery retries dropped hints and
+wakes deferred by retry deadlines. Startup and periodic recovery release
+null-group reservations once the call is terminal; live calls retain their
+reservations. Failed registration retains the observed group through cleanup so
+proven group exit releases capacity while the call retains its proven-unsent
+outcome when registration aborts before request delivery.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
 wait attempt and closed cause. Transcript reads and initial follow snapshots
@@ -227,10 +229,9 @@ call preparation, and send authorization use the wait's retained effective
 target with its retained policy; a missing current selection leaves the wait
 unconsumed. Release pins a pre-call wait's retained target on its turn, and
 domain call preparation retains that pin across catalog reloads. The rendered
-provider operation uses that retained target. Parking retains
-the exclusions that selected the wait. An exclusion with an absent or zero
-record generation is the oldest generation and cannot make its member wakeable
-by an operator clear.
+provider operation uses that retained target. Parking retains the exclusions
+that selected the wait. An exclusion with an absent or zero record generation is
+the oldest generation and cannot make its member wakeable by an operator clear.
 
 A terminal release after a predecessor call projects
 `failed_after_credential_wait` with the fresh terminal attempt and the
