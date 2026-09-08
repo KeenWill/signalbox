@@ -253,8 +253,10 @@ review-findings listing takes its run and its findings from separate
 transactions. Every reported duration is clamped nonnegative and sampled against
 the database transaction timestamp, not a client clock.
 
-Every read that holds a pooled connection across more than one statement takes
-one snapshot-reader admission; the single-statement defaults read takes none.
+Except for immutable credential-pool policy validation, every read that holds a
+pooled connection across more than one statement takes one snapshot-reader
+admission; the single-statement defaults read takes none. Pool-policy validation
+takes no admission so a follower can validate its snapshot while holding one.
 Every request states its admission class before dispatch, so no read verb
 reaches the pool by omission. The reader budget leaves at least two pool
 connections outside snapshot work.

@@ -264,7 +264,11 @@ pub(super) async fn prepare_release(
     };
     let turn = TurnId::from_uuid(waiting.try_get("turn_id")?);
     let wait = load_phase(connection, session_id, turn).await?;
-    if !waiting.try_get::<bool, _>("eligible")? {
+    if !waiting.try_get::<bool, _>("eligible")?
+        || super::credential_pool::load_availability_successor_backoff(connection, wait.attempt())
+            .await?
+            .is_some()
+    {
         return Ok(Some(wait));
     }
     super::credential_pool::acquire_model_call_outbox_order_guard(connection).await?;
