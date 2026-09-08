@@ -2343,6 +2343,60 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         armedToolDenials.remove(deniedRequestID.rawValue)
       }
     }
+    let tools = normalizer.records.compactMap { record -> SignalboxProcessToolEvent? in
+      guard case .processTool(let tool) = record.event else {
+        return nil
+      }
+      return tool
+    }
+    for denied in tools where armedToolDenials.contains(denied.toolRequestID.rawValue) {
+      for later in tools {
+        guard toolWasApproved(later),
+          later.toolName == denied.toolName,
+          let arguments = denied.arguments,
+          later.arguments == arguments,
+          approvalFollowsDenial(later, denied)
+        else {
+          continue
+        }
+        armedToolDenials.remove(denied.toolRequestID.rawValue)
+        break
+      }
+    }
+  }
+
+  private func toolWasApproved(_ tool: SignalboxProcessToolEvent) -> Bool {
+    if let approval = toolApprovalDecisionsByRequestID[tool.toolRequestID.rawValue],
+      case .approve = approval.decision
+    {
+      return true
+    }
+    return tool.status == .completed
+  }
+
+  private func approvalFollowsDenial(
+    _ later: SignalboxProcessToolEvent,
+    _ denied: SignalboxProcessToolEvent
+  ) -> Bool {
+    guard let laterID = try? SignalboxCanonicalUUID(validating: later.toolRequestID.rawValue),
+      let deniedID = try? SignalboxCanonicalUUID(validating: denied.toolRequestID.rawValue),
+      let laterPosition = later.sessionToolRequestPositions?[laterID],
+      let deniedPosition = later.sessionToolRequestPositions?[deniedID]
+        ?? denied.sessionToolRequestPositions?[deniedID]
+    else {
+      return false
+    }
+    if laterPosition.turnID == deniedPosition.turnID {
+      return laterPosition.modelCallID != deniedPosition.modelCallID
+        && laterPosition.entryIndex.rawValue > deniedPosition.entryIndex.rawValue
+    }
+    guard let laterAcceptance = later.sessionTurnAcceptancePositions?[laterPosition.turnID],
+      let deniedAcceptance = later.sessionTurnAcceptancePositions?[deniedPosition.turnID]
+        ?? denied.sessionTurnAcceptancePositions?[deniedPosition.turnID]
+    else {
+      return false
+    }
+    return laterAcceptance.rawValue > deniedAcceptance.rawValue
   }
 
   private func retainedToolApprovalDecisions(

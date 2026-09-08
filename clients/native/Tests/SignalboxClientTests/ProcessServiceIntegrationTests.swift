@@ -3065,6 +3065,108 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testLaterUserApprovalRetiresArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval()
+      )
+    )
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testSameRoundApprovalDoesNotRetireArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval(modelCallID: ProcessDriverFixture.modelCall)
+      )
+    )
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testDifferentCommandApprovalDoesNotRetireArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval(toolName: "different_tool")
+      )
+    )
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testDifferentArgumentsApprovalDoesNotRetireArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval(arguments: "{\"different\":true}")
+      )
+    )
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testLaterApprovalEventRetiresArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval(approvalMember: "")
+      )
+    )
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.event(try ProcessProjectionFixture.laterUserApprovalEvent()))
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
   func testAmbiguousToolDecisionRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -8238,6 +8340,70 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithLaterUserApproval(
+    modelCallID: String = laterTurnModelCall,
+    toolName: String = proposedToolName,
+    arguments: String = "{}",
+    approvalMember: String = laterUserApprovalMember
+  ) throws -> SignalboxSynchronizationSnapshot {
+    let encodedArguments = String(decoding: try JSONEncoder().encode(arguments), as: UTF8.self)
+    return try snapshotWithProposedTool(
+      approvalMember:
+        """
+        ,"approval":{
+          "decision":{"type":"deny","reason":null},
+          "decider":{
+            "type":"delegate",
+            "model_selection_id":"\(delegateModelSelection)",
+            "model_call_id":"\(delegateModelCall)"
+          },
+          "rationale":"\(delegateRationale)"
+        }
+        """,
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(modelCallID)",
+            "tool_request_id":"\(closedToolID)",
+            "tool_name":"\(toolName)",
+            "arguments":\(encodedArguments)\(approvalMember)
+          }
+        }
+        """
+      ]
+    )
+  }
+
+  static let laterUserApprovalMember = """
+    ,"approval":{
+      "decision":{"type":"approve"},
+      "decider":{"type":"user","command_id":"\(ProcessSubmissionFixture.commandID)"},
+      "rationale":null
+    }
+    """
+
+  static func laterUserApprovalEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_approval_decided",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "tool_request_id":"\(closedToolID)",
+        "decision":{"type":"approve"},
+        "decider":{"type":"user","command_id":"\(ProcessSubmissionFixture.commandID)"},
+        "rationale":null
+      }
+      """
+    )
+  }
+
   static func snapshotWithDelegateDenial() throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithProposedTool(
       approvalMember:
@@ -10094,6 +10260,7 @@ private enum ProcessProjectionFixture {
                 try! SignalboxCanonicalUUID(validating: $0.key),
                 SignalboxProcessToolRequestPosition(
                   turnID: try! SignalboxCanonicalUUID(validating: $0.value.turnID),
+                  modelCallID: try! SignalboxCanonicalUUID(validating: ProcessDriverFixture.modelCall),
                   entryIndex: SignalboxCanonicalUInt64(rawValue: $0.value.entryIndex),
                   toolName: $0.value.toolName,
                   toolAttemptID: $0.value.toolAttemptID.map {

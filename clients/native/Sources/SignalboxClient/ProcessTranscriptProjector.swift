@@ -620,12 +620,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return records.reduce(into: [:]) { positions, record in
       guard case .entry(let message) = record,
         message.sourceSessionID == nativeSourceSessionID,
-        case .assistantToolUse(let turnID, _, let requestID, let toolName, _, _) = message.entry
+        case .assistantToolUse(let turnID, let modelCallID, let requestID, let toolName, _, _) = message.entry
       else {
         return
       }
       positions[requestID] = SignalboxProcessToolRequestPosition(
         turnID: turnID,
+        modelCallID: modelCallID,
         entryIndex: message.entryIndex,
         toolName: toolName,
         toolAttemptID: ambiguousResultRequestIDs.contains(requestID)
