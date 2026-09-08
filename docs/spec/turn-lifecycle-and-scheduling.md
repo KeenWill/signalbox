@@ -15,8 +15,9 @@ durable wait that retains the slot: on a tool approval, on a recovery decision
 after an ambiguous operation, on a lost runner, or on a foreground delegated
 child, or on credential availability. A credential wait ends a call-free attempt
 WithoutStop(YieldedToDurableWait) and retains its latest frontier without a
-current attempt or transcript entry. Which credential a model call uses, and
-what happens to the turn when none is available, is owned by
+current attempt or transcript entry. The session projects Waiting with the
+external-recheck waker. Which credential a model call uses, and what happens to
+the turn when none is available, is owned by
 [credential-availability](credential-availability.md).
 
 A turn attempt is one exclusive physical orchestration tenure;

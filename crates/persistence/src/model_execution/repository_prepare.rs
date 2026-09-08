@@ -722,7 +722,6 @@ impl PostgresModelCallRepository {
                         &policy,
                         &observation,
                         successor_attempt,
-                        usage,
                         cause,
                         &self.targets,
                     )

@@ -657,7 +657,7 @@ pub(super) async fn select_runtime_pool_credential(
             attempt,
             &policy,
             observed_at,
-            &headroom,
+            headroom,
         )
         .await?;
     }

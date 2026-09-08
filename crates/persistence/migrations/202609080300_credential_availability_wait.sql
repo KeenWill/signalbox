@@ -225,3 +225,137 @@ END;
 $$;
 CREATE TRIGGER credential_availability_wait_member_origin_immutable BEFORE UPDATE OR DELETE ON credential_availability_wait_member
     FOR EACH ROW EXECUTE FUNCTION guard_credential_availability_wait_member_change();
+
+DO $$
+DECLARE definition text;
+BEGIN
+    SELECT pg_get_functiondef('project_session_lifecycle(uuid,boolean,text,text,boolean,boolean)'::regprocedure)
+      INTO definition;
+    definition := replace(definition, 'CASE live_phase',
+        'CASE live_phase
+            WHEN ''awaiting_credential_availability'' THEN
+                next_state := ''waiting'';
+                next_waiting_kind := ''external'';
+                next_waiting_waker := ''external_recheck'';');
+    EXECUTE definition;
+END;
+$$;
+
+DO $$
+DECLARE definition text;
+BEGIN
+    SELECT pg_get_functiondef('assert_model_call_steering_final_state(uuid)'::regprocedure)
+      INTO definition;
+    definition := replace(definition,
+        'SELECT member_count
+      INTO starting_count',
+        'SELECT waiting.frontier_id INTO result_boundary
+           FROM model_call call
+           JOIN credential_availability_wait_release release
+             ON release.turn_attempt_id = call.turn_attempt_id
+           JOIN credential_availability_wait waiting
+             ON waiting.wait_attempt_id = release.wait_attempt_id
+            AND waiting.consumed_by_attempt_id = call.turn_attempt_id
+            AND waiting.session_id = call.session_id AND waiting.turn_id = call.turn_id
+          WHERE call.model_call_id = checked_model_call_id;
+        IF FOUND THEN
+            starting_frontier := result_boundary;
+            predecessor_attempt := NULL;
+        END IF;
+
+        SELECT member_count
+      INTO starting_count');
+    EXECUTE definition;
+END;
+$$;
+
+CREATE FUNCTION credential_wait_terminal_history_is_valid(subject uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    WITH RECURSIVE history AS (
+        SELECT attempt.* FROM turn_attempt attempt JOIN turn_lifecycle lifecycle
+            ON lifecycle.terminal_attempt_id = attempt.turn_attempt_id
+           AND lifecycle.turn_id = attempt.turn_id AND lifecycle.session_id = attempt.session_id
+        WHERE lifecycle.turn_id = subject AND lifecycle.state_kind = 'terminal'
+        UNION
+        SELECT predecessor.* FROM turn_attempt predecessor JOIN history successor
+            ON predecessor.turn_attempt_id = successor.continued_from_attempt_id
+           AND predecessor.turn_id = successor.turn_id AND predecessor.session_id = successor.session_id
+    )
+    SELECT count(*) = (SELECT count(*) FROM turn_attempt WHERE turn_id = subject)
+        AND count(*) FILTER (WHERE continued_from_attempt_id IS NULL) = 1
+        AND bool_and(state_kind = 'ended')
+        AND EXISTS (SELECT 1 FROM history attempt
+            JOIN credential_availability_wait_release release USING (turn_attempt_id)
+            JOIN credential_availability_wait waiting USING (wait_attempt_id)
+            WHERE waiting.consumed_by_attempt_id = attempt.turn_attempt_id
+              AND attempt.continued_from_attempt_id = waiting.wait_attempt_id)
+    FROM history
+$$;
+
+DO $$
+DECLARE definition text;
+BEGIN
+    SELECT pg_get_functiondef('assert_terminal_started_turn_common_final_state(uuid)'::regprocedure)
+      INTO definition;
+    definition := replace(definition, 'OR attempt_count <> 1',
+        'OR (attempt_count <> 1 AND NOT credential_wait_terminal_history_is_valid(checked_turn_id))');
+    EXECUTE definition;
+    SELECT pg_get_functiondef('assert_cancelled_turn_final_state(uuid)'::regprocedure)
+      INTO definition;
+    definition := replace(definition, 'ELSIF checked_terminal_call IS NULL THEN',
+        'ELSIF checked_terminal_call IS NULL AND EXISTS (
+            SELECT 1 FROM credential_availability_wait_release WHERE turn_attempt_id = checked_terminal_attempt
+        ) THEN
+            SELECT waiting.frontier_id INTO base_frontier
+              FROM credential_availability_wait_release release
+              JOIN credential_availability_wait waiting USING (wait_attempt_id)
+             WHERE release.turn_attempt_id = checked_terminal_attempt
+               AND waiting.consumed_by_attempt_id = checked_terminal_attempt
+               AND waiting.session_id = checked_session AND waiting.turn_id = checked_turn_id;
+        ELSIF checked_terminal_call IS NULL THEN');
+    EXECUTE definition;
+END;
+$$;
+
+DO $$
+DECLARE function_name text; definition text;
+BEGIN
+    FOREACH function_name IN ARRAY ARRAY[
+        'assert_failed_terminal_execution_without_tool_loop(uuid)',
+        'assert_failed_terminal_execution_before_credential_pools(uuid)',
+        'assert_cancelled_turn_final_state(uuid)'
+    ] LOOP
+        SELECT pg_get_functiondef(function_name::regprocedure) INTO definition;
+        definition := replace(definition, 'attempt_count <> 1',
+            '(attempt_count <> 1 AND NOT credential_wait_terminal_history_is_valid(checked_turn_id))');
+        definition := replace(definition, 'call_count <> 1',
+            '(call_count <> 1 AND NOT credential_wait_terminal_history_is_valid(checked_turn_id))');
+        definition := replace(definition, 'call_count > 1',
+            '(call_count > 1 AND NOT credential_wait_terminal_history_is_valid(checked_turn_id))');
+        EXECUTE definition;
+    END LOOP;
+END;
+$$;
+
+DO $$
+DECLARE definition text;
+BEGIN
+    SELECT pg_get_functiondef('assert_model_call_final_state(uuid)'::regprocedure) INTO definition;
+    definition := replace(definition, 'IF FOUND THEN
+        IF predecessor_state',
+        'IF FOUND AND predecessor_state = ''terminal'' AND predecessor_disposition = ''known_failed''
+           AND predecessor_attempt_state = ''ended'' AND predecessor_attempt_disposition = ''known_failure''
+           AND successor_state = ''ended'' AND successor_continuation = predecessor_attempt_id
+           AND lifecycle_state = ''active'' AND lifecycle_phase = ''awaiting_credential_availability''
+           AND EXISTS (SELECT 1 FROM credential_availability_wait waiting
+               WHERE waiting.wait_attempt_id = successor_attempt_id
+                 AND waiting.predecessor_model_call_id = checked_model_call_id
+                 AND waiting.turn_id = predecessor_turn_id AND waiting.session_id = predecessor_session_id
+                 AND waiting.consumed_by_attempt_id IS NULL) THEN
+            PERFORM assert_credential_availability_wait(predecessor_turn_id);
+            RETURN;
+        END IF;
+        IF FOUND THEN
+        IF predecessor_state');
+    EXECUTE definition;
+END;
+$$;

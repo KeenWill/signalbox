@@ -111,7 +111,7 @@ pub(super) async fn park_initial(
         &ended,
     )
     .await?;
-    let rows = sqlx::query("UPDATE turn_lifecycle SET active_phase_kind = 'awaiting_credential_availability', current_attempt_id = NULL WHERE turn_id = $1 AND session_id = $2 AND state_kind = 'active' AND active_phase_kind = 'running' AND current_attempt_id = $3")
+    let rows = sqlx::query("UPDATE turn_lifecycle SET active_phase_kind = 'awaiting_credential_availability', current_attempt_id = NULL, active_tool_round_call_id = NULL WHERE turn_id = $1 AND session_id = $2 AND state_kind = 'active' AND active_phase_kind = 'running' AND current_attempt_id = $3")
         .bind(execution.turn().into_uuid()).bind(execution.session().into_uuid()).bind(ended.id().into_uuid())
         .execute(&mut *connection).await?.rows_affected();
     require_single(rows, "credential wait phase")?;
@@ -178,6 +178,10 @@ pub(super) async fn prepare_release(
         return Ok(Some(wait));
     }
     super::credential_pool::acquire_model_call_outbox_order_guard(connection).await?;
+    let policy =
+        credential_pool_records::load_policy(connection, waiting.try_get("pool_policy_id")?)
+            .await?;
+    super::credential_pool::lock_credential_pool_action_heads(connection, &policy).await?;
     sqlx::query("SAVEPOINT credential_wait_admission")
         .execute(&mut *connection)
         .await?;
@@ -220,13 +224,13 @@ pub(super) async fn prepare_release(
         &repository.credential_pools,
     )
     .await?;
+    sqlx::query("ROLLBACK TO SAVEPOINT credential_wait_admission")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("RELEASE SAVEPOINT credential_wait_admission")
+        .execute(&mut *connection)
+        .await?;
     if let Some(snapshot) = selected.wait {
-        sqlx::query("ROLLBACK TO SAVEPOINT credential_wait_admission")
-            .execute(&mut *connection)
-            .await?;
-        sqlx::query("RELEASE SAVEPOINT credential_wait_admission")
-            .execute(&mut *connection)
-            .await?;
         let policy = selected
             .policy
             .ok_or(ModelCallCorruption::Missing("credential wait policy"))?;
@@ -257,9 +261,7 @@ pub(super) async fn prepare_release(
             CredentialAvailabilityWaitCause::Exhausted,
         )));
     }
-    sqlx::query("RELEASE SAVEPOINT credential_wait_admission")
-        .execute(&mut *connection)
-        .await?;
+    consume_wait(connection, session_id, turn, wait, successor).await?;
     Ok(None)
 }
 
@@ -288,7 +290,6 @@ pub(super) async fn park_failed(
     policy: &CredentialPoolRuntimePolicy,
     observation: &signalbox_domain::CorrelatedModelCallTerminalObservation,
     successor_attempt: TurnAttemptId,
-    usage: ProviderReportedTokenUsage,
     cause: ProviderModelCallFailureCause,
     targets: &ModelTargetCatalog,
 ) -> Result<Option<CredentialAvailabilityWait>, ModelCallRepositoryError> {
@@ -327,7 +328,11 @@ pub(super) async fn park_failed(
         observation.call(),
     );
     super::persist_tool_round::persist_availability_successor(
-        connection, &successor, usage, cause, backoff,
+        connection,
+        &successor,
+        observation.usage(),
+        cause,
+        backoff,
     )
     .await?;
     let refreshed =
