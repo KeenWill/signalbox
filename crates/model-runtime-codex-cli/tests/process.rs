@@ -3059,10 +3059,26 @@ async fn cancellation_is_not_starved_by_continuously_ready_stdout() {
     let cancellation =
         cancel_after_wall_clock_record(temporary.path().join("fake-codex-busy-stdout"));
     let mut observations = Vec::new();
+    let (finished, completion) = std::sync::mpsc::channel::<()>();
+    let (expired, watchdog) = tokio::sync::oneshot::channel();
+    let watchdog_thread = std::thread::spawn(move || {
+        if matches!(
+            completion.recv_timeout(OFFLINE_HARNESS_TIMEOUT),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            let _ = expired.send(());
+        }
+    });
 
-    let report = runtime
-        .execute(prepared, &mut observations, cancellation)
-        .await;
+    let report = tokio::select! {
+        biased;
+        _ = watchdog => panic!("stdout-flood cancellation completes within the wall-clock bound"),
+        report = runtime.execute(prepared, &mut observations, cancellation) => report,
+    };
+    drop(finished);
+    watchdog_thread
+        .join()
+        .expect("the wall-clock watchdog exits");
 
     assert_eq!(
         boundary_loss(&report.evidence).cause,
