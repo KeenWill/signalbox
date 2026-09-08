@@ -3,7 +3,7 @@
 use std::{
     ffi::{OsStr, OsString},
     fs::File,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, IsTerminal, Read, Seek, SeekFrom, Write},
     os::unix::ffi::OsStrExt as _,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -213,11 +213,21 @@ pub async fn run_terminal(
             return ExitCode::from(2);
         }
     };
+    let stdin = std::io::stdin();
+    let input_limit = if stdin.is_terminal()
+        && matches!(
+            &parsed.command,
+            Command::Goal(GoalCommand::Resume { guidance: None, .. })
+        ) {
+        0
+    } else {
+        u64::MAX
+    };
     let Command::Chat { session_id } = parsed.command else {
         return run(
             arguments,
             socket_environment,
-            &mut std::io::stdin().lock(),
+            &mut stdin.lock().take(input_limit),
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
         )
@@ -496,7 +506,7 @@ async fn execute(
         Command::Credential(command) => {
             credential::credential(&mut client, &mut output, command).await
         }
-        Command::Goal(command) => goal(&mut client, &mut output, command).await,
+        Command::Goal(command) => goal(&mut client, &mut output, command, stdin).await,
         Command::Status => status(&mut client, &mut output).await,
         Command::List => list(&mut client, &mut output).await,
         Command::ReloadConfiguration { command_id } => {
