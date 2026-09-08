@@ -694,24 +694,30 @@ async fn runner_working_directory_changed_outbox_round_trips() -> Result<(), Box
         .expect("the runner detail exists");
     assert_eq!(item.projected_body_bytes, expected_bytes);
     assert_eq!(item.items[0].projected_body_bytes, expected_bytes);
+    assert_eq!(item.continuation, None);
     let region = timeline
         .read_region_details(session, address, address, None, limits)
         .await?
         .expect("the runner region exists");
     assert_eq!(region, item);
     let small_limits = signalbox_application::TimelineDetailLimits::new(1, 256)?;
-    for result in [
-        timeline
-            .read_item_details(session, address, None, small_limits)
-            .await,
-        timeline
-            .read_region_details(session, address, address, None, small_limits)
-            .await,
-    ] {
-        assert!(matches!(result, Err(signalbox_persistence::session_timeline::SessionTimelineRepositoryError::Corruption(
-            signalbox_persistence::session_timeline::SessionTimelineCorruption::DetailProjectionOverflow
-        ))));
-    }
+    let bounded_item = timeline
+        .read_item_details(session, address, None, small_limits)
+        .await?
+        .expect("a runner directory beyond the item budget remains continuable");
+    assert!(bounded_item.items.is_empty());
+    assert_eq!(bounded_item.projected_body_bytes, 0);
+    assert_eq!(
+        bounded_item.continuation,
+        Some(signalbox_application::TimelineDetailContinuation::MoreAt(
+            address
+        ))
+    );
+    let bounded_region = timeline
+        .read_region_details(session, address, address, None, small_limits)
+        .await?
+        .expect("a runner directory beyond the region budget remains continuable");
+    assert_eq!(bounded_region, bounded_item);
     drop(pool);
     Ok(())
 }

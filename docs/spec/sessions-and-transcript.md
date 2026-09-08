@@ -552,15 +552,17 @@ oversized text is a typed bounded excerpt carrying its total length and exact
 continuation, never a summary that appears complete. Detail bodies carry typed
 session and turn lifecycle facts, model settings and provider responses, tool
 arguments and execution evidence, approval decisions, goals, compaction, runner
-placement, and delegation; a retired turn remains a closed event fact. Creation
-bodies retain the cause and its dispatch, program-run, or spawning-request
-identity. User overrides retain the command and denied-request identities.
-Repeated tool and goal members continue by member index. Tool-transition members
-freeze attempt state and payloads when the transition commits. Transitions
-without frozen members project the original stored tool and goal references. An
-unknown durable event or state is corruption, never a generic body or guessed
-prose. Expanding a browser timeline event renders its typed body; following a
-continuation replaces the current detail page.
+placement, and delegation; a retired turn remains a closed event fact. A runner
+directory that exceeds the remaining detail byte budget leaves its item
+unreturned and continues at that item's address. Creation bodies retain the
+cause and its dispatch, program-run, or spawning-request identity. User
+overrides retain the command and denied-request identities. Repeated tool and
+goal members continue by member index. Tool-transition members freeze attempt
+state and payloads when the transition commits. Transitions without frozen
+members project the original stored tool and goal references. An unknown durable
+event or state is corruption, never a generic body or guessed prose. Expanding a
+browser timeline event renders its typed body; following a continuation replaces
+the current detail page.
 
 A search result's address is directly usable with the timeline around read even
 when the matching region is not loaded, and each returned source is correlated
