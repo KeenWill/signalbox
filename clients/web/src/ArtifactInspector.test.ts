@@ -1,8 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import { inspectedArtifact, nextResolutionSequence } from './ArtifactInspector'
-import { imageArtifact, jpegDescriptor } from './features/artifacts/artifactScenario'
+import {
+  fallbackDescriptor,
+  imageArtifact,
+  jpegDescriptor,
+} from './features/artifacts/artifactScenario'
 
 describe('artifact inspector resolution identity', () => {
+  it('keeps an image declaration without admitted image views in the blob renderer', () => {
+    const descriptor = { ...fallbackDescriptor, declared_media_type: 'image/svg+xml' }
+    expect(inspectedArtifact(descriptor, nextResolutionSequence()).kind).toBe('blob')
+  })
+
+  it('renders admitted image views even when the declaration is not an image', () => {
+    const descriptor = { ...imageArtifact, declared_media_type: 'application/octet-stream' }
+    expect(inspectedArtifact(descriptor, nextResolutionSequence()).kind).toBe('image')
+  })
   it('never reissues a sequence, so a remount cannot restart the count', () => {
     const first = nextResolutionSequence()
     // A route detour unmounts the inspector and discards its component state; the allocator does
