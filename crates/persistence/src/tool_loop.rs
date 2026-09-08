@@ -4194,14 +4194,14 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
         return Ok(None);
     };
     let kind = crate::mapping::delegation_outcome_kind_from_str(&row.outcome_kind)
-        .filter(|kind| {
-            matches!(
-                kind,
-                DelegationOutcomeKind::ResultReturned
-                    | DelegationOutcomeKind::ChildFailed
-                    | DelegationOutcomeKind::ChildStopped
-                    | DelegationOutcomeKind::ChildCancelled
-            )
+        .filter(|kind| match kind {
+            DelegationOutcomeKind::ResultReturned
+            | DelegationOutcomeKind::ChildFailed
+            | DelegationOutcomeKind::ChildStopped
+            | DelegationOutcomeKind::ChildCancelled => true,
+            DelegationOutcomeKind::AlreadyTerminal | DelegationOutcomeKind::ContinueRunning => {
+                false
+            }
         })
         .ok_or_else(|| ToolLoopCorruption::Unsupported {
             field: "delegation outcome",
