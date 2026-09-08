@@ -1,5 +1,8 @@
-import { afterEach, expect, it, vi } from 'vitest'
-import type { WebTimelineDetailContinuation } from './generated/web-contract.mjs'
+import { afterEach, expect, expectTypeOf, it, vi } from 'vitest'
+import type {
+  WebSessionTimelineDetailPage,
+  WebTimelineDetailContinuation,
+} from './generated/web-contract.mjs'
 import bootstrapFixture from './generated/web-contract-bootstrap.json' with { type: 'json' }
 import {
   followSession,
@@ -502,7 +505,11 @@ it('loads messages beyond metadata-only detail pages within the scan budget', as
     limits,
     null,
   )
-  expect(result.page).toEqual(message)
+  expect(result.page).toEqual({
+    items: message.items,
+    projected_body_bytes: message.projected_body_bytes,
+    continuation: message.continuation,
+  })
   expect(fetch).toHaveBeenCalledTimes(2)
   expect(fetch.mock.calls[1]?.[0]).toContain('cursor_address=5')
 })
@@ -538,11 +545,16 @@ it.each([
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(held.page.items).toEqual([])
     expect(held.page.continuation).toEqual(continuation)
+    expectTypeOf(held.page).not.toExtend<WebSessionTimelineDetailPage>()
     const message = inputPage(1)
     message.items[0]!.address.event_sequence = next
     fetch.mockResolvedValueOnce(Response.json(message))
     const loaded = await readExtendedSessionTranscript(window, continuation, limits, held)
-    expect(loaded.page).toEqual(message)
+    expect(loaded.page).toEqual({
+      items: message.items,
+      projected_body_bytes: message.projected_body_bytes,
+      continuation: message.continuation,
+    })
     expect(fetch).toHaveBeenCalledTimes(2)
     expect(fetch.mock.calls[1]?.[0]).toContain(`cursor_address=${next}`)
   },
