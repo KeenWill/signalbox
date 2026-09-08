@@ -755,6 +755,27 @@ test('keeps opened workspace identities in the URL and restores them on reload',
   await expect(page.getByText(`Session workspace loaded for ${secondSessionId}.`)).toBeVisible()
 })
 
+test('unwinds a workspace and its catalog inspector through their existing history entries', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: 'Sessions' }).click()
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+  await page.getByRole('button', { name: 'Open timeline workspace' }).click()
+  await expect(page).toHaveURL(/workspace=true/)
+  await page.getByRole('main').focus()
+  await page.keyboard.press('Escape')
+  await expect(
+    page.getByRole('dialog', { name: firstPage.summaries[0].title_summary }),
+  ).toBeVisible()
+  await page.getByRole('button', { name: 'Close session inspector' }).focus()
+  await page.keyboard.press('Escape')
+  await expect(page).toHaveURL(/\/sessions$/)
+  await page.goBack()
+  await expect(page).toHaveURL(/\/attention$/)
+})
+
 test('classifies a catalog connection failure as transport unavailability', async ({ page }) => {
   await useCatalogFixture(page)
   await page.route('**/api/sessions?**', (route) => route.abort())

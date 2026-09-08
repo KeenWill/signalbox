@@ -659,7 +659,6 @@ export function ProductApp({
         state: {
           catalogSessionOpenedHere:
             next.session !== undefined &&
-            !next.workspace &&
             (catalogSessionOpenedHere || (mode === 'push' && previousSession === undefined)),
         },
       })
