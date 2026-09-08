@@ -114,7 +114,7 @@ pub enum RunnerToolPermissionOverride {
 
 ```rust
 pub struct RunnerToolPermissionOverrides(/* private */);
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl RunnerToolPermissionOverrides {
     pub fn try_new(
         overrides: impl collect::IntoIterator<Item = (ToolName, RunnerToolPermissionOverride)>,
@@ -868,7 +868,7 @@ pub struct SessionRunnerPlacementRequest {
     pub sandbox: RunnerSandboxProfile,
     pub permission_overrides: RunnerToolPermissionOverrides,
 }
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 ```
 
 ## RunnerCredentialGrantLineage
