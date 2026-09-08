@@ -71,10 +71,22 @@ impl PostgresModelCallRepository {
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         session: SessionId,
+        observation_frontier: Option<ContextFrontierId>,
     ) -> Result<(), ModelCallRepositoryError> {
         if let Some(runner) = &self.runner_recovery {
+            let boundary = match observation_frontier {
+                Some(frontier) => Some(
+                    super::live_turn::load_call_snapshot(transaction.as_mut(), session, frontier)
+                        .await?
+                        .reconstitute()
+                        .ok_or(ModelCallCorruption::Inconsistent(
+                            "runner replacement observation snapshot",
+                        ))?,
+                ),
+                None => None,
+            };
             runner
-                .settle_replacement_at_boundary(transaction, session, None)
+                .settle_replacement_at_boundary(transaction, session, boundary.as_ref())
                 .await
                 .map_err(|error| match error {
                     crate::runner_protocol::RunnerProtocolStoreError::Database(source) => {

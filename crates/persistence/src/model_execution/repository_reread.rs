@@ -81,7 +81,7 @@ impl PostgresModelCallRepository {
         .await;
         let result = match result {
             Ok(outcome) => {
-                self.settle_runner_replacement_after_observation(&mut transaction, session)
+                self.settle_runner_replacement_after_observation(&mut transaction, session, None)
                     .await?;
                 Ok(outcome)
             }
@@ -647,7 +647,7 @@ impl PostgresModelCallRepository {
         .await;
         let result = match result {
             Ok(outcome) => {
-                self.settle_runner_replacement_after_observation(&mut transaction, session)
+                self.settle_runner_replacement_after_observation(&mut transaction, session, None)
                     .await?;
                 Ok(outcome)
             }

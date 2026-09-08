@@ -809,8 +809,18 @@ impl PostgresModelCallRepository {
         .await;
         let result = match result {
             Ok(outcome) => {
-                self.settle_runner_replacement_after_observation(&mut transaction, session)
-                    .await?;
+                let observation_frontier = match &outcome {
+                    Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(outcome)) => {
+                        Some(outcome.successor().predecessor_call().frontier().snapshot())
+                    }
+                    _ => None,
+                };
+                self.settle_runner_replacement_after_observation(
+                    &mut transaction,
+                    session,
+                    observation_frontier,
+                )
+                .await?;
                 Ok(outcome)
             }
             Err(error) => Err(error),

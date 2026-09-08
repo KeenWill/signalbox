@@ -1047,7 +1047,7 @@ pub(super) async fn load_tool_result_correlations(
         .collect())
 }
 
-/// Restores the frontier an availability predecessor was prepared against.
+/// Restores an availability predecessor frontier and its observation-boundary relocation.
 ///
 /// A successor attempt owns no call yet, and its predecessor is terminal, so
 /// the live call set omits it and reconstitution would fall back to the turn's
@@ -1056,8 +1056,8 @@ pub(super) async fn load_tool_result_correlations(
 /// predecessor that consumed steering would reconstitute without the durable
 /// consumed-steering rows the frontier holds.
 ///
-/// A predecessor prepared against the turn's own starting frontier adds
-/// nothing, so that case keeps the ordinary starting-snapshot path.
+/// When neither the predecessor nor a relocation extends the starting frontier,
+/// the ordinary starting-snapshot path applies.
 async fn load_availability_predecessor_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1065,10 +1065,20 @@ async fn load_availability_predecessor_snapshot(
     starting_frontier: signalbox_domain::ContextFrontierId,
 ) -> Result<Option<ResolvedContextFrontierReconstitutionInput>, ModelCallRepositoryError> {
     let frontier: Option<Uuid> = sqlx::query_scalar(
-        "SELECT predecessor.context_frontier_id
+        "SELECT COALESCE(relocation.context_frontier_id, predecessor.context_frontier_id)
            FROM credential_pool_availability_successor AS successor
            JOIN model_call AS predecessor
              ON predecessor.model_call_id = successor.predecessor_model_call_id
+           LEFT JOIN LATERAL (
+                SELECT boundary.context_frontier_id
+                  FROM runner_placement_boundary AS boundary
+                  JOIN context_frontier AS frontier
+                    ON frontier.owning_session_id = boundary.session_id
+                   AND frontier.context_frontier_id = boundary.context_frontier_id
+                 WHERE boundary.session_id = predecessor.session_id
+                   AND frontier.prefix_context_frontier_id = predecessor.context_frontier_id
+                 ORDER BY boundary.placement_revision DESC LIMIT 1
+           ) AS relocation ON true
           WHERE successor.successor_turn_attempt_id = $1",
     )
     .bind(attempt.into_uuid())
