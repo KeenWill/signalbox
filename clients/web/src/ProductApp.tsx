@@ -659,10 +659,10 @@ export function ProductApp({
     () =>
       bootstrap.data === undefined
         ? null
-        : HttpImportApi.withAdmittedBootstrap(bootstrap.data, async () => {
+        : HttpImportApi.withAdmittedBootstrap(bootstrap.data, bootstrap.dataUpdatedAt, async () => {
             await revalidateBootstrap({ throwOnError: true })
           }),
-    [bootstrap.data, revalidateBootstrap],
+    [bootstrap.data, bootstrap.dataUpdatedAt, revalidateBootstrap],
   )
   const context = useMemo<ProductCommandContext>(() => {
     // `productCommandRegistry` already carries the `imports.*` family behind `available()` gates;
