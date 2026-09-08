@@ -3581,6 +3581,12 @@ function assertTimelineDetailPage(value) {{
         }}
         const tool = item.body.tools[0];
         const goal = item.body.goal_events[0];
+        if (goal !== undefined && !(
+          goal.type === "achieved" ||
+          (goal.type === "blocked" && goal.reason !== "execution_failure")
+        )) {{
+          fail(`${{path}}.body.goal_events[0]`, "a tool-produced blocked or achieved goal event");
+        }}
         const memberIndex = item.body.projected_member_index;
         if ((tool !== undefined || goal !== undefined) && (memberIndex === undefined || memberIndex === null)) {{
           fail(
@@ -3761,6 +3767,12 @@ function assertTimelineDetailPage(value) {{
       case "goal_event":
         if (item.kind !== "goal_changed") {{
           fail(`${{path}}.kind`, "goal_changed for a goal_event body");
+        }}
+        if (item.body.event.type === "session_closed" && (
+          item.body.event.outcome === "achieved_verified" ||
+          item.body.event.outcome === "achieved_declared"
+        )) {{
+          fail(`${{path}}.body.event.outcome`, "a session closure outcome");
         }}
         if (item.body.event.text !== undefined && item.body.event.text !== null) {{
           continuation = assertTimelineExcerpt(
