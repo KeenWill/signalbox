@@ -836,3 +836,26 @@ test('captures the pinned narrow responsive shell', async ({ page }, testInfo) =
   await expect.soft(page).toHaveScreenshot('responsive-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
+
+test('retains an ambiguous import continuation and accepts only its exact replay', async ({
+  page,
+}) => {
+  await page.goto('/scenario/imports?continuation=ambiguous')
+  const resume = page.getByRole('button', { name: 'Resume', exact: true })
+  await expect(resume).toBeEnabled()
+  await resume.click()
+  const retry = page.getByRole('button', { name: 'Retry exact command' })
+  await expect(retry).toBeVisible()
+  await expect(resume).toBeDisabled()
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  await expect(entries).toHaveAttribute('aria-disabled', 'true')
+  const retained = await page.evaluate(() => JSON.stringify(sessionStorage))
+  await entries.press('ArrowDown')
+  expect(await page.evaluate(() => JSON.stringify(sessionStorage))).toBe(retained)
+  await retry.click()
+  await expect(
+    page.getByText(`Session created: ${importsFixture.continuedSessionId}`, { exact: true }),
+  ).toBeVisible()
+  await expect(retry).toBeHidden()
+  await expect(entries).toHaveAttribute('aria-disabled', 'false')
+})
