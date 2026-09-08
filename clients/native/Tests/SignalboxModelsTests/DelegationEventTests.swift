@@ -8,12 +8,8 @@ final class DelegationEventTests: XCTestCase {
   private let request = "33333333-3333-4333-8333-333333333333"
 
   func testDelegationOutcomeSpellingsPreserveEveryVariant() throws {
-    let cases: [(String, SignalboxDelegationOutcome)] = [
-      ("returned", .returned), ("failed", .failed), ("stopped", .stopped),
-      ("cancelled", .cancelled), ("continue_running", .continueRunning),
-      ("already_terminal", .alreadyTerminal),
-    ]
-    for (spelling, expected) in cases {
+    for expected in SignalboxDelegationOutcome.allCases {
+      let spelling = expectedSpelling(expected)
       let data = try JSONEncoder().encode(spelling)
       let decoded = try SignalboxJSONCoding.decoder().decode(SignalboxDelegationOutcome.self, from: data)
       XCTAssertEqual(decoded, expected, spelling)
@@ -22,16 +18,34 @@ final class DelegationEventTests: XCTestCase {
   }
 
   func testDelegationReasonSpellingsPreserveEveryVariant() throws {
-    let cases: [(String, SignalboxDelegationReason)] = [
-      ("child_completed", .childCompleted), ("child_execution_failed", .childExecutionFailed),
-      ("child_result_unavailable", .childResultUnavailable), ("child_cancelled", .childCancelled),
-      ("parent_stopped", .parentStopped), ("parent_cancelled", .parentCancelled),
-    ]
-    for (spelling, expected) in cases {
+    for expected in SignalboxDelegationReason.allCases {
+      let spelling = expectedSpelling(expected)
       let data = try JSONEncoder().encode(spelling)
       let decoded = try SignalboxJSONCoding.decoder().decode(SignalboxDelegationReason.self, from: data)
       XCTAssertEqual(decoded, expected, spelling)
       XCTAssertEqual(decoded.rawValue, spelling)
+    }
+  }
+
+  private func expectedSpelling(_ value: SignalboxDelegationOutcome) -> String {
+    switch value {
+    case .returned: "returned"
+    case .failed: "failed"
+    case .stopped: "stopped"
+    case .cancelled: "cancelled"
+    case .continueRunning: "continue_running"
+    case .alreadyTerminal: "already_terminal"
+    }
+  }
+
+  private func expectedSpelling(_ value: SignalboxDelegationReason) -> String {
+    switch value {
+    case .childCompleted: "child_completed"
+    case .childExecutionFailed: "child_execution_failed"
+    case .childResultUnavailable: "child_result_unavailable"
+    case .childCancelled: "child_cancelled"
+    case .parentStopped: "parent_stopped"
+    case .parentCancelled: "parent_cancelled"
     }
   }
 

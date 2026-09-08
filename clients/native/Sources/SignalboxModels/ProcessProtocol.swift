@@ -3403,7 +3403,7 @@ public enum SignalboxDelegationWaitMode: String, Decodable, Equatable, Sendable 
   case background
 }
 
-public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable {
+public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable, CaseIterable {
   case returned
   case failed
   case stopped
@@ -3412,7 +3412,7 @@ public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable {
   case alreadyTerminal = "already_terminal"
 }
 
-public enum SignalboxDelegationReason: String, Decodable, Equatable, Sendable {
+public enum SignalboxDelegationReason: String, Decodable, Equatable, Sendable, CaseIterable {
   case childCompleted = "child_completed"
   case childExecutionFailed = "child_execution_failed"
   case childResultUnavailable = "child_result_unavailable"
