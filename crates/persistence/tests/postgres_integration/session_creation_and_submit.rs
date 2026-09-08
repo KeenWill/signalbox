@@ -5977,3 +5977,112 @@ async fn pinned_target_without_a_tool_batch_rolls_back_attachment_submission()
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn submit_replay_requires_the_actor_principal_pair() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{Actor, CommandPrincipal, ParentTerminationKind, ProgramRunId};
+    let (_container, pool, _) = migrated_postgres().await?;
+    let journal =
+        signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone());
+    let run = ProgramRunId::from_uuid(next_test_submit_uuid());
+    let registrations =
+        signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
+            pool.clone(),
+        );
+    let registration = registrations
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(next_test_submit_uuid()),
+            signalbox_domain::program_registration::ProgramRegistrationRequest {
+                name: run.into_uuid().to_string(),
+                revision: "fixture-revision".into(),
+                source: Vec::new(),
+                artifact: String::new(),
+                grants: signalbox_domain::program_registration::ProgramGrants::new([
+                    signalbox_domain::ProgramCapability::Session,
+                ]),
+            },
+        )
+        .await?;
+    registrations.start_run(run, registration.id).await?;
+    let capability = signalbox_persistence::program_journal::ProgramSessionHost::new(journal)
+        .session_capability(run)
+        .await?
+        .expect("the run is retained");
+    let session = SessionId::from_uuid(next_test_submit_uuid());
+    let content = UserContent::try_text(String::from("replay principal validation"))
+        .expect("fixture content is admitted");
+    let configuration = input_choices(1, ModelSelectionOverride::UseSessionDefault);
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn { configuration };
+    let repository = SubmitInputRepository::new(pool.clone());
+    for command in [
+        SubmitInput::new(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            session,
+            content.clone(),
+            delivery,
+        ),
+        SubmitInput::new_core_continuation(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            session,
+            content.clone(),
+            configuration,
+        ),
+        SubmitInput::new_program(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            session,
+            content,
+            delivery,
+            capability.reference(),
+        ),
+    ] {
+        let principal = match command.actor() {
+            Actor::Program { .. } => Some(CommandPrincipal::Core),
+            _ => None,
+        };
+        let recorded = repository
+            .handle(
+                command.clone(),
+                AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                None,
+            )
+            .await?;
+        assert!(matches!(recorded, SubmitInputHandlingOutcome::Recorded(_)));
+        let error = repository
+            .handle_with_candidates_alias_resolver_as(
+                command.clone(),
+                principal,
+                ParentTerminationKind::Cancelled,
+                AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                None,
+                CancelledModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                ),
+                |_| panic!("replay cannot allocate a turn"),
+                |_| panic!("replay cannot cancel a tool"),
+                || panic!("replay cannot settle a closure"),
+                || panic!("replay cannot settle a closure"),
+                |_| None,
+            )
+            .await
+            .expect_err("a recorded receipt cannot bypass the actor/principal check");
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+                "actor and envelope principal"
+            ))
+        ));
+        assert_eq!(
+            repository
+                .handle(
+                    command,
+                    AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                    None,
+                )
+                .await?,
+            recorded
+        );
+    }
+    Ok(())
+}

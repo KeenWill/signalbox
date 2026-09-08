@@ -73,6 +73,7 @@ where
     NextClosureDecision: FnMut() -> DurableCommandId + Send,
     NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
 {
+    let issuer = admitted_issuer(command.actor(), principal)?;
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
         Some(CommandKind::SubmitInput) => {
@@ -127,7 +128,6 @@ where
         .into());
     }
 
-    let issuer = admitted_issuer(command.actor(), principal)?;
     let claimed = sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at,
@@ -439,7 +439,10 @@ where
                     | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. }
                     | signalbox_domain::ActiveTurnPhase::AwaitingChild { .. }
                     | signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-                    | signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. } => None,
+                    | signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+                    | signalbox_domain::ActiveTurnPhase::AwaitingCredentialAvailability {
+                        ..
+                    } => None,
                 });
             if let Some(IssuedOperationRef::ToolAttempt(recovery_attempt)) = recovery_operation {
                 let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
@@ -972,6 +975,8 @@ where
                 .await?;
                 Some(outcome)
             } else {
+                crate::model_execution::credential_wait::release_for_stop(connection, interrupt)
+                    .await?;
                 let execution =
                     require_live_execution_for_restart(connection, interrupt.session()).await?;
                 let identities = attach_interrupt_reclassification_candidates(

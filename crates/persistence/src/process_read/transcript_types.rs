@@ -138,6 +138,11 @@ pub enum ProcessModelCallRecoveryPrecondition {
 /// Authoritative lifecycle state for one projected turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTurnState {
+    /// Credential admission yielded its call-free attempt and retains the active slot.
+    ActiveAwaitingCredentialAvailability {
+        /// Ended wait attempt, its frontier and closed cause.
+        wait: signalbox_domain::CredentialAvailabilityWait,
+    },
     /// Frozen pre-call exhaustion evidence and terminal correlations.
     FailedCredentialPoolExhausted(Box<crate::credential_pool_exhaustion::CredentialPoolExhaustion>),
     /// Accepted work has not activated.

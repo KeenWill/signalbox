@@ -158,7 +158,7 @@ where
         )
         .await;
     };
-    run_submit_input(
+    Box::pin(run_submit_input(
         writer,
         version,
         request_id,
@@ -170,7 +170,7 @@ where
         eligibility_nudge,
         tool_dispatch_gate,
         model_configuration,
-    )
+    ))
     .await
 }
 

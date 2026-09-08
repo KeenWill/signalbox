@@ -780,6 +780,7 @@ pub fn instruction_finding_kind_from_str(value: &str) -> Option<InstructionDisco
 /// Closed active-turn phase discriminators stored by PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ActiveTurnPhaseStorageKind {
+    AwaitingCredentialAvailability,
     Running,
     AwaitingToolApproval,
     AwaitingChild,
@@ -791,6 +792,9 @@ pub(crate) enum ActiveTurnPhaseStorageKind {
 #[cfg(test)]
 pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) -> &'static str {
     match value {
+        ActiveTurnPhaseStorageKind::AwaitingCredentialAvailability => {
+            "awaiting_credential_availability"
+        }
         ActiveTurnPhaseStorageKind::Running => "running",
         ActiveTurnPhaseStorageKind::AwaitingToolApproval => "awaiting_tool_approval",
         ActiveTurnPhaseStorageKind::AwaitingChild => "awaiting_child",
@@ -802,6 +806,9 @@ pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) 
 
 pub(crate) fn active_turn_phase_from_str(value: &str) -> Option<ActiveTurnPhaseStorageKind> {
     match value {
+        "awaiting_credential_availability" => {
+            Some(ActiveTurnPhaseStorageKind::AwaitingCredentialAvailability)
+        }
         "running" => Some(ActiveTurnPhaseStorageKind::Running),
         "awaiting_tool_approval" => Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval),
         "awaiting_child" => Some(ActiveTurnPhaseStorageKind::AwaitingChild),

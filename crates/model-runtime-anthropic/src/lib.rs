@@ -36,6 +36,8 @@ mod runtime;
 mod status;
 mod stream;
 mod translate;
+
+pub use translate::serialized_message_bytes;
 mod wire;
 
 pub use config::AnthropicConfig;

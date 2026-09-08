@@ -3,6 +3,7 @@ import { AlertTriangle, ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 import type { WebContractBootstrap, WebSearchPage } from './generated/web-contract.mjs'
 import {
+  boundedSearchText,
   ProductRequestError,
   type ProductSearchState,
   ProductTransportError,
@@ -15,20 +16,6 @@ const displayClass = (value: string) => value.replaceAll('_', ' ')
 const MAX_U64 = 18_446_744_073_709_551_615n
 const MAX_I64 = 9_223_372_036_854_775_807n
 const MAX_SESSION_DRAFT_LENGTH = 45
-
-const boundedUtf8Prefix = (value: string, maximumBytes: number) => {
-  let bytes = 0
-  let prefix = ''
-  for (const character of value) {
-    const codePoint = character.codePointAt(0) ?? 0
-    const characterBytes =
-      codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4
-    if (bytes + characterBytes > maximumBytes) break
-    bytes += characterBytes
-    prefix += character
-  }
-  return prefix
-}
 
 const validUuid = (value: string) => {
   const simple = /^[0-9a-f]{32}$/i
@@ -83,6 +70,8 @@ export function SearchSurface({
 }) {
   const [draftQuery, setDraftQuery] = useState(state.q ?? '')
   const [draftSession, setDraftSession] = useState(state.session ?? '')
+  const [queryOverflow, setQueryOverflow] = useState(false)
+  const [sessionOverflow, setSessionOverflow] = useState(false)
   const [draftIsInvalid, setDraftIsInvalid] = useState(false)
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
   const errorHeadingRef = useRef<HTMLHeadingElement>(null)
@@ -94,6 +83,7 @@ export function SearchSurface({
       ? { address: state.afterAddress, projectionId: state.afterProjection }
       : undefined
   const routeStateRef = useRef({
+    queryParameterIsValid: state.queryParameterIsValid,
     q: state.q,
     session: state.session,
     sessionParameterIsValid: state.sessionParameterIsValid,
@@ -101,23 +91,32 @@ export function SearchSurface({
     afterProjection: state.afterProjection,
     cursorParametersAreValid: state.cursorParametersAreValid,
   })
-  useEffect(() => setDraftQuery(state.q ?? ''), [state.q])
-  useEffect(() => setDraftSession(state.session ?? ''), [state.session])
+  useEffect(() => {
+    setDraftQuery(state.q ?? '')
+    setQueryOverflow(state.q !== undefined && state.queryParameterIsValid === false)
+  }, [state.q, state.queryParameterIsValid])
+  useEffect(() => {
+    setDraftSession(state.session ?? '')
+    setSessionOverflow(state.session !== undefined && state.sessionParameterIsValid === false)
+  }, [state.session, state.sessionParameterIsValid])
   useEffect(() => {
     const previous = routeStateRef.current
     const routeChanged =
+      previous.queryParameterIsValid !== state.queryParameterIsValid ||
       previous.q !== state.q ||
       previous.session !== state.session ||
       previous.sessionParameterIsValid !== state.sessionParameterIsValid ||
       previous.afterAddress !== state.afterAddress ||
       previous.afterProjection !== state.afterProjection ||
       previous.cursorParametersAreValid !== state.cursorParametersAreValid
+    if (routeChanged) setDraftIsInvalid(false)
     if (routeChanged && submittedRouteChangeRef.current) {
       submittedRouteChangeRef.current = false
     } else if (routeChanged) {
-      restoreResultsFocusRef.current = true
+      restoreResultsFocusRef.current = !document.activeElement?.closest('.search-form')
     }
     routeStateRef.current = {
+      queryParameterIsValid: state.queryParameterIsValid,
       q: state.q,
       session: state.session,
       sessionParameterIsValid: state.sessionParameterIsValid,
@@ -130,6 +129,7 @@ export function SearchSurface({
     state.afterProjection,
     state.cursorParametersAreValid,
     state.q,
+    state.queryParameterIsValid,
     state.session,
     state.sessionParameterIsValid,
   ])
@@ -147,6 +147,7 @@ export function SearchSurface({
         ? validCursor({ address: state.afterAddress, projectionId: state.afterProjection })
         : false)
   const requestIsValid =
+    state.queryParameterIsValid !== false &&
     queryBytes > 0 &&
     queryBytes <= queryLimit &&
     !queryText.includes('\0') &&
@@ -172,11 +173,18 @@ export function SearchSurface({
       requestIsValid,
     gcTime: 0,
   })
-  const searchData = requestIsValid ? results.data : undefined
+  const searchData = requestIsValid && !results.isError ? results.data : undefined
   const searchIsFetching = requestIsValid && results.isFetching
-  const routeValidationIsVisible = bootstrap !== undefined && Boolean(queryText) && !requestIsValid
+  const routeValidationIsVisible =
+    bootstrap !== undefined &&
+    (Boolean(queryText) || state.queryParameterIsValid === false) &&
+    !requestIsValid
   useEffect(() => {
     if (!restoreResultsFocusRef.current) return
+    if (document.activeElement?.closest('.search-form')) {
+      restoreResultsFocusRef.current = false
+      return
+    }
     if (searchData !== undefined) {
       restoreResultsFocusRef.current = false
       resultsHeadingRef.current?.focus()
@@ -197,6 +205,8 @@ export function SearchSurface({
     const qBytes = new TextEncoder().encode(q).length
     const submittedSession = session || undefined
     const draftParametersAreValid =
+      !queryOverflow &&
+      !sessionOverflow &&
       qBytes > 0 &&
       qBytes <= queryLimit &&
       !q.includes('\0') &&
@@ -209,6 +219,7 @@ export function SearchSurface({
     restoreResultsFocusRef.current = false
     if (
       q !== queryText ||
+      state.queryParameterIsValid === false ||
       submittedSession !== state.session ||
       !sessionIsValid ||
       activeAfter !== undefined ||
@@ -217,6 +228,7 @@ export function SearchSurface({
       submittedRouteChangeRef.current = true
       onStateChange({
         q,
+        queryParameterIsValid: undefined,
         session: submittedSession,
         sessionParameterIsValid: undefined,
         afterAddress: undefined,
@@ -236,10 +248,13 @@ export function SearchSurface({
           <span className="search-input">
             <Search aria-hidden="true" />
             <input
+              id="product-search-input"
               name="q"
               value={draftQuery}
               onChange={(event) => {
-                setDraftQuery(boundedUtf8Prefix(event.currentTarget.value, queryLimit))
+                const bounded = boundedSearchText(event.currentTarget.value, queryLimit)
+                setDraftQuery(bounded.text)
+                setQueryOverflow(bounded.overflow)
                 setDraftIsInvalid(false)
               }}
               placeholder="Natural language terms"
@@ -255,10 +270,10 @@ export function SearchSurface({
             name="session"
             value={draftSession}
             onChange={(event) => {
+              setSessionOverflow(event.currentTarget.value.length > MAX_SESSION_DRAFT_LENGTH)
               setDraftSession(event.currentTarget.value.slice(0, MAX_SESSION_DRAFT_LENGTH))
               setDraftIsInvalid(false)
             }}
-            maxLength={MAX_SESSION_DRAFT_LENGTH}
             placeholder="Session UUID"
           />
         </label>
@@ -266,7 +281,7 @@ export function SearchSurface({
           Search
         </button>
       </form>
-      {draftIsInvalid && (
+      {(draftIsInvalid || queryOverflow || sessionOverflow) && !routeValidationIsVisible && (
         <p className="search-notice" role="alert">
           Search parameters are malformed or outside the contract bounds.
         </p>
@@ -277,7 +292,7 @@ export function SearchSurface({
           {queryBytes} of {queryLimit} allowed UTF-8 bytes.
         </p>
       )}
-      {!queryText && (
+      {!queryText && state.queryParameterIsValid !== false && (
         <section className="search-zero">
           <span className="eyebrow">Bounded lexical index</span>
           <h2>Search durable text without loading transcripts</h2>

@@ -2938,6 +2938,10 @@ public struct SignalboxTranscriptTurn: Decodable, Equatable, Sendable {
   }
 }
 
+public enum SignalboxCredentialAvailabilityWaitCause: String, Decodable, Equatable, Sendable {
+  case exhausted
+}
+
 public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
   case queued(acceptedInputID: SignalboxCanonicalUUID, content: SignalboxUserInputContent)
   case queuedDelegated(
@@ -2970,6 +2974,8 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
     recoveryToolAttemptID: SignalboxCanonicalUUID,
     automaticReconciliationAttempts: SignalboxCanonicalUInt64,
     operatorActionRequired: Bool)
+  case activeAwaitingCredentialAvailability(
+    waitAttemptID: SignalboxCanonicalUUID, cause: SignalboxCredentialAvailabilityWaitCause)
   case failedCredentialPoolExhausted(SignalboxCredentialPoolExhaustion)
   case failed(
     terminalFrontierID: SignalboxCanonicalUUID,
@@ -3124,6 +3130,10 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
             "automatic_reconciliation_attempts"),
           operatorActionRequired: try decoder.decode("operator_action_required")
         )
+      case "active_awaiting_credential_availability":
+        try tagged.rejectUnadmittedFields(["type", "wait_attempt_id", "cause"], decoder: decoder)
+        self = .activeAwaitingCredentialAvailability(
+          waitAttemptID: try decoder.decode("wait_attempt_id"), cause: try decoder.decode("cause"))
       case "failed_credential_pool_exhausted":
         try tagged.rejectUnadmittedFields(["type", "terminal_frontier_id", "terminal_attempt_id", "failure_entry_id", "pool_policy_id", "policy_members", "members"], decoder: decoder)
         self = .failedCredentialPoolExhausted(try SignalboxCredentialPoolExhaustion(from: decoder))

@@ -214,9 +214,12 @@ impl RunnerProtocolStore {
             return Ok((true, None));
         };
         let command = DurableCommandId::from_uuid(command);
-        let Some((result, relocation)) = self
-            .install_staged_replacement_in(transaction, command, session, boundary)
-            .await?
+        // Construct the installation future outside the shared boundary poll frame.
+        let Some((result, relocation)) = Box::pin(async {
+            self.install_staged_replacement_in(transaction, command, session, boundary)
+                .await
+        })
+        .await?
         else {
             return Ok((false, None));
         };

@@ -1384,20 +1384,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_pool_policy_read_holds_snapshot_capacity() -> Result<(), Box<dyn Error>> {
+    async fn credential_pool_policy_read_proceeds_while_follow_holds_reader_capacity() -> Result<(), Box<dyn Error>> {
         let budget = Arc::new(Semaphore::new(1));
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let follow = ClientRequest::FollowSession { session_id: fixture_identity(1) };
+        let follow_permit = admit_snapshot_reader(&follow, Arc::clone(&budget), &mut shutdown_receiver)
+            .await?
+            .flatten()
+            .ok_or_else(|| io::Error::other("the follow must hold snapshot capacity"))?;
         let request = ClientRequest::ReadCredentialPoolPolicy {
             session_id: fixture_identity(1),
             turn_id: fixture_identity(2),
             pool_policy_id: fixture_identity(3),
         };
-        let permit = admit_snapshot_reader(&request, Arc::clone(&budget), &mut shutdown_receiver)
-            .await?
-            .ok_or_else(|| io::Error::other("the running reader must be admitted"))?
-            .ok_or_else(|| io::Error::other("the policy read must reserve its pooled connection"))?;
+        let permit = timeout(Duration::from_secs(1), admit_snapshot_reader(&request, Arc::clone(&budget), &mut shutdown_receiver))
+            .await??
+            .ok_or_else(|| io::Error::other("the policy read must proceed while follow holds capacity"))?;
+        assert!(permit.is_none());
         assert_eq!(budget.available_permits(), 0);
-        drop(permit);
+        drop(follow_permit);
         assert_eq!(budget.available_permits(), 1);
         Ok(())
     }

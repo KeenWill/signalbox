@@ -503,12 +503,13 @@ resumes durable history above its cursor without reloading the historical
 transcript. The browser permits one immediate resynchronization, then waits one
 second before each subsequent resynchronization; leaving the session cancels the
 wait. The session synchronization service owns the selected stream and publishes
-its phase, monotonic cursor, and live projection to application state.
-Transcript text reads require the bounded timeline-detail capability and replace
-pages of at most eight items and 65,536 projected bytes, clamped to the
-advertised limits, with exact byte accounting and continuation matching.
-Pagination resets when the session, window bounds, or observation cursor
-changes; the response bound includes their attachment references.
+its phase, monotonic cursor, and live projection to application state. Only the
+open workspace requests a follow subscription, and closing it cancels that
+subscription. Transcript text reads require the bounded timeline-detail
+capability and replace pages of at most eight items and 65,536 projected bytes,
+clamped to the advertised limits, with exact byte accounting and continuation
+matching. Pagination resets when the session, window bounds, or observation
+cursor changes; the response bound includes their attachment references.
 
 The session timeline descriptor reports the first and latest addresses, the item
 and projected-size facts, the active and queued turn counts, and the observation
@@ -690,8 +691,6 @@ closed.
   targets lack instruction transport or capacity for the session's admitted set
   ([design](../design/sessions-and-transcript.md)).
 - Eval creation causes for sessions created by registered programs
-  ([design](../design/sessions-and-transcript.md)).
-- Browser follow route used only by the open workspace
   ([design](../design/sessions-and-transcript.md)).
 - Durable timeline-to-blob relation behind the referenced blob count and byte
   length ([design](../design/sessions-and-transcript.md)).

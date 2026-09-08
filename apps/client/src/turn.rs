@@ -701,6 +701,7 @@ pub(crate) fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), C
         | TurnState::DelegationTerminated { .. }
         | TurnState::ActiveRunning { .. }
         | TurnState::ActiveAwaitingToolApproval { .. }
+        | TurnState::ActiveAwaitingCredentialAvailability { .. }
         | TurnState::ActiveAwaitingChild { .. }
         | TurnState::Completed { .. }
         | TurnState::FailedCredentialPoolExhausted { .. }
@@ -836,6 +837,7 @@ pub(crate) fn terminal_snapshot_state(
             | TurnState::QueuedDelegationWake { .. }
             | TurnState::ActiveRunning { .. }
             | TurnState::ActiveAwaitingToolApproval { .. }
+            | TurnState::ActiveAwaitingCredentialAvailability { .. }
             | TurnState::ActiveAwaitingChild { .. },
         ) => Ok(None),
         Some(
