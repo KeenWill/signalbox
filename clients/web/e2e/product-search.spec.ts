@@ -581,3 +581,12 @@ test('sets the imports scenario title after leaving a workspace', async ({ page 
   await page.getByRole('link', { name: /^Million-row imports/ }).click()
   await expect(page).toHaveTitle('Signalbox Scenario Studio — Imports')
 })
+
+test('releases the imports title when the next scenario fails to load', async ({ page }) => {
+  await page.route('**/assets/App-*.js', (route) => route.abort())
+  await page.goto('/scenario/imports')
+  await expect(page).toHaveTitle('Signalbox Scenario Studio — Imports')
+  await page.getByRole('link', { name: /^Streaming session/ }).click()
+  await expect(page.getByText('Scenario studio could not be loaded.')).toBeVisible()
+  await expect(page).not.toHaveTitle('Signalbox Scenario Studio — Imports')
+})
