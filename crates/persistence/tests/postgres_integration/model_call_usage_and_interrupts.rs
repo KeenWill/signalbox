@@ -4324,3 +4324,165 @@ async fn steering_accepted_while_stopping_is_reclassified_at_cancellation()
     drop(container);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn prepared_call_requires_catalog_facts_only_for_rendered_attachments()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    const FIXTURE_SEED: u128 = 0x129300;
+    let seed = FIXTURE_SEED;
+    let compacted_digest = BlobDigest::digest(b"compacted attachment");
+    let visible_digest = BlobDigest::digest(b"visible attachment");
+    let visible_length = 7_u64;
+    let mut catalog = pool.begin().await?;
+    sqlx::query("INSERT INTO blob_store_binding (store_name, namespace_id) VALUES ('compaction-attachment-fixture', $1)")
+        .bind(Uuid::now_v7()).execute(&mut *catalog).await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 1), ($2, $3)")
+        .bind(compacted_digest.as_bytes().as_slice())
+        .bind(visible_digest.as_bytes().as_slice())
+        .bind(Decimal::from(visible_length))
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query("INSERT INTO blob_replica (digest, store_name, object_key) VALUES ($1, 'compaction-attachment-fixture', 'compacted'), ($2, 'compaction-attachment-fixture', 'visible')")
+        .bind(compacted_digest.as_bytes().as_slice()).bind(visible_digest.as_bytes().as_slice())
+        .execute(&mut *catalog).await?;
+    catalog.commit().await?;
+    let (fixture, repository, authorized) =
+        authorize_checkpointed_model_call_with_attachment(&pool, seed, Some(compacted_digest))
+            .await?;
+    let retained_source_suffix = "context before compaction";
+    let assistant = AssistantText::try_new(String::from(retained_source_suffix))
+        .expect("fixture assistant text is admitted");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![assistant],
+        });
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let compaction_repository = ContextCompactionRepository::new(pool.clone());
+    let prepared = compaction_repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x30)),
+            session: fixture.session,
+            requested_through_position: Some(1),
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+            target,
+            input_includes_cache_tokens: true,
+            credential_reference: String::from("compaction usage fixture credential"),
+            call: ModelCallId::from_uuid(Uuid::from_u128(seed + 0x31)),
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(seed + 0x32)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x33)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x34)),
+        })
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(prepared) = prepared else {
+        panic!("the completed turn has a compactable frontier")
+    };
+    compaction_repository.authorize(&prepared).await?;
+    let compaction_usage = ContextCompactionTokenUsage::unreported()
+        .with_input_tokens(Some(91))
+        .with_output_tokens(Some(13))
+        .with_cache_creation_input_tokens(Some(17))
+        .with_cache_read_input_tokens(Some(19));
+    compaction_repository
+        .complete(&prepared, "retained context summary", compaction_usage)
+        .await?;
+
+    // Remove only the compacted-away catalog fact to distinguish semantic
+    // history authentication from the rendered request's attachment needs.
+    let mut corruption = pool.begin().await?;
+    sqlx::query("ALTER TABLE blob DISABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query("DELETE FROM blob WHERE digest = $1")
+        .bind(compacted_digest.as_bytes().as_slice())
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query("ALTER TABLE blob ENABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+    let suffix = "content appended after compaction";
+    SubmitInputRepository::new(pool.clone())
+        .with_attachment_maximum_bytes(FIXTURE_ATTACHMENT_MAXIMUM_BYTES)
+        .handle(
+            start_input_with_attachment(
+                seed + 0x40,
+                seed + 1,
+                suffix,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+                Some(visible_digest),
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x42))),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x43),
+            starting_frontier: Uuid::from_u128(seed + 0x44),
+            initial_attempt: Uuid::from_u128(seed + 0x45),
+        },
+    )
+    .await?;
+
+    let next_call = ModelCallId::from_uuid(Uuid::now_v7());
+    let failure = FailedModelCallTurnIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+        ContextFrontierId::from_uuid(Uuid::now_v7()),
+    );
+    let steering = ContextFrontierId::from_uuid(Uuid::now_v7());
+    let checkpoint = repository
+        .prepare_initial_call(
+            fixture.session,
+            next_call,
+            failure.clone(),
+            steering,
+            |_| panic!("no pending steering exists in the fixture"),
+        )
+        .await?;
+    assert!(matches!(
+        checkpoint,
+        PrepareInitialModelCallOutcome::Checkpointed(_)
+    ));
+    let ready = repository
+        .prepare_initial_call(fixture.session, next_call, failure, steering, |_| {
+            panic!("the prepared replay cannot consume steering")
+        })
+        .await?;
+    let PrepareInitialModelCallOutcome::Ready { request, .. } = ready else {
+        panic!("the exact rendered attachment inventory can be prepared");
+    };
+    assert_eq!(request.attachment_byte_length(compacted_digest), None);
+    assert_eq!(
+        request
+            .attachment_byte_length(visible_digest)
+            .map(|length| length.get()),
+        Some(visible_length)
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
