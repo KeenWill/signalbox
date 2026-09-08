@@ -62,6 +62,10 @@ pub(super) struct Admission {
 }
 
 impl Admission {
+    pub(super) fn is_released(&self, task: Id) -> bool {
+        self.released.contains(&task)
+    }
+
     pub(super) fn occupied(&self, tasks: &HashMap<Id, InFlightPass>) -> usize {
         tasks.len() - self.released.len()
     }
