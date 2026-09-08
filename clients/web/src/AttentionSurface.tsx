@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowRight, Radio, RefreshCw, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { type AttentionSyncPhase, synchronizeAttention } from './attention'
+import { type AttentionSyncPhase, attentionSnapshotsMatch, synchronizeAttention } from './attention'
 import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
 import { ProductRequestError, productTransport } from './product'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
@@ -32,9 +32,6 @@ export const activityTime = (unixMilliseconds: string) => {
 }
 
 const queryKey = (after: string | null) => ['production', 'attention', after] as const
-
-const snapshotsMatch = (left: WebAttentionSnapshot, right: WebAttentionSnapshot): boolean =>
-  JSON.stringify(left) === JSON.stringify(right)
 
 export function AttentionSurface({
   registerEscapeHandler,
@@ -73,7 +70,7 @@ export function AttentionSurface({
       }
       if (
         latestProjection.cursor === snapshot.cursor &&
-        !snapshotsMatch(latestProjection, snapshot)
+        !attentionSnapshotsMatch(latestProjection, snapshot)
       ) {
         throw new TypeError('attention projections diverged at the same cursor')
       }
@@ -100,7 +97,7 @@ export function AttentionSurface({
         if (
           queryProjection &&
           queryProjection.cursor === snapshot.cursor &&
-          !snapshotsMatch(queryProjection, snapshot)
+          !attentionSnapshotsMatch(queryProjection, snapshot)
         ) {
           throw new TypeError('attention projections diverged at the same cursor')
         }

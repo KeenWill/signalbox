@@ -89,7 +89,6 @@ export const synchronizeAttention = async ({
           return
         }
         firstEvent = false
-        const cursorBeforeReduction = projection?.cursor
         const reduction = reduceAttentionEvent(projection, event)
         // A projection below the last advertised resync cursor omits a known journal
         // interval, so it is never installed as authority.
@@ -115,13 +114,6 @@ export const synchronizeAttention = async ({
         }
         const acceptance = onProjection(reduction.snapshot)
         projection = acceptance.snapshot
-        if (
-          acceptance.accepted &&
-          (cursorBeforeReduction === undefined ||
-            BigInt(acceptance.snapshot.cursor) > BigInt(cursorBeforeReduction))
-        ) {
-          resyncs = 0
-        }
         transition('live')
       }
       if (!restart) {
@@ -133,3 +125,22 @@ export const synchronizeAttention = async ({
     if (!signal.aborted) transition('failed')
   }
 }
+
+const canonicalProjection = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalProjection)
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, item]) => item != null)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalProjection(item)]),
+    )
+  }
+  return value
+}
+
+export const attentionSnapshotsMatch = (
+  left: WebAttentionSnapshot,
+  right: WebAttentionSnapshot,
+): boolean =>
+  JSON.stringify(canonicalProjection(left)) === JSON.stringify(canonicalProjection(right))

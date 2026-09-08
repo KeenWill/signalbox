@@ -110,25 +110,29 @@ const useDeterministicSession = (page: Page) =>
 
 const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   const problems = watchBrowser(page)
+  const screenshot = evidence.snapshot === 'attention' ? expect.soft(page) : expect(page)
   await useDeterministicBootstrap(page)
   // Only the Imports route reads this adapter; every other route ignores it.
   await useDeterministicImportApi(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
   await expect(page.getByRole('heading', { name: evidence.title, level: 1 })).toBeVisible()
-  await expect(page).toHaveScreenshot(`${evidence.snapshot}-desktop-dark.png`, {
+  await screenshot.toHaveScreenshot(`${evidence.snapshot}-desktop-dark.png`, {
     animations: 'disabled',
+    maxDiffPixelRatio: evidence.snapshot === 'attention' ? 0 : undefined,
   })
 
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await expect(page).toHaveScreenshot(`${evidence.snapshot}-desktop-light.png`, {
+  await screenshot.toHaveScreenshot(`${evidence.snapshot}-desktop-light.png`, {
     animations: 'disabled',
+    maxDiffPixelRatio: evidence.snapshot === 'attention' ? 0 : undefined,
   })
 
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
-  await expect(page).toHaveScreenshot(`${evidence.snapshot}-mobile-light.png`, {
+  await screenshot.toHaveScreenshot(`${evidence.snapshot}-mobile-light.png`, {
     animations: 'disabled',
+    maxDiffPixelRatio: evidence.snapshot === 'attention' ? 0 : undefined,
   })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 }

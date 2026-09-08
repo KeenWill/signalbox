@@ -511,7 +511,10 @@ test('captures the dark attention fleet', async ({ page }, testInfo) => {
   await installAttentionScenario(page)
   await page.goto('/attention')
   await expect(page.getByRole('heading', { name: '3 sessions', level: 2 })).toBeVisible()
-  await expect(page).toHaveScreenshot('attention-dark.png', { animations: 'disabled' })
+  await expect(page).toHaveScreenshot('attention-dark.png', {
+    animations: 'disabled',
+    maxDiffPixelRatio: 0,
+  })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -523,7 +526,10 @@ test('captures the light attention workbench inspector', async ({ page }, testIn
   await page.getByRole('button', { name: 'Use light theme' }).click()
   await page.getByRole('button', { name: new RegExp(`blocked.*${blockedSessionId}`) }).click()
   await expect(page.getByRole('heading', { name: 'blocked', level: 2 })).toBeVisible()
-  await expect(page).toHaveScreenshot('attention-light.png', { animations: 'disabled' })
+  await expect(page).toHaveScreenshot('attention-light.png', {
+    animations: 'disabled',
+    maxDiffPixelRatio: 0,
+  })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -538,7 +544,10 @@ test('captures the focused phone inspector', async ({ page }, testInfo) => {
     .click()
   await expect(page.getByRole('heading', { name: 'runner lost', level: 2 })).toBeVisible()
   await expect(page.getByRole('heading', { name: '3 sessions', level: 2 })).toBeHidden()
-  await expect(page).toHaveScreenshot('attention-mobile-dark.png', { animations: 'disabled' })
+  await expect(page).toHaveScreenshot('attention-mobile-dark.png', {
+    animations: 'disabled',
+    maxDiffPixelRatio: 0,
+  })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
