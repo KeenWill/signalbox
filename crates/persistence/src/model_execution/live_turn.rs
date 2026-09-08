@@ -211,7 +211,7 @@ pub(super) async fn require_live_execution_with_targets(
              SELECT 1
                FROM credential_pool_availability_successor
               WHERE successor_turn_attempt_id = $1
-         ) OR EXISTS (SELECT 1 FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1 AND waiting.predecessor_model_call_id IS NOT NULL)",
+         ) OR EXISTS (SELECT 1 FROM credential_availability_wait_release WHERE turn_attempt_id = $1)",
     )
     .bind(current_attempt.id().into_uuid())
     .fetch_one(&mut *connection)
@@ -275,7 +275,13 @@ pub(super) async fn require_live_execution_with_targets(
         load_tool_denial_correlations(connection, &frontier_entries).await?;
     let recovered_targets;
     let targets = if let Some(targets) = configured_targets {
-        targets.clone()
+        super::credential_wait::retain_target_catalog(
+            connection,
+            active_turn.turn(),
+            *active_turn.configuration().effective().model(),
+            targets,
+        )
+        .await?
     } else {
         let mut definitions = calls
             .iter()

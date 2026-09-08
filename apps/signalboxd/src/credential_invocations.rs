@@ -40,6 +40,7 @@ impl CredentialInvocationProcesses {
     }
 
     pub async fn recover(&self) -> Result<(), ModelCallRepositoryError> {
+        credential_invocations::release_unregistered_terminal_calls(&self.pool).await?;
         for (call, group) in credential_invocations::active_processes(&self.pool).await? {
             if group_absent(group) {
                 credential_invocations::release(&self.pool, call).await?;
