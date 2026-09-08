@@ -104,6 +104,16 @@ const result = spawnSync(
   ],
   { cwd: project, env: environment, stdio: 'inherit' },
 )
+if (process.argv.includes('--update-snapshots=all')) {
+  for (const entry of readdirSync(join(project, 'e2e'), { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name.endsWith('-snapshots')) {
+      materialize(
+        join(project, 'e2e', entry.name),
+        join(evidence, 'updated-snapshots/e2e', entry.name),
+      )
+    }
+  }
+}
 if (result.error) throw result.error
 if (result.signal) throw new Error(`Playwright exited on ${result.signal}`)
 process.exit(result.status ?? 1)
