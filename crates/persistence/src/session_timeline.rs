@@ -651,6 +651,11 @@ async fn project_address_page(
 
 enum DetailEvent {
     Decoded(DispatchedOutboxEvent),
+    DelegationUpdate {
+        sequence: u64,
+        update: DispatchedDelegationUpdate,
+        content: Option<ModelResponseSlice>,
+    },
     InputAccepted {
         sequence: u64,
         turn: TurnId,
@@ -663,7 +668,9 @@ impl DetailEvent {
     const fn sequence(&self) -> u64 {
         match self {
             Self::Decoded(event) => event.sequence(),
-            Self::InputAccepted { sequence, .. } => *sequence,
+            Self::InputAccepted { sequence, .. } | Self::DelegationUpdate { sequence, .. } => {
+                *sequence
+            }
         }
     }
 }
@@ -689,6 +696,39 @@ async fn load_detail_event(
     };
     if header.session != Some(session) {
         return Ok(None);
+    }
+    if header.discriminator == OutboxEventDiscriminator::DelegationUpdate {
+        let update = crate::outbox::load_delegation_update(
+            transaction,
+            sequence,
+            session.into_uuid(),
+            false,
+        )
+        .await?;
+        let offset = cursor.map_or(0, |cursor| cursor.offset_bytes);
+        let row = sqlx::query(
+            "SELECT octet_length(content_text)::numeric AS total_bytes,
+                    substring(convert_to(content_text, 'UTF8')
+                        FROM (least($3::numeric, octet_length(content_text)::numeric) + 1)::integer
+                        FOR $4::integer) AS content_bytes
+               FROM delegation_update_outbox_event
+              WHERE event_sequence = $1 AND session_id = $2",
+        )
+        .bind(Decimal::from(sequence))
+        .bind(session.into_uuid())
+        .bind(Decimal::from(offset))
+        .bind(
+            i64::from(max_bytes.saturating_sub(DETAIL_ENVELOPE_BYTES))
+                + i64::from(MAX_UTF8_SCALAR_BYTES)
+                - 1,
+        )
+        .fetch_one(&mut **transaction)
+        .await?;
+        return Ok(Some(DetailEvent::DelegationUpdate {
+            sequence,
+            update,
+            content: optional_text_slice(&row, offset)?,
+        }));
     }
     if header.discriminator == OutboxEventDiscriminator::InputAccepted {
         require_cursor_field(cursor, TimelineBodyField::InputText, 0)?;
@@ -873,6 +913,22 @@ async fn project_detail_event(
                     text,
                     attachments: attachments.clone(),
                 },
+                continuation,
+            )
+        }
+        DetailEvent::DelegationUpdate {
+            update, content, ..
+        } => {
+            let (body, continuation) = project_delegation_update(
+                address,
+                update,
+                content.as_ref(),
+                cursor,
+                &mut remaining,
+            )?;
+            (
+                SessionTimelineEventKind::DelegationUpdate,
+                body,
                 continuation,
             )
         }
@@ -1145,8 +1201,8 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                         None,
                     )
                 }
-                DispatchedOutboxEventKind::DelegationUpdate(update) => {
-                    project_delegation_update(address, update, cursor, &mut remaining)?
+                DispatchedOutboxEventKind::DelegationUpdate(_) => {
+                    return Err(SessionTimelineCorruption::MissingDetailRecord.into());
                 }
                 DispatchedOutboxEventKind::DelegationWake(wake) => {
                     require_no_body_cursor(cursor)?;
@@ -1395,29 +1451,28 @@ async fn load_goal_change_event(
     remaining: &mut u32,
 ) -> Result<TimelineGoalEvent, SessionTimelineRepositoryError> {
     require_cursor_field(cursor, TimelineBodyField::GoalText, 0)?;
+    let offset = cursor.map_or(0, |cursor| cursor.offset_bytes);
     let row = sqlx::query(
         "SELECT event.generation, event.event_kind, event.blocked_reason, event.session_outcome_kind,
-                COALESCE(event.statement, event.need, event.guidance, event.report) AS body
+                octet_length(body.content)::numeric AS total_bytes,
+                substring(convert_to(body.content, 'UTF8')
+                    FROM (least($3::numeric, octet_length(body.content)::numeric) + 1)::integer
+                    FOR $4::integer) AS content_bytes
            FROM goal_event AS event
+           CROSS JOIN LATERAL (
+               SELECT COALESCE(event.statement, event.need, event.guidance, event.report) AS content
+           ) AS body
           WHERE event.session_id = $1
             AND event.event_ordinal = $2",
     )
     .bind(session.into_uuid())
     .bind(Decimal::from(goal_event_ordinal))
+    .bind(Decimal::from(offset))
+    .bind(i64::from(*remaining) + i64::from(MAX_UTF8_SCALAR_BYTES) - 1)
     .fetch_one(&mut **transaction)
     .await?;
-    let text = row
-        .try_get::<Option<String>, _>("body")?
-        .map(|text| {
-            excerpt_text(
-                &text,
-                address,
-                TimelineBodyField::GoalText,
-                0,
-                cursor.map_or(0, |cursor| cursor.offset_bytes),
-                remaining,
-            )
-        })
+    let text = optional_text_slice(&row, offset)?
+        .map(|text| bounded_text_excerpt(&text, address, TimelineBodyField::GoalText, remaining))
         .transpose()?;
     // A textless retiring event is a legitimate stored shape, so a
     // caller-supplied `goal_text` cursor naming it is an inapplicable query,
@@ -1627,7 +1682,7 @@ async fn project_tool_batch(
     if let Some(goal_cursor) =
         cursor.filter(|cursor| cursor.field == Some(TimelineBodyField::GoalText))
     {
-        let goal_row = load_goal_event_row(transaction, address, goal_cursor.member_index)
+        let goal_row = load_goal_event_row(transaction, address, goal_cursor, *remaining)
             .await?
             .ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
         return project_tool_goal(
@@ -1897,19 +1952,23 @@ struct StoredGoalEvent {
     event_kind: String,
     reason: Option<String>,
     outcome: Option<String>,
-    text: Option<String>,
+    text: Option<ModelResponseSlice>,
     has_next: bool,
 }
 
 async fn load_goal_event_row(
     transaction: &mut Transaction<'_, Postgres>,
     address: TimelineAddress,
-    member_index: u32,
+    cursor: TimelineDetailCursor,
+    max_bytes: u32,
 ) -> Result<Option<StoredGoalEvent>, SessionTimelineRepositoryError> {
     let mut query = sqlx::QueryBuilder::<Postgres>::new(TOOL_DETAIL_MEMBERS_SQL);
     query.push(
         " SELECT event.generation, event.event_kind, event.blocked_reason, event.session_outcome_kind,
-               COALESCE(event.statement, event.need, event.guidance, event.report) AS body,
+               octet_length(body.content)::numeric AS total_bytes,
+               substring(convert_to(body.content, 'UTF8')
+                   FROM (least($3::numeric, octet_length(body.content)::numeric) + 1)::integer
+                   FOR $4::integer) AS content_bytes,
                EXISTS (
                    SELECT 1
                      FROM goal_members AS probe
@@ -1919,12 +1978,17 @@ async fn load_goal_event_row(
           JOIN goal_event AS event
             ON event.session_id = selected.session_id
            AND event.event_ordinal = selected.goal_event_ordinal
+          CROSS JOIN LATERAL (
+              SELECT COALESCE(event.statement, event.need, event.guidance, event.report) AS content
+          ) AS body
          WHERE selected.member_index = $2",
     );
     let row = query
         .build()
         .bind(Decimal::from(address.sequence().get()))
-        .bind(i64::from(member_index))
+        .bind(i64::from(cursor.member_index))
+        .bind(Decimal::from(cursor.offset_bytes))
+        .bind(i64::from(max_bytes) + i64::from(MAX_UTF8_SCALAR_BYTES) - 1)
         .fetch_optional(&mut **transaction)
         .await?;
     row.map(|row| {
@@ -1933,7 +1997,7 @@ async fn load_goal_event_row(
             event_kind: row.try_get("event_kind")?,
             reason: row.try_get("blocked_reason")?,
             outcome: row.try_get("session_outcome_kind")?,
-            text: row.try_get("body")?,
+            text: optional_text_slice(&row, cursor.offset_bytes)?,
             has_next: row.try_get("has_next")?,
         })
     })
@@ -1960,16 +2024,14 @@ fn project_tool_goal(
     }
     let text = row
         .text
-        .as_deref()
-        .map(|text| {
-            excerpt_text(
-                text,
-                address,
-                TimelineBodyField::GoalText,
-                cursor.member_index,
-                cursor.offset_bytes,
-                remaining,
-            )
+        .as_ref()
+        .map(|text| -> Result<_, SessionTimelineRepositoryError> {
+            let mut excerpt =
+                bounded_text_excerpt(text, address, TimelineBodyField::GoalText, remaining)?;
+            if let Some(next) = &mut excerpt.continuation {
+                next.member_index = cursor.member_index;
+            }
+            Ok(excerpt)
         })
         .transpose()?;
     let continuation = text
@@ -2080,11 +2142,16 @@ async fn project_tool_approval(
                 model_call_id: *call,
             }
         }
-        (ToolDecisionSource::UserOverride, ToolApprovalDecider::UserOverride { command, .. }) => {
-            TimelineApprovalActor::User {
-                command_id: *command,
-            }
-        }
+        (
+            ToolDecisionSource::UserOverride,
+            ToolApprovalDecider::UserOverride {
+                command,
+                denied_request,
+            },
+        ) => TimelineApprovalActor::UserOverride {
+            command_id: *command,
+            denied_request_id: *denied_request,
+        },
         (ToolDecisionSource::RuntimeSafety, _)
         | (ToolDecisionSource::LifecycleClosure, _)
         | (ToolDecisionSource::PolicyAuto, _)
@@ -2194,6 +2261,7 @@ fn runner_state(state: DispatchedRunnerState) -> TimelineRunnerState {
 fn project_delegation_update(
     address: TimelineAddress,
     update: &DispatchedDelegationUpdate,
+    content_slice: Option<&ModelResponseSlice>,
     cursor: Option<TimelineDetailCursor>,
     remaining: &mut u32,
 ) -> Result<
@@ -2263,17 +2331,15 @@ fn project_delegation_update(
             outcome,
             reason,
             provenance,
-            content,
+            ..
         } => {
-            let content = match content.as_deref() {
+            let content = match content_slice {
                 Some(content) => {
                     require_cursor_field(cursor, TimelineBodyField::DelegationContent, 0)?;
-                    Some(excerpt_text(
+                    Some(bounded_text_excerpt(
                         content,
                         address,
                         TimelineBodyField::DelegationContent,
-                        0,
-                        cursor.map_or(0, |cursor| cursor.offset_bytes),
                         remaining,
                     )?)
                 }
@@ -2305,15 +2371,13 @@ fn project_delegation_update(
             recipient,
             message_ordinal,
             delivery_sequence,
-            content,
+            ..
         } => {
             require_cursor_field(cursor, TimelineBodyField::DelegationContent, 0)?;
-            let content = excerpt_text(
-                content,
+            let content = bounded_text_excerpt(
+                content_slice.ok_or(SessionTimelineCorruption::MissingDetailRecord)?,
                 address,
                 TimelineBodyField::DelegationContent,
-                0,
-                cursor.map_or(0, |cursor| cursor.offset_bytes),
                 remaining,
             )?;
             let continuation = content
@@ -2562,6 +2626,25 @@ struct ModelDetailRow {
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
 }
 
+fn optional_text_slice(
+    row: &sqlx::postgres::PgRow,
+    offset_bytes: u64,
+) -> Result<Option<ModelResponseSlice>, SessionTimelineRepositoryError> {
+    let Some(bytes) = row.try_get::<Option<Vec<u8>>, _>("content_bytes")? else {
+        return Ok(None);
+    };
+    let total_bytes = nonnegative(row.try_get("total_bytes")?, "detail text byte length")?;
+    if offset_bytes > total_bytes {
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
+    }
+    Ok(Some(ModelResponseSlice {
+        bytes,
+        offset_bytes,
+        total_bytes,
+    }))
+}
+
+#[derive(Debug)]
 struct ModelResponseSlice {
     bytes: Vec<u8>,
     offset_bytes: u64,

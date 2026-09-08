@@ -945,6 +945,10 @@ pub enum WebTimelineApprovalActor {
     User {
         command_id: WebSessionId,
     },
+    UserOverride {
+        command_id: WebSessionId,
+        denied_request_id: WebSessionId,
+    },
     Delegate {
         model_selection_id: WebSessionId,
         model_call_id: WebSessionId,

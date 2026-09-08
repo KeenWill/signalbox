@@ -1240,6 +1240,10 @@ pub enum WebTimelineApprovalActor {
     User {
         command_id: WebSessionId,
     },
+    UserOverride {
+        command_id: WebSessionId,
+        denied_request_id: WebSessionId,
+    },
     Delegate {
         model_selection_id: WebSessionId,
         model_call_id: WebSessionId,
@@ -3719,7 +3723,7 @@ function assertTimelineDetailPage(value) {{
         if (item.kind !== "tool_approval_decided") {{
           fail(`${{path}}.kind`, "tool_approval_decided for a tool_approval_decision body");
         }}
-        if (item.body.approval_judge_escalated && item.body.actor.type !== "user") {{
+        if (item.body.approval_judge_escalated && !["user", "user_override"].includes(item.body.actor.type)) {{
           fail(
             `${{path}}.body.actor`,
             "a user actor when the approval judge escalated",

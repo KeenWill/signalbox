@@ -519,6 +519,10 @@ pub enum TimelineApprovalActor {
     User {
         command_id: DurableCommandId,
     },
+    UserOverride {
+        command_id: DurableCommandId,
+        denied_request_id: ToolRequestId,
+    },
     Delegate {
         model_selection_id: DirectModelSelection,
         model_call_id: ModelCallId,
