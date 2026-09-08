@@ -894,6 +894,7 @@ impl ReviewFindingEventResult {
 pub struct ReviewProducedFindings {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ReviewProducedFindings {
+    pub const MAXIMUM: usize;
     pub fn try_new(
         findings: vec::Vec<ReviewFindingRef>,
     ) -> result::Result<Self, ReviewProducedFindingsError>;
