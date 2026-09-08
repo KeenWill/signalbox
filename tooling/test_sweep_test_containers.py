@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPOSITORY = Path(__file__).absolute().parent.parent
@@ -152,7 +153,7 @@ REFUSED_REMOVAL = "Error response from daemon: removal is denied by policy"
 HARMLESS_REMOVAL_NOTE = "WARNING: --volumes is deprecated in favour of -v"
 
 MARKED_START = re.compile(
-    r"\.with_labels\((?:[A-Za-z_][A-Za-z_0-9]*::)*disposable_test_container_labels\(\)\)"
+    r"\.with_labels\((?:(?P<qualifier>signalbox_persistence|crate)::)?disposable_test_container_labels\(\)\)"
 )
 
 # A chain longer than this is not a container start; the walk backwards stops
@@ -226,7 +227,11 @@ def container_start_sites() -> tuple[list[str], list[str]]:
                 and not lines[head - 2].lstrip().startswith("let ")
             ):
                 head -= 1
-            if MARKED_START.search("\n".join(lines[head - 2 : number])) is None:
+            marked = MARKED_START.search("\n".join(lines[head - 2 : number]))
+            if marked is None or (
+                marked.group("qualifier") == "crate"
+                and not name.startswith("crates/persistence/")
+            ):
                 unmarked.append(f"{name}:{number}")
     return sites, unmarked
 
@@ -452,6 +457,35 @@ def run_sweep(
 
 
 class SweepTestContainersTest(unittest.TestCase):
+    def test_only_harness_qualifiers_mark_a_container_start(self) -> None:
+        cases = [
+            {"file": "apps/fixture.rs", "qualifier": "", "unmarked": 0},
+            {"file": "apps/fixture.rs", "qualifier": "signalbox_persistence::", "unmarked": 0},
+            {"file": "crates/persistence/src/fixture.rs", "qualifier": "crate::", "unmarked": 0},
+            {"file": "apps/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "apps/fixture.rs", "qualifier": "unrelated::", "unmarked": 1},
+            {"file": "crates/persistence/src/fixture.rs", "qualifier": "unrelated::", "unmarked": 1},
+        ]
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / case["file"]
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(
+                    "use testcontainers::runners::AsyncRunner;\n"
+                    "let container = Postgres::default()\n"
+                    f"    .with_labels({case['qualifier']}disposable_test_container_labels())\n"
+                    "    .start().await?;\n"
+                )
+                (root / "sources.json").write_text(json.dumps([case["file"]]))
+                with mock.patch(f"{__name__}.REPOSITORY", root), mock.patch.dict(
+                    os.environ, {"SIGNALBOX_RUST_SOURCE_MANIFEST": "sources.json"}
+                ):
+                    sites, unmarked = container_start_sites()
+
+                self.assertEqual(len(sites), 1)
+                self.assertEqual(len(unmarked), case["unmarked"])
+
     def test_the_listing_asks_for_this_repository_s_disposable_label_alone(self) -> None:
         run = run_sweep(
             [aged("old111", 72, "running", "postgres:18.4-alpine3.23")],
