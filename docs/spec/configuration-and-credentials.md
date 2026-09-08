@@ -716,8 +716,9 @@ before it crosses into evidence. An `ambient` or `codex_home` profile gives the
 daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
 
-A GitHub classic tool or HTTPS-push token used for merge-forward work needs
-`repo` and `workflow` scopes to push workflow changes, as specified by
+A GitHub classic tool or HTTPS-push token used for merge-forward work needs the
+`workflow` scope plus `public_repo` for public repositories or `repo` for
+private repositories to push workflow changes, as specified by
 [GitHub's OAuth scopes](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
 The repository-watch credential needs read access for polling and checkout
 provisioning; it does not need push or workflow-write authority. Classic `repo`
