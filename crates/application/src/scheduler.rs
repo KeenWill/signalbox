@@ -1039,12 +1039,14 @@ where
         observe_occupancy(&self.occupancy_observer, &task_sessions);
 
         'scheduler: loop {
-            if let Some(session) = take_admissible_hint(
-                &mut pending_sessions,
-                &mut pending_hints,
-                slots.active(),
-                self.max_in_flight_passes,
-            ) {
+            if slots.can_reserve()
+                && let Some(session) = take_admissible_hint(
+                    &mut pending_sessions,
+                    &mut pending_hints,
+                    slots.active(),
+                    self.max_in_flight_passes,
+                )
+            {
                 select! {
                     biased;
 

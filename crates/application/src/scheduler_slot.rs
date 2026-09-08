@@ -2,18 +2,22 @@
 
 use std::{
     future::Future,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
 
 #[derive(Debug)]
 pub(crate) struct SchedulerSlots {
     maximum: usize,
-    active: AtomicUsize,
+    state: Mutex<SlotState>,
+    reacquisition_queue: tokio::sync::Mutex<()>,
     changed: watch::Sender<()>,
+}
+
+#[derive(Debug, Default)]
+struct SlotState {
+    active: usize,
+    waiting: usize,
 }
 
 impl SchedulerSlots {
@@ -21,13 +25,25 @@ impl SchedulerSlots {
         let (changed, _) = watch::channel(());
         Arc::new(Self {
             maximum,
-            active: AtomicUsize::new(0),
+            state: Mutex::new(SlotState::default()),
+            reacquisition_queue: tokio::sync::Mutex::new(()),
             changed,
         })
     }
 
     pub(crate) fn active(&self) -> usize {
-        self.active.load(Ordering::Acquire)
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+    }
+
+    pub(crate) fn can_reserve(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.waiting == 0 && state.active < self.maximum
     }
 
     pub(crate) fn changes(&self) -> watch::Receiver<()> {
@@ -35,19 +51,22 @@ impl SchedulerSlots {
     }
 
     fn try_acquire(self: &Arc<Self>) -> Option<SchedulerSlot> {
-        let mut active = self.active();
-        while active < self.maximum {
-            match self.active.compare_exchange_weak(
-                active,
-                active + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(SchedulerSlot(Arc::clone(self))),
-                Err(observed) => active = observed,
-            }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.waiting > 0 {
+            return None;
         }
-        None
+        self.acquire_available(&mut state)
+    }
+
+    fn acquire_available(self: &Arc<Self>, state: &mut SlotState) -> Option<SchedulerSlot> {
+        if state.active == self.maximum {
+            return None;
+        }
+        state.active += 1;
+        Some(SchedulerSlot(Arc::clone(self)))
     }
 
     pub(crate) fn reserve(self: &Arc<Self>) -> Option<SchedulerPassSlot> {
@@ -57,9 +76,18 @@ impl SchedulerSlots {
     }
 
     async fn acquire(self: &Arc<Self>) -> SchedulerSlot {
+        let _waiting = ReacquisitionWaiter::new(self);
+        let _queue = self.reacquisition_queue.lock().await;
         let mut changed = self.changes();
         loop {
-            if let Some(slot) = self.try_acquire() {
+            let acquired = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                self.acquire_available(&mut state)
+            };
+            if let Some(slot) = acquired {
                 return slot;
             }
             let _ = changed.changed().await;
@@ -75,12 +103,40 @@ impl SchedulerSlots {
     }
 }
 
+struct ReacquisitionWaiter<'a>(&'a SchedulerSlots);
+
+impl<'a> ReacquisitionWaiter<'a> {
+    fn new(slots: &'a SchedulerSlots) -> Self {
+        slots
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .waiting += 1;
+        Self(slots)
+    }
+}
+
+impl Drop for ReacquisitionWaiter<'_> {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .waiting -= 1;
+        self.0.changed.send_replace(());
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct SchedulerSlot(Arc<SchedulerSlots>);
 
 impl Drop for SchedulerSlot {
     fn drop(&mut self) {
-        self.0.active.fetch_sub(1, Ordering::AcqRel);
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active -= 1;
         self.0.changed.send_replace(());
     }
 }
@@ -149,6 +205,87 @@ pub async fn with_scheduler_slot_released<F: Future>(io: F) -> F::Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn assert_waiting(mut future: std::pin::Pin<&mut impl Future>) {
+        std::future::poll_fn(|context| {
+            assert!(future.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn returning_pass_reserves_released_capacity_before_fresh_admission() {
+        let slots = SchedulerSlots::new(1);
+        let occupied = slots.reserve().expect("one occupied slot");
+        let mut returning = Box::pin(slots.acquire());
+        assert_waiting(returning.as_mut()).await;
+
+        drop(occupied);
+        assert!(
+            !slots.can_reserve(),
+            "the scheduler must wait for returning passes"
+        );
+        assert!(
+            slots.reserve().is_none(),
+            "fresh passes cannot bypass the queued return"
+        );
+        let reacquired = returning.await;
+        assert_eq!(slots.active(), 1);
+        drop(reacquired);
+        assert!(slots.reserve().is_some());
+    }
+
+    #[tokio::test]
+    async fn returning_passes_reacquire_in_queue_order() {
+        let slots = SchedulerSlots::new(1);
+        let occupied = slots.reserve().expect("one occupied slot");
+        let mut first = Box::pin(slots.acquire());
+        let mut second = Box::pin(slots.acquire());
+        assert_waiting(first.as_mut()).await;
+        assert_waiting(second.as_mut()).await;
+
+        drop(occupied);
+        assert_waiting(second.as_mut()).await;
+        let first_slot = first.await;
+        assert!(slots.reserve().is_none());
+        drop(first_slot);
+        assert!(slots.reserve().is_none());
+        drop(second.await);
+        assert!(slots.reserve().is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_front_returner_preserves_the_next_returners_priority() {
+        let slots = SchedulerSlots::new(1);
+        let occupied = slots.reserve().expect("one occupied slot");
+        let mut first = Box::pin(slots.acquire());
+        let mut second = Box::pin(slots.acquire());
+        assert_waiting(first.as_mut()).await;
+        assert_waiting(second.as_mut()).await;
+
+        drop(occupied);
+        drop(first);
+        assert!(slots.reserve().is_none());
+        drop(second.await);
+        assert!(slots.reserve().is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_last_returner_reopens_fresh_admission() {
+        let slots = SchedulerSlots::new(1);
+        let occupied = slots.reserve().expect("one occupied slot");
+        let mut returning = Box::pin(slots.acquire());
+        assert_waiting(returning.as_mut()).await;
+        drop(occupied);
+        assert!(slots.reserve().is_none());
+        let mut changes = slots.changes();
+        changes.borrow_and_update();
+
+        drop(returning);
+        assert!(changes.has_changed().expect("slot channel remains open"));
+        assert!(slots.reserve().is_some());
+    }
 
     #[tokio::test]
     async fn store_io_releases_capacity_and_waits_for_reacquisition() {
