@@ -17,7 +17,7 @@ use std::{
 
 use rustix::fs::{
     AtFlags, FileType, Mode, OFlags, RenameFlags, Stat, fchmod, fstat, openat, renameat_with,
-    statat, unlinkat,
+    unlinkat,
 };
 
 use signalbox_application::{
@@ -26,7 +26,8 @@ use signalbox_application::{
     ToolExecutorEvidence,
 };
 use signalbox_domain::{
-    NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
+    BlobDigest, NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail,
+    ToolPermissionDefault,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -1083,7 +1084,7 @@ struct StagedMutation {
     backup_created: bool,
     target_installed: bool,
     writes_target: bool,
-    installed_file: Option<(File, Stat)>,
+    installed_file: Option<(File, Stat, BlobDigest)>,
 }
 
 fn stage_mutation(
@@ -1162,7 +1163,7 @@ fn write_staged_file(
     content: &str,
     mode: u32,
     path: &WorkspaceMutationPath,
-) -> Result<(File, Stat), WorkspaceMutationCommitError> {
+) -> Result<(File, Stat, BlobDigest), WorkspaceMutationCommitError> {
     let descriptor = openat(
         parent,
         name,
@@ -1180,7 +1181,7 @@ fn write_staged_file(
         .and_then(|()| file.sync_all())
         .and_then(|()| fstat(&file).map_err(std::io::Error::from));
     if let Ok(identity) = result {
-        return Ok((file, identity));
+        return Ok((file, identity, BlobDigest::digest(content.as_bytes())));
     }
     drop(file);
     unlinkat(parent, name, AtFlags::empty())
@@ -1266,7 +1267,9 @@ fn rollback_staged(staged: &mut [StagedMutation]) -> Result<(), ()> {
 }
 
 fn remove_installed_target(file: &StagedMutation) -> Result<(), ()> {
-    let (_installed, expected) = file.installed_file.as_ref().ok_or(())?;
+    if !rollback_target_is_owned(file, &file.target)? {
+        return Err(());
+    }
     let displaced = transaction_name("rollback");
     renameat_with(
         &file.parent,
@@ -1276,16 +1279,7 @@ fn remove_installed_target(file: &StagedMutation) -> Result<(), ()> {
         RenameFlags::NOREPLACE,
     )
     .map_err(|_| ())?;
-    let owned = statat(&file.parent, &displaced, AtFlags::SYMLINK_NOFOLLOW)
-        .map(|current| {
-            current.st_dev == expected.st_dev
-                && current.st_ino == expected.st_ino
-                && current.st_size == expected.st_size
-                && current.st_mtime == expected.st_mtime
-                && current.st_mtime_nsec == expected.st_mtime_nsec
-                && current.st_mode == expected.st_mode
-        })
-        .unwrap_or(false);
+    let owned = rollback_target_is_owned(file, &displaced).unwrap_or(false);
     if !owned {
         // Never replace a new destination; both displaced and backup files survive on failure.
         let _ = renameat_with(
@@ -1298,6 +1292,31 @@ fn remove_installed_target(file: &StagedMutation) -> Result<(), ()> {
         return Err(());
     }
     unlinkat(&file.parent, &displaced, AtFlags::empty()).map_err(|_| ())
+}
+
+fn rollback_target_is_owned(file: &StagedMutation, target: &OsStr) -> Result<bool, ()> {
+    let (_installed, expected, digest) = file.installed_file.as_ref().ok_or(())?;
+    let descriptor = openat(
+        &file.parent,
+        target,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| ())?;
+    let current = fstat(&descriptor).map_err(|_| ())?;
+    if current.st_dev != expected.st_dev
+        || current.st_ino != expected.st_ino
+        || current.st_size != expected.st_size
+        || current.st_mode != expected.st_mode
+    {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    File::from(descriptor)
+        .take((MAX_WORKSPACE_MUTATION_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    Ok(bytes.len() <= MAX_WORKSPACE_MUTATION_FILE_BYTES && BlobDigest::digest(&bytes) == *digest)
 }
 
 fn cleanup_staged(staged: &mut [StagedMutation]) -> Result<(), ()> {
@@ -1688,7 +1707,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_preserves_a_same_size_in_place_rewrite_of_an_installed_target() {
+    fn rollback_preserves_an_in_place_rewrite_with_unchanged_size_and_mtime() {
         let workspace = tempfile::tempdir().expect("workspace constructs");
         let target = workspace.path().join("file.txt");
         std::fs::write(&target, "original").expect("original writes");
@@ -1717,14 +1736,18 @@ mod tests {
         let backup = workspace
             .path()
             .join(staged.backup.as_ref().expect("backup retained"));
-        // Equal-size content keeps inode and size unchanged; an explicit mtime avoids clock granularity.
+        let installed_mtime = std::fs::metadata(&target)
+            .expect("metadata reads")
+            .modified()
+            .expect("modification time reads");
+        // The competing bytes keep the inode and size, and the writer restores the installed mtime.
         std::fs::write(&target, "concurrent write").expect("concurrent writer rewrites in place");
         File::options()
             .write(true)
             .open(&target)
             .expect("target opens")
-            .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
-            .expect("concurrent modification time is distinct");
+            .set_times(std::fs::FileTimes::new().set_modified(installed_mtime))
+            .expect("installed modification time is restored");
 
         assert_eq!(
             rollback_result(
