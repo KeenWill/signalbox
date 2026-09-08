@@ -3194,3 +3194,36 @@ test("tool batches accept only tool-produced goal events", () => {
     assert.deepEqual(decodeWebSessionTimelineDetailPage(direct), direct);
   }
 });
+
+test("goal evidence belongs to the enclosing detail session", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "goal_changed";
+  page.items[0].body = { type: "goal_event", session_id: page.session_id,
+    event: { type: "user_stopped", generation: "1" } };
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.session_id = "00000000-0000-0000-0000-000000000992";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /body.session_id must be the enclosing page session/);
+});
+
+test("injection settlements reject contradictory delivery evidence", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "injection_settled";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  for (const delivered of [true, false]) {
+    for (const rejection of [undefined, null, "session_closed"]) {
+      for (const turn_id of [undefined, null, page.session_id]) {
+        page.items[0].body = { type: "injection_settlement", command_id: page.session_id,
+          delivered, ...(rejection === undefined ? {} : { rejection }),
+          ...(turn_id === undefined ? {} : { turn_id }) };
+        if (delivered && rejection != null) {
+          assert.throws(() => decodeWebSessionTimelineDetailPage(page), /rejection must be absent for a delivered injection/);
+        } else if (!delivered && turn_id != null) {
+          assert.throws(() => decodeWebSessionTimelineDetailPage(page), /turn_id must be absent for an undelivered injection/);
+        } else {
+          assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+        }
+      }
+    }
+  }
+});

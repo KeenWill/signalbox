@@ -7703,6 +7703,9 @@ function assertTimelineDetailPage(value) {
         if (item.kind !== "goal_changed") {
           fail(`${path}.kind`, "goal_changed for a goal_event body");
         }
+        if (item.body.session_id !== value.session_id) {
+          fail(`${path}.body.session_id`, "the enclosing page session");
+        }
         if (item.body.event.type === "session_closed" && (
           item.body.event.outcome === "achieved_verified" ||
           item.body.event.outcome === "achieved_declared"
@@ -8018,6 +8021,12 @@ function assertTimelineDetailPage(value) {
       case "injection_settlement":
         if (item.kind !== "injection_settled") {
           fail(`${path}.kind`, "injection_settled for this body");
+        }
+        if (item.body.delivered && item.body.rejection !== undefined && item.body.rejection !== null) {
+          fail(`${path}.body.rejection`, "absent for a delivered injection");
+        }
+        if (!item.body.delivered && item.body.turn_id !== undefined && item.body.turn_id !== null) {
+          fail(`${path}.body.turn_id`, "absent for an undelivered injection");
         }
         break;
       case "ownership":
