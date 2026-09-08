@@ -202,5 +202,51 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("uncovered lines", report)
 
 
+class LcovTests(unittest.TestCase):
+    def test_suite_reports_merge_hits_without_duplicating_the_denominator(self):
+        import tempfile
+        from summarize_coverage import lcov_document, read_lcov, write_lcov
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / 'first.info', root / 'second.info'
+            first.write_text('SF:crates/domain/src/lib.rs\nFN:2,operation\nFNDA:0,operation\n'
+                             'DA:2,0\nDA:3,2\nend_of_record\n')
+            second.write_text(f'SF:{root}/crates/domain/src/lib.rs\nFN:2,operation\nFNDA:1,operation\n'
+                              'DA:2,1\nDA:3,3\nDA:4,0\nend_of_record\n')
+            files = read_lcov([first, second], root)
+            document = lcov_document(files, root)
+            measured = read_file_summaries(document)[0][1]
+            self.assertEqual(measured.lines, Counter(count=3, covered=2))
+            self.assertEqual(measured.functions, Counter(count=1, covered=1))
+            output = root / 'merged.info'
+            write_lcov(files, output)
+            self.assertEqual(read_lcov([output], root), files)
+            self.assertIn('DA:3,5\n', output.read_text())
+
+    def test_lcov_does_not_report_unmeasured_regions_as_fully_covered(self):
+        from summarize_coverage import lcov_document
+
+        document = lcov_document({'crates/domain/src/lib.rs': {
+            'lines': {2: 1}, 'functions': {'operation': 1}, 'starts': {'operation': 2},
+        }}, REPO_ROOT)
+        report = render(document, REPO_ROOT, 0, 'Coverage')
+        self.assertIn('| Regions | n/a | n/a | n/a |', report)
+        self.assertIn('| `crates/domain` | 100.00% | 1/1 | 100.00% | n/a |', report)
+
+    def test_lcov_excludes_dedicated_tests_benches_and_external_sources(self):
+        import tempfile
+        from summarize_coverage import read_lcov
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'coverage.info'
+            paths = ['crates/domain/src/lib.rs', 'crates/domain/tests/integration.rs',
+                     'crates/domain/benches/load.rs', 'crates/domain/src/session_tests.rs',
+                     'crates/domain/src/tests/module.rs', '/vendor/lib.rs']
+            source.write_text(''.join(f'SF:{path}\nDA:1,1\nend_of_record\n' for path in paths))
+            self.assertEqual(list(read_lcov([source], root)), ['crates/domain/src/lib.rs'])
+
+
 if __name__ == "__main__":
     unittest.main()

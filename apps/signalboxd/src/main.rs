@@ -54,6 +54,7 @@ use signalbox_persistence::{
     turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
+use signalboxd::GUARD_CHECK_INTERVAL;
 use signalboxd::runner_protocol_runtime::{
     PostgresRunnerRegistrationService, RunnerProtocolRuntime, RunnerProtocolRuntimeError,
     RunnerRegistrationFailureCause,
@@ -95,7 +96,6 @@ const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
-const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 fn graceful_shutdown_window(
     model_exchange_timeout: Option<Duration>,
@@ -853,6 +853,7 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
         | ProcessRuntimeError::SpoolIo(_)
         | ProcessRuntimeError::InsufficientPoolCapacity
         | ProcessRuntimeError::CleanupSocket(_)
+        | ProcessRuntimeError::RunnerRecoveryNotifications(_)
         | ProcessRuntimeError::Dispatch(OutboxDispatchError::Database(_)) => {
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
@@ -1608,11 +1609,32 @@ async fn run_hub(
     );
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
+    let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
+        Ok(service) => service,
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("runner_catalog_construction_failed"),
+            );
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
+    let scan_runner_service = runner_service.clone();
     let migration_oauth_registrations = model_configuration.oauth_registrations();
     let scan_pool = pool.clone();
     let startup = migrate_scan_then_schedule(
         install_oauth_registrations(&pool, &migration_oauth_registrations),
         async move {
+            scan_runner_service
+                .mark_orphaned_connections_lost()
+                .await
+                .map_err(|_| {
+                    erase_startup_cause(
+                        RuntimePhase::StartupScan,
+                        SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
+                    )
+                })?;
             let mut scan = StartupScanService::new(
                 UuidV7StartupScanIdGenerator,
                 PostgresStartupScanRepository::new(scan_pool),
@@ -1727,48 +1749,6 @@ async fn run_hub(
                 return Err(failure);
             }
         };
-    let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
-        Ok(service) => service,
-        Err(_) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("runner_catalog_construction_failed"),
-            );
-            drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-    };
-    match await_while_guarded(
-        &mut database,
-        runner_service.mark_orphaned_connections_lost(),
-    )
-    .await
-    {
-        GuardedAwait::Completed(Ok(_)) => {}
-        GuardedAwait::Completed(Err(_)) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
-            );
-            drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-        GuardedAwait::GuardLost => {
-            if let Some(registry) = blob_store_registry.as_ref() {
-                registry.disarm_staging_sweep();
-            }
-            drop(blob_executor);
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Ok(ShutdownOutcome::GuardLost);
-        }
-    }
     let runner_listener = match LocalProcessListener::bind(configuration.runner_socket_path()) {
         Ok(listener) => listener,
         Err(error) => {
@@ -1889,6 +1869,7 @@ async fn run_hub(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
+    let runner_service = runner_service.with_eligibility_nudge(eligibility_nudge.clone());
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let repository_watch_runtime = {
         let start = async {
@@ -2080,7 +2061,8 @@ async fn run_hub(
             runtime_models.clone(),
             model_configuration.clone(),
             compaction.clone(),
-        );
+        )
+        .with_repository_watch_continuation(pass_nudge.clone(), tool_dispatch_gate.clone());
         let execution = execution_supervisor.with_execution(
             PostgresProviderModelExecution::new(
                 model_repository.clone(),

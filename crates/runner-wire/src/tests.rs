@@ -645,7 +645,7 @@ fn advertisement_digest_preimage_is_pinned() {
 }
 
 #[test]
-fn advertisement_binds_and_round_trips_the_runner_default_directory() {
+fn advertisement_digest_binds_and_round_trips_the_runner_default_directory() {
     let mut successor = advertisement();
     successor.default_working_directory = Some("/workspace/successor".to_owned());
     let domain = successor
@@ -657,6 +657,10 @@ fn advertisement_binds_and_round_trips_the_runner_default_directory() {
         successor
     );
     let digest = advertisement_digest(&successor).expect("checked directory digest");
+    assert_ne!(
+        advertisement_digest(&advertisement()).expect("absent directory digest"),
+        digest
+    );
     successor.default_working_directory = Some("/workspace/predecessor".to_owned());
     assert_ne!(
         advertisement_digest(&successor).expect("distinct directory digest"),
@@ -909,4 +913,21 @@ fn rejected_frame_rejects_invalid_complete_provision_correlation() {
     });
 
     assert!(Frame::try_new(invalid).is_err());
+}
+
+#[test]
+fn workspace_provision_omits_absent_recovery_and_rejects_explicit_null() {
+    let provision = WorkspaceProvision {
+        correlation: provision_correlation(),
+        recovery: None,
+    };
+    let mut encoded = serde_json::to_value(&provision).expect("workspace provision encodes");
+    assert!(encoded.get("recovery").is_none());
+    assert_eq!(
+        serde_json::from_value::<WorkspaceProvision>(encoded.clone())
+            .expect("absent recovery decodes"),
+        provision
+    );
+    encoded["recovery"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<WorkspaceProvision>(encoded).is_err());
 }

@@ -261,11 +261,11 @@ template = "watch"
             .ingest_observation(
                 &store.ingest_baseline(repository).await?,
                 &signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+                    merged_at: std::collections::BTreeMap::new(),
                     repository: repository.clone(),
                     default_branch: BranchName::try_new(String::from("main"))?,
                     default_head: head.clone(),
                     observed_at: now,
-                    merged_at: std::collections::BTreeMap::new(),
                     observation,
                 },
                 EventProducer::Poll,

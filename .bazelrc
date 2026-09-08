@@ -10,3 +10,9 @@ build --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 
 # Clippy shares the workspace configuration with Cargo.
 build --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
+
+coverage --combined_report=lcov
+coverage --instrumentation_filter=^//(apps|crates)/
+coverage --instrument_test_targets
+# Keep LLVM's linked dynamic-section address intact during runtime relocation.
+coverage --@rules_rust//rust/settings:extra_rustc_flag=-Clink-arg=-Wl,-rpath,$ORIGIN/coverage-runtime
