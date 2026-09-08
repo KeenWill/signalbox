@@ -210,6 +210,7 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
 })
 
 test('fetches fresh original bytes after browser decoding fails', async ({ page }) => {
+  const problems = watchBrowser(page)
   await page.addInitScript(() => {
     const request = window.fetch
     const cacheModes: (RequestCache | undefined)[] = []
@@ -246,6 +247,7 @@ test('fetches fresh original bytes after browser decoding fails', async ({ page 
     'reload',
     'reload',
   ])
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
 test('restores a loaded original after leaving and reopening the scenario', async ({ page }) => {
