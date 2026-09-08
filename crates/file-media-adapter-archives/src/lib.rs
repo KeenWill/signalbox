@@ -279,10 +279,8 @@ fn reader_declaration(
             range_count: 1,
             cumulative_bytes: SOURCE_BYTES,
         }),
-        // Validation reads at most two ranges: the bounded signature prefix and
-        // the single remainder read that completes the bounded whole source.
-        // Their cumulative bytes never exceed the whole-source ceiling.
-        validation: ValidationDeclaration::new(SOURCE_BYTES, 2),
+        // Validation reads either the bounded whole source or its signature prefix.
+        validation: ValidationDeclaration::new(SOURCE_BYTES, 1),
         views: vec![entries_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
