@@ -49,7 +49,10 @@ test('keeps document bytes behind the admitted download-only affordance', async 
   await expect(download).toHaveAttribute('href', new RegExp(`^${documentDownloadPath}`))
   expect(
     await page.evaluate(
-      (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
+      (path) =>
+        performance
+          .getEntriesByType('resource')
+          .filter((entry) => new URL(entry.name).pathname === path).length,
       documentDownloadPath,
     ),
   ).toBe(0)

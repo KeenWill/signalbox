@@ -17,6 +17,7 @@ import {
   imageDownloadView,
   imageOriginalView,
   imagePreviewView,
+  imageThumbnailView,
   isSingleFrameJpegBytes,
   jpegDescriptor,
   jpegOriginalView,
@@ -201,11 +202,10 @@ describe('artifact renderer compatibility', () => {
     expect(selectProvenViewDerivation(imageArtifact, view)).toBeUndefined()
   })
 
-  it('names a thumbnail fallback as a thumbnail', () => {
-    const thumbnail = { ...preview, kind: 'thumbnail' as const }
+  it('falls back to a proven thumbnail when the preview has no proof', () => {
     const descriptor: WebBlobDescriptor = {
       ...imageArtifact,
-      available_views: [download, thumbnail],
+      available_views: [download, { ...preview, derivations: [] }, imageThumbnailView],
     }
 
     expect(selectImageView(descriptor)?.kind).toBe('thumbnail')
