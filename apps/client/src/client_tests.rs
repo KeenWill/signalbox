@@ -4561,8 +4561,88 @@ async fn stop_turn_names_the_active_turn_and_returns_its_successor() -> Result<(
     Ok(())
 }
 
-/// a decision verb sends the exact closed decision and validates
-/// that the receipt echoes the same request and decision.
+/// Override arming sends its own canonical command and accepts only the exact
+/// overridden-request receipt.
+#[tokio::test]
+async fn override_validates_the_exact_recorded_receipt() -> Result<(), Box<dyn Error>> {
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let tool_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+    struct Case {
+        receipt: ServerMessage,
+        accepted: bool,
+    }
+    let cases = [
+        Case {
+            receipt: ServerMessage::ToolDenialOverridden { tool_request_id },
+            accepted: true,
+        },
+        Case {
+            receipt: ServerMessage::ToolDenialOverridden {
+                tool_request_id: session_id,
+            },
+            accepted: false,
+        },
+        Case {
+            receipt: ServerMessage::ToolRequestDecided {
+                tool_request_id,
+                decision: ToolDecision::Approve {},
+            },
+            accepted: false,
+        },
+    ];
+    for case in cases {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::OverrideDeniedToolRequest {
+                    command_id,
+                    session_id,
+                    tool_request_id,
+                }
+            );
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                case.receipt,
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let result = crate::override_denial(
+            &mut ProcessClient::new(socket),
+            &mut output,
+            session_id,
+            tool_request_id,
+            Some(command_id),
+        )
+        .await;
+        server.await??;
+
+        assert_eq!(result.is_ok(), case.accepted, "{result:?}");
+        assert_eq!(!stdout.is_empty(), case.accepted);
+        assert_eq!(
+            String::from_utf8(stderr)?.contains("one extra model round"),
+            case.accepted
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn decide_validates_the_exact_recorded_receipt() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;

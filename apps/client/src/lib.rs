@@ -131,8 +131,8 @@ use turn::{
     terminal_event_state, terminal_snapshot_state, tool_recovery_transition,
 };
 use turn::{
-    child_lifecycle_terminalization, decide, descendant_scope, reconcile, send, steer, stop,
-    stop_turn,
+    child_lifecycle_terminalization, decide, descendant_scope, override_denial, reconcile, send,
+    steer, stop, stop_turn,
 };
 mod follow_status;
 use follow_status::terminal_snapshot_selection;
@@ -320,6 +320,7 @@ async fn execute(
         | Command::Reconcile { .. }
         | Command::Review(_)
         | Command::Stop { .. }
+        | Command::Override { .. }
         | Command::Approve { .. }
         | Command::Deny { .. } => None,
     };
@@ -351,6 +352,7 @@ async fn execute(
         | Command::Reconcile { .. }
         | Command::Review(_)
         | Command::Stop { .. }
+        | Command::Override { .. }
         | Command::Approve { .. }
         | Command::Deny { .. }
         | Command::BlobMetadata { .. }
@@ -385,6 +387,7 @@ async fn execute(
         | Command::Steer { .. }
         | Command::Reconcile { .. }
         | Command::Stop { .. }
+        | Command::Override { .. }
         | Command::Approve { .. }
         | Command::Deny { .. }
         | Command::Model { .. }
@@ -651,6 +654,20 @@ async fn execute(
                 defaults_version,
                 descendants,
                 input,
+            )
+            .await
+        }
+        Command::Override {
+            session_id,
+            tool_request_id,
+            command_id,
+        } => {
+            override_denial(
+                &mut client,
+                &mut output,
+                session_id,
+                tool_request_id,
+                command_id,
             )
             .await
         }
