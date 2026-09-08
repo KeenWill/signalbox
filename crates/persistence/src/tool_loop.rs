@@ -28,7 +28,7 @@ use signalbox_domain::{
     DecideToolRequestResult, DelegateApprovalRecommendation, DelegateToolApproval,
     DelegationContent, DelegationOutcome, DelegationOutcomeKind,
     DelegationProvenanceReconstitutionInput, DirectModelSelection, DurableCommandId,
-    EndedToolAttempt, FastMode, GoalGeneration, NormalizedToolArguments, OverrideDeniedToolRequest,
+    EndedToolAttempt, GoalGeneration, NormalizedToolArguments, OverrideDeniedToolRequest,
     OverrideDeniedToolRequestResult, PreparedDecideToolRequest, PreparedOverrideDeniedToolRequest,
     PreparedToolBatchDecision, PreparedToolResultProjection, ReconstitutedToolAttempt,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
@@ -64,8 +64,8 @@ use crate::{
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{
-        insert_prepared_call, insert_snapshot, lock_delegated_child_endpoint_sessions,
-        lock_delegated_turn_terminal_frontier, prepared_serving_evidence,
+        insert_snapshot, lock_delegated_child_endpoint_sessions,
+        lock_delegated_turn_terminal_frontier,
     },
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
@@ -1303,127 +1303,6 @@ impl PostgresToolLoopRepository {
         finish_commit(transaction, result).await
     }
 
-    /// Atomically commits result projection, steering consumption, and the
-    /// next prepared model call for the same logical turn.
-    pub async fn commit_result_and_prepare_continuation(
-        &self,
-        producing_call: signalbox_domain::ModelCallId,
-        projection: &PreparedToolResultProjection,
-        prepared: &signalbox_domain::PreparedInitialModelCall,
-        credential_reference: &ModelCallCredentialReference,
-    ) -> Result<(), ToolLoopRepositoryError> {
-        let session = prepared.session();
-        let turn = prepared.turn();
-        let mut transaction = self.pool.begin().await?;
-        let result = async {
-            lock_tool_session(&mut transaction, session).await?;
-            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
-                .await?
-                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
-            if batch.producing_call() != producing_call
-                || batch.yielded_snapshot().frontier().owning_session() != session
-                || !matches!(
-                    batch.phase(),
-                    signalbox_domain::ToolBatchPhase::Executing { turn_attempt }
-                        if turn_attempt == prepared.attempt()
-                )
-            {
-                return Err(ToolLoopCorruption::Inconsistent("continuation batch").into());
-            }
-            let projection_frontier = projection.snapshot().frontier();
-            let call_frontier = prepared.call().frontier();
-            let frontier_matches = match prepared.steering_snapshot() {
-                Some(steering_snapshot) => {
-                    projection
-                        .snapshot()
-                        .is_semantic_prefix_of(steering_snapshot)
-                        && call_frontier == steering_snapshot.frontier()
-                }
-                None => call_frontier == projection_frontier,
-            };
-            if projection_frontier.owning_session() != session || !frontier_matches {
-                return Err(ToolLoopCorruption::Inconsistent("continuation call frontier").into());
-            }
-
-            persist_result_entries(&mut transaction, projection).await?;
-            insert_snapshot(&mut transaction, projection.snapshot())
-                .await
-                .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
-            outbox::append(
-                &mut transaction,
-                OutboxEvent::ToolBatchTransition {
-                    session,
-                    turn,
-                    producing_call,
-                    state: ToolBatchOutboxState::ResultsProjected(
-                        projection.snapshot().frontier().snapshot(),
-                    ),
-                },
-            )
-            .await?;
-            let fast_mode: String = sqlx::query_scalar(
-                "SELECT resolved_model_settings #>> '{effective,fast_mode}'
-                   FROM turn_model_settings_resolved
-                  WHERE session_id = $1
-                    AND turn_id = $2",
-            )
-            .bind(session_id_to_uuid(session))
-            .bind(turn_id_to_uuid(turn))
-            .fetch_one(&mut *transaction)
-            .await?;
-            let fast_mode = match fast_mode.as_str() {
-                "disabled" => FastMode::Disabled,
-                "enabled" => FastMode::Enabled,
-                _ => {
-                    return Err(ToolLoopCorruption::Inconsistent(
-                        "continuation effective fast mode",
-                    )
-                    .into());
-                }
-            };
-            let serving_evidence = prepared_serving_evidence(
-                self.credential_families.as_ref(),
-                &self.continuation_usage_limits,
-                prepared.call().target(),
-                fast_mode,
-            );
-            insert_prepared_call(
-                &mut transaction,
-                prepared,
-                credential_reference,
-                None,
-                self.cache_inclusive_input_targets
-                    .contains(&prepared.call().target()),
-                serving_evidence,
-            )
-            .await
-            .map_err(map_model_call_error)?;
-            let rows = sqlx::query(
-                "UPDATE turn_lifecycle
-                    SET active_tool_round_call_id = NULL,
-                        approval_tool_request_id = NULL,
-                        recovery_tool_attempt_id = NULL
-                  WHERE turn_id = $1
-                    AND session_id = $2
-                    AND current_attempt_id = $3
-                    AND state_kind = 'active'
-                    AND active_phase_kind = 'running'
-                    AND active_tool_round_call_id = $4",
-            )
-            .bind(turn_id_to_uuid(turn))
-            .bind(session_id_to_uuid(session))
-            .bind(prepared.attempt().into_uuid())
-            .bind(producing_call.into_uuid())
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
-            require_single(rows, "tool result continuation call")?;
-            Ok(())
-        }
-        .await;
-        finish_commit(transaction, result).await
-    }
-
     /// Atomically derives and commits result projection, consumes all pending
     /// steering, and prepares the next same-turn model call.
     pub async fn prepare_continuation<NextSteering>(
@@ -1514,6 +1393,43 @@ impl PostgresToolLoopRepository {
                         "tool batch is not ready for continuation",
                     )
                 })?;
+                let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT accepted_input_id FROM accepted_input
+                      WHERE session_id = $1 AND expected_active_turn_id = $2
+                        AND disposition_kind = 'pending_steering'
+                      ORDER BY acceptance_position",
+                )
+                .bind(session.into_uuid())
+                .bind(turn.into_uuid())
+                .fetch_all(&mut *transaction)
+                .await?;
+                let steering_candidates = pending_inputs
+                    .into_iter()
+                    .map(|input| {
+                        let input = signalbox_domain::AcceptedInputId::from_uuid(input);
+                        (input, next_steering(input))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                crate::model_execution::reserve_frontier_write_identities(
+                    &mut transaction,
+                    identities
+                        .result_entries()
+                        .iter()
+                        .map(|entry| entry.into_uuid())
+                        .chain(
+                            steering_candidates
+                                .values()
+                                .map(|(entry, _)| entry.into_uuid()),
+                        )
+                        .chain([
+                            identities.result_frontier().into_uuid(),
+                            identities.steering_frontier().into_uuid(),
+                            identities.target_failure().failure_entry().into_uuid(),
+                            identities.target_failure().terminal_frontier().into_uuid(),
+                        ]),
+                )
+                .await
+                .map_err(map_model_call_error)?;
                 persist_result_entries(&mut transaction, &projection).await?;
                 insert_snapshot(&mut transaction, projection.snapshot())
                     .await
@@ -1549,6 +1465,12 @@ impl PostgresToolLoopRepository {
                         "runner replacement authority is not configured",
                     ));
                 }
+                sqlx::raw_sql(
+                    "SET CONSTRAINTS context_frontier_requires_complete_membership IMMEDIATE;
+                     SET CONSTRAINTS context_frontier_requires_complete_membership DEFERRED;",
+                )
+                .execute(&mut *transaction)
+                .await?;
                 // Full frontier reconstruction can scan a long-lived session. Keep
                 // that read outside the global writer guard while the session lock
                 // preserves the transaction-local result projection unchanged.
@@ -1591,7 +1513,7 @@ impl PostgresToolLoopRepository {
                     identities.call(),
                     identities.target_failure().clone(),
                     identities.steering_frontier(),
-                    &mut next_steering,
+                    steering_candidates,
                 )
                 .await
                 .map_err(map_model_call_error)?;
