@@ -4,4 +4,4 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| code_host | 67 | 1 | 0 | [types](code_host/types.md), [types-2](code_host/types-2.md), [functions](code_host/functions.md), [traits](code_host/traits.md) |
+| code_host | 68 | 1 | 0 | [types](code_host/types.md), [types-2](code_host/types-2.md), [functions](code_host/functions.md), [traits](code_host/traits.md) |

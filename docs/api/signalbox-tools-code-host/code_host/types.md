@@ -379,10 +379,27 @@ impl CodeHostOperation {
 }
 ```
 
+## CodeHostHttpFailure
+
+```rust
+pub enum CodeHostHttpFailure {
+    CredentialUnavailable,
+    Forbidden,
+    RateLimited,
+    NotFound,
+    Conflict,
+    Validation,
+    Server,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## CodeHostTransportFailure
 
 ```rust
 pub enum CodeHostTransportFailure {
+    Http(CodeHostHttpFailure),
+    HttpBeforeMutation(CodeHostHttpFailure),
     InvalidCredential,
     Rejected,
     NotFound,
