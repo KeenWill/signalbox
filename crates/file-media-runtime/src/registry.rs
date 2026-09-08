@@ -240,16 +240,19 @@ impl FileMediaRegistry {
             .cloned()
             .collect::<Vec<_>>();
         if !strong.is_empty() {
-            return self
+            let inspection = self
                 .resolve_candidates(
                     processor,
-                    request,
+                    request.clone(),
                     source,
                     cancellation,
                     strong,
                     ValidationEvidence::StrongSignature,
                 )
-                .await;
+                .await?;
+            if !matches!(inspection, FileInspection::Unknown { .. }) {
+                return Ok(inspection);
+            }
         }
 
         let structural = candidates

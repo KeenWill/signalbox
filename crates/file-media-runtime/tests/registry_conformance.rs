@@ -720,6 +720,31 @@ fn probe_evidence_outside_the_reader_validation_envelope_cannot_validate() {
 }
 
 #[test]
+fn strong_candidate_outside_validation_envelope_resumes_declared_and_text_fallbacks() {
+    let registry = selection_registry_with_media_types(
+        &[SYNTHETIC_MEDIA_TYPE, "text/plain"],
+        StreamingTextFallback::Enabled,
+        FileMediaCeilings::version_one(),
+        SELECTION_PROBE_EVIDENCE_BYTES - 1,
+    );
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Strong,
+        validation: SelectionValidation::Validated,
+    };
+    for (declared, expected) in [
+        (
+            SYNTHETIC_MEDIA_TYPE,
+            ValidationEvidence::DeclaredCandidateStructurallyValidated,
+        ),
+        ("unknown", ValidationEvidence::StreamingTextValidation),
+    ] {
+        let inspection = inspect(&registry, &processor, &MemorySource::synthetic(), declared)
+            .expect("strong validation miss permits fallback");
+        assert_eq!(validated_evidence(inspection), expected);
+    }
+}
+
+#[test]
 fn declared_candidate_follows_probe_miss() {
     let inspection = selection_inspection(
         SelectionProbe::NoMatch,
