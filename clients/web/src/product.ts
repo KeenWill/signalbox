@@ -1150,12 +1150,10 @@ export async function* followSession(
 // Selected page limits keep mounted transcript text and its attachment metadata bounded.
 const SESSION_TRANSCRIPT_MAX_ITEMS = 8
 const SESSION_TRANSCRIPT_MAX_BYTES = 65536
-// Protocol floor: TimelineDetailLimits requires at least 256 projected bytes per read.
-const MIN_SESSION_TRANSCRIPT_PAGE_BYTES = 256
 
 export type SessionTranscriptLimits = Pick<
   WebContractBootstrap['limits'],
-  'max_timeline_detail_items' | 'max_timeline_detail_bytes'
+  'max_timeline_detail_items' | 'max_timeline_detail_bytes' | 'min_timeline_detail_bytes'
 >
 
 export async function readSessionTranscript(
@@ -1252,6 +1250,7 @@ async function readSessionTextPage(
       through,
       cursor,
       {
+        min_timeline_detail_bytes: limits.min_timeline_detail_bytes,
         max_timeline_detail_items: Math.min(
           maxItems - items.length,
           maxScannedItems - scannedItems,
@@ -1283,7 +1282,7 @@ async function readSessionTextPage(
       (cursor?.type === 'more_body' && cursor.body.offset_bytes === '0')) &&
     scannedItems < maxScannedItems &&
     items.length < maxItems &&
-    maxBytes - scannedBytes >= MIN_SESSION_TRANSCRIPT_PAGE_BYTES
+    maxBytes - scannedBytes >= limits.min_timeline_detail_bytes
   )
   return { session_id: sessionId, items, projected_body_bytes: bytes, continuation: cursor }
 }

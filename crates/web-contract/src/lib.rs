@@ -14,7 +14,7 @@ use signalbox_application::{
     max_search_snippet_bytes, max_session_live_queued_turns, max_timeline_detail_bytes,
     max_timeline_detail_items, max_timeline_window_bytes, max_timeline_window_items,
     max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
-    timeline_detail_envelope_bytes,
+    min_timeline_detail_bytes, timeline_detail_envelope_bytes,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -89,6 +89,8 @@ pub struct WebContractLimits {
     pub max_timeline_window_bytes: u32,
     /// Maximum detailed timeline records in one response.
     pub max_timeline_detail_items: u32,
+    /// Minimum projected typed-body byte budget accepted for a detail request.
+    pub min_timeline_detail_bytes: u32,
     /// Maximum projected typed-body bytes in one detail response.
     pub max_timeline_detail_bytes: u32,
     /// Maximum queued turn identities retained in one live snapshot.
@@ -153,6 +155,7 @@ impl WebContractBootstrap {
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
                 max_timeline_detail_items: u32::from(max_timeline_detail_items()),
+                min_timeline_detail_bytes: min_timeline_detail_bytes(),
                 max_timeline_detail_bytes: max_timeline_detail_bytes(),
                 max_session_live_queued_turns: u32::from(max_session_live_queued_turns()),
                 max_search_query_bytes: max_search_query_bytes() as u32,

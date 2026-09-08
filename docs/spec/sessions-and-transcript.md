@@ -97,9 +97,11 @@ parent-chosen policy, messages in both directions, and the child's one result.
 The browser read plane serves a session catalog with attention states, a live
 projection and follow stream for one session, a timeline of durable events with
 typed detail, and lexical search. Its request and response shapes live in
-`crates/web-contract`. `POST /api/sessions/{session_id}/input` submits browser
-text with a user-global command ID through the operator submit-input path,
-starting only when no turn is active. A 204 response acknowledges durable
+`crates/web-contract`. Bootstrap advertises the minimum accepted detail byte
+budget from `TimelineDetailLimits`; automatic transcript pagination stops when
+its remaining budget is smaller. `POST /api/sessions/{session_id}/input` submits
+browser text with a user-global command ID through the operator submit-input
+path, starting only when no turn is active. A 204 response acknowledges durable
 acceptance; typed errors report rejection, and an unconfirmed outcome is retried
 with the same command ID and text. Browser drafts are limited to 65,536 UTF-16
 code units before serialization; the serialized request must fit the JSON byte

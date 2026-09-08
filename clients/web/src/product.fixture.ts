@@ -22,6 +22,7 @@ export const webContractBootstrapFixture = {
     max_timeline_window_items: 256,
     max_timeline_window_bytes: 65_536,
     max_timeline_detail_items: 128,
+    min_timeline_detail_bytes: 256,
     max_timeline_detail_bytes: 65_536,
     max_session_live_queued_turns: 32,
     max_search_query_bytes: 512,

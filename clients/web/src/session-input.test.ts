@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import type { WebTimelineDetailContinuation } from './generated/web-contract.mjs'
+import bootstrapFixture from './generated/web-contract-bootstrap.json' with { type: 'json' }
 import {
   followSession,
   MAX_SESSION_MESSAGE_LENGTH,
@@ -8,7 +9,7 @@ import {
   submitSessionInput,
 } from './product'
 
-const limits = { max_timeline_detail_items: 128, max_timeline_detail_bytes: 65536 }
+const limits = bootstrapFixture.limits
 const readSessionTranscript = (
   sessionId: string,
   first: string,
@@ -357,7 +358,7 @@ it('clamps transcript requests and response validation to advertised limits', as
     .mockResolvedValueOnce(Response.json(inputPage(2)))
     .mockResolvedValueOnce(Response.json(inputPage(1, 1000)))
   vi.stubGlobal('fetch', fetch)
-  const advertised = { max_timeline_detail_items: 1, max_timeline_detail_bytes: 1024 }
+  const advertised = { ...limits, max_timeline_detail_items: 1, max_timeline_detail_bytes: 1024 }
   await readTranscript(sessionId, '1', '9', null, advertised)
   const url = new URL(fetch.mock.calls[0]?.[0], 'http://localhost')
   expect(url.searchParams.get('max_items')).toBe('1')
@@ -507,11 +508,11 @@ it('loads messages beyond metadata-only detail pages within the scan budget', as
 })
 
 it.each([
-  { count: 8, bytes: 1024, budget: 65536, next: '9' },
-  { count: 1, bytes: 128, budget: 256, next: '2' },
+  { count: 8, bytes: 1024, budget: 65536, minimum: limits.min_timeline_detail_bytes, next: '9' },
+  { count: 1, bytes: 128, budget: 1024, minimum: 1024, next: '2' },
 ])(
   'preserves incremental loading after scanning $count metadata records and $bytes bytes',
-  async ({ count, bytes, budget, next }) => {
+  async ({ count, bytes, budget, minimum, next }) => {
     const continuation = { type: 'more_at' as const, address: { event_sequence: next } }
     const fetch = vi.fn().mockResolvedValueOnce(
       Response.json({
@@ -531,7 +532,7 @@ it.each([
     const held = await readExtendedSessionTranscript(
       window,
       null,
-      { ...limits, max_timeline_detail_items: 8, max_timeline_detail_bytes: budget },
+      { ...limits, max_timeline_detail_items: 8, max_timeline_detail_bytes: budget, min_timeline_detail_bytes: minimum },
       null,
     )
     expect(fetch).toHaveBeenCalledTimes(1)
