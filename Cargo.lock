@@ -4854,10 +4854,8 @@ dependencies = [
  "signalbox-application",
  "signalbox-derive",
  "signalbox-domain",
- "signalbox-persistence",
  "signalbox-tool-contract",
  "signalbox-tool-schema-derive",
- "sqlx",
  "tokio",
  "uuid",
 ]
