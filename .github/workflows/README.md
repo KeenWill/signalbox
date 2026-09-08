@@ -76,8 +76,5 @@ facilities stay hosted for now, although this may change over time.
 | `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix)         |
 | `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                         |
 
-The `web.yml` `snapshot-update` job uses `ubuntu-latest` for focused Chromium
-snapshot evidence independently of the self-hosted web matrix.
-
 The `bazel-postgres` job uses the canonical routing expression with
 `signalbox-docker`, or `ubuntu-latest` for fork and named bot pull requests.
