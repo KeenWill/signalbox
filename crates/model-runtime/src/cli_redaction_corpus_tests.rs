@@ -1309,3 +1309,20 @@ fn stateful_equals_stateless_generated_soak() {
 fn suppression_is_absorbing_generated_soak() {
     assert_suppression_is_absorbing(GENERATOR_SEED, SOAK_GENERATIVE_CASES);
 }
+
+#[test]
+fn indicator_free_values_follow_expected_fast_paths() {
+    let corpus = include_str!("testdata/redaction-fast-path-corpus.tsv");
+    for line in corpus.lines() {
+        let mut fields = line.splitn(3, '\t');
+        let scan = fields.next().unwrap().parse::<bool>().unwrap();
+        let observed = fields.next().unwrap();
+        let expected = fields.next().unwrap();
+        assert_eq!(
+            super::text_might_contain_credential(observed),
+            scan,
+            "{observed}"
+        );
+        assert_eq!(redact_text(observed), expected, "{observed}");
+    }
+}
