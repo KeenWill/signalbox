@@ -1140,3 +1140,88 @@ async fn compaction_recovery_spares_a_compaction_its_window_never_prepared()
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn exact_expiry_observation_recovers_a_between_operations_turn() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x18_100).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidate = repository
+        .observed_slot_held_turn(fixture.session)
+        .await?
+        .expect("the exact expired turn remains observable between operations");
+    assert_eq!(candidate.turn(), fixture.turn);
+    assert_eq!(
+        repository.slot_held_active_turns(None).await?.candidates(),
+        [],
+        "the periodic busy-operation inventory remains distinct"
+    );
+
+    let outcome = repository
+        .recover_observed_slot_held_turn(
+            candidate,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x18_110)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x18_111)),
+            ),
+            &mut UuidV7StartupScanIdGenerator,
+        )
+        .await?;
+    let state: String =
+        sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(matches!(
+        outcome,
+        Some(StartupScanSessionOutcome::Recovered(_))
+    ));
+    assert_eq!(state, "terminal");
+    assert_eq!(
+        repository.observed_slot_held_turn(fixture.session).await?,
+        None
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn exact_expiry_recovery_does_not_take_a_different_between_operations_turn()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x18_200).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let current = repository
+        .observed_slot_held_turn(fixture.session)
+        .await?
+        .expect("the running turn is observable");
+    let old = StaleTurnCandidate::new(
+        current.session(),
+        TurnId::from_uuid(Uuid::from_u128(0x18_210)),
+        current.evidence(),
+    );
+
+    let outcome = repository
+        .recover_observed_slot_held_turn(
+            old,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x18_211)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x18_212)),
+            ),
+            &mut UuidV7StartupScanIdGenerator,
+        )
+        .await?;
+
+    assert_eq!(outcome, None);
+    assert_eq!(
+        repository.observed_slot_held_turn(fixture.session).await?,
+        Some(current)
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
