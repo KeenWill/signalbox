@@ -877,7 +877,7 @@ where
                                 }
                                 observe_turn(activated.turn());
                                 report_guarded_turn_activation(activated.session(), activated.turn());
-                                let execution = async { execution.execute(activated).await };
+                                let execution = Box::pin(async { execution.execute(activated).await });
                                 return execution
                                     .instrument(guarded_turn_span(session, turn))
                                     .await
@@ -1015,7 +1015,7 @@ where
                                         activated.session(),
                                         activated.turn(),
                                     );
-                                    let execution = async { execution.execute(activated).await };
+                                    let execution = Box::pin(async { execution.execute(activated).await });
                                     return execution
                                         .instrument(guarded_turn_span(session, turn))
                                         .await
@@ -1176,9 +1176,9 @@ where
                             }
                             observe_turn(activated.turn());
                             report_guarded_turn_activation(activated.session(), activated.turn());
-                            let execution = async {
+                            let execution = Box::pin(async {
                                 execution.execute(activated).await
-                            };
+                            });
                             return execution
                                 .instrument(guarded_turn_span(session, turn))
                                 .await
