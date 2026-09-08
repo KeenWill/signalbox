@@ -369,6 +369,8 @@ use connection::*;
 mod reload;
 mod request;
 use request::handle_request;
+mod credential_exclusions;
+use credential_exclusions::*;
 mod delegation;
 use delegation::*;
 mod review;

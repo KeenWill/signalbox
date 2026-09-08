@@ -3,6 +3,7 @@
 mod blob;
 mod catalog_and_tools;
 mod conversation_import;
+mod credential_exclusions;
 mod defaults_and_templates;
 mod delegation_turns_and_model_calls;
 mod frame_bounds;

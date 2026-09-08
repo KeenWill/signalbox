@@ -5263,6 +5263,56 @@ fn review_pass_snapshot() -> ReviewPassSnapshot {
 }
 
 #[tokio::test]
+async fn credential_clear_rejects_a_receipt_for_another_generation() -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{CredentialExclusionClearOutcome, CredentialExclusionTarget};
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let target = CredentialExclusionTarget::ProfileQuarantine {
+        profile: "home".into(),
+        record_generation: CanonicalU64::new(1),
+    };
+    let request_target = target.clone();
+    let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &ClientRequest::ClearCredentialExclusion {
+                command_id,
+                target: request_target,
+            },
+            ServerMessage::CredentialExclusionCleared {
+                target: CredentialExclusionTarget::ProfileQuarantine {
+                    profile: "home".into(),
+                    record_generation: CanonicalU64::new(2),
+                },
+                outcome: CredentialExclusionClearOutcome::Cleared,
+            },
+        )
+        .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = crate::credential::credential(
+        &mut client,
+        &mut Output::new(&mut stdout, &mut stderr, false),
+        crate::arguments::CredentialCommand::Clear {
+            target,
+            command_id: Some(command_id),
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(
+        stdout.is_empty(),
+        "a mismatched receipt must not be presented as cleared"
+    );
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reload_configuration_prints_the_correlated_installed_sections()
 -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;

@@ -367,6 +367,18 @@ where
             )
             .await
         }
+        ClientRequest::ListCredentialExclusions { page_size, after } => {
+            handle_list_credential_exclusions(
+                writer, version, request_id, page_size, after, services,
+            )
+            .await
+        }
+        ClientRequest::ClearCredentialExclusion { command_id, target } => {
+            handle_clear_credential_exclusion(
+                writer, version, request_id, command_id, target, services,
+            )
+            .await
+        }
         ClientRequest::CreateSession {
             command_id,
             initial_model_selection,

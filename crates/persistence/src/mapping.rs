@@ -1842,6 +1842,8 @@ pub(crate) enum DurableCommandKind {
     MintGitRemote,
     /// Git remote withdrawal.
     WithdrawGitRemote,
+    /// Credential exclusion clearing.
+    ClearCredentialExclusion,
     /// Session lifecycle command.
     SessionLifecycle,
     /// Runner recovery command.
@@ -1872,6 +1874,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::RegisterWorkspace => "register_workspace",
         DurableCommandKind::MintGitRemote => "mint_git_remote",
         DurableCommandKind::WithdrawGitRemote => "withdraw_git_remote",
+        DurableCommandKind::ClearCredentialExclusion => "clear_credential_exclusion",
         DurableCommandKind::ReloadConfiguration => "reload_configuration",
         DurableCommandKind::SessionLifecycle => "session_lifecycle",
         DurableCommandKind::ReplaceLostRunner => "replace_lost_runner",
@@ -1904,6 +1907,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "register_workspace" => Some(DurableCommandKind::RegisterWorkspace),
         "mint_git_remote" => Some(DurableCommandKind::MintGitRemote),
         "withdraw_git_remote" => Some(DurableCommandKind::WithdrawGitRemote),
+        "clear_credential_exclusion" => Some(DurableCommandKind::ClearCredentialExclusion),
         "session_lifecycle" => Some(DurableCommandKind::SessionLifecycle),
         "reload_configuration" => Some(DurableCommandKind::ReloadConfiguration),
         "replace_lost_runner" => Some(DurableCommandKind::ReplaceLostRunner),

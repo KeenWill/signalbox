@@ -7,6 +7,8 @@
 
 mod continuation;
 mod credential_pool;
+#[path = "credential_pool_records.rs"]
+mod credential_pool_records;
 mod delegated_result;
 mod delegation_lock;
 mod live_turn;

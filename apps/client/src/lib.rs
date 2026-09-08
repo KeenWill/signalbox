@@ -79,6 +79,7 @@ use conversation_import::{
     PreparedImport, collect_import_paths, import_conversation_file, imported, open_import_source,
     read_imported_conversation, scan_conversations, write_single_import_outcome,
 };
+mod credential_exclusions;
 mod delegation;
 use delegation::session_delegation;
 #[cfg(test)]

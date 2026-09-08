@@ -218,6 +218,23 @@ pub enum ServerMessage {
         /// Closed terminal result.
         outcome: OauthCredentialOutcome,
     },
+    /// Opens one exclusion-listing page.
+    CredentialExclusionStart {},
+    /// One exact active clearable exclusion target.
+    CredentialExclusion {
+        target: crate::CredentialExclusionTarget,
+    },
+    /// Closes a page, retaining its exclusive continuation cursor.
+    CredentialExclusionEnd {
+        exclusion_count: CanonicalU64,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        next_after: Option<crate::CredentialExclusionTarget>,
+    },
+    /// An exact exclusion clear committed or equally replayed.
+    CredentialExclusionCleared {
+        target: crate::CredentialExclusionTarget,
+        outcome: crate::CredentialExclusionClearOutcome,
+    },
     /// Session creation receipt.
     SessionCreated {
         /// Created session.
@@ -925,6 +942,21 @@ impl ServerMessage {
                 validate_oauth_authorization(user_code, verification_uri)?;
             }
             Self::OauthCredentialReceipt { profile, .. } => validate_oauth_profile(profile)?,
+            Self::CredentialExclusion { target }
+            | Self::CredentialExclusionCleared { target, .. } => target.validate()?,
+            Self::CredentialExclusionEnd {
+                exclusion_count,
+                next_after,
+            } => {
+                if exclusion_count.value() > 100
+                    || (exclusion_count.value() == 0 && next_after.is_some())
+                {
+                    return Err(FrameValidationError::CredentialExclusionShape);
+                }
+                if let Some(target) = next_after {
+                    target.validate()?;
+                }
+            }
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
             Self::SessionAwaitRegistered {
                 mode: DelegationWaitMode::Foreground,

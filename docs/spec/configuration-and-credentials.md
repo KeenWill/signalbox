@@ -396,8 +396,13 @@ through its typed failed `turn/completed` closure under the
 authorizes no successor.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
-observed it, and nothing ends one. It applies to every session except one that
-has already completed a call through that member on the same pool.
+observed it until an operator clears its exact generation. It applies to every
+session except one that has already completed a call through that member on the
+same pool.
+
+An operator clear removes a pending `switch_next_turn` displacement or an
+`avoid_new_sessions` exclusion exactly as it clears a quarantine; the request is
+owned by [process protocol](../spec/process-protocol.md).
 
 A session's credential history stores the preferred reference rather than the
 pool policy, so a fresh availability chain resolves the pool from the current
@@ -818,8 +823,8 @@ advances the retained generation, and preserves registration and history.
 - Bounded credential-home concurrency and round-robin selection:
   `max_concurrent_invocations` and `round_robin`:
   [design](../design/configuration-and-credentials.md).
-- Credential-exclusion lifecycle: reset-aware expiry, operator clear, probe
-  recovery, action-head generations, and origin-aware clearing:
+- Credential-exclusion lifecycle: reset-aware expiry, probe recovery, and
+  coalescing action-head generations:
   [design](../design/configuration-and-credentials.md).
 - Pool-policy credential history and the migration of family-to-reference
   entries: [design](../design/configuration-and-credentials.md).

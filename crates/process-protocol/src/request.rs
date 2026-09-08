@@ -88,6 +88,17 @@ pub enum ClientRequest {
         /// Credential profile identity, including a retired declaration.
         profile: String,
     },
+    /// List active clearable exclusions in canonical target order.
+    ListCredentialExclusions {
+        page_size: u32,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        after: Option<crate::CredentialExclusionTarget>,
+    },
+    /// Clear one exact retained exclusion generation.
+    ClearCredentialExclusion {
+        command_id: CommandId,
+        target: crate::CredentialExclusionTarget,
+    },
     /// Create a user-initiated session.
     CreateSession {
         /// Durable mutation identity.
@@ -721,6 +732,15 @@ impl ClientRequest {
             | Self::DeleteOauthCredential { profile, .. } => {
                 crate::response::validate_oauth_profile(profile)?;
             }
+            Self::ListCredentialExclusions { page_size, after } => {
+                if !(1..=100).contains(page_size) {
+                    return Err(FrameValidationError::CredentialExclusionShape);
+                }
+                if let Some(target) = after {
+                    target.validate()?;
+                }
+            }
+            Self::ClearCredentialExclusion { target, .. } => target.validate()?,
             Self::AttachGoal { statement, .. }
             | Self::SupersedeGoal { statement, .. }
             | Self::CommissionSession { statement, .. } => {

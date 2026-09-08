@@ -95,6 +95,18 @@ pub enum ServerMessage {
         profile: string::String,
         outcome: OauthCredentialOutcome,
     },
+    CredentialExclusionStart {},
+    CredentialExclusion {
+        target: CredentialExclusionTarget,
+    },
+    CredentialExclusionEnd {
+        exclusion_count: CanonicalU64,
+        next_after: option::Option<CredentialExclusionTarget>,
+    },
+    CredentialExclusionCleared {
+        target: CredentialExclusionTarget,
+        outcome: CredentialExclusionClearOutcome,
+    },
     SessionCreated {
         session_id: CanonicalUuid,
         model_settings: ModelSettingsSnapshot,

@@ -8,45 +8,12 @@ owner has committed and the daemon and terminal client do not implement.
 
 Future implementation of these surfaces under protocol version 1 must pair each
 daemon handler with its terminal-client consumer in the same change:
-credential-exclusion administration, program-run
-cancellation, runner placement facts, and the typed projection of
-credential-pool exhaustion and of the credential-availability wait.
+program-run cancellation, runner placement facts, and the
+typed projection of credential-pool exhaustion and of the
+credential-availability wait.
 
 ## Design
 
-Credential-exclusion administration is one `list_credential_exclusions` read
-carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
-carrying a user-global `command_id` and one closed `target` object. The target
-is `profile_quarantine { profile, record_generation }`,
-`membership_exclusion { pool_policy_id, profile, record_generation }`,
-`session_displacement { session_id, pool_policy_id, profile, record_generation }`,
-or
-`chain_exclusion { session_id, turn_id, pool_policy_id, profile, predecessor_model_call_id }`.
-The read lists every active exclusion the mutation admits, as its exact target
-object, and omits exactly the records the mutation rejects; the filter turns on
-the exclusion's origin, never on the profile's delivery. A quarantine minted by
-a rejected daemon-owned OAuth refresh is rejected; a quarantine minted by a
-failed `codex_home` identity walk is accepted, because the walk reruns at every
-preparation and re-quarantines a still-broken home. `page_size` is 1 through
-100; `after` is null or one complete target object and is an exclusive keyset
-cursor. Results sort by target tag in the order above, then by each field's
-canonical order: UTF-8 bytes for configured names, UUID bytes for durable
-identities, numeric order for generations. The read opens with
-`credential_exclusion_start`, then one `credential_exclusion` per row, then
-`credential_exclusion_end { exclusion_count, next_after }` with a null
-`next_after` only at the end. The mutation marks exactly the named active
-generation or predecessor correlation cleared. A newer active generation at the
-target's own exact scope returns `stale_generation` before the named older
-generation is considered; the scope is the profile and origin for a profile
-quarantine, the pool policy and profile for a membership exclusion, and the
-session, pool policy, and profile for a session displacement. A target with no
-exactly matching retained record is `unknown_credential_exclusion`; an exact
-record an earlier command already cleared is `already_cleared`. Success returns
-`credential_exclusion_cleared { target, outcome }` with outcome `cleared` or
-`already_cleared`, and the inactive record is retained so the second answer is
-durable. An equal `command_id` replay returns its stored receipt before current
-state is evaluated. Both operations are authorized as every other request is:
-reaching the owner-private socket is the authority.
 
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt
@@ -109,23 +76,28 @@ length, and each evidence item's `profile` equals the same-ordinal
 `reset_at_unix_ms`, and one closed `exclusion`:
 `profile_quarantine { record_generation }`,
 `membership_exclusion { record_generation }`,
-`session_displacement { record_generation }`, or
-`chain_exclusion { predecessor_model_call_id }`. A member satisfying several
-exclusions reports exactly one, chosen in that order, widest scope first, so two
-producers cannot describe one exhaustion differently. `reset_at_unix_ms` is
-present only when every exclusion active for the member at the failure commit
-expires at the reset it reports, and is then the latest of them. The snapshot
-and event carry no credential bytes, path, provider prose, or
-current-configuration lookup, and the projection is never paginated or
-truncated; configuration admission bounds each profile and pool name to 256
-UTF-8 bytes and each pool to 1,024 members so the duplicated evidence fits one
-frame under worst-case JSON escaping. The credential-availability wait projects
-as an active turn state retaining the same turn and session slot. The after-call
-wait-transition failure projects the predecessor call identity alongside its
-call-free terminal attempt. The endings these shapes project belong to
+`session_displacement { record_generation }`,
+`chain_exclusion { predecessor_model_call_id }`, or
+`headroom_reserve { observed_headroom_percent, reserve_percent }` without a
+generation. A member satisfying several exclusions reports exactly one, chosen
+in that order, widest scope first, so two producers cannot describe one
+exhaustion differently. `reset_at_unix_ms` is present only when every exclusion
+active for the member at the failure commit expires at the reset it reports, and
+is then the latest of them. The snapshot and event carry no credential bytes,
+path, provider prose, or current-configuration lookup, and the projection is
+never paginated or truncated; configuration admission bounds each profile and
+pool name to 256 UTF-8 bytes and each pool to 1,024 members so the duplicated
+evidence fits one frame under worst-case JSON escaping. The
+credential-availability wait projects as an active turn state retaining the same
+turn and session slot. The after-call wait-transition failure projects the
+predecessor call identity alongside its call-free terminal attempt. The endings
+these shapes project belong to
 [credential-availability.md](../spec/credential-availability.md).
 
 ## Compatibility constraints
+
+Chain exclusions remain insert-only and turn-local and are neither listed nor
+clearable.
 
 `runner_state_transition` is an admitted version-1 event variant that the daemon
 projects when the outbox carries a runner state transition. Every other request
@@ -141,9 +113,6 @@ failed projection; no present producer emits the typed state or event.
 Admitting `park` in static configuration alone does not make the wait reachable;
 whatever first makes either wait reachable includes this projection.
 
-Exclusion records retain the generation and predecessor correlations the clear
-mutation names, and a cleared record is retained inactive rather than deleted.
-
 ## Acceptance criteria
 
 Every request and message above decodes under version 1 with unknown fields
@@ -151,13 +120,8 @@ rejected, and each surface ships with its daemon handler and the terminal-client
 consumer it lacks; a follower-visible addition also ships the native client's
 decoder and projection updates.
 
-The exclusion listing and the clear mutation agree on what is clearable for
-every exclusion origin, and a delivery-origin OAuth-refresh quarantine is
-neither listed nor clearable.
-
 An equal `command_id` replay returns the stored receipt for
-`clear_credential_exclusion` and `cancel_program_run`, and `stale_generation` is
-evaluated only for a fresh command and only within the target's own scope.
+`cancel_program_run`.
 
 A follower learns a live runner loss, change, or relocation through
 `runner_state_transition` and the current runner state from its snapshot, and

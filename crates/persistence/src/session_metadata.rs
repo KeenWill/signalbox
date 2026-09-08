@@ -244,7 +244,8 @@ impl SessionMetadataRepository {
                 | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential,
+                | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion,
             ) => Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -606,7 +607,8 @@ async fn existing_or_conflicting(
         | CommandKind::PromotePendingRunner
         | CommandKind::ProvisionOauthCredential
         | CommandKind::ReprovisionOauthCredential
-        | CommandKind::DeleteOauthCredential => {
+        | CommandKind::DeleteOauthCredential
+        | CommandKind::ClearCredentialExclusion => {
             return Ok(ReplaceSessionMetadataHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });
