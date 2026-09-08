@@ -2,8 +2,9 @@
 //! `docs/spec/file-and-media.md`.
 
 use std::{
+    cell::Cell,
     error::Error,
-    io::{Cursor, Read},
+    io::{self, Cursor, Read, Seek, SeekFrom},
     num::NonZeroU64,
     str::FromStr,
 };
@@ -28,6 +29,7 @@ const ENTRIES_VIEW: &str = "entries";
 const MALFORMED_REASON: &str = "malformed_archive";
 const ENTRY_COUNT_REASON: &str = "entry_count_limit";
 const EXPANDED_SIZE_REASON: &str = "expanded_size_limit";
+const ZIP_SCAN_REASON: &str = "zip_scan_work_limit";
 const HOSTILE_NAME_REASON: &str = "hostile_entry_name";
 const LINK_ENTRY_REASON: &str = "link_entry";
 const RECURSIVE_REASON: &str = "recursive_container";
@@ -101,7 +103,10 @@ impl FileMediaProvider for ArchiveProvider {
                     let complete = read_complete_after_prefix(source, prefix).await?;
                     require_active(cancellation)?;
                     let examined = complete.as_bytes().len();
-                    let Some(strength) = kind.probe_strength_with_complete_bytes(&complete) else {
+                    let Some(strength) = kind
+                        .probe_strength_with_complete_bytes(&complete)
+                        .map_err(|_| FileMediaProviderFailure::Failed)?
+                    else {
                         return Ok(ProcessorProbeOutput::NoMatch);
                     };
                     (strength, examined)
@@ -148,7 +153,9 @@ impl FileMediaProvider for ArchiveProvider {
                     }
                     let bytes = read_complete_after_prefix(source, prefix).await?;
                     require_active(cancellation)?;
-                    if ZipArchive::new(Cursor::new(bytes.as_bytes())).is_err() {
+                    if !structurally_valid_zip(bytes.as_bytes())
+                        .map_err(|_| FileMediaProviderFailure::Failed)?
+                    {
                         return Ok(ProcessorValidationOutput::NoMatch);
                     }
                     complete = Some(bytes.0);
@@ -208,9 +215,11 @@ impl FileMediaProvider for ArchiveProvider {
             require_active(cancellation)?;
             match enumerate(kind, &bytes) {
                 Ok(summary) => entries_output(kind, &summary),
-                Err(ArchiveIssue::Expansion) => Ok(ProcessorReadOutput::ExpansionLimitExceeded {
-                    limit_kind: String::from(EXPANDED_SIZE_REASON),
-                }),
+                Err(issue @ (ArchiveIssue::Expansion | ArchiveIssue::ZipScanWork)) => {
+                    Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                        limit_kind: String::from(issue.reason()),
+                    })
+                }
                 Err(
                     ArchiveIssue::Malformed
                     | ArchiveIssue::Encrypted
@@ -286,6 +295,7 @@ fn reader_declaration(
             ReasonCode::try_new(MALFORMED_REASON)?,
             ReasonCode::try_new(ENTRY_COUNT_REASON)?,
             ReasonCode::try_new(EXPANDED_SIZE_REASON)?,
+            ReasonCode::try_new(ZIP_SCAN_REASON)?,
             ReasonCode::try_new(HOSTILE_NAME_REASON)?,
             ReasonCode::try_new(LINK_ENTRY_REASON)?,
             ReasonCode::try_new(RECURSIVE_REASON)?,
@@ -332,9 +342,12 @@ impl ArchiveKind {
         }
     }
 
-    fn probe_strength_with_complete_bytes(self, source: &CompleteSource) -> Option<ProbeStrength> {
-        let structurally_valid_zip = ZipArchive::new(Cursor::new(source.as_bytes())).is_ok();
-        match self {
+    fn probe_strength_with_complete_bytes(
+        self,
+        source: &CompleteSource,
+    ) -> Result<Option<ProbeStrength>, ArchiveIssue> {
+        let structurally_valid_zip = structurally_valid_zip(source.as_bytes())?;
+        Ok(match self {
             Self::Zip if structurally_valid_zip => Some(ProbeStrength::Strong),
             Self::Zip if !zip_signature_at_start(source.probe_prefix()) => None,
             // A ZIP-shaped source demotes a competing claim only once that claim's own
@@ -350,7 +363,7 @@ impl ArchiveKind {
             Self::Zip | Self::Gzip | Self::Zstd | Self::Tar => {
                 Some(self.probe_strength(source.probe_prefix()))
             }
-        }
+        })
     }
 
     fn matches_probe(self, bytes: &[u8]) -> bool {
@@ -382,6 +395,7 @@ enum ArchiveIssue {
     Encrypted,
     EntryCount,
     Expansion,
+    ZipScanWork,
     HostileName,
     Link,
     Recursive,
@@ -395,6 +409,7 @@ impl ArchiveIssue {
             Self::Malformed | Self::Encrypted => MALFORMED_REASON,
             Self::EntryCount => ENTRY_COUNT_REASON,
             Self::Expansion => EXPANDED_SIZE_REASON,
+            Self::ZipScanWork => ZIP_SCAN_REASON,
             Self::HostileName => HOSTILE_NAME_REASON,
             Self::Link => LINK_ENTRY_REASON,
             Self::Recursive => RECURSIVE_REASON,
@@ -413,72 +428,134 @@ fn enumerate(kind: ArchiveKind, bytes: &[u8]) -> Result<ArchiveSummary, ArchiveI
     }
 }
 
+/// Counts repeated ZIP parser reads against the compiled expanded-work ceiling.
+struct ZipScanReader<'a> {
+    cursor: Cursor<&'a [u8]>,
+    remaining: &'a Cell<usize>,
+    exhausted: &'a Cell<bool>,
+}
+
+impl Read for ZipScanReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() || self.cursor.position() >= self.cursor.get_ref().len() as u64 {
+            return Ok(0);
+        }
+        let permitted = output.len().min(self.remaining.get());
+        if permitted == 0 {
+            self.exhausted.set(true);
+            return Err(io::Error::other(ZIP_SCAN_REASON));
+        }
+        let count = self.cursor.read(&mut output[..permitted])?;
+        self.remaining.set(self.remaining.get() - count);
+        Ok(count)
+    }
+}
+
+impl Seek for ZipScanReader<'_> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.cursor.seek(position)
+    }
+}
+
+fn with_zip<T>(
+    bytes: &[u8],
+    operation: impl FnOnce(&mut ZipArchive<ZipScanReader<'_>>) -> Result<T, ArchiveIssue>,
+) -> Result<T, ArchiveIssue> {
+    let remaining =
+        Cell::new(usize::try_from(MAX_EXPANDED_BYTES).map_err(|_| ArchiveIssue::ZipScanWork)?);
+    let exhausted = Cell::new(false);
+    let reader = ZipScanReader {
+        cursor: Cursor::new(bytes),
+        remaining: &remaining,
+        exhausted: &exhausted,
+    };
+    let result = match ZipArchive::new(reader) {
+        Ok(mut archive) => operation(&mut archive),
+        Err(_) => Err(ArchiveIssue::Malformed),
+    };
+    if exhausted.get() {
+        Err(ArchiveIssue::ZipScanWork)
+    } else {
+        result
+    }
+}
+
+fn structurally_valid_zip(bytes: &[u8]) -> Result<bool, ArchiveIssue> {
+    match with_zip(bytes, |_| Ok(())) {
+        Ok(()) => Ok(true),
+        Err(ArchiveIssue::Malformed) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
-    let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|_| ArchiveIssue::Malformed)?;
-    if zip_central_directory_records(bytes, archive.central_directory_start())? != archive.len() {
-        return Err(ArchiveIssue::Malformed);
-    }
-    if archive.len() > MAX_ENTRIES {
-        return Err(ArchiveIssue::EntryCount);
-    }
-    let mut descriptors = Vec::with_capacity(archive.len());
-    for index in 0..archive.len() {
-        let file = archive
-            .by_index_raw(index)
-            .map_err(|_| ArchiveIssue::Malformed)?;
-        if file.encrypted() {
-            return Err(ArchiveIssue::Encrypted);
+    with_zip(bytes, |archive| {
+        if zip_central_directory_records(bytes, archive.central_directory_start())? != archive.len()
+        {
+            return Err(ArchiveIssue::Malformed);
         }
-        match file.compression() {
-            CompressionMethod::Stored | CompressionMethod::Deflated => {}
-            _ => return Err(ArchiveIssue::UnsupportedCompression),
+        if archive.len() > MAX_ENTRIES {
+            return Err(ArchiveIssue::EntryCount);
         }
-        let name = checked_name(file.name().as_bytes())?;
-        if is_link(file.unix_mode()) {
-            return Err(ArchiveIssue::Link);
+        let mut descriptors = Vec::with_capacity(archive.len());
+        for index in 0..archive.len() {
+            let file = archive
+                .by_index_raw(index)
+                .map_err(|_| ArchiveIssue::Malformed)?;
+            if file.encrypted() {
+                return Err(ArchiveIssue::Encrypted);
+            }
+            match file.compression() {
+                CompressionMethod::Stored | CompressionMethod::Deflated => {}
+                _ => return Err(ArchiveIssue::UnsupportedCompression),
+            }
+            let name = checked_name(file.name().as_bytes())?;
+            if is_link(file.unix_mode()) {
+                return Err(ArchiveIssue::Link);
+            }
+            if zip_special(file.unix_mode()) {
+                return Err(ArchiveIssue::Special);
+            }
+            if recursive_name(&name) {
+                return Err(ArchiveIssue::Recursive);
+            }
+            if file.size() > MAX_ENTRY_BYTES {
+                return Err(ArchiveIssue::Expansion);
+            }
+            let is_directory = file.is_dir() || zip_directory_mode(file.unix_mode());
+            if is_directory && file.size() != 0 {
+                return Err(ArchiveIssue::Special);
+            }
+            let kind = if is_directory { "directory" } else { "file" };
+            descriptors.push((name, kind));
         }
-        if zip_special(file.unix_mode()) {
-            return Err(ArchiveIssue::Special);
+        let mut entries = Vec::with_capacity(archive.len());
+        let mut total = 0_u64;
+        for (index, (name, kind)) in descriptors.into_iter().enumerate() {
+            let mut file = archive
+                .by_index(index)
+                .map_err(|_| ArchiveIssue::Malformed)?;
+            let (expanded, recursive) = count_reader(&mut file, MAX_ENTRY_BYTES)?;
+            if kind == "directory" && expanded != 0 {
+                return Err(ArchiveIssue::Special);
+            }
+            if recursive {
+                return Err(ArchiveIssue::Recursive);
+            }
+            total = bounded_total(ExpansionAggregation {
+                current: total,
+                added: expanded,
+            })?;
+            entries.push(EntrySummary {
+                name,
+                kind,
+                expanded_bytes: expanded,
+            });
         }
-        if recursive_name(&name) {
-            return Err(ArchiveIssue::Recursive);
-        }
-        if file.size() > MAX_ENTRY_BYTES {
-            return Err(ArchiveIssue::Expansion);
-        }
-        let is_directory = file.is_dir() || zip_directory_mode(file.unix_mode());
-        if is_directory && file.size() != 0 {
-            return Err(ArchiveIssue::Special);
-        }
-        let kind = if is_directory { "directory" } else { "file" };
-        descriptors.push((name, kind));
-    }
-    let mut entries = Vec::with_capacity(archive.len());
-    let mut total = 0_u64;
-    for (index, (name, kind)) in descriptors.into_iter().enumerate() {
-        let mut file = archive
-            .by_index(index)
-            .map_err(|_| ArchiveIssue::Malformed)?;
-        let (expanded, recursive) = count_reader(&mut file, MAX_ENTRY_BYTES)?;
-        if kind == "directory" && expanded != 0 {
-            return Err(ArchiveIssue::Special);
-        }
-        if recursive {
-            return Err(ArchiveIssue::Recursive);
-        }
-        total = bounded_total(ExpansionAggregation {
-            current: total,
-            added: expanded,
-        })?;
-        entries.push(EntrySummary {
-            name,
-            kind,
-            expanded_bytes: expanded,
-        });
-    }
-    Ok(ArchiveSummary {
-        entries,
-        expanded_bytes: total,
+        Ok(ArchiveSummary {
+            entries,
+            expanded_bytes: total,
+        })
     })
 }
 
@@ -610,7 +687,7 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         }
         remaining = remaining.get(consumed..).ok_or(ArchiveIssue::Malformed)?;
     }
-    if detector.detected() {
+    if detector.detected()? {
         return Err(ArchiveIssue::Recursive);
     }
     let name = first_name.ok_or(ArchiveIssue::Malformed)?;
@@ -651,7 +728,7 @@ fn single_stream_summary(name: String, expanded: u64) -> ArchiveSummary {
 fn count_reader(reader: &mut dyn Read, maximum: u64) -> Result<(u64, bool), ArchiveIssue> {
     let mut detector = RecursiveDetector::new();
     let total = count_reader_with_detector(reader, maximum, &mut detector)?;
-    Ok((total, detector.detected()))
+    Ok((total, detector.detected()?))
 }
 
 fn count_reader_with_detector(
@@ -694,11 +771,11 @@ impl RecursiveDetector {
         self.complete.extend_from_slice(bytes);
     }
 
-    fn detected(&self) -> bool {
-        ZipArchive::new(Cursor::new(&self.complete)).is_ok()
+    fn detected(&self) -> Result<bool, ArchiveIssue> {
+        Ok(structurally_valid_zip(&self.complete)?
             || structurally_valid_gzip(&self.complete)
             || structurally_valid_zstd(&self.complete)
-            || structurally_valid_tar(&self.complete)
+            || structurally_valid_tar(&self.complete))
     }
 }
 
@@ -1059,9 +1136,16 @@ fn malformed_validation(kind: ArchiveKind, reason: &str) -> ProcessorValidationO
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Result};
+    use std::{
+        cell::Cell,
+        io::{self, Cursor, Read, Result, Seek, SeekFrom},
+    };
+    use zip::ZipArchive;
 
-    use super::{DECODE_BUFFER_BYTES, DecodeStatus, MAX_EXPANDED_BYTES, reader_decode_status};
+    use super::{
+        ArchiveIssue, DECODE_BUFFER_BYTES, DecodeStatus, MAX_EXPANDED_BYTES, RecursiveDetector,
+        ZipScanReader, enumerate_zip, reader_decode_status,
+    };
 
     /// A well-formed decoder over a high-expansion source: it never fails and never ends,
     /// so only a decode bound can stop it. `produced` records how much it was asked for.
@@ -1076,6 +1160,78 @@ mod tests {
                 .produced
                 .saturating_add(u64::try_from(buffer.len()).expect("buffer length fits in u64"));
             Ok(buffer.len())
+        }
+    }
+
+    fn eocd_shaped_payload() -> Vec<u8> {
+        let mut bytes = vec![0; 32];
+        for _ in 0..8_192 {
+            let mut footer = [0_u8; 22];
+            footer[..4].copy_from_slice(b"PK\x05\x06");
+            footer[8..10].copy_from_slice(&1_u16.to_le_bytes());
+            footer[10..12].copy_from_slice(&1_u16.to_le_bytes());
+            bytes.extend_from_slice(&footer);
+        }
+        bytes
+    }
+
+    struct CountedReader<R> {
+        inner: R,
+        visited: u64,
+    }
+
+    impl<R: Read> Read for CountedReader<R> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            let count = self.inner.read(bytes)?;
+            self.visited += count as u64;
+            Ok(count)
+        }
+    }
+
+    impl<R: Seek> Seek for CountedReader<R> {
+        fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(from)
+        }
+    }
+
+    #[test]
+    fn repeated_eocd_scans_cannot_visit_more_than_the_work_budget() {
+        let bytes = eocd_shaped_payload();
+        let mut baseline = CountedReader {
+            inner: Cursor::new(&bytes),
+            visited: 0,
+        };
+        assert!(ZipArchive::new(&mut baseline).is_err());
+        let budget = usize::try_from(MAX_EXPANDED_BYTES).expect("compiled budget fits usize");
+        let remaining = Cell::new(budget);
+        let exhausted = Cell::new(false);
+        let mut bounded = CountedReader {
+            inner: ZipScanReader {
+                cursor: Cursor::new(&bytes),
+                remaining: &remaining,
+                exhausted: &exhausted,
+            },
+            visited: 0,
+        };
+        assert!(ZipArchive::new(&mut bounded).is_err());
+        assert!(bounded.visited <= MAX_EXPANDED_BYTES);
+        assert!(bounded.visited <= baseline.visited);
+        let detector = RecursiveDetector {
+            complete: bytes.clone(),
+        };
+        if baseline.visited > MAX_EXPANDED_BYTES {
+            assert!(exhausted.get());
+            assert!(matches!(
+                enumerate_zip(&bytes),
+                Err(ArchiveIssue::ZipScanWork)
+            ));
+            assert_eq!(detector.detected(), Err(ArchiveIssue::ZipScanWork));
+        } else {
+            assert!(matches!(
+                enumerate_zip(&bytes),
+                Err(ArchiveIssue::Malformed)
+            ));
+            assert_eq!(detector.detected(), Ok(false));
         }
     }
 
