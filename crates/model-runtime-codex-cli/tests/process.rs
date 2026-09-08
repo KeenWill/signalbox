@@ -422,7 +422,8 @@ fn collect_loss_cause(cause: &LossCause, material: &mut Vec<String>) {
                 StreamInterruption::TransportFailure(facts) | StreamInterruption::TimedOut(facts),
         } => material.push(facts.detail.clone()),
         LossCause::ResponseUnintelligible { detail }
-        | LossCause::StreamProtocolViolation { detail } => material.push(detail.clone()),
+        | LossCause::StreamProtocolViolation { detail }
+        | LossCause::ResponseEnvelopeRejected { detail, .. } => material.push(detail.clone()),
     }
 }
 
@@ -1347,6 +1348,13 @@ async fn duplicate_response_envelope_members_are_stream_protocol_violations() {
 
     let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
     assert!(detail.contains("response envelope"));
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,
+            ..
+        }
+    ));
 }
 
 /// a marker-bearing object field that sorts before a benign sibling
@@ -2036,6 +2044,13 @@ async fn credential_shaped_envelope_errors_are_content_silent() {
         detail,
         "last agent message does not match the response envelope"
     );
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::Shape,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -2051,6 +2066,13 @@ async fn deeply_nested_decoded_envelope_is_boundary_loss() {
     assert!(
         response_unintelligible(&boundary_loss(&result.evidence).cause).contains("JSON nesting")
     );
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::NestingBound,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -2764,7 +2786,10 @@ async fn completed_turn_without_an_envelope_is_boundary_loss() {
     .await;
     assert!(matches!(
         boundary_loss(&result.evidence).cause,
-        LossCause::ResponseUnintelligible { .. }
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::Missing,
+            ..
+        }
     ));
     assert_eq!(result.spawns, 1);
 }
@@ -5309,14 +5334,21 @@ fn transport_failed(cause: &LossCause) -> &signalbox_model_runtime::TransportFac
 }
 
 fn response_unintelligible(cause: &LossCause) -> &str {
-    let LossCause::ResponseUnintelligible { detail } = cause else {
+    let (LossCause::ResponseUnintelligible { detail }
+    | LossCause::ResponseEnvelopeRejected { detail, .. }) = cause
+    else {
         panic!("expected unintelligible-response loss, got {cause:?}");
     };
     detail
 }
 
 fn stream_protocol_violation(cause: &LossCause) -> &str {
-    let LossCause::StreamProtocolViolation { detail } = cause else {
+    let (LossCause::StreamProtocolViolation { detail }
+    | LossCause::ResponseEnvelopeRejected {
+        stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,
+        detail,
+    }) = cause
+    else {
         panic!("expected stream-protocol violation, got {cause:?}");
     };
     detail

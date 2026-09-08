@@ -34,9 +34,7 @@ enum SnapshotCanvas: String, CaseIterable {
     case iPhoneLandscape = "iphone-landscape"
     case iPadPortrait = "ipad-portrait"
     case iPadLandscape = "ipad-landscape"
-    /// A sheet is not a screen: its content declares its own minimum size, and
-    /// rendering it on a phone-width canvas would record it clipped to a width
-    /// no presentation gives it.
+    /// Standalone sheet content, separate from a presented phone or iPad sheet.
     case sheet
 
     var size: CGSize {
@@ -73,6 +71,28 @@ enum SnapshotCanvas: String, CaseIterable {
     var displayScale: CGFloat { 2 }
 }
 
+/// Explicit appearance axes keep references independent of host settings.
+enum SnapshotAppearance: String, CaseIterable {
+    case light
+    case dark
+    case largeText = "large-text"
+    case darkLargeText = "dark-large-text"
+
+    var userInterfaceStyle: UIUserInterfaceStyle {
+        switch self {
+        case .light, .largeText: return .light
+        case .dark, .darkLargeText: return .dark
+        }
+    }
+
+    var contentSizeCategory: UIContentSizeCategory {
+        switch self {
+        case .light, .dark: return .large
+        case .largeText, .darkLargeText: return .accessibilityExtraExtraExtraLarge
+        }
+    }
+}
+
 /// Everything a canvas pins that only UIKit can express.
 ///
 /// Split from the declaration above so the geometry can be extracted without
@@ -80,11 +100,6 @@ enum SnapshotCanvas: String, CaseIterable {
 /// reusable by an AppKit destination, and that is the whole reason for the
 /// seam.
 extension SnapshotCanvas {
-    /// Stated here for the same reason the scale is: a dynamic color resolves
-    /// against the trait collection of whatever it is set on, so an inherited
-    /// interface style would record a different golden on a dark-mode host.
-    static let userInterfaceStyle = UIUserInterfaceStyle.light
-
     /// The canvas is the whole safe area.
     ///
     /// A window takes its insets from the scene's device, and navigation and
@@ -109,14 +124,14 @@ extension SnapshotCanvas {
     /// worse, being device state rather than device geometry: a run on the
     /// pinned simulator model would still record a different golden with either
     /// switched on.
-    func overrideTraits(on controller: UIViewController) {
+    func overrideTraits(on controller: UIViewController, appearance: SnapshotAppearance = .light) {
         controller.traitOverrides.userInterfaceIdiom = userInterfaceIdiom
         controller.traitOverrides.horizontalSizeClass = horizontalSizeClass
         controller.traitOverrides.verticalSizeClass = verticalSizeClass
-        controller.traitOverrides.userInterfaceStyle = Self.userInterfaceStyle
+        controller.traitOverrides.userInterfaceStyle = appearance.userInterfaceStyle
         controller.traitOverrides.displayScale = displayScale
         controller.traitOverrides.layoutDirection = .leftToRight
-        controller.traitOverrides.preferredContentSizeCategory = .large
+        controller.traitOverrides.preferredContentSizeCategory = appearance.contentSizeCategory
         controller.traitOverrides.legibilityWeight = .regular
         controller.traitOverrides.accessibilityContrast = Self.accessibilityContrast
     }
@@ -129,8 +144,8 @@ extension SnapshotCanvas {
     /// navigation chrome's glass materials sample. Only the interface style is
     /// pinned here, along with the contrast that decides which system color it
     /// resolves to.
-    func overrideTraits(on window: UIWindow) {
-        window.overrideUserInterfaceStyle = Self.userInterfaceStyle
+    func overrideTraits(on window: UIWindow, appearance: SnapshotAppearance = .light) {
+        window.overrideUserInterfaceStyle = appearance.userInterfaceStyle
         window.traitOverrides.accessibilityContrast = Self.accessibilityContrast
     }
 
@@ -227,9 +242,9 @@ extension SnapshotCanvas {
     /// what a vertically compact presentation does, and is not what the
     /// portrait scene would give it. Presentation geometry follows the canvas
     /// and these overrides; the scene's orientation does not reach it. The
-    /// portrait canvas of that same test is the control: it records the form
-    /// clipped at 390 points, so the two differ by the canvas rather than by
-    /// the scene they share.
+    /// portrait canvas of that same test exercises a 390-point-wide sheet.
+    /// The iOS form has a 320-point minimum height and no minimum width;
+    /// its content must fit the portrait canvas without horizontal clipping.
     ///
     /// What stays outside that measurement is anything reading the scene
     /// directly. Nothing in the application does — `interfaceOrientation` and
@@ -260,12 +275,10 @@ extension SnapshotCanvas {
 /// golden is a presentation the application never makes: nothing here drives a
 /// sheet onto a screen that did not present one.
 ///
-/// Snapshotting sheet content standalone on `SnapshotCanvas.sheet` is the
-/// second way to record a sheet and not a correction of the first. It exists
-/// for content whose declared minimum width the presenting canvas cannot give
-/// it, where the presented rendering would record the form clipped; the two
-/// tests for the creation sheet are the pair, and the note on each says which
-/// question it answers.
+/// Snapshotting sheet content standalone on `SnapshotCanvas.sheet` records
+/// the form separately from its presentation. The creation sheet has no iOS
+/// minimum width: its presented test uses the available presentation width,
+/// while the standalone test uses the explicit sheet canvas.
 ///
 /// The second cost is the destination, and it is bounded rather than absent.
 /// Everything a layout resolves against is pinned below — size, scale, size
@@ -346,6 +359,7 @@ enum LiveScreenRenderer {
     static func render(
         _ view: some View,
         canvas: SnapshotCanvas,
+        appearance: SnapshotAppearance = .light,
         timeout: Duration = settleTimeout,
         file: StaticString = #filePath,
         line: UInt = #line
@@ -375,16 +389,16 @@ enum LiveScreenRenderer {
         // whatever the host happened to be showing. It extends past the canvas
         // by more than a blur radius on every side.
         let backdrop = UIWindow(windowScene: scene)
-        canvas.overrideTraits(on: backdrop)
+        canvas.overrideTraits(on: backdrop, appearance: appearance)
         backdrop.frame = CGRect(origin: .zero, size: canvas.size).insetBy(dx: -200, dy: -200)
         backdrop.backgroundColor = .systemBackground
         backdrop.isOpaque = true
         backdrop.windowLevel = .normal + 1
         backdrop.isHidden = false
         let window = UIWindow(windowScene: scene)
-        canvas.overrideTraits(on: window)
+        canvas.overrideTraits(on: window, appearance: appearance)
         window.windowLevel = .normal + 2
-        canvas.overrideTraits(on: content)
+        canvas.overrideTraits(on: content, appearance: appearance)
         host.view.backgroundColor = .systemBackground
         host.addChild(content)
         host.view.addSubview(content.view)
@@ -494,8 +508,8 @@ enum LiveScreenRenderer {
 /// tolerance at 1.0 fails on drift no reader can see; a pixel precision below
 /// 1.0 would instead let a small region change entirely.
 @MainActor
-func assertLiveScreenSnapshot(
-    of view: some View,
+func assertLiveScreenSnapshot<Content: View>(
+    of makeView: @autoclosure () -> Content,
     canvas: SnapshotCanvas,
     fileID: StaticString = #fileID,
     file: StaticString = #filePath,
@@ -510,24 +524,55 @@ func assertLiveScreenSnapshot(
         XCTFail(unsupported, file: file, line: line)
         return
     }
-    let rendering = await LiveScreenRenderer.render(view, canvas: canvas, file: file, line: line)
-    // The record mode is passed per assertion rather than installed around the
-    // suite: `withSnapshotTesting` carries it in a task local, and XCTest runs
-    // an async test body in a task that does not inherit one.
-    assertSnapshot(
-        of: rendering,
-        as: .image(
-            precision: 1,
-            perceptualPrecision: 0.98,
-            scale: canvas.displayScale
-        ),
-        named: canvas.rawValue,
-        record: liveScreenSnapshotRecordMode(),
-        fileID: fileID,
-        file: file,
-        testName: testName,
-        line: line
-    )
+    let recordMode = liveScreenSnapshotRecordMode()
+    for appearance in SnapshotAppearance.allCases {
+        let name = appearance == .light ? canvas.rawValue : "\(canvas.rawValue)-\(appearance.rawValue)"
+        let reference = liveScreenSnapshotReference(file: file, testName: testName, name: name)
+        let rendering = await LiveScreenRenderer.render(makeView(), canvas: canvas, appearance: appearance, file: file, line: line)
+        if appearance != .light && recordMode == .never && !FileManager.default.fileExists(atPath: reference.path) {
+            XCTContext.runActivity(named: "Snapshot coverage gap: \(reference.lastPathComponent)") { activity in
+                let gap = XCTAttachment(string: "Missing appearance reference: \(reference.lastPathComponent). Comparison skipped.")
+                gap.name = "Missing appearance reference"
+                gap.lifetime = .keepAlways
+                activity.add(gap)
+                let candidate = XCTAttachment(image: rendering)
+                candidate.name = reference.lastPathComponent
+                candidate.lifetime = .keepAlways
+                activity.add(candidate)
+            }
+            continue
+        }
+        // The record mode is passed per assertion rather than installed around the
+        // suite: `withSnapshotTesting` carries it in a task local, and XCTest runs
+        // an async test body in a task that does not inherit one.
+        assertSnapshot(
+            of: rendering,
+            as: .image(
+                precision: 1,
+                perceptualPrecision: 0.98,
+                scale: canvas.displayScale
+            ),
+            named: name,
+            record: recordMode,
+            fileID: fileID,
+            file: file,
+            testName: testName,
+            line: line
+        )
+    }
+}
+
+/// The named PNG path used by SnapshotTesting, including its path sanitization.
+func liveScreenSnapshotReference(file: StaticString, testName: String, name: String) -> URL {
+    func sanitized(_ value: String) -> String {
+        value.replacingOccurrences(of: "\\W+", with: "-", options: .regularExpression)
+            .replacingOccurrences(of: "^-|-$", with: "", options: .regularExpression)
+    }
+    let source = URL(fileURLWithPath: "\(file)")
+    return source.deletingLastPathComponent()
+        .appendingPathComponent("__Snapshots__")
+        .appendingPathComponent(source.deletingPathExtension().lastPathComponent)
+        .appendingPathComponent("\(sanitized(testName)).\(sanitized(name)).png")
 }
 
 /// The one appearance input these goldens depend on that no canvas can pin.
@@ -569,9 +614,9 @@ func liveScreenSnapshotUnsupportedState(reduceTransparency: Bool) -> String? {
 
 /// The record mode the suite runs under.
 ///
-/// `never` by default so a missing golden fails instead of being written and
-/// silently passing on a retry. `SIGNALBOX_NATIVE_SNAPSHOT_RECORD` takes the
-/// library's own vocabulary — `all`, `missing`, `failed`, `never` — rather
+/// `never` by default so verification cannot rewrite references. Missing light
+/// references fail; missing appearance variants attach a recorded coverage gap.
+/// `SIGNALBOX_NATIVE_SNAPSHOT_RECORD` takes the library's own vocabulary — `all`, `missing`, `failed`, `never` — rather
 /// than a second one that would have to be kept in step with it.
 func liveScreenSnapshotRecordMode() -> SnapshotTestingConfiguration.Record {
     liveScreenSnapshotRecordMode(
