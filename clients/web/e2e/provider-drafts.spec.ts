@@ -1,6 +1,6 @@
-import { expect, test } from '@playwright/test'
 import type { WebSessionLiveSnapshot } from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture } from '../src/product.fixture'
+import { expect, test } from './fontTest'
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
 const live: WebSessionLiveSnapshot = {
@@ -148,7 +148,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
   )
   await expect(page.getByText('Runner · pinned · suspect')).toBeVisible()
   if (testInfo.project.name === 'chromium' && process.platform === 'linux')
-    await expect(page).toHaveScreenshot('provider-drafts.png', { animations: 'disabled' })
+    await expect.soft(page).toHaveScreenshot('provider-drafts.png', { animations: 'disabled' })
   holdLive = true
   await page.evaluate(() =>
     window.dispatchEvent(
