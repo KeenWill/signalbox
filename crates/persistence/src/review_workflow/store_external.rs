@@ -243,23 +243,9 @@ impl ReviewWorkflowStore {
         link: ReviewExternalLinkId,
         observation: ReviewExternalLinkObservation,
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
-        let Some(current) = self.load_external_link(link).await? else {
+        let Some(_) = self.load_external_link(link).await? else {
             return Ok(None);
         };
-        match current.clone().observe(observation.clone()) {
-            Ok(_) => {}
-            Err(error)
-                if error.failure() == ReviewExternalLinkTransitionFailure::UnchangedObservation =>
-            {
-                // The database lock below decides whether this remains
-                // unchanged after any concurrent observation commits.
-            }
-            Err(error) => {
-                return Err(ReviewWorkflowStoreError::InvalidTransition(
-                    ReviewWorkflowTransitionError::ExternalLink(error),
-                ));
-            }
-        }
         let mut transaction = self.pool.begin().await?;
         sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
             .bind(link.into_uuid())
@@ -273,11 +259,25 @@ impl ReviewWorkflowStore {
                     String::from("locked reservation disappeared"),
                 )
             })?;
+        let observed = current.clone().observe(observation.clone());
+        if let Err(error) = &observed
+            && error.failure() != ReviewExternalLinkTransitionFailure::UnchangedObservation
+        {
+            return Err(ReviewWorkflowStoreError::InvalidTransition(
+                ReviewWorkflowTransitionError::ExternalLink(error.clone()),
+            ));
+        }
         if let Some(latest) = current
             .observations()
             .last()
             .filter(|latest| latest.state() == observation.state())
         {
+            if latest.ordinal().get().checked_add(1) != Some(observation.ordinal().get()) {
+                return Err(corruption(
+                    "review_external_link_observation",
+                    String::from("unchanged report ordinal is not contiguous"),
+                ));
+            }
             let canonical_pass =
                 load_pass_on_connection(&mut transaction, observation.pass().pass())
                     .await?
@@ -319,7 +319,7 @@ impl ReviewWorkflowStore {
             commit_mutation(transaction).await?;
             return Ok(Some(next));
         }
-        let next = current.observe(observation.clone()).map_err(|error| {
+        let next = observed.map_err(|error| {
             ReviewWorkflowStoreError::InvalidTransition(
                 ReviewWorkflowTransitionError::ExternalLink(error),
             )

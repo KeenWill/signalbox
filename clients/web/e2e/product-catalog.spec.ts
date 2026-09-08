@@ -1,5 +1,5 @@
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import bootstrapFixture from '../src/generated/web-contract-bootstrap.json' with { type: 'json' }
+import { expect, type Page, type TestInfo, test } from './fontTest'
 
 const firstSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const secondSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e'
@@ -583,10 +583,10 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
   const ratesBounds = await page.getByLabel('Listed session rates').boundingBox()
   const listBounds = await page.locator('.catalog-list').boundingBox()
   expect(ratesBounds && listBounds && ratesBounds.y + ratesBounds.height <= listBounds.y).toBe(true)
-  await expect(page).toHaveScreenshot('catalog-desktop-dark.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('catalog-desktop-dark.png', { animations: 'disabled' })
 
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await expect(page).toHaveScreenshot('catalog-desktop-light.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('catalog-desktop-light.png', { animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
   const mobileInspector = page.getByRole('dialog', {
@@ -596,7 +596,7 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
   await expect(mobileInspector).toHaveAttribute('aria-modal', 'true')
   await page.keyboard.press('Tab')
   await expect(page.getByRole('button', { name: 'Open timeline workspace' })).toBeFocused()
-  await expect(page).toHaveScreenshot('catalog-mobile-light.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('catalog-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
