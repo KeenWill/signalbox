@@ -528,6 +528,22 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
                     );
                 }
                 let phase = match active_phase.as_deref() {
+                    Some("awaiting_credential_availability") if current_attempt.is_none() => {
+                        let wait = crate::model_execution::credential_wait::load_phase(
+                            connection,
+                            lifecycle_session,
+                            lifecycle_turn,
+                        )
+                        .await
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent("credential availability wait")
+                        })?;
+                        required_frontiers.insert(wait.frontier().into_uuid());
+                        ActiveTurnSchedulingReconstitutionInput::awaiting_credential_availability(
+                            lifecycle_turn,
+                            wait,
+                        )
+                    }
                     Some("awaiting_runner_recovery")
                         if current_attempt.is_none()
                             && recovery_model_call.is_none()

@@ -92,18 +92,19 @@ pub use model_execution::{
     AuthorizeModelCallTransaction, AvailabilitySuccessorOutcome,
     CommitModelCallObservationTransaction, CredentialPoolExhaustedOutcome,
     FailPreparedModelCallTransaction, InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit,
-    MAX_RETAINED_FRONTIER_CONTENT_BYTES, ModelAttachmentStub, ModelCallAuthorizationReread,
-    ModelCallCapabilityPreparation, ModelCallCredentialReference, ModelCallExecutionError,
-    ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallInputTokenCount, ModelCallInputTokenCounter, ModelCallObservationCommitOutcome,
-    ModelCallProvider, ModelCallTerminalIdentityCandidates, ModelConversationMessage,
-    ModelFrontierRenderingError, ModelToolResultContent, ModelUserContent, ModelUserContentPart,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, PreparedModelCallFailureCause,
-    PreparedModelOperation, ProviderReasoningProvenance, RetainedModelCallExecutionState,
-    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallCapability,
-    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
-    UuidV7ModelCallExecutionIdGenerator, projected_frontier_container_bytes,
-    projected_frontier_content_bytes, render_model_user_content,
+    MAX_RENDERED_ATTACHMENT_STUB_BYTES, MAX_RETAINED_FRONTIER_CONTENT_BYTES, ModelAttachmentStub,
+    ModelCallAuthorizationReread, ModelCallCapabilityPreparation, ModelCallCredentialReference,
+    ModelCallExecutionError, ModelCallExecutionIdGenerator, ModelCallExecutionOutcome,
+    ModelCallExecutionService, ModelCallInputTokenCount, ModelCallInputTokenCounter,
+    ModelCallObservationCommitOutcome, ModelCallProvider, ModelCallTerminalIdentityCandidates,
+    ModelConversationMessage, ModelFrontierRenderingError, ModelToolResultContent,
+    ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome, PrepareModelCallTransaction,
+    PreparedModelCallFailureCause, PreparedModelOperation, ProviderReasoningProvenance,
+    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus, ScriptedModelCallCapability, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
+    projected_frontier_container_bytes, projected_frontier_content_bytes,
+    render_model_user_content,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
@@ -153,7 +154,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
-    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, with_released_scheduler_admission,
 };
 pub use search::{
     MAX_SEARCH_HIGHLIGHTS_PER_RESULT, SearchArtifactId, SearchArtifactProjection,
@@ -255,3 +256,6 @@ pub use workspace_instructions::{
     InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
     InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
 };
+
+/// Verified host-side session attribution for program input.
+pub mod program_session;

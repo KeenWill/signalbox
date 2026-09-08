@@ -17,8 +17,8 @@ use std::{
 /// Maximum projected frontier content and representation overhead retained for one call.
 pub const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize = 256 * 1024 * 1024;
 
-// Worst-case compact JSON for maximum checked metadata, u64 length, and digest.
-const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize = 2_304;
+/// Upper bound for compact attachment JSON with checked metadata, length, and digest.
+pub const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize = 2_304;
 
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,

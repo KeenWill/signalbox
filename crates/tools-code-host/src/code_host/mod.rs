@@ -120,16 +120,23 @@ impl CodeHostNumericBounds {
         self.stack_comparisons_in_flight
     }
 
-    const fn repository_file_content_bytes(self) -> Option<usize> {
-        self.repository_file_content_bytes
+    fn repository_file_content_bytes(self) -> Option<usize> {
+        match (self.repository_file_content_bytes, self.result_text_bytes) {
+            (Some(file), Some(text)) => Some(file.min(text)),
+            (file, text) => file.or(text),
+        }
     }
 
     const fn result_text_bytes(self) -> Option<usize> {
         self.result_text_bytes
     }
 
-    const fn result_items(self) -> Option<usize> {
-        self.result_items
+    fn result_items(self) -> Option<usize> {
+        Some(
+            self.result_items
+                .unwrap_or(result::MAX_COLLECTION_MEMBERS)
+                .min(result::MAX_COLLECTION_MEMBERS),
+        )
     }
 
     fn permits_result_text(self, observed: usize) -> bool {
@@ -137,7 +144,7 @@ impl CodeHostNumericBounds {
     }
 
     fn permits_result_items(self, observed: usize) -> bool {
-        self.result_items.is_none_or(|limit| observed <= limit)
+        self.result_items().is_none_or(|limit| observed <= limit)
     }
 }
 

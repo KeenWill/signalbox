@@ -321,6 +321,9 @@ pub(super) struct ExecutingToolBatchReconstitutionFacts {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum StoredActiveTurnPhase {
+    AwaitingCredentialAvailability {
+        wait: crate::CredentialAvailabilityWait,
+    },
     Prepared,
     Running,
     StopRequested {
@@ -682,12 +685,31 @@ impl ActiveTurnSchedulingReconstitutionInput {
         }
     }
 
+    /// Supplies a credential wait whose attempt, policy and exclusion evidence were checked together.
+    pub const fn awaiting_credential_availability(
+        owning_turn: TurnId,
+        wait: crate::CredentialAvailabilityWait,
+    ) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: None,
+            state: StoredActiveTurnPhase::AwaitingCredentialAvailability { wait },
+            executing_tool_batch: None,
+        }
+    }
+
     /// Returns the turn named as owner by the active-phase record.
     pub const fn owning_turn(&self) -> TurnId {
         self.owning_turn
     }
 
     pub(super) fn canonical_evidence_free_phase(&self) -> Option<ActiveTurnPhase> {
+        if let StoredActiveTurnPhase::AwaitingCredentialAvailability { wait } = self.state {
+            return self
+                .current_attempt
+                .is_none()
+                .then_some(ActiveTurnPhase::AwaitingCredentialAvailability { wait });
+        }
         if let StoredActiveTurnPhase::AwaitingApproval { wait } = &self.state {
             return (self.current_attempt.is_none() && self.owning_turn == wait.turn()).then_some(
                 ActiveTurnPhase::AwaitingApproval {
@@ -728,7 +750,8 @@ impl ActiveTurnSchedulingReconstitutionInput {
             | StoredActiveTurnPhase::AwaitingChild { .. }
             | StoredActiveTurnPhase::AwaitingToolRecovery { .. }
             | StoredActiveTurnPhase::AwaitingModelCallRecovery { .. }
-            | StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => return None,
+            | StoredActiveTurnPhase::AwaitingRunnerRecovery { .. }
+            | StoredActiveTurnPhase::AwaitingCredentialAvailability { .. } => return None,
         };
         Some(ActiveTurnPhase::Running { current_attempt })
     }

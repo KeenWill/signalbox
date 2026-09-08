@@ -4,19 +4,18 @@ use std::collections::HashSet;
 
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CliDecodeFailure, CliDecodeFailureClass, CliProcessLabels,
-    CliSession, CliTerminalTextCapture, CompletionEvidence, CompletionFinish, DeliveryMode,
-    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
-    ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
-    ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence, ResponseEnvelopeRejectionStage,
-    TerminalEvidence, TokenUsage, ToolArgumentRedaction, ToolCallId, ToolCallProposal,
-    ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, redact_text,
-    trailing_credential_context, validate_provider_json_nesting,
+    CliSession, CompletionEvidence, CompletionFinish, DeliveryMode, ExchangeFacts, FinishReason,
+    LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderRequestId,
+    RefusalEvidence, ResponseEnvelopeRejectionStage, TerminalEvidence, TokenUsage, ToolCallId,
+    ToolCallProposal, ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members,
+    validate_provider_json_nesting,
 };
 
 use crate::app_server::{
     classify::{FailureClass, classify, input_too_large},
     client::{Client, Event},
-    decode::{fold_uninterpreted, parse},
+    decode::parse,
     frame::{AgentMessage, TurnError, TurnStatus, UsageBreakdown},
 };
 use crate::translate::{ToolRequirement, TranslatedOperation};
@@ -82,7 +81,7 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn push(
         &mut self,
         line: &[u8],
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), DecodeFailure> {
         let value = parse(line).map_err(|error| DecodeFailure::stream_protocol(error.0))?;
         let event = self
@@ -91,7 +90,6 @@ impl<C: Clone> EventDecoder<C> {
             .map_err(|error| DecodeFailure::stream_protocol(error.0))?;
         match event {
             Event::RateLimitsUpdated => {
-                fold_uninterpreted(sink, &value, &[&["method"]]);
                 if let Some(snapshot) = self
                     .client
                     .rate_limits
@@ -101,115 +99,48 @@ impl<C: Clone> EventDecoder<C> {
                 }
             }
             Event::ThreadStarted(id) => {
-                fold_uninterpreted(sink, &value, &[&["result", "thread", "id"]]);
-                let sanitized = sink.redact_terminal_failure_text(&id);
-                self.exchange.provider_request_id = Some(ProviderRequestId::new(sanitized.clone()));
+                self.exchange.provider_request_id = Some(ProviderRequestId::new(id));
                 sink.observe(Observation {
                     correlation: self.correlation.clone(),
                     fact: ObservationFact::ExchangeEstablished(self.exchange.clone()),
                 });
-                sink.seed_emitted_context(&sanitized);
             }
             Event::AgentMessage {
                 message,
                 completed: true,
-            } => {
-                self.fold_retained_agent_message(sink);
-                fold_uninterpreted(
-                    sink,
-                    &value,
-                    &[
-                        &["method"],
-                        &["params", "item", "type"],
-                        &["params", "item", "id"],
-                        &["params", "item", "text"],
-                    ],
-                );
-                self.retain_message(message)?;
-            }
+            } => self.retain_message(message)?,
             Event::Delta(delta) => {
-                // Deltas are envelope fragments, not user-visible prose. The
-                // completed item supplies the authoritative bounded envelope.
+                // The completed item supplies the authoritative response envelope.
                 let _ = (&delta.item_id, &delta.delta);
-                fold_uninterpreted(sink, &value, &[&["method"]]);
             }
-            Event::Usage(event) => {
-                fold_uninterpreted(sink, &value, &[&["method"]]);
-                self.usage.absorb(usage(event.token_usage.total)?);
-            }
+            Event::Usage(event) => self.usage.absorb(usage(event.token_usage.total)?),
             Event::Error(event) => {
-                self.fold_retained_agent_message(sink);
-                self.fold_retained_error(sink);
-                fold_uninterpreted(
-                    sink,
-                    &value,
-                    &[&["method"], &["params", "error", "message"]],
-                );
-                if event.will_retry {
-                    sink.extend_dropped_context(&event.error.message);
-                } else {
-                    self.last_error = Some(event.error);
-                }
+                self.agent_message = None;
+                self.last_error = (!event.will_retry).then_some(event.error);
             }
             Event::Terminal(turn) => {
-                self.fold_retained_error(sink);
-                if turn.status == TurnStatus::Completed {
-                    if self.agent_message.is_none() {
-                        if let Some(item) = turn
-                            .items
-                            .iter()
-                            .rev()
-                            .find(|item| item["type"] == "agentMessage")
-                        {
-                            let message = crate::app_server::decode::decode(item)
-                                .map_err(|error| DecodeFailure::new(error.0))?;
-                            // The selected summary is sanitized as the final envelope.
-                            let mut folded = value.clone();
-                            if let Some(items) = folded["params"]["turn"]["items"].as_array_mut()
-                                && let Some(selected) = items
-                                    .iter_mut()
-                                    .rev()
-                                    .find(|item| item["type"] == "agentMessage")
-                                && let Some(fields) = selected.as_object_mut()
-                            {
-                                fields.remove("id");
-                                fields.remove("text");
-                            }
-                            fold_uninterpreted(sink, &folded, &[&["method"]]);
-                            self.retain_message(message)?;
-                        } else {
-                            fold_uninterpreted(sink, &value, &[&["method"]]);
-                        }
-                    } else {
-                        fold_uninterpreted(sink, &value, &[&["method"]]);
-                    }
-                } else {
-                    self.fold_retained_agent_message(sink);
-                    fold_uninterpreted(
-                        sink,
-                        &value,
-                        &[&["method"], &["params", "turn", "error", "message"]],
-                    );
+                if turn.status == TurnStatus::Completed
+                    && self.agent_message.is_none()
+                    && let Some(item) = turn
+                        .items
+                        .iter()
+                        .rev()
+                        .find(|item| item["type"] == "agentMessage")
+                {
+                    let message = crate::app_server::decode::decode(item)
+                        .map_err(|error| DecodeFailure::new(error.0))?;
+                    self.retain_message(message)?;
                 }
                 self.last_error = turn.error;
                 self.terminal = Some(turn.status);
             }
-            Event::Rejected { method, error } => {
-                fold_uninterpreted(sink, &value, &[]);
-                self.rejection = Some((method, error));
-            }
+            Event::Rejected { method, error } => self.rejection = Some((method, error)),
             Event::Ignored
             | Event::AgentMessage {
                 completed: false, ..
-            } => fold_uninterpreted(sink, &value, &[]),
+            } => {}
         }
         Ok(())
-    }
-
-    fn fold_retained_error(&mut self, sink: &mut RedactingSink<'_, C>) {
-        if let Some(error) = self.last_error.take() {
-            sink.extend_dropped_context(&error.message);
-        }
     }
 
     fn retain_message(&mut self, message: AgentMessage) -> Result<(), DecodeFailure> {
@@ -223,7 +154,7 @@ impl<C: Clone> EventDecoder<C> {
         Ok(())
     }
 
-    pub(crate) fn finish(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
+    pub(crate) fn finish(mut self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
         if let Some((method, error)) = self.rejection.take() {
             if input_too_large(method, &error) {
                 return TerminalEvidence::ProviderError(ProviderErrorEvidence {
@@ -255,15 +186,15 @@ impl<C: Clone> EventDecoder<C> {
                     "Codex app-server turn status is interrupted",
                 ),
             )),
-            Some(TurnStatus::Failed) => self.failure(sink),
-            _ if self.last_error.is_some() => self.failure(sink),
+            Some(TurnStatus::Failed) => self.failure(),
+            _ if self.last_error.is_some() => self.failure(),
             _ => self.boundary_loss(LossCause::StreamEndedWithoutTerminalMarker {
                 interruption: signalbox_model_runtime::StreamInterruption::EndOfStream,
             }),
         }
     }
 
-    fn failure(self, sink: &RedactingSink<'_, C>) -> TerminalEvidence {
+    fn failure(self) -> TerminalEvidence {
         let info = self
             .last_error
             .as_ref()
@@ -299,14 +230,11 @@ impl<C: Clone> EventDecoder<C> {
                         self.client.activity.proves_non_acceptance(status, info)
                     }),
                     native: NativeErrorFacts {
-                        error_token: info.map(|info| sink.redact_terminal_failure_text(info.tag())),
+                        error_token: info.map(|info| info.tag().to_string()),
                         error_code: info
                             .and_then(|info| info.http_status())
                             .map(|status| status.to_string()),
-                        message: self
-                            .last_error
-                            .as_ref()
-                            .map(|error| sink.redact_terminal_failure_text(&error.message)),
+                        message: self.last_error.as_ref().map(|error| error.message.clone()),
                     },
                     usage: self.usage,
                 })
@@ -321,7 +249,7 @@ impl<C: Clone> EventDecoder<C> {
     pub(crate) fn boundary_loss_unless_provider_failure(
         self,
         cause: LossCause,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
         if self.rejection.is_some()
             || matches!(
@@ -340,25 +268,7 @@ impl<C: Clone> EventDecoder<C> {
         self.client.is_terminal()
     }
 
-    /// Folds a retained agent message (and its id) into the dropped lookbehind
-    /// when it is displaced — by a later agent message or a failure terminal —
-    /// so a credential marker ending it still governs the text that follows.
-    /// The two are chained *in wire order*, id before text: the message text is
-    /// the last of the pair the provider wrote, so it is what the following
-    /// output continues, and a clean id can no longer resolve away the live
-    /// marker (`api_`) that the text ends in. Chaining stays precise rather
-    /// than taking the fail-closed multi-unit path — a benign message the
-    /// streaming lookbehind holds but no value completes still flows unchanged.
-    fn fold_retained_agent_message(&mut self, sink: &mut RedactingSink<'_, C>) {
-        if let Some(superseded) = self.agent_message.take() {
-            if let Some(previous_id) = self.message_id.clone() {
-                sink.extend_dropped_context(&previous_id);
-            }
-            sink.extend_dropped_context(&superseded);
-        }
-    }
-
-    fn completed(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
+    fn completed(mut self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
         let agent_message = match self.agent_message.take() {
             Some(agent_message) => agent_message,
             None => {
@@ -418,7 +328,7 @@ impl<C: Clone> EventDecoder<C> {
             EnvelopeOutcome::Completed if envelope.tool_calls.is_empty() => FinishReason::EndTurn,
             EnvelopeOutcome::Completed => FinishReason::ToolUse,
         };
-        let mut content = match self.decode_content(&envelope, &mut *sink) {
+        let content = match self.decode_content(&envelope) {
             Ok(content) => content,
             Err(failure) => {
                 return boundary_loss_after_envelope(
@@ -433,31 +343,7 @@ impl<C: Clone> EventDecoder<C> {
                 );
             }
         };
-        // Sanitized against the held lookbehind plus the same-envelope final
-        // text — exactly as the tool-call id path is — before the usage
-        // barrier below flushes the lookbehind, so a message id extending a
-        // credential marker held from reasoning, or one ending the final text
-        // itself, is suppressed instead of surfacing as `ProviderMessageId`
-        // beside the independently redacted text.
-        let message_id_context = trailing_credential_context(&envelope.text);
-        let message_id = self.message_id.take().map(|id| {
-            // The id both continues the final text (redact_provider_id's held
-            // + preceding-text join) and, as the field preceding the content
-            // in terminal evidence, can be continued by it: an id ending
-            // `api_` beside content opening `key=opaque` reconstructs
-            // `api_key=opaque` across the two fields. Redact the id in that
-            // second direction too, breaking the shape before it is emitted.
-            let sanitized = sink.redact_provider_id(message_id_context, &id);
-            let id_precedes_text = [id.as_str(), envelope.text.as_str()].concat();
-            if sanitized == id && redact_text(&id_precedes_text) != id_precedes_text {
-                REDACTED.to_string()
-            } else {
-                sanitized
-            }
-        });
-        if self.delivery == DeliveryMode::Streamed {
-            sink.begin_streaming_terminal_text_capture();
-        }
+        let message_id = self.message_id.take();
         if let Err(detail) = self.emit_completion_observations(
             sink,
             &content,
@@ -474,54 +360,6 @@ impl<C: Clone> EventDecoder<C> {
                     detail,
                 },
             );
-        }
-        if self.delivery == DeliveryMode::Streamed {
-            // The usage barrier inside the observation emission above flushed
-            // every held lookbehind fragment, so the capture now holds the
-            // stateful cross-fragment redaction of the final text. Terminal
-            // evidence carries exactly those bytes; an independent stateless
-            // re-redaction of the raw text would miss a credential value whose
-            // marker arrived in an earlier fragment.
-            let captured = sink.take_terminal_text_capture().into_text();
-            if let Some(index) = content
-                .iter()
-                .position(|part| matches!(part, AssistantPart::Text(_)))
-            {
-                // An empty capture means no final-text delta reached the caller
-                // (the raw text was empty, or fully held and never emitted); a
-                // provisional `[redacted]` text part — which a held credential
-                // makes `redact_terminal_failure_text("")` return, passing the
-                // decode-time non-empty check — must not survive as empty
-                // completion material. Drop it and re-check that some material
-                // remains, so an otherwise-empty completion fails closed as
-                // ResponseUnintelligible rather than a contentless Completed.
-                if captured.is_empty() {
-                    content.remove(index);
-                } else {
-                    content[index] = AssistantPart::Text(captured);
-                }
-            }
-            // An explicit `refused` outcome is definitive evidence on its own,
-            // so a textless refusal stays a refusal here exactly as buffered
-            // delivery already returns it; only an ordinary completion needs
-            // material to be intelligible, and only it fails closed when the
-            // capture leaves none.
-            if content.is_empty()
-                && self.output_contract_name.is_none()
-                && envelope.outcome != EnvelopeOutcome::Refused
-            {
-                return boundary_loss_after_envelope(
-                    self.exchange,
-                    self.usage,
-                    Some(reported_finish),
-                    &envelope,
-                    LossCause::ResponseEnvelopeRejected {
-                        stage: ResponseEnvelopeRejectionStage::StreamedCompletionEmpty,
-                        detail: "streamed response envelope carries no completion material"
-                            .to_string(),
-                    },
-                );
-            }
         }
 
         match envelope.outcome {
@@ -556,7 +394,6 @@ impl<C: Clone> EventDecoder<C> {
     fn decode_content(
         &self,
         envelope: &ModelEnvelope,
-        sink: &mut RedactingSink<'_, C>,
     ) -> Result<Vec<AssistantPart>, ResponseEnvelopeFailure> {
         if envelope.outcome == EnvelopeOutcome::Refused && !envelope.tool_calls.is_empty() {
             return Err(ResponseEnvelopeFailure::new(
@@ -565,21 +402,7 @@ impl<C: Clone> EventDecoder<C> {
             ));
         }
         let mut content = Vec::new();
-        // Consults the held lookbehind (including the emitted thread-id and
-        // dropped-reasoning contexts), not just the stateless scan: a buffered
-        // final text whose start completes a credential marker ending either
-        // chain must be suppressed whole, exactly as the streamed path
-        // suppresses it delta by delta. Buffered delivery also resolves both
-        // chains through this text — a chain the text broke must not misfire
-        // on the clean provider ids that follow. Streamed delivery must NOT
-        // consume the chains here: the same text is about to flow through the
-        // delta machinery, which needs the live context to suppress the
-        // continuation and resolves the chains itself.
-        let text = if self.delivery == DeliveryMode::Buffered {
-            sink.redact_final_envelope_text(&envelope.text)
-        } else {
-            sink.redact_terminal_failure_text(&envelope.text)
-        };
+        let text = envelope.text.clone();
         if !text.is_empty() {
             content.push(AssistantPart::Text(text));
         }
@@ -587,13 +410,7 @@ impl<C: Clone> EventDecoder<C> {
             return Ok(content);
         }
 
-        // The tool fields need only the final text's trailing credential
-        // context, not the whole (possibly multi-megabyte) text, so a
-        // credential spanning the text end and a field is caught without
-        // rescanning the full text per call.
-        let final_text_context = trailing_credential_context(&envelope.text);
         let mut raw_ids = HashSet::new();
-        let mut clean_ids = HashSet::new();
         for call in &envelope.tool_calls {
             if call.id.is_empty() || !raw_ids.insert(call.id.as_str()) {
                 return Err(ResponseEnvelopeFailure::new(
@@ -601,26 +418,14 @@ impl<C: Clone> EventDecoder<C> {
                     "tool call ids must be nonempty and distinct",
                 ));
             }
-            // An id is clean only if neither the stateless scan nor the held
-            // cross-fragment lookbehind (including the same-envelope final
-            // text) would redact it, so a marker held from reasoning or ending
-            // the final text cannot leave a matching id in the clean set.
-            let sanitized = sink.redact_provider_id(final_text_context, &call.id);
-            if sanitized == call.id {
-                clean_ids.insert(sanitized);
-            }
         }
-        let mut redacted_id_cursor = 1_usize;
         for call in &envelope.tool_calls {
             let allowed = self.declared_tools.contains(&call.name)
                 || self.output_contract_name.as_deref() == Some(call.name.as_str());
             if !allowed {
                 return Err(ResponseEnvelopeFailure::new(
                     ResponseEnvelopeRejectionStage::UndeclaredTool,
-                    format!(
-                        "response proposed undeclared tool `{}`",
-                        sink.redact_provider_id(final_text_context, &call.name)
-                    ),
+                    format!("response proposed undeclared tool `{}`", call.name),
                 ));
             }
             // The envelope carries the provider's argument text inside a
@@ -636,33 +441,11 @@ impl<C: Clone> EventDecoder<C> {
             // the line-level and agent-message-level checks, and the shared
             // typed decoders admit only serde_json's recursion boundary.
             validate_tool_argument_nesting(call)?;
-            // The id consults the same held lookbehind the arguments do —
-            // including the same-envelope final text — so an id extending a
-            // credential marker gets a safe surrogate instead of leaking.
-            let sanitized = sink.redact_provider_id(final_text_context, &call.id);
-            let id = if sanitized == call.id {
-                sanitized
-            } else {
-                next_redacted_call_id(&mut redacted_id_cursor, &clean_ids)
-            };
-            // The arguments consult the held cross-fragment lookbehind before
-            // stateless JSON-aware redaction. A whole-object suppression is
-            // typed separately so no executable sentinel request can cross
-            // the adapter boundary and churn through tool rounds.
-            match sink.redact_tool_arguments(final_text_context, &call.arguments) {
-                ToolArgumentRedaction::Admitted(arguments_json) => {
-                    content.push(AssistantPart::ToolCall(ToolCallProposal {
-                        id: ToolCallId::new(id),
-                        name: ToolName::new(call.name.clone()),
-                        arguments_json,
-                    }));
-                }
-                ToolArgumentRedaction::Suppressed => {
-                    content.push(AssistantPart::SuppressedToolCall(ToolName::new(
-                        call.name.clone(),
-                    )));
-                }
-            }
+            content.push(AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new(call.id.clone()),
+                name: ToolName::new(call.name.clone()),
+                arguments_json: call.arguments.clone(),
+            }));
         }
         if let Some(contract_name) = &self.output_contract_name {
             if !envelope
@@ -709,7 +492,7 @@ impl<C: Clone> EventDecoder<C> {
 
     fn emit_completion_observations(
         &mut self,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
         content: &[AssistantPart],
         raw_text: &str,
         finish: FinishReason,
@@ -790,28 +573,14 @@ impl ResponseEnvelopeFailure {
 /// that consume the preserved text admit only serde_json's recursion boundary.
 /// Syntax and shape are deliberately not judged here: malformed and non-object
 /// text is authoritative proposal material the typed decoders classify. Failure
-/// detail names only the redacted tool name, never the argument text itself.
+/// detail names only the tool name, never the argument text itself.
 fn validate_tool_argument_nesting(call: &EnvelopeToolCall) -> Result<(), ResponseEnvelopeFailure> {
     validate_provider_json_nesting(call.arguments.as_bytes()).map_err(|error| {
         ResponseEnvelopeFailure::new(
             ResponseEnvelopeRejectionStage::ToolArgumentsNesting,
-            format!("tool `{}` arguments: {error}", redact_text(&call.name)),
+            format!("tool `{}` arguments: {error}", call.name),
         )
     })
-}
-
-/// Allocates the next distinct redacted-call surrogate from a monotonic
-/// cursor, skipping only names that collide with a clean provider id. The
-/// cursor never resets, so total work across a completion is linear in the
-/// tool-call count plus the fixed clean-id set rather than quadratic.
-fn next_redacted_call_id(cursor: &mut usize, clean_ids: &HashSet<String>) -> String {
-    loop {
-        let candidate = format!("codex-redacted-call-{cursor}");
-        *cursor += 1;
-        if !clean_ids.contains(&candidate) {
-            return candidate;
-        }
-    }
 }
 
 fn usage(usage: UsageBreakdown) -> Result<TokenUsage, DecodeFailure> {
@@ -934,10 +703,6 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         &self.correlation
     }
 
-    fn terminal_text_capture(&self) -> CliTerminalTextCapture {
-        CliTerminalTextCapture::Disabled
-    }
-
     fn terminal_observed(&self) -> bool {
         EventDecoder::terminal_observed(self)
     }
@@ -945,7 +710,7 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
     fn push(
         &mut self,
         line: &[u8],
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Result<(), CliDecodeFailure> {
         EventDecoder::push(self, line, sink).map_err(|error| {
             let class = match error.class() {
@@ -969,7 +734,7 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         }
     }
 
-    fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
+    fn finish(self, sink: &mut (dyn ObservationSink<C> + Send)) -> TerminalEvidence {
         EventDecoder::finish(self, sink)
     }
 
@@ -980,7 +745,7 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
     fn boundary_loss_unless_provider_failure(
         self,
         cause: LossCause,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
         EventDecoder::boundary_loss_unless_provider_failure(self, cause, sink)
     }
@@ -989,9 +754,101 @@ impl<C: Clone> CliSession<C> for EventDecoder<C> {
         self,
         message: &str,
         classification: &str,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + Send),
     ) -> TerminalEvidence {
         let _ = (message, classification);
         self.finish(sink)
+    }
+}
+
+#[cfg(test)]
+mod passthrough_tests {
+    use super::*;
+    use crate::app_server::frame::{TextInput, TextInputKind, ThreadOptions, TurnInput};
+    use serde_json::json;
+
+    #[test]
+    fn repository_review_output_passes_through_ambient_cli() {
+        let prior_user_content = r###"Target pull request: KeenWill/signalbox#1860 ("Remove retired repository watch checkouts"), branch agent/repo-watch-dispatch-checkout-retire, current head e906aa33e. Work only on that branch in a detached worktree of that head as your tools allow: fix every actionable unresolved review thread below with the smallest correct change (add a regression test when the thread names a wrong result in code), validate with `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --all-features` and `cargo test -p <touched crate> --all-features` for code, or `python3 scripts/check_docs_consistency.py` for docs, commit with a plain subject, push to the same branch, reply on each thread naming the commit, and resolve it. Do not rebase or force-push, and do not touch any other branch. Unresolved threads at this head:
+
+- PRRT_kwDOTWhy-86gCyhi, apps/signalboxd/src/repo_watch_checkout.rs:153 — **  Make published checkouts recoverable before marker creation**  When shutdown cancels provisioning after this publication rename—for example, while credential lookup or `git clone` is awaiting—the ledger already records creation ownership and identity, but `.git/signalbox-dispatch` is not written until later. If the session becomes terminal before replay, `marker_matches` returns false and `remove` reports success, so scavenging sets `checkout_removed = true` while permanently leaving the checkout on disk. Establish durable ownership evidence before publication, or keep this markerless interrupted state eligible for safe cleanup.  AGENTS.md reference: [AGENTS.md:L38-L41](https://github.com/KeenWill/signalbox/blob/6b165156d516d0ee6f905848b61c53f53a9e082b/AGENTS.md#L38-L41)  Useful? React with 👍 / 👎.
+
+Finish with one short summary of the commit and the thread ids.
+"###;
+        let text = "I'll inspect the thread: Make published checkouts recoverable before marker creation. Then I will read the checkout cleanup code.";
+        let calls = vec![
+            ToolCallProposal {
+                id: ToolCallId::new("call-summary"),
+                name: ToolName::new("change_request_summary"),
+                arguments_json: r#"{ "number": 1860 }"#.into(),
+            },
+            ToolCallProposal {
+                id: ToolCallId::new("call-status"),
+                name: ToolName::new("git_status"),
+                arguments_json: "{}".into(),
+            },
+            ToolCallProposal {
+                id: ToolCallId::new("call-read"),
+                name: ToolName::new("read_file"),
+                arguments_json: r#"{"path":"apps/signalboxd/src/repo_watch_checkout.rs"}"#.into(),
+            },
+        ];
+        for delivery in [DeliveryMode::Buffered, DeliveryMode::Streamed] {
+            let translated = TranslatedOperation {
+                prompt: prior_user_content.as_bytes().to_vec(),
+                declared_tools: calls
+                    .iter()
+                    .map(|call| call.name.as_str().to_string())
+                    .collect(),
+                output_contract_name: None,
+                tool_requirement: ToolRequirement::Optional,
+            };
+            let client = Client::new(
+                ThreadOptions {
+                    model: "gpt-5.6-sol".into(),
+                    cwd: "/workspace".into(),
+                    service_tier: None,
+                },
+                TurnInput {
+                    input: vec![TextInput {
+                        kind: TextInputKind::Text,
+                        text: prior_user_content.into(),
+                    }],
+                    output_schema: json!({"type":"object"}),
+                    effort: None,
+                },
+            );
+            let mut decoder = EventDecoder::new((), delivery, &translated, client, 1024 * 1024);
+            let mut observed = Vec::new();
+            let sink = &mut observed;
+            for response in [
+                json!({"id":1,"result":{"userAgent":"codex","codexHome":"/workspace/.codex"}}),
+                json!({"id":4,"result":{"rateLimits":{}}}),
+                json!({"id":2,"result":{"thread":{"id":"thread-fixture"}}}),
+                json!({"id":3,"result":{"turn":{"id":"turn-fixture","status":"inProgress","items":[]}}}),
+                json!({"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"user-fixture","type":"userMessage","content":[{"type":"text","text":prior_user_content}]}}}),
+                json!({"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"message-fixture","type":"agentMessage","text":json!({"outcome":"completed","text":text,"tool_calls":calls.iter().map(|call| json!({"id":call.id.as_str(),"name":call.name.as_str(),"arguments":call.arguments_json})).collect::<Vec<_>>()}).to_string()}}}),
+                json!({"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed","items":[],"error":null}}}),
+            ] {
+                decoder
+                    .push(&serde_json::to_vec(&response).unwrap(), sink)
+                    .unwrap_or_else(|error| panic!("{}", error.into_detail()));
+            }
+            let evidence = decoder.finish(sink);
+            let TerminalEvidence::Completed(completion) = evidence else {
+                panic!("{evidence:?}")
+            };
+            let mut expected = vec![AssistantPart::Text(text.into())];
+            expected.extend(calls.iter().cloned().map(AssistantPart::ToolCall));
+            assert_eq!(completion.content, expected);
+            let proposals = observed
+                .iter()
+                .filter_map(|observation| match &observation.fact {
+                    ObservationFact::ToolCallProposed(call) => Some(call.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(proposals, calls);
+        }
     }
 }

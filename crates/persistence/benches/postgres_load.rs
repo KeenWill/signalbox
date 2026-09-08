@@ -905,6 +905,8 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         PrepareInitialModelCallOutcome::NoWork
         | PrepareInitialModelCallOutcome::RetryBackoff(_)
         | PrepareInitialModelCallOutcome::PoolExhausted(_)
+        | PrepareInitialModelCallOutcome::CredentialWait(_)
+        | PrepareInitialModelCallOutcome::WaitFailed(_)
         | PrepareInitialModelCallOutcome::Ready { .. }
         | PrepareInitialModelCallOutcome::RetainedContentLimitExceeded { .. }
         | PrepareInitialModelCallOutcome::TargetUnavailable(_) => {
@@ -937,6 +939,8 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         PrepareInitialModelCallOutcome::NoWork
         | PrepareInitialModelCallOutcome::RetryBackoff(_)
         | PrepareInitialModelCallOutcome::PoolExhausted(_)
+        | PrepareInitialModelCallOutcome::CredentialWait(_)
+        | PrepareInitialModelCallOutcome::WaitFailed(_)
         | PrepareInitialModelCallOutcome::Checkpointed(_)
         | PrepareInitialModelCallOutcome::RetainedContentLimitExceeded { .. }
         | PrepareInitialModelCallOutcome::TargetUnavailable(_) => {

@@ -61,6 +61,10 @@ pub struct SubmitInputRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SubmitInputRequestKind {
     User(DeliveryRequest),
+    Program {
+        capability: crate::program_session::ProgramSessionCapability,
+        delivery: DeliveryRequest,
+    },
     CoreContinuation(PerInputConfigurationChoices),
     CoreInterrupt {
         expected_active_turn: TurnId,
@@ -72,7 +76,7 @@ enum SubmitInputRequestKind {
 impl SubmitInputRequestKind {
     const fn delivery(&self) -> DeliveryRequest {
         match self {
-            Self::User(delivery) => *delivery,
+            Self::User(delivery) | Self::Program { delivery, .. } => *delivery,
             Self::CoreContinuation(configuration) => DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: *configuration,
             },
@@ -135,6 +139,26 @@ impl SubmitInputRequest {
             session,
             content,
             SubmitInputRequestKind::CoreContinuation(configuration),
+            None,
+        )
+    }
+
+    /// Validates input issued by the host-side session capability of a retained run.
+    pub fn try_new_program(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        capability: crate::program_session::ProgramSessionCapability,
+    ) -> Result<Self, SubmitInputRequestError> {
+        Self::admit(
+            command_id,
+            session,
+            content,
+            SubmitInputRequestKind::Program {
+                capability,
+                delivery,
+            },
             None,
         )
     }
@@ -434,6 +458,16 @@ where
                     configuration,
                 )
             }
+            SubmitInputRequestKind::Program {
+                capability,
+                delivery,
+            } => DomainSubmitInput::new_program(
+                command_id,
+                session,
+                content,
+                delivery,
+                capability.reference(),
+            ),
             SubmitInputRequestKind::CoreInterrupt {
                 expected_active_turn,
                 descendant_scope,
@@ -1255,6 +1289,51 @@ mod tests {
         assert!(
             nudge.observed.into_inner().is_empty(),
             "a failed transaction has no committed eligibility change to nudge"
+        );
+    }
+    #[test]
+    fn program_admission_passes_its_exact_actor_to_the_transaction() {
+        let id = command_id(1);
+        // The run is an arbitrary retained-reference fixture.
+        struct RetainedRun;
+        impl crate::program_session::ProgramRunVerifier for RetainedRun {
+            type Error = std::convert::Infallible;
+            async fn verify_run(
+                &self,
+                _: signalbox_domain::ProgramRunId,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+        let capability = run_ready(
+            crate::program_session::ProgramSessionHost::new(RetainedRun).session_capability(
+                signalbox_domain::ProgramRunId::from_uuid(Uuid::from_u128(3)),
+            ),
+        )
+        .expect("fixture verification succeeds")
+        .expect("fixture run is retained");
+        let admitted = SubmitInputRequest::try_new_program(
+            id,
+            session_id(2),
+            content("program input"),
+            delivery(1),
+            capability,
+        )
+        .expect("program input is structurally admitted");
+        let mut service = SubmitInputService::new(
+            FakeIds::new([accepted_input_id(4)], [turn_id(5)]),
+            FakeTransaction::returning([Ok(SubmitInputOutcome::ConflictingReuse {
+                command_id: id,
+            })]),
+            FakeNudge::default(),
+            crate::InProcessToolDispatchGate::default(),
+        );
+        run_ready(service.execute(admitted)).expect("scripted transaction succeeds");
+        let (_, transaction, _, _) = service.into_parts();
+        assert_eq!(transaction.observed[0].0.actor(), capability.actor());
+        assert_ne!(
+            transaction.observed[0].0.actor(),
+            signalbox_domain::Actor::User
         );
     }
 }

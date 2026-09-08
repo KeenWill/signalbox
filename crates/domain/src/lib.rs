@@ -13,6 +13,7 @@ mod blob;
 mod configuration;
 mod context_compaction;
 mod context_frontier;
+mod credential_availability;
 mod delivery_request;
 mod fatal_mismatch;
 mod git_remote;
@@ -24,6 +25,8 @@ mod model_call;
 mod model_execution;
 mod model_settings;
 mod program_journal;
+/// Host-verified program session attribution.
+pub mod program_session;
 mod provider_evidence;
 mod queue_order;
 mod rate_limit;
@@ -55,7 +58,7 @@ pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
     SteeringBinding, SteeringReclassificationReason,
 };
-pub use actor::Actor;
+pub use actor::{Actor, ProgramActor};
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
 pub use blob::{
     BlobDerivation, BlobDerivationError, BlobDerivationProducer, BlobDigest, BlobDigestParseError,
@@ -82,6 +85,7 @@ pub use context_frontier::{
     ContextFrontier, ContextFrontierId, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
 };
+pub use credential_availability::{CredentialAvailabilityWait, CredentialAvailabilityWaitCause};
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use git_remote::{
     ConfiguredGitRemoteRecord, GitRemoteName, GitRemoteTextError, GitRemoteUrl,

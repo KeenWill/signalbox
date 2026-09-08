@@ -13,6 +13,10 @@ use super::{
 /// Result of the authoritative prepare-call transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrepareModelCallOutcome {
+    /// Admission of a released wait failed with its predecessor provider evidence.
+    WaitFailed(Box<FailedModelCallTurn>),
+    /// Credential admission retained the turn without preparing a call.
+    CredentialWait(signalbox_domain::CredentialAvailabilityWait),
     /// The scheduling hint no longer identifies runnable work.
     NoWork,
     /// A durable availability-successor deadline has not elapsed.
@@ -374,6 +378,8 @@ pub trait ModelCallInputTokenCounter {
 /// One durable result of committing a correlated model-call observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCallObservationCommitOutcome {
+    /// A failed call's chain yielded to a call-free credential admission wait.
+    CredentialWait(signalbox_domain::CredentialAvailabilityWait),
     /// The observation reached an ordinary terminal or durable-wait outcome.
     Terminal(Box<ModelCallTerminalOutcome>),
     /// Pool policy authorized a distinct availability successor attempt.

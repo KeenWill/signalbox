@@ -640,8 +640,9 @@ async fn tool_continuation_headroom_closes_before_another_call() -> Result<(), B
     let authorized = tool_repository
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
         .await?;
-    let result_text = String::from("2026-08-22T04:00:00Z");
-    let result_content_bytes = u64::try_from(result_text.len())?;
+    // Six three-byte characters exceed the remaining fifteen-byte allowance.
+    let result_text = String::from("界界界界界界");
+    let result_content_bytes = 18_u64;
     tool_repository
         .commit_observation(
             authorized
@@ -2877,20 +2878,18 @@ async fn parked_approval_rejection_requires_a_recorded_approval_wait() -> Result
 async fn interrupt_preserves_tool_recovery_ambiguity() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x74c0;
-    let (fixture, _, _, request) =
-        checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        &[("external-tool", "{}")],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the automatic fixture has one request");
+    };
+    let request = *request;
     let repository = PostgresToolLoopRepository::new(pool.clone());
-    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
-    repository
-        .decide(
-            decide_tool_request(
-                DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
-                request,
-                ToolApprovalDecision::Approve,
-            ),
-            || issuing_attempt,
-        )
-        .await?;
     let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
     repository
         .prepare_next_attempt(
@@ -2900,9 +2899,11 @@ async fn interrupt_preserves_tool_recovery_ambiguity() -> Result<(), Box<dyn Err
             ToolEffectClass::ExternalEffect,
         )
         .await?;
-    repository
+    let issuing_attempt = repository
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
-        .await?;
+        .await?
+        .attempt()
+        .issuing_attempt();
     let mut recovery_ids = FixedStartupScanIds::new([], []);
     assert_ambiguous_tool_recovery(
         PostgresStartupScanRepository::new(pool.clone())
@@ -2985,8 +2986,27 @@ async fn interrupt_preserves_tool_recovery_ambiguity() -> Result<(), Box<dyn Err
         process_tool_reconciliation_operation(snapshot.turns()[0].state()),
         (issuing_attempt, tool_attempt)
     );
+    assert!(
+        snapshot.entries().iter().all(|entry| !matches!(
+            entry,
+            ProcessTranscriptEntry::AssistantToolUse {
+                approval: Some(_),
+                ..
+            }
+        )),
+        "automatic approval has no explicit transcript provenance"
+    );
     assert_eq!(assistant_tool_request(snapshot.entries()), request);
     assert_eq!(closed_tool_request(snapshot.entries()), request);
+    assert!(snapshot.entries().iter().any(|entry| matches!(
+        entry,
+        ProcessTranscriptEntry::ToolClosed {
+            request: closed_request,
+            approved_before_close: true,
+            ..
+        } if *closed_request == request
+    )));
+
     assert!(
         dispatched_tool_reconciliation(&pool, fixture.turn, tool_attempt).await?,
         "the tool reconciliation event must not block dispatch"
@@ -3975,6 +3995,10 @@ async fn stopped_tool_round_closes_requests_and_decision_replay() -> Result<(), 
 
     let first_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 22));
     let second_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 23));
+    let first_proposal = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24));
+    let first_closure = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25));
+    let second_proposal = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27));
+    let second_closure = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 28));
     let response = ToolUsingAssistantResponse::try_from_parts(vec![
         AssistantResponsePart::ToolCall(ToolCallProposal::new(
             ToolName::try_new(String::from("first_tool")).expect("valid fixture tool name"),
@@ -4006,18 +4030,18 @@ async fn stopped_tool_round_closes_requests_and_decision_replay() -> Result<(), 
                 StoppedToolRoundModelCallIdentities::new(
                     vec![
                         StoppedToolResponsePartIdentity::tool_call(
-                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
+                            first_proposal,
                             first_request,
-                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
-                            InitialToolApproval::Confirm,
+                            first_closure,
+                            InitialToolApproval::PolicyAuto,
                         ),
                         StoppedToolResponsePartIdentity::text(
                             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
                         ),
                         StoppedToolResponsePartIdentity::tool_call(
-                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27)),
+                            second_proposal,
                             second_request,
-                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 28)),
+                            second_closure,
                             InitialToolApproval::Confirm,
                         ),
                     ],
@@ -4032,6 +4056,40 @@ async fn stopped_tool_round_closes_requests_and_decision_replay() -> Result<(), 
         outcome,
         ModelCallTerminalOutcome::CancelledWithToolResponse(_)
     ));
+
+    let entries = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(
+            &[1, 2, 3, 4],
+            &[
+                SemanticTranscriptEntryRef::from_source(fixture.session, first_proposal),
+                SemanticTranscriptEntryRef::from_source(fixture.session, first_closure),
+                SemanticTranscriptEntryRef::from_source(fixture.session, second_proposal),
+                SemanticTranscriptEntryRef::from_source(fixture.session, second_closure),
+            ],
+        )
+        .await?;
+    let closures: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ProcessTranscriptEntry::ToolClosed {
+                request,
+                approved_before_close,
+                ..
+            } => Some((*request, *approved_before_close)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(closures, [(first_request, false), (second_request, false)]);
+    assert!(
+        entries.iter().all(|entry| !matches!(
+            entry,
+            ProcessTranscriptEntry::AssistantToolUse {
+                approval: Some(_),
+                ..
+            }
+        )),
+        "closure evidence must survive without explicit approval provenance"
+    );
 
     let rejection = PostgresToolLoopRepository::new(pool.clone())
         .decide(
@@ -4434,5 +4492,299 @@ async fn completed_cancellation_requires_closed_tool_round() -> Result<(), Box<d
 
     pool.close().await;
     drop(container);
+    Ok(())
+}
+/// Headroom reserves model-visible steering and rendered errors before dispatch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tool_continuation_headroom_counts_steering_and_error_envelopes()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind};
+    let (_container, pool, _) = migrated_postgres().await?;
+    let digest = BlobDigest::digest(b"headroom attachment");
+    super::session_creation_and_submit::catalog_verified_blob(
+        &pool,
+        digest,
+        19,
+        "headroom",
+        Uuid::from_u128(0x135000),
+        "attachment",
+    )
+    .await?;
+    let success = || ToolAttemptObservation::Completed {
+        result: ToolResultContent::Text(ToolResultText::try_new(String::from("ok")).unwrap()),
+    };
+    let failure = |detail| ToolAttemptObservation::KnownFailed {
+        error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, detail),
+    };
+    // Five three-byte characters reserve fifteen bytes, not five characters.
+    for (index, steering, resolution, result_bytes, steering_bytes) in [
+        (
+            0,
+            Some(UserContent::try_text(String::from("界界界界界")).unwrap()),
+            HeadroomResolution::Observed(success()),
+            2,
+            15,
+        ),
+        (
+            1,
+            Some(super::session_creation_and_submit::attachment_content(
+                digest,
+            )),
+            HeadroomResolution::Observed(success()),
+            2,
+            2304,
+        ),
+        (2, None, HeadroomResolution::Observed(failure(None)), 55, 0),
+        (
+            3,
+            None,
+            HeadroomResolution::Observed(failure(Some(
+                ToolExecutionErrorDetail::try_new(String::from("\"\\界")).unwrap(),
+            ))),
+            60,
+            0,
+        ),
+        (4, None, HeadroomResolution::Denied, 45, 0),
+        // PostgreSQL's JSON envelope reserves 67 bytes for the 63-byte compact result.
+        (5, None, HeadroomResolution::Inadmissible, 67, 0),
+    ] {
+        assert_headroom_case(
+            &pool,
+            HeadroomCase {
+                index,
+                steering,
+                resolution,
+                result_bytes,
+                steering_bytes,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tool_continuation_headroom_migration_retains_existing_rows() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, _) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "CREATE TEMP TABLE tool_continuation_context_headroom (
+            usage_input_includes_cache_tokens boolean, usage_input_tokens numeric,
+            usage_cache_creation_input_tokens numeric, usage_cache_read_input_tokens numeric,
+            usage_output_tokens numeric, projected_result_content_bytes numeric,
+            max_output_tokens numeric, context_window_tokens numeric,
+            CONSTRAINT tool_continuation_context_headroom_requires_compaction CHECK (
+                usage_input_tokens
+                + CASE WHEN usage_input_includes_cache_tokens THEN 0
+                       ELSE COALESCE(usage_cache_creation_input_tokens, 0)
+                          + COALESCE(usage_cache_read_input_tokens, 0) END
+                + COALESCE(usage_output_tokens, 0) + projected_result_content_bytes
+                + max_output_tokens > context_window_tokens
+            )
+         ) ON COMMIT DROP;
+         INSERT INTO tool_continuation_context_headroom VALUES (true, 70, NULL, NULL, 5, 67, 10, 100);",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/202609081401_pending_steering_headroom.sql"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    let retained: (Decimal, Decimal) = sqlx::query_as(
+        "SELECT projected_result_content_bytes, pending_steering_content_bytes
+           FROM tool_continuation_context_headroom",
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    assert_eq!(retained, (Decimal::from(67), Decimal::ZERO));
+    transaction.rollback().await?;
+    Ok(())
+}
+
+struct HeadroomCase {
+    index: u128,
+    steering: Option<UserContent>,
+    resolution: HeadroomResolution,
+    result_bytes: u64,
+    steering_bytes: u64,
+}
+
+enum HeadroomResolution {
+    Observed(ToolAttemptObservation),
+    Denied,
+    Inadmissible,
+}
+
+async fn assert_headroom_case(pool: &PgPool, case: HeadroomCase) -> Result<(), Box<dyn Error>> {
+    let HeadroomCase {
+        index,
+        steering,
+        resolution,
+        result_bytes,
+        steering_bytes,
+    } = case;
+    let seed = 0x136000 + index * 0x100;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_usage(
+        pool,
+        seed,
+        "current_time",
+        "{}",
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(5)),
+    )
+    .await?;
+    let tools = PostgresToolLoopRepository::new(pool.clone());
+    if let Some(content) = steering {
+        SubmitInputRepository::new(pool.clone())
+            .with_attachment_maximum_bytes(19)
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x40)),
+                    fixture.session,
+                    content,
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: fixture.turn,
+                    },
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41)),
+                None,
+            )
+            .await?;
+    }
+    let decision = match resolution {
+        HeadroomResolution::Observed(_) | HeadroomResolution::Inadmissible => {
+            ToolApprovalDecision::Approve
+        }
+        HeadroomResolution::Denied => ToolApprovalDecision::Deny { reason: None },
+    };
+    tools
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                decision,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    if let HeadroomResolution::Inadmissible = resolution {
+        let mut transaction = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET CONSTRAINTS ALL IMMEDIATE;
+             ALTER TABLE tool_request DISABLE TRIGGER tool_request_resolution_guard",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE tool_request SET resolution_kind = 'closed_inadmissible',
+                    inadmissible_reason = 'placement_lost' WHERE request_id = $1",
+        )
+        .bind(request.into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::raw_sql("ALTER TABLE tool_request ENABLE TRIGGER tool_request_resolution_guard")
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+    }
+    if let HeadroomResolution::Observed(observation) = resolution {
+        let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+        tools
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                attempt,
+                ToolEffectClass::EffectFree,
+            )
+            .await?;
+        let authorized = tools
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        tools
+            .commit_observation(authorized.executor_fence().bind(observation))
+            .await?;
+    }
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+        target,
+    )])
+    .unwrap();
+    let model_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                100,
+            )]);
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27));
+    let outcome = model_repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x26,
+                ))],
+                frontier,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x42)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 0x43)),
+                )
+            },
+        )
+        .await?;
+    assert!(
+        matches!(
+            outcome,
+            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+        ),
+        "case {index}"
+    );
+    let evidence: (Decimal, Decimal, bool) = sqlx::query_as(
+        "SELECT projected_result_content_bytes, pending_steering_content_bytes,
+                EXISTS (SELECT 1 FROM model_call WHERE model_call_id = $2)
+           FROM tool_continuation_context_headroom WHERE producing_model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(call.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        evidence,
+        (
+            Decimal::from(result_bytes),
+            Decimal::from(steering_bytes),
+            false
+        ),
+        "case {index}"
+    );
+    let reported = model_repository
+        .latest_reported_usage(fixture.session, target, FastMode::Disabled, false, frontier)
+        .await?
+        .expect("the producing call reported usage");
+    assert_eq!(
+        reported.projected_unreported_content_bytes(),
+        result_bytes,
+        "pending steering is reclassified, not retained as a tool result"
+    );
     Ok(())
 }

@@ -136,6 +136,7 @@ impl ToolCrashClosureIdentities {
 
 ```rust
 pub enum PrepareToolContinuationOutcome {
+    CredentialWait(signalbox_domain::CredentialAvailabilityWait),
     NoWork,
     Checkpointed(signalbox_domain::ModelCallId),
     TargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),

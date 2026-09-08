@@ -224,6 +224,7 @@ pub(crate) enum OutboxEventDiscriminator {
     SessionStateChanged,
     SessionTerminal,
     TurnTerminal,
+    CredentialPoolExhausted,
     GoalChanged,
     CommandSettled,
     InjectionSettled,
@@ -247,6 +248,7 @@ pub(crate) fn outbox_event_discriminator_from_str(value: &str) -> Option<OutboxE
         SESSION_STATE_CHANGED => OutboxEventDiscriminator::SessionStateChanged,
         SESSION_TERMINAL => OutboxEventDiscriminator::SessionTerminal,
         TURN_TERMINAL => OutboxEventDiscriminator::TurnTerminal,
+        "turn_credential_pool_exhausted" => OutboxEventDiscriminator::CredentialPoolExhausted,
         GOAL_CHANGED => OutboxEventDiscriminator::GoalChanged,
         COMMAND_SETTLED => OutboxEventDiscriminator::CommandSettled,
         INJECTION_SETTLED => OutboxEventDiscriminator::InjectionSettled,
@@ -330,6 +332,7 @@ pub(crate) const fn timeline_event_kind_str(
         (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Retired)) => {
             GOAL_TURN_RETIRED
         }
+        (OutboxEventDiscriminator::CredentialPoolExhausted, _) => TURN_FAILED,
         (OutboxEventDiscriminator::TurnTerminal, None) => return None,
         (OutboxEventDiscriminator::SessionCreated, _) => SESSION_CREATED,
         (OutboxEventDiscriminator::SessionStateChanged, _) => SESSION_STATE_CHANGED,
@@ -773,6 +776,7 @@ pub fn instruction_finding_kind_from_str(value: &str) -> Option<InstructionDisco
 /// Closed active-turn phase discriminators stored by PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ActiveTurnPhaseStorageKind {
+    AwaitingCredentialAvailability,
     Running,
     AwaitingToolApproval,
     AwaitingChild,
@@ -784,6 +788,9 @@ pub(crate) enum ActiveTurnPhaseStorageKind {
 #[cfg(test)]
 pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) -> &'static str {
     match value {
+        ActiveTurnPhaseStorageKind::AwaitingCredentialAvailability => {
+            "awaiting_credential_availability"
+        }
         ActiveTurnPhaseStorageKind::Running => "running",
         ActiveTurnPhaseStorageKind::AwaitingToolApproval => "awaiting_tool_approval",
         ActiveTurnPhaseStorageKind::AwaitingChild => "awaiting_child",
@@ -795,6 +802,9 @@ pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) 
 
 pub(crate) fn active_turn_phase_from_str(value: &str) -> Option<ActiveTurnPhaseStorageKind> {
     match value {
+        "awaiting_credential_availability" => {
+            Some(ActiveTurnPhaseStorageKind::AwaitingCredentialAvailability)
+        }
         "running" => Some(ActiveTurnPhaseStorageKind::Running),
         "awaiting_tool_approval" => Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval),
         "awaiting_child" => Some(ActiveTurnPhaseStorageKind::AwaitingChild),

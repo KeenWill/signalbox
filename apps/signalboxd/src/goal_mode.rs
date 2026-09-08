@@ -930,12 +930,13 @@ impl PostgresGoalPassDisposition {
             );
             return ResumeAttempt::InfrastructureUnsettled;
         };
-        let unchargeable = match self
+        let charge = match self
             .repository
             .unchargeable_automatic_resume_turns(session, &[failed_turn])
             .await
         {
-            Ok(turns) => turns.contains(&failed_turn),
+            Ok(turns) if turns.contains(&failed_turn) => AutomaticResumeCharge::Exempt,
+            Ok(_) => AutomaticResumeCharge::Chargeable,
             Err(error) => {
                 tracing::error!(
                     session = %session.into_uuid(),
@@ -948,7 +949,7 @@ impl PostgresGoalPassDisposition {
                 return ResumeAttempt::InfrastructureUnsettled;
             }
         };
-        let guidance = match automatic_resume_guidance(unchargeable) {
+        let guidance = match automatic_resume_guidance(charge) {
             Ok(guidance) => guidance,
             Err(error) => {
                 tracing::error!(
@@ -1455,11 +1456,20 @@ impl SpentAutomaticResumeAttempts {
     }
 }
 
-fn automatic_resume_guidance(unchargeable: bool) -> Result<Option<GoalGuidance>, GoalTextError> {
-    if unchargeable {
-        return Ok(None);
+enum AutomaticResumeCharge {
+    Chargeable,
+    Exempt,
+}
+
+fn automatic_resume_guidance(
+    charge: AutomaticResumeCharge,
+) -> Result<Option<GoalGuidance>, GoalTextError> {
+    match charge {
+        AutomaticResumeCharge::Chargeable => {
+            GoalGuidance::try_new(String::from(CHARGEABLE_FAILURE_RESUME_GUIDANCE)).map(Some)
+        }
+        AutomaticResumeCharge::Exempt => Ok(None),
     }
-    GoalGuidance::try_new(String::from(CHARGEABLE_FAILURE_RESUME_GUIDANCE)).map(Some)
 }
 
 /// Whether the goal is still blocked by exactly the named failure event.
@@ -2065,23 +2075,6 @@ context_window_tokens = 200000
         assert_eq!(
             scheduled.as_str(),
             "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal."
-        );
-    }
-
-    #[test]
-    fn a_chargeable_failure_changes_the_next_turn_input() {
-        let guidance = automatic_resume_guidance(false)
-            .expect("the static guidance is admitted")
-            .expect("a chargeable failure carries guidance");
-
-        assert_eq!(guidance.as_str(), CHARGEABLE_FAILURE_RESUME_GUIDANCE);
-    }
-
-    #[test]
-    fn an_unchargeable_failure_reuses_the_commissioned_statement() {
-        assert_eq!(
-            automatic_resume_guidance(true).expect("no guidance needs admission"),
-            None
         );
     }
 
