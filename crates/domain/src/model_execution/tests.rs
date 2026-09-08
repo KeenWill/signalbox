@@ -3356,3 +3356,59 @@ fn refusal_closes_call_attempt_and_turn_without_content() {
     assert_eq!(refused.disposition(), &TurnDisposition::Refused);
     assert_eq!(refused.terminal_snapshot().entry_count(), 1);
 }
+
+#[test]
+fn tool_round_rejects_approval_that_disagrees_with_argument_suppression() {
+    for (suppressed, approval) in [
+        (true, InitialToolApproval::PolicyAuto),
+        (true, InitialToolApproval::Confirm),
+        (false, InitialToolApproval::RuntimeSafetyDeny),
+    ] {
+        let execution = in_flight_execution();
+        let call = execution
+            .current_call
+            .clone()
+            .expect("fixture issued a call")
+            .end_classified(ModelCallDisposition::Completed)
+            .expect("issued call can complete");
+        let attempt = execution
+            .current_attempt
+            .clone()
+            .end_without_stop(UnstoppedAttemptDisposition::YieldedToDurableWait)
+            .expect("running attempt can yield");
+        let proposal = if suppressed {
+            crate::ToolCallProposal::suppressed(
+                ToolName::try_new(String::from("current_time")).expect("fixture tool name"),
+            )
+        } else {
+            tool_proposal("current_time", "{}")
+        };
+        let response =
+            ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+                proposal,
+            )])
+            .expect("one tool proposal");
+        let error = assemble_tool_round(
+            ModelCallTurnScope {
+                session: execution.session(),
+                turn: execution.turn(),
+            },
+            call,
+            attempt,
+            execution.frontier_entries.to_vec(),
+            response,
+            ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    semantic_transcript_entry_id(43),
+                    tool_request_id(44),
+                    approval,
+                )],
+                context_frontier_id(45),
+                Some(turn_attempt_id(46)),
+            ),
+            DangerousToolAutoApproval::Disabled,
+        )
+        .expect_err("suppression and approval must agree before a request is created");
+        assert_eq!(error, ModelCallClosureError::InitialToolApprovalMismatch);
+    }
+}
