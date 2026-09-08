@@ -46,3 +46,14 @@ END;
 $$;
 CREATE TRIGGER credential_wait_oauth_replaced AFTER INSERT OR UPDATE OF generation ON oauth_credential_authorization
     FOR EACH ROW EXECUTE FUNCTION wake_replaced_oauth_credential_waits();
+
+CREATE FUNCTION notify_credential_wait_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' OR NEW IS DISTINCT FROM OLD THEN
+        PERFORM pg_notify('credential_wait_changed', NEW.session_id::text);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER credential_wait_changed AFTER INSERT OR UPDATE ON credential_availability_wait
+    FOR EACH ROW EXECUTE FUNCTION notify_credential_wait_change();

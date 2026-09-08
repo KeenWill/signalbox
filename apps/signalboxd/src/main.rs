@@ -863,7 +863,7 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
         | ProcessRuntimeError::SpoolIo(_)
         | ProcessRuntimeError::InsufficientPoolCapacity
         | ProcessRuntimeError::CleanupSocket(_)
-        | ProcessRuntimeError::RunnerRecoveryNotifications(_)
+        | ProcessRuntimeError::DatabaseNotifications(_)
         | ProcessRuntimeError::RunnerRecoveryCommands(_)
         | ProcessRuntimeError::Dispatch(OutboxDispatchError::Database(_)) => {
             OperatorFailureClass::Infrastructure {
@@ -1566,6 +1566,11 @@ async fn run_hub(
         reconciliation_sweep_interval,
         nudge_buffer_capacity,
     );
+    let invocation_processes =
+        signalboxd::credential_invocations::CredentialInvocationProcesses::new(
+            pool.clone(),
+            eligibility_nudge.clone(),
+        );
 
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
@@ -1640,10 +1645,7 @@ async fn run_hub(
     let startup = migrate_scan_then_schedule(
         async {
             install_oauth_registrations(&pool, &migration_oauth_registrations).await?;
-            let processes = signalboxd::credential_invocations::CredentialInvocationProcesses::new(
-                pool.clone(),
-            );
-            processes.recover().await.map_err(|_| {
+            invocation_processes.recover().await.map_err(|_| {
                 erase_startup_cause(
                     RuntimePhase::StartupScan,
                     SanitizedStartupCause::Static("credential_invocation_recovery_failed"),
@@ -2068,6 +2070,7 @@ async fn run_hub(
         process_runtime.with_recovery_reporter(execution_supervisor.recovery_reporter());
     let pass_pool = scheduler_pool.clone();
     let pass_nudge = eligibility_nudge.clone();
+    let pass_invocation_processes = invocation_processes.clone();
     let pass_blobs = blob_store_registry.clone();
     let compose_pass = move |model_configuration: &HubModelConfiguration| {
         let runtime_models = model_configuration.runtime_model_catalog();
@@ -2085,11 +2088,7 @@ async fn run_hub(
             diagnostic_model_identity_limit,
         )
         .with_text_delta_sink(text_deltas.clone())
-        .with_invocation_process_observer(
-            signalboxd::credential_invocations::CredentialInvocationProcesses::new(
-                pass_pool.clone(),
-            ),
-        );
+        .with_invocation_process_observer(pass_invocation_processes.clone());
         let counter = AttachmentPreparingModelCallProvider::for_counting(
             provider.clone(),
             pass_pool.clone(),
@@ -2280,8 +2279,6 @@ async fn run_hub(
             )
         });
     }
-    let invocation_processes =
-        signalboxd::credential_invocations::CredentialInvocationProcesses::new(pool.clone());
     let invocation_shutdown = turn_liveness_shutdown_receiver.clone();
     runtime_tasks.spawn(async move {
         invocation_processes.run(invocation_shutdown).await;

@@ -153,6 +153,20 @@ async fn pool_projection_parked_wait_stays_readable_and_followable() -> Result<(
     .await?;
     let session = SessionId::from_uuid(session_id.into_uuid());
     activate_turn(&runtime.pool, session).await?;
+    let mut prior_follower = Connection::connect(runtime.socket()).await?;
+    prior_follower
+        .request_version(
+            ProtocolVersion::One,
+            1,
+            ClientRequest::FollowSession { session_id },
+        )
+        .await?;
+    loop {
+        let frame = response_within(&mut prior_follower).await?;
+        if matches!(frame.message(), ServerMessage::TranscriptSnapshotEnd { .. }) {
+            break;
+        }
+    }
     sqlx::query("INSERT INTO credential_exclusion(kind,profile,origin) VALUES ('profile_quarantine','anthropic-primary','codex_home')").execute(&runtime.pool).await?;
     let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let repository = PostgresModelCallRepository::new(
@@ -176,6 +190,14 @@ async fn pool_projection_parked_wait_stays_readable_and_followable() -> Result<(
     else {
         panic!("clearable quarantine parks")
     };
+    loop {
+        let frame = response_within(&mut prior_follower).await?;
+        if let ServerMessage::Error { code, .. } = frame.message() {
+            assert_eq!(*code, ErrorCode::ResyncRequired);
+            break;
+        }
+    }
+    drop(prior_follower);
     let expected = TurnState::ActiveAwaitingCredentialAvailability {
         wait_attempt_id: CanonicalUuid::from_uuid(wait.attempt().into_uuid()),
         cause: signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted,
@@ -238,7 +260,8 @@ async fn pool_projection_capacity_recovery_retains_live_groups_and_releases_ende
         .kill_on_drop(true)
         .spawn()?;
     let group = child.id().expect("spawned child has an identity");
-    let observer = CredentialInvocationProcesses::new(runtime.pool.clone());
+    let observer =
+        CredentialInvocationProcesses::new(runtime.pool.clone(), runtime.eligibility_nudge.clone());
     assert!(observer.register(call, group).await);
     observer.finished(call, None, true).await;
     observer.recover().await?;

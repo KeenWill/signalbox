@@ -600,8 +600,9 @@ predecessor call and non-acceptance proof. Release commits the successor's
 prepared call or terminal disposition with wait consumption; re-parking replaces
 evidence and deadline in place. Member-availability updates and successful
 exclusion clears grant named waits eligibility in their committing transactions;
-replayed or ineffective clears grant none. The scheduler rechecks due deadlines
-and eligible waits.
+replayed or ineffective clears grant none. Wait inserts and changes publish a
+transactional database notification for scheduler nudges and follower
+resynchronization. The scheduler rechecks due deadlines and eligible waits.
 
 A contended wait additionally retains the complete bounded-member set and each
 member's invocation reservations. Admission locks capacity rows in profile byte

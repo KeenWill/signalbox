@@ -78,7 +78,9 @@ an event kind with no projection advances that cursor and reaches no follower. A
 database-scoped advisory guard and a generation fence in
 `crates/persistence/src/hub_fence.rs` enforce one active daemon process per
 database, and therefore one dispatcher and its fan-outs. The guard is taken on a
-dedicated connection before migrations run and held until shutdown.
+dedicated connection before migrations run and held until shutdown. A committed
+credential-wait change sends `resync_required` to that session's followers; the
+database notification listener reconnecting requires all followers to resync.
 
 ## Design decisions
 

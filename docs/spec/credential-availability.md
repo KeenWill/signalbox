@@ -189,13 +189,15 @@ instead consumes the wait, opens a fresh immediate successor with its applied
 interrupt proof, ends it AfterCancellation(Cancelled), and appends TurnCancelled
 after the wait frontier while reclassifying pending steering.
 
-A due deadline makes a wait eligible through the scheduler's existing
-reconciliation sweep. A durable member-availability update or a successful
-operator clear grants eligibility to waits naming that member in the same
-transaction. Eligibility prepares no call and consumes no wait. Startup alone
-leaves exhausted waits unchanged; deadline-free waits have no timer. Pooled
-capacity observations and wait admission acquire the model-call order guard,
-profile action locks and invocation-capacity locks before updating waits.
+A due deadline makes a wait eligible. Commit-time wait notifications nudge the
+scheduler; periodic invocation recovery also nudges eligible waits, including
+deadlines and dropped hints, without a configured reconciliation sweep. A
+durable member-availability update or a successful operator clear grants
+eligibility to waits naming that member in the same transaction. Eligibility
+prepares no call and consumes no wait. Startup alone leaves exhausted waits
+unchanged; deadline-free waits have no timer. Pooled capacity observations and
+wait admission acquire the model-call order guard, profile action locks and
+invocation-capacity locks before updating waits.
 
 Contended-wait: no member is admitted and at least one otherwise-admissible
 member is skipped only for its configured invocation bound. Either exhaustion
@@ -218,11 +220,12 @@ retains the observed group through cleanup so proven group exit releases
 capacity while the call retains its boundary-loss outcome.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
-wait attempt and closed cause. Transcript reads and initial follow snapshots
-retain the active turn and its slot without rejection detail. Release admission,
-call preparation, and send authorization use the wait's retained effective
-target with its retained policy; a missing current selection leaves the wait
-unconsumed. Release pins a pre-call wait's retained target on its turn, and
-domain call preparation retains that pin across catalog reloads. The rendered
-provider operation uses that retained target. Parking retains the exclusions
-that selected the wait.
+wait attempt and closed cause. Committed wait changes require connected
+followers to resynchronize their snapshots; no transcript entry is appended.
+Transcript reads and initial follow snapshots retain the active turn and its
+slot without rejection detail. Release admission, call preparation, and send
+authorization use the wait's retained effective target with its retained policy;
+a missing current selection leaves the wait unconsumed. Release pins a pre-call
+wait's retained target on its turn, and domain call preparation retains that pin
+across catalog reloads. The rendered provider operation uses that retained
+target. Parking retains the exclusions that selected the wait.

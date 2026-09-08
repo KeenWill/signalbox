@@ -179,11 +179,11 @@ impl ProcessRuntime {
     pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), ProcessRuntimeError> {
         let mut recovery_listener = sqlx::postgres::PgListener::connect_with(&self.pool)
             .await
-            .map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
+            .map_err(ProcessRuntimeError::DatabaseNotifications)?;
         recovery_listener
-            .listen("runner_recovery")
+            .listen_all(["runner_recovery", "credential_wait_changed"])
             .await
-            .map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
+            .map_err(ProcessRuntimeError::DatabaseNotifications)?;
         let oauth = signalbox_persistence::oauth_credential::OauthCredentialRepository::new(
             self.pool.clone(),
         );
@@ -206,10 +206,12 @@ impl ProcessRuntime {
             })?,
         );
         resume_runner_replacements_and_notify(&recovery_store, &fanouts.runner_recovery).await?;
-        let recovery_notifications = forward_runner_recovery_notifications(
+        let recovery_notifications = forward_database_notifications(
             recovery_listener,
             recovery_store,
             fanouts.runner_recovery.clone(),
+            fanouts.streaming.clone(),
+            self.eligibility_nudge.clone(),
             shutdown.clone(),
         );
         let connection_dependencies = ConnectionDependencies {
@@ -255,23 +257,40 @@ async fn resume_runner_replacements_and_notify(
     Ok(())
 }
 
-async fn forward_runner_recovery_notifications(
+async fn forward_database_notifications(
     mut listener: sqlx::postgres::PgListener,
     store: signalbox_persistence::runner_protocol::RunnerProtocolStore,
     notifications: watch::Sender<()>,
+    credential_wait_updates: broadcast::Sender<ProcessUpdate>,
+    eligibility_nudge: InProcessEligibilityNudge,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
     loop {
         if *shutdown.borrow() {
             return Ok(());
         }
-        tokio::select! {
+        let notification = tokio::select! {
             notification = listener.try_recv() => {
-                notification.map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
+                notification.map_err(ProcessRuntimeError::DatabaseNotifications)?
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+                continue;
             }
+        };
+        if let Some(notification) = notification {
+            if notification.channel() == "credential_wait_changed" {
+                let session = uuid::Uuid::parse_str(notification.payload())
+                    .ok()
+                    .map(SessionId::from_uuid);
+                if let Some(session) = session {
+                    eligibility_nudge.nudge(session);
+                }
+                let _ = credential_wait_updates.send(ProcessUpdate::ResyncRequired { session });
+                continue;
+            }
+        } else {
+            let _ = credential_wait_updates.send(ProcessUpdate::ResyncRequired { session: None });
         }
         resume_runner_replacements_and_notify(&store, &notifications).await?;
     }
@@ -676,10 +695,16 @@ mod runner_recovery_tests {
                 .expect("registration catalog is valid"),
         );
         resume_runner_replacements_and_notify(&store, &notifications).await?;
-        let forwarder = tokio::spawn(forward_runner_recovery_notifications(
+        let (updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let forwarder = tokio::spawn(forward_database_notifications(
             listener,
             store,
             notifications,
+            updates,
+            nudge,
             receiver,
         ));
         for waiter in &mut waiters {

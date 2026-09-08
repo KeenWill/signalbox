@@ -138,6 +138,21 @@ where
         };
         let queued_at_snapshot = consume_snapshot_queued_update(&mut updates_queued_at_snapshot);
         match update {
+            ProcessUpdate::ResyncRequired { session } => {
+                if session.is_none_or(|session| session == selected_session) {
+                    return run_until_shutdown(
+                        &mut shutdown,
+                        write_error(
+                            writer,
+                            version,
+                            request_id,
+                            ProtocolError::without_detail(ErrorCode::ResyncRequired),
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Ok(()));
+                }
+            }
             ProcessUpdate::Durable {
                 cursor,
                 session,

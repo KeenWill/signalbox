@@ -1,5 +1,6 @@
 //! Connects invocation capacity to supervised process lifetimes.
-use signalbox_domain::ModelCallId;
+use signalbox_application::{EligibilityNudge, InProcessEligibilityNudge};
+use signalbox_domain::{ModelCallId, SessionId};
 use signalbox_model_provider_runtime::InvocationProcessObserver;
 use signalbox_persistence::{credential_invocations, model_execution::ModelCallRepositoryError};
 use std::{
@@ -19,13 +20,15 @@ const PROCESS_GROUP_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Clone)]
 pub struct CredentialInvocationProcesses {
     pool: sqlx::PgPool,
+    eligibility_nudge: InProcessEligibilityNudge,
     observed: Arc<Mutex<BTreeMap<ModelCallId, (u32, String)>>>,
 }
 
 impl CredentialInvocationProcesses {
-    pub fn new(pool: sqlx::PgPool) -> Self {
+    pub fn new(pool: sqlx::PgPool, eligibility_nudge: InProcessEligibilityNudge) -> Self {
         Self {
             pool,
+            eligibility_nudge,
             observed: Arc::default(),
         }
     }
@@ -59,6 +62,22 @@ impl CredentialInvocationProcesses {
             if group_absent(group, &start_time) {
                 credential_invocations::release(&self.pool, call).await?;
             }
+        }
+        self.nudge_eligible_waits().await
+    }
+
+    async fn nudge_eligible_waits(&self) -> Result<(), ModelCallRepositoryError> {
+        let sessions: Vec<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT waiting.session_id FROM credential_availability_wait waiting
+             JOIN turn_lifecycle active ON active.turn_id = waiting.turn_id AND active.session_id = waiting.session_id
+             WHERE active.state_kind = 'active' AND NOT active.delegation_runtime_terminal
+               AND goal_turn_is_runtime_relevant(active.session_id, active.turn_id)
+               AND credential_wait_is_eligible(waiting.wait_attempt_id)",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for session in sessions {
+            self.eligibility_nudge.nudge(SessionId::from_uuid(session));
         }
         Ok(())
     }
@@ -128,6 +147,7 @@ impl InvocationProcessObserver for CredentialInvocationProcesses {
                     || (group.is_none() && proven_unsent)
                 {
                     credential_invocations::release(&self.pool, call).await?;
+                    self.nudge_eligible_waits().await?;
                 } else if let Some((group, start_time)) = group {
                     credential_invocations::register_process(&self.pool, call, group, &start_time)
                         .await?;
