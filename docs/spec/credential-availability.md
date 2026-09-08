@@ -95,7 +95,9 @@ resolved and carries contiguous member rows in policy order, each naming the
 member's exclusion, widest scope first. Partial, foreign or stale evidence fails
 reconstitution closed. The terminalizing commit emits `turn_failed` and
 `turn_credential_pool_exhausted`; its header retains the resolved pool-policy
-identity and member evidence rows attach in a separate table.
+identity and member evidence rows attach in a separate table. A pre-projection
+header with a null pool-policy identity and no member rows reconstitutes as the
+ordinary failed turn without an exhaustion projection.
 
 Post-failure fail: the observation that closes a qualifying provider failure
 finds every member excluded. The turn terminalizes Failed and adds no further

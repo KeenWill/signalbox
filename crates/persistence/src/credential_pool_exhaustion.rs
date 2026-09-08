@@ -141,6 +141,7 @@ pub async fn read_policy(
 }
 
 /// Authenticates a pre-call failure and reconstitutes its frozen evidence.
+/// Returns no projection for a pre-projection header with no policy or members.
 pub async fn load(
     connection: &mut sqlx::PgConnection,
     session: Uuid,
@@ -156,7 +157,19 @@ pub async fn load(
         .ok_or(CredentialPoolEvidenceError::Corruption)?;
     let attempt: Uuid = row.try_get("terminal_attempt_id")?;
     let policy: Option<Uuid> = row.try_get("pool_policy_id")?;
-    let policy = policy.ok_or(CredentialPoolEvidenceError::Corruption)?;
+    let Some(policy) = policy else {
+        let has_members: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM credential_pool_exhaustion_member WHERE terminal_attempt_id = $1)",
+        )
+        .bind(attempt)
+        .fetch_one(&mut *connection)
+        .await?;
+        return if has_members {
+            Err(CredentialPoolEvidenceError::Corruption)
+        } else {
+            Ok(None)
+        };
+    };
     let policy_members = load_policy(connection, policy)
         .await?
         .ok_or(CredentialPoolEvidenceError::Corruption)?;
