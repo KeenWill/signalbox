@@ -207,9 +207,10 @@ impl fmt::Display for ClientError {
             Self::ReviewInputFile(_) => {
                 formatter.write_str("the review JSON input file could not be read")
             }
-            Self::ReviewInputJson(_) => {
-                formatter.write_str("the review JSON input file is not an exact admitted shape")
-            }
+            Self::ReviewInputJson(source) => write!(
+                formatter,
+                "the review JSON input file is not an exact admitted shape: {source}"
+            ),
             Self::ReviewInputExceedsFrame => {
                 formatter.write_str("the review JSON input exceeds the process frame bound")
             }
@@ -970,6 +971,16 @@ mod tests {
                  (delegation_message_identity_collision message={message_id})"
             )
         );
+    }
+
+    #[test]
+    fn review_input_json_error_includes_parser_location() {
+        let source = serde_json::from_str::<serde_json::Value>("{\n  \"finding\":\n}")
+            .expect_err("a missing field value must reject");
+        let error = ClientError::ReviewInputJson(source);
+
+        expect![["the review JSON input file is not an exact admitted shape: expected value at line 3 column 1"]]
+            .assert_eq(&error.to_string());
     }
 
     #[test]
