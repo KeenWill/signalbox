@@ -120,7 +120,7 @@ test('resolves a typed artifact in the desktop side inspector without a mouse', 
 
   await resolveArtifactWithoutMouse(page)
   await page.keyboard.press('Escape')
-  await expect(page.getByRole('heading', { name: 'Selection details' })).toBeVisible()
+  await expect(page.getByRole('complementary', { name: 'Inspector' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Open artifact inspector' })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -188,10 +188,10 @@ test('does not restore stale side-inspector focus after closing a narrow sheet',
   await expect(page.getByRole('dialog', { name: 'Artifact inspector' })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('button', { name: 'Open artifact inspector' })).toBeFocused()
-  const density = page.getByRole('button', { name: 'Use comfortable density' })
-  await density.focus()
+  const theme = page.getByRole('button', { name: 'Use light theme' })
+  await theme.focus()
   await page.setViewportSize({ width: 1440, height: 900 })
-  await expect(density).toBeFocused()
+  await expect(theme).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -309,7 +309,7 @@ test('keeps focus moved during a pending bootstrap retry', async ({ page }) => {
     await route.fulfill({ json: webContractBootstrapFixture })
   })
   const request = page.waitForRequest('**/api/bootstrap')
-  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await page.getByRole('button', { name: 'Retry connection' }).click()
   await request
   const navigation = page.getByRole('link', { name: /Settings/ })
   await navigation.focus()
@@ -334,7 +334,7 @@ test('preserves an intentional blur during a pending descriptor retry', async ({
   const request = page.waitForRequest('**/api/blobs/**/descriptor?*')
   await page.getByRole('button', { name: 'Retry', exact: true }).click()
   await request
-  await page.getByText('Operator workstation', { exact: true }).click()
+  await page.getByText('Signalbox', { exact: true }).click()
   await expect(page.locator('body')).toBeFocused()
   response.resolve()
   await expect(
@@ -358,12 +358,12 @@ test('preserves an intentional blur during a pending bootstrap retry', async ({ 
     await route.fulfill({ json: webContractBootstrapFixture })
   })
   const request = page.waitForRequest('**/api/bootstrap')
-  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await page.getByRole('button', { name: 'Retry connection' }).click()
   await request
-  await page.getByText('Operator workstation', { exact: true }).click()
+  await page.getByText('Signalbox', { exact: true }).click()
   await expect(page.locator('body')).toBeFocused()
   response.resolve()
-  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
   await expect(page.locator('body')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

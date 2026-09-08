@@ -35,12 +35,6 @@ const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
 const MAX_CACHED_SESSION_WORKSPACES = 4
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
-export interface SessionSelectionEvidence {
-  sessionId: string
-  eventSequence: string
-  kind: string
-  projectedStructuredBytes: number
-}
 
 export const isCanonicalSessionId = (value: string): boolean => SESSION_ID_PATTERN.test(value)
 export const sessionWorkspaceQueryKey = (sessionId: string | null) =>
@@ -119,8 +113,8 @@ export const pruneExpandedSessionItems = (
 
 export function SessionWorkspaceSurface({
   initialSessionId,
+  focusEntry,
   onSessionOpen,
-  onSelectionEvidence,
   onTimelineIds,
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
@@ -131,8 +125,8 @@ export function SessionWorkspaceSurface({
   windowRequest,
 }: {
   initialSessionId?: string
+  focusEntry: boolean
   onSessionOpen: (sessionId: string) => void
-  onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
@@ -146,7 +140,9 @@ export function SessionWorkspaceSurface({
   const queryClient = useQueryClient()
   const app = useAppSelector(selectApp)
   const entryInput = useRef<HTMLInputElement>(null)
-  useEffect(() => entryInput.current?.focus(), [])
+  useEffect(() => {
+    if (focusEntry) entryInput.current?.focus()
+  }, [focusEntry])
   const [draftId, setDraftId] = useState(initialSessionId ?? '')
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId ?? null)
   const [awaitingSessionId, setAwaitingSessionId] = useState<string | null>(null)
@@ -281,22 +277,6 @@ export function SessionWorkspaceSurface({
       dispatch(actions.timelineSelected(reconciled))
     }
   }, [app.selectedTimeline, dispatch, displayedSession?.anchor, timelineIds])
-  useEffect(() => {
-    const selectedItem = displayedSession?.window.items.find(
-      (item) => item.address.event_sequence === app.selectedTimeline,
-    )
-    onSelectionEvidence(
-      sessionId !== null && selectedItem !== undefined
-        ? {
-            sessionId,
-            eventSequence: selectedItem.address.event_sequence,
-            kind: selectedItem.kind,
-            projectedStructuredBytes: selectedItem.projected_structured_bytes,
-          }
-        : null,
-    )
-  }, [app.selectedTimeline, displayedSession?.window.items, onSelectionEvidence, sessionId])
-  useEffect(() => () => onSelectionEvidence(null), [onSelectionEvidence])
   useEffect(() => {
     setExpanded((current) =>
       pruneExpandedSessionItems(current, displayedSession?.window.items ?? []),

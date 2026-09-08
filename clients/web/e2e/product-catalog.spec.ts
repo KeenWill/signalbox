@@ -452,9 +452,7 @@ test('gates catalog reads on a successful bootstrap', async ({ page }) => {
 
   await page.goto('/sessions')
   await expect(page.getByText('Contract rejected')).toBeVisible()
-  await expect(
-    page.getByText('Sessions are unavailable until the browser contract handshake succeeds.'),
-  ).toBeVisible()
+  await expect(page.getByText('Sessions unavailable')).toBeVisible()
   expect(sessionReads).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -488,7 +486,7 @@ test('recovers after retrying a transient bootstrap failure', async ({ page }) =
   await page.route('**/api/sessions?**', (route) => route.fulfill({ json: firstPage }))
 
   await page.goto('/sessions')
-  await page.getByRole('button', { name: 'Retry contract handshake' }).click()
+  await page.getByRole('button', { name: 'Retry sessions' }).click()
   await expect(page.getByRole('heading', { name: `${firstPage.total} sessions` })).toBeVisible()
   await expect(page.getByRole('main')).toBeFocused()
   expect(bootstrapReads).toBe(2)

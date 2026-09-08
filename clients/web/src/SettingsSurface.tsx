@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react'
 import { type CommandContext, invokeCommand } from './commands'
-import { defaultBrowserPreferences } from './preferences'
 import { selectApp, useAppSelector } from './state'
 
 function PreferenceGroup({ legend, children }: { legend: string; children: ReactNode }) {
@@ -24,17 +23,8 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
   ) => invokeCommand(command, { ...context, paneSize })
   return (
     <div className="surface-body settings-surface">
-      <section className="settings-intro">
-        <span className="eyebrow">Browser local</span>
-        <h2>Operator preferences</h2>
-        <p>
-          Presentation choices stay in this browser. They do not change daemon authority or
-          manufacture operational facts.
-        </p>
-      </section>
-
       <div className="settings-grid">
-        <PreferenceGroup legend="Workspace layout">
+        <PreferenceGroup legend="Layout">
           <label>
             <input
               type="radio"
@@ -43,7 +33,6 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               onChange={() => invokeCommand('layout.workbench', context)}
             />
             <span>Workbench</span>
-            <small>Navigation, primary surface, and contextual inspector.</small>
           </label>
           <label>
             <input
@@ -53,11 +42,10 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               onChange={() => invokeCommand('layout.focus', context)}
             />
             <span>Focus</span>
-            <small>A quiet primary surface with secondary panes removed.</small>
           </label>
         </PreferenceGroup>
 
-        <PreferenceGroup legend="Visual density">
+        <PreferenceGroup legend="Density">
           <label>
             <input
               type="radio"
@@ -66,7 +54,6 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               onChange={() => invokeCommand('density.compact', context)}
             />
             <span>Compact</span>
-            <small>Dense rows for high-volume operator work.</small>
           </label>
           <label>
             <input
@@ -76,7 +63,6 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               onChange={() => invokeCommand('density.comfortable', context)}
             />
             <span>Comfortable</span>
-            <small>More separation without changing information detail.</small>
           </label>
         </PreferenceGroup>
 
@@ -132,7 +118,7 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
         </PreferenceGroup>
 
         <fieldset className="preference-group pane-preferences">
-          <legend>Workbench panes</legend>
+          <legend>Pane widths</legend>
           <label>
             <span>Navigation width</span>
             <output>{app.paneSizes.navigation}px</output>
@@ -186,10 +172,6 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
         <button type="button" onClick={() => invokeCommand('preferences.reset', context)}>
           Restore defaults
         </button>
-        <small>
-          Defaults: {defaultBrowserPreferences.layout}, {defaultBrowserPreferences.density},{' '}
-          {defaultBrowserPreferences.detail}, {defaultBrowserPreferences.theme}.
-        </small>
       </div>
     </div>
   )

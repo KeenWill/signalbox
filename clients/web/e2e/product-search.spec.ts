@@ -152,7 +152,7 @@ test('does not announce query validation before bootstrap limits load', async ({
   await page.route('**/api/search?**', (route) => route.fulfill({ json: firstPage }))
   await page.goto('/search?q=release')
 
-  await expect(page.getByText('Checking whether bounded search is available…')).toBeVisible()
+  await expect(page.getByText('Loading search…')).toBeVisible()
   await expect(page.getByRole('alert')).toHaveCount(0)
 
   admitBootstrap()
@@ -400,7 +400,7 @@ test('does not search without the bounded lexical search capability', async ({ p
 
   await expect(
     page.getByRole('heading', {
-      name: 'This daemon contract does not advertise bounded lexical search',
+      name: 'Search unavailable',
     }),
   ).toBeVisible()
   expect(searchRequests).toBe(0)
@@ -425,7 +425,7 @@ test('does not expose focusable search fields before capabilities defer Search',
   await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
   await expect(
     page.getByRole('heading', {
-      name: 'This daemon contract does not advertise bounded lexical search',
+      name: 'Search unavailable',
     }),
   ).toBeVisible()
   await expect(main).toBeFocused()

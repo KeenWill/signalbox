@@ -243,9 +243,7 @@ test('retries an unconfirmed acceptance with the same command and text', async (
   )
   await expect(page.getByRole('button', { name: 'Discard retained command' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toHaveCount(0)
-  await page
-    .getByRole('link', { name: 'Settings Local workspace preferences', exact: true })
-    .click()
+  await page.getByRole('link', { name: 'Settings', exact: true }).click()
   await expect(page.getByRole('form', { name: 'Message composer' })).toHaveCount(0)
   await page.goBack()
   await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue(
@@ -290,9 +288,7 @@ test('retains a command whose response is lost while its composer is unmounted',
     .fill('Keep the in-flight identity.')
   await page.getByRole('button', { name: 'Send message', exact: true }).click()
   await expect.poll(() => attempts.length).toBe(1)
-  await page
-    .getByRole('link', { name: 'Settings Local workspace preferences', exact: true })
-    .click()
+  await page.getByRole('link', { name: 'Settings', exact: true }).click()
   await expect(page.getByRole('form', { name: 'Message composer' })).toHaveCount(0)
   loseResponse()
   await page.goBack()

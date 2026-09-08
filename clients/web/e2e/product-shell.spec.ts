@@ -161,7 +161,7 @@ const watchBrowser = (page: Page) => {
 const platformModifier = (page: Page) =>
   page.evaluate(() => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control'))
 
-const expectedContractStatus = `${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`
+const expectedContractStatus = 'Connected'
 
 test('applies saved visual preferences before the first rendered frame', async ({ page }) => {
   await page.addInitScript(() => {
@@ -313,10 +313,10 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
 
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
   scenario.recover()
-  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await page.getByRole('button', { name: 'Retry connection' }).click()
 
   await expect(page.getByText('Timeline reads available')).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
   expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
   expect(
@@ -368,10 +368,8 @@ test('renders a truthful search bootstrap failure', async ({ page }) => {
   await page.route('**/api/bootstrap', (route) => route.fulfill({ status: 503 }))
   await page.goto('/search')
 
-  await expect(
-    page.getByRole('heading', { name: 'Search availability could not be checked' }),
-  ).toBeVisible()
-  await expect(page.getByText('Checking whether bounded search is available…')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Search unavailable' })).toBeVisible()
+  await expect(page.getByText('Loading search…')).toHaveCount(0)
 })
 
 test('does not offer the palette opener inside the open palette', async ({ page }) => {
@@ -447,21 +445,21 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('clears the session inspector description when navigating to Imports', async ({ page }) => {
+test('uses the main pane for sessions and expands it in Focus', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
-  await useDeterministicImportApi(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
-  await page.getByRole('option', { name: /43 turn completed/ }).click()
-  const inspector = page.getByRole('complementary', { name: 'Inspector' })
-  await expect(inspector).toContainText(
-    'Bounded server-provided timeline projection for the selected record.',
-  )
-  await page.getByRole('link', { name: /Imports/ }).click()
-  await expect(inspector).toContainText(
-    'Select an available operational record to inspect its server-provided evidence.',
-  )
-  await expect(inspector).not.toContainText('Bounded server-provided timeline projection')
+  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  await expect(page.getByRole('complementary', { name: 'Inspector' })).toHaveCount(0)
+  const main = page.getByRole('main')
+  const workbench = await main.boundingBox()
+  expect(workbench!.width).toBeGreaterThan(1200)
+  await page.getByRole('button', { name: 'Switch to focus layout' }).click()
+  await expect.poll(async () => (await main.boundingBox())?.width).toBe(1440)
+  await expect(page.getByRole('navigation', { name: 'Product navigation' })).toBeHidden()
+  await page.getByRole('button', { name: 'Switch to workbench layout' }).click()
+  await expect.poll(async () => (await main.boundingBox())?.width).toBe(workbench!.width)
 })
 
 test('opens and inspects a bounded production session without a mouse', async ({ page }) => {
@@ -509,11 +507,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(
     page.getByText('Durable event metadata; message text appears in the transcript above'),
   ).toBeVisible()
-  const inspector = page.getByLabel('Inspector')
-  await expect(inspector.getByText(sessionWorkspaceFixture.id, { exact: true })).toBeVisible()
-  await expect(inspector.getByText('43', { exact: true })).toBeVisible()
-  await expect(inspector.getByText('turn completed', { exact: true })).toBeVisible()
-  await expect(inspector.getByText('78', { exact: true })).toBeVisible()
+  await expect(page.getByRole('complementary', { name: 'Inspector', exact: true })).toHaveCount(0)
 
   const accepted = page.getByRole('option', { name: /41 input accepted/ })
   await accepted.click()
@@ -680,7 +674,11 @@ test('clears cached Session projections after a refetch error', async ({ page })
     'The daemon could not provide this bounded session window',
   )
   await expect(page.getByRole('listbox', { name: 'Session timeline' })).toHaveCount(0)
-  await expect(page.getByLabel('Inspector').getByText(sessionWorkspaceFixture.id)).toHaveCount(0)
+  await expect(
+    page
+      .getByRole('complementary', { name: 'Inspector', exact: true })
+      .getByText(sessionWorkspaceFixture.id),
+  ).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
   expect(
     problems.consoleErrors.every((message) =>
@@ -900,7 +898,8 @@ test('changes visible product spacing with the density control', async ({ page }
 
   const surface = page.locator('.surface-body')
   const compactPadding = await surface.evaluate((element) => getComputedStyle(element).paddingTop)
-  await page.getByRole('button', { name: 'Use comfortable density' }).click()
+  await page.getByRole('main').focus()
+  await page.keyboard.press('Shift+D')
   await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
   const comfortablePadding = await surface.evaluate(
     (element) => getComputedStyle(element).paddingTop,
@@ -921,7 +920,7 @@ test('retries an initial bootstrap failure', async ({ page }) => {
   // A refused admission answers with a status, so `readBootstrap` raises a plain error and the
   // shell classifies it as an unavailable bootstrap rather than an unreachable transport.
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
-  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await page.getByRole('button', { name: 'Retry connection' }).click()
   await expect(page.getByText(expectedContractStatus)).toBeVisible()
   await expect(page.getByRole('status')).toBeFocused()
   expect(problems.pageErrors).toEqual([])
@@ -961,7 +960,7 @@ test('keeps Settings within the pane when a vertical scrollbar reduces content w
   await page.goto('/settings')
 
   const navigationWidth = page
-    .getByRole('group', { name: 'Workbench panes' })
+    .getByRole('group', { name: 'Pane widths' })
     .getByRole('slider')
     .nth(0)
   await navigationWidth.fill('360')
@@ -978,7 +977,7 @@ test('applies saved pane widths to the scenario workspace', async ({ page }) => 
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/settings')
 
-  const paneSliders = page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider')
+  const paneSliders = page.getByRole('group', { name: 'Pane widths' }).getByRole('slider')
   await paneSliders.nth(0).fill('300')
   await paneSliders.nth(1).fill('400')
   await page.setViewportSize({ width: 1000, height: 800 })
@@ -996,9 +995,9 @@ test('fits Settings inside a narrow primary pane with maximum saved side panes',
   page,
 }, testInfo) => {
   const problems = watchBrowser(page)
-  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.setViewportSize({ width: 780, height: 720 })
   await page.goto('/settings')
-  const sliders = page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider')
+  const sliders = page.getByRole('group', { name: 'Pane widths' }).getByRole('slider')
   await sliders.nth(0).fill('360')
   await sliders.nth(1).fill('480')
 
@@ -1007,8 +1006,8 @@ test('fits Settings inside a narrow primary pane with maximum saved side panes',
   expect(await settings.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
     true,
   )
-  const layoutBox = await page.getByRole('group', { name: 'Workspace layout' }).boundingBox()
-  const densityBox = await page.getByRole('group', { name: 'Visual density' }).boundingBox()
+  const layoutBox = await page.getByRole('group', { name: 'Layout', exact: true }).boundingBox()
+  const densityBox = await page.getByRole('group', { name: 'Density', exact: true }).boundingBox()
   expect(densityBox?.y).toBeGreaterThan((layoutBox?.y ?? 0) + (layoutBox?.height ?? 0))
   await page.screenshot({ path: testInfo.outputPath('settings-pane.png') })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -1018,7 +1017,7 @@ test('compacts the scenario toolbar at its pane width', async ({ page }, testInf
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 780, height: 720 })
   await page.goto('/settings')
-  await page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider').nth(0).fill('360')
+  await page.getByRole('group', { name: 'Pane widths' }).getByRole('slider').nth(0).fill('360')
   await page.getByRole('link', { name: /Scenario studio/ }).click()
 
   const toolbar = page.getByRole('toolbar', { name: 'Workspace controls' })
@@ -1044,7 +1043,7 @@ test('keeps Settings available without consulting daemon bootstrap', async ({ pa
   await page.goto('/settings')
 
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
-  await expect(page.getByText('Browser-local preferences', { exact: true })).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Theme', exact: true })).toBeVisible()
   await expect(page.getByText('Transport unavailable')).toHaveCount(0)
   expect(bootstrapRequests).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -1073,7 +1072,7 @@ test('does not start Attention reads when bootstrap validation fails', async ({ 
 
   await page.goto('/attention')
 
-  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
   await expect(page.getByText('Contract rejected')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
@@ -1095,7 +1094,7 @@ test('does not start Attention reads for incompatible bootstrap values', async (
 
   await page.goto('/attention')
 
-  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
   await expect(page.getByText('Contract rejected')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
@@ -1105,11 +1104,11 @@ test('retries a transient Attention bootstrap failure in place', async ({ page }
   await useDeterministicAttention(page)
   await page.goto('/attention')
 
-  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
-  await page.getByRole('button', { name: 'Retry contract check' }).click()
+  await page.getByRole('button', { name: 'Retry Attention' }).click()
 
-  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: '0 sessions' })).toBeVisible()
   expect(admission.attempts).toBe(2)
 })
@@ -1118,9 +1117,7 @@ test('gives iconless Attention contract errors the full empty-state width', asyn
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.goto('/attention')
 
-  const message = page
-    .getByRole('heading', { name: 'Attention contract unavailable' })
-    .locator('..')
+  const message = page.getByRole('heading', { name: 'Attention unavailable' }).locator('..')
   await expect(message).toHaveCSS('grid-column-start', '1')
   await expect(message).toHaveCSS('grid-column-end', '-1')
 })
@@ -1187,7 +1184,7 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
 
   await expect(
     page.getByRole('heading', {
-      name: 'Imports are unavailable until bootstrap admission succeeds',
+      name: 'Imports unavailable',
     }),
   ).toBeVisible()
   // A refused admission answers with a status, so the shell classifies it as an unavailable
@@ -1211,9 +1208,9 @@ test('shares expired Imports admission failure with the shell retry state', asyn
     .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
     .fill('expired-admission')
   await expect(page.getByText('Contract rejected')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Retry bootstrap' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry connection' })).toBeVisible()
   await useDeterministicBootstrap(page)
-  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await page.getByRole('button', { name: 'Retry connection' }).click()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -1225,9 +1222,9 @@ test('mounts Imports after the daemon contract recovers', async ({ page }) => {
   await page.goto(importsProductFixture.path)
 
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
-  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await page.getByRole('button', { name: 'Retry connection' }).click()
 
-  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   expect(admission.attempts).toBe(2)
   expect(problems.pageErrors).toEqual([])
@@ -1318,7 +1315,8 @@ test('applies product presentation controls to the mounted Imports surface', asy
   await page.goto(importsProductFixture.path)
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Use comfortable density' }).click()
+  await page.getByRole('main').focus()
+  await page.keyboard.press('Shift+D')
   await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
   await page.getByRole('button', { name: 'Use light theme' }).click()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
@@ -1371,12 +1369,14 @@ test('stacks Imports from the available product pane width', async ({ page }) =>
         detail: 'condensed',
         theme: 'dark',
         paneSizes: { navigation: 360, inspector: 480 },
+        lastLogicalPositions: {},
       }),
     )
   })
   await page.setViewportSize({ width: 1280, height: 844 })
   await page.goto(importsProductFixture.path)
 
+  await page.getByRole('button', { name: 'Open artifact inspector', exact: true }).click()
   const workspace = page.locator('.imports-workspace-product')
   const inspectorBody = page.locator('.import-inspector-body')
   await expect(workspace).toBeVisible()
@@ -1595,10 +1595,8 @@ test('retries a transient bootstrap failure without reloading', async ({ page })
 
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
   scenario.recover()
-  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
-  await expect(
-    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
-  ).toBeVisible()
+  await page.getByRole('button', { name: 'Retry connection' }).click()
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
   await expect(page.getByRole('status')).toBeFocused()
   expect(problems.pageErrors).toEqual([])
   expect(
@@ -1614,7 +1612,7 @@ test('distinguishes a rejected bootstrap contract from transport failure', async
   await page.goto('/attention')
 
   await expect(page.getByText('Contract rejected')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Retry bootstrap' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry connection' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -1731,4 +1729,21 @@ test('starts the settled exact import filter without the previous page cursor', 
     .toBe(true)
   await page.clock.runFor(200)
   await expect.poll(() => requests.at(-1)).toEqual({ source: 'source-session-1', after: null })
+})
+
+test('keeps connection recovery controls inside a phone viewport', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invalid: true } }))
+  await page.goto('/attention')
+  const retry = page.getByRole('button', { name: 'Retry connection', exact: true })
+  const palette = page.getByRole('button', { name: 'Open command palette', exact: true })
+  await expect(retry).toBeVisible()
+  for (const control of [retry, palette]) {
+    const box = await control.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box?.x).toBeGreaterThanOrEqual(0)
+    expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(390)
+  }
+  expect(await page.locator('.product-shell').evaluate((element) => element.scrollWidth)).toBe(390)
+  await page.screenshot({ path: testInfo.outputPath('phone-connection-error.png') })
 })

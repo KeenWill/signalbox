@@ -9,7 +9,6 @@ import {
   Menu,
   Moon,
   PanelLeftClose,
-  Rows3,
   Sun,
   X,
 } from 'lucide-react'
@@ -30,8 +29,6 @@ import {
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
-import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
-import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
@@ -42,7 +39,6 @@ import {
   type ProductSessionState,
   ProductTransportError,
   productRoutes,
-  productSurfaceCacheLabel,
   productSurfaceStates,
   productTransport,
   readProductSessionState,
@@ -57,7 +53,7 @@ import {
 } from './productCommands'
 import { SearchSurface } from './SearchSurface'
 import { SessionCatalogSurface } from './SessionCatalogSurface'
-import { type SessionSelectionEvidence, SessionWorkspaceSurface } from './SessionWorkspaceSurface'
+import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
@@ -68,50 +64,6 @@ declare module '@tanstack/react-router' {
   }
 }
 
-const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
-  attention: {
-    eyebrow: 'Operator overview',
-    title: 'Attention',
-    question: 'What needs intervention now?',
-  },
-  sessions: {
-    eyebrow: 'Conversation index',
-    title: 'Sessions',
-    question: 'Where is work active, blocked, or recently settled?',
-  },
-  search: {
-    eyebrow: 'Corpus navigation',
-    title: 'Search',
-    question: 'Where does this fact occur?',
-  },
-  runners: {
-    eyebrow: 'Execution fleet',
-    title: 'Runners',
-    question: 'Which runners are available, occupied, or lost?',
-  },
-  reviews: {
-    eyebrow: 'Convergence',
-    title: 'Reviews',
-    question: 'Which pull requests still need work?',
-  },
-  imports: {
-    eyebrow: 'Conversation intake',
-    title: 'Imports',
-    question: 'Which imports completed, failed, or need inspection?',
-  },
-  usage: {
-    eyebrow: 'Accounting',
-    title: 'Usage',
-    question: 'Where are tokens and cost accumulating?',
-  },
-  settings: {
-    eyebrow: 'Local preferences',
-    title: 'Settings',
-    question: 'How should this workstation present information?',
-  },
-}
-
-// A keystroke aimed at an editing control belongs to that control, never to a global binding.
 const isEditableTarget = (target: EventTarget | null) => {
   if (!(target instanceof HTMLElement)) return false
   return (
@@ -149,7 +101,6 @@ export function ProductNavigation({
       <div className="brand">
         <span className="brand-mark">SB</span>
         <strong>Signalbox</strong>
-        <small>Operator workstation</small>
       </div>
       <nav aria-label="Product">
         {productRoutes.map((route) => (
@@ -181,7 +132,6 @@ export function ProductNavigation({
             }}
           >
             <span>{route.label}</span>
-            <small>{route.description}</small>
           </Link>
         ))}
       </nav>
@@ -247,7 +197,7 @@ function CommandPalette({
           <div className="dialog-heading">
             <div>
               <Dialog.Title>Command palette</Dialog.Title>
-              <Dialog.Description id="product-palette-description">
+              <Dialog.Description id="product-palette-description" className="sr-only">
                 Navigate and adjust the workstation from one command registry.
               </Dialog.Description>
             </div>
@@ -280,7 +230,6 @@ function CommandPalette({
                 >
                   <span>
                     <strong>{command.title}</strong>
-                    <small>{command.description}</small>
                   </span>
                   <kbd>{command.bindings[0]?.label ?? '—'}</kbd>
                 </button>
@@ -327,7 +276,7 @@ function KeyboardHelp({
           <div className="dialog-heading">
             <div>
               <Dialog.Title>Keyboard help</Dialog.Title>
-              <Dialog.Description id="keyboard-help-description">
+              <Dialog.Description id="keyboard-help-description" className="sr-only">
                 Available workstation commands and bindings.
               </Dialog.Description>
             </div>
@@ -349,7 +298,6 @@ function KeyboardHelp({
                 <div key={command.id}>
                   <span>
                     <strong>{command.title}</strong>
-                    <small>{command.description}</small>
                   </span>
                   <kbd>{command.bindings.map((binding) => binding.label).join(' / ')}</kbd>
                 </div>
@@ -368,19 +316,9 @@ function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
     <section className="surface-empty" aria-labelledby={`${surface}-unavailable-heading`}>
       <AlertTriangle aria-hidden="true" />
       <div>
-        <span className="availability-tag">Committed · unavailable</span>
         <h2 id={`${surface}-unavailable-heading`}>
-          Operational data is not exposed by this daemon contract
+          {productRoutes.find((route) => route.id === surface)?.label} unavailable
         </h2>
-        <p>
-          {state.owningTrack} is committed, but no present production surface provides the required
-          facts on this branch. Signalbox will not infer or fabricate them.
-        </p>
-        <ul>
-          {state.facts.map((fact) => (
-            <li key={fact}>{fact}</li>
-          ))}
-        </ul>
       </div>
     </section>
   )
@@ -390,33 +328,6 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   return (
     <div className="surface-body">
       <SurfaceUnavailable surface={surface} />
-    </div>
-  )
-}
-
-const reviewEvidenceUnavailable: ArtifactItem = {
-  id: 'review-evidence-unavailable',
-  displayName: 'Review evidence',
-  kind: 'blocked',
-  attemptedKind: 'review evidence artifact',
-  reason: 'Review evidence is not exposed by the current daemon contract.',
-}
-
-function ReviewsArtifactSurface({ commandContext }: { commandContext: CommandContext }) {
-  return (
-    <div className="surface-body reviews-artifact-surface">
-      <SurfaceUnavailable surface="reviews" />
-      <section aria-labelledby="review-artifact-heading">
-        <header>
-          <span className="eyebrow">Typed artifact view</span>
-          <h2 id="review-artifact-heading">Review evidence</h2>
-          <p>
-            Review facts and their artifact identities are not exposed by this daemon contract. The
-            client preserves that missing typed boundary instead of fabricating a preview.
-          </p>
-        </header>
-        <ArtifactRenderer artifact={reviewEvidenceUnavailable} commandContext={commandContext} />
-      </section>
     </div>
   )
 }
@@ -454,20 +365,13 @@ function ProductToolbar({
         <FileSearch />
       </button>
       <button
-        className="icon-button"
-        type="button"
-        aria-label={`Use ${app.density === 'compact' ? 'comfortable' : 'compact'} density`}
-        onClick={() => invokeProductCommand('density.toggle', context)}
-      >
-        <Rows3 />
-      </button>
-      <button
-        className="icon-button"
+        className="layout-button"
         type="button"
         aria-label={`Switch to ${app.layout === 'focus' ? 'workbench' : 'focus'} layout`}
         onClick={() => invokeProductCommand('layout.toggle', context)}
       >
         <PanelLeftClose />
+        <span>{app.layout === 'focus' ? 'Workbench' : 'Focus'}</span>
       </button>
       <button
         className="icon-button"
@@ -506,68 +410,6 @@ function useNarrowInspector(): boolean {
     return () => query.removeEventListener('change', update)
   }, [])
   return narrow
-}
-
-function SelectionInspector({
-  cacheLabel,
-  selectionEvidence,
-  surface,
-  title,
-}: {
-  cacheLabel: string | null
-  selectionEvidence: SessionSelectionEvidence | null
-  surface: ProductRouteId
-  title: string
-}) {
-  return (
-    <>
-      <span className="eyebrow">Inspector</span>
-      <h2>Selection details</h2>
-      <p>
-        {surface === 'settings'
-          ? 'Presentation preferences are stored locally in this browser and do not represent server evidence.'
-          : surface !== 'sessions' || selectionEvidence === null
-            ? 'Select an available operational record to inspect its server-provided evidence.'
-            : 'Bounded server-provided timeline projection for the selected record.'}
-      </p>
-      <dl className="selection-inspector-details">
-        <div>
-          <dt>Surface</dt>
-          <dd>{title}</dd>
-        </div>
-        <div>
-          <dt>Authority</dt>
-          <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
-        </div>
-        {cacheLabel !== null && (
-          <div>
-            <dt>Cache</dt>
-            <dd>{cacheLabel}</dd>
-          </div>
-        )}
-        {surface === 'sessions' && selectionEvidence !== null && (
-          <>
-            <div>
-              <dt>Session</dt>
-              <dd>{selectionEvidence.sessionId}</dd>
-            </div>
-            <div>
-              <dt>Event</dt>
-              <dd>{selectionEvidence.eventSequence}</dd>
-            </div>
-            <div>
-              <dt>Kind</dt>
-              <dd>{selectionEvidence.kind.replaceAll('_', ' ')}</dd>
-            </div>
-            <div>
-              <dt>Projected bytes</dt>
-              <dd>{selectionEvidence.projectedStructuredBytes}</dd>
-            </div>
-          </>
-        )}
-      </dl>
-    </>
-  )
 }
 
 export function ProductApp({
@@ -617,7 +459,6 @@ export function ProductApp({
   const [focusAfterBootstrapRecovery, setFocusAfterBootstrapRecovery] = useState(false)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
-  const [selectionEvidence, setSelectionEvidence] = useState<SessionSelectionEvidence | null>(null)
   const [windowRequest, setWindowRequest] = useState<{
     anchor: 'first' | 'latest'
     attempt: number
@@ -629,13 +470,11 @@ export function ProductApp({
     [],
   )
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
-  const updateSelectionEvidence = useCallback(
-    (evidence: SessionSelectionEvidence | null) => setSelectionEvidence(evidence),
-    [],
-  )
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
+  const sessionEntryRequested = useRef(false)
   const updateSessionSearch = useCallback(
     (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
+      sessionEntryRequested.current = next.workspace === true
       if (mode === 'close') {
         currentCatalogSession.current = next.session
         if (catalogSessionOpenedHere) {
@@ -890,8 +729,7 @@ export function ProductApp({
     return () => window.removeEventListener('keydown', closeOnEscape, true)
   }, [app.overlay, artifactOpen, closeArtifactInspector, inspectorInSheet])
 
-  const copy = surfaceCopy[surface]
-  const cacheLabel = productSurfaceCacheLabel(surface)
+  const title = productRoutes.find((route) => route.id === surface)?.label ?? surface
   const timelineCapability = bootstrap.isPending
     ? 'checking'
     : bootstrap.isSuccess && hasValidSessionTimelineContract(bootstrap.data)
@@ -900,11 +738,11 @@ export function ProductApp({
 
   useEffect(() => {
     const previousTitle = document.title
-    document.title = `${copy.title} · Signalbox`
+    document.title = `${title} · Signalbox`
     return () => {
       document.title = previousTitle
     }
-  }, [copy.title])
+  }, [title])
 
   const updateSearch = (next: ProductSearchState) =>
     void navigate({ to: '/$surface', params: { surface }, search: next })
@@ -916,14 +754,7 @@ export function ProductApp({
       <div className="surface-body">
         <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
           <div>
-            <h2>
-              {bootstrap.isError ? 'Attention contract unavailable' : 'Checking Attention contract'}
-            </h2>
-            <p>
-              {bootstrap.isError
-                ? 'Attention reads remain disabled until the generated bootstrap contract validates.'
-                : 'Attention reads will begin after the generated bootstrap contract validates.'}
-            </p>
+            <h2>{bootstrap.isError ? 'Attention unavailable' : 'Loading Attention…'}</h2>
             {bootstrap.isError && (
               <button
                 type="button"
@@ -933,7 +764,7 @@ export function ProductApp({
                   void bootstrap.refetch()
                 }}
               >
-                Retry contract check
+                Retry Attention
               </button>
             )}
           </div>
@@ -945,8 +776,8 @@ export function ProductApp({
         onSessionOpen={(session) =>
           updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
         }
+        focusEntry={sessionEntryRequested.current}
         initialSessionId={sessionState.session}
-        onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}
@@ -964,7 +795,7 @@ export function ProductApp({
       />
     ) : surface === 'sessions' ? (
       <div className="catalog-notice">
-        <p>Sessions are unavailable until the browser contract handshake succeeds.</p>
+        <p>Sessions unavailable</p>
         {bootstrap.isError && (
           <button
             type="button"
@@ -975,7 +806,7 @@ export function ProductApp({
               })
             }}
           >
-            Retry contract handshake
+            Retry sessions
           </button>
         )}
       </div>
@@ -984,18 +815,13 @@ export function ProductApp({
         <section className="surface-empty" role="alert">
           <AlertTriangle aria-hidden="true" />
           <div>
-            <h2>Search availability could not be checked</h2>
-            <p>
-              {bootstrap.error instanceof ProductContractError
-                ? 'The daemon response is incompatible with the generated web contract.'
-                : 'Signalbox could not be reached. Retry the contract check when transport is available.'}
-            </p>
+            <h2>Search unavailable</h2>
           </div>
         </section>
       </div>
     ) : surface === 'search' && bootstrap.data === undefined ? (
       <div className="surface-body">
-        <p className="search-notice">Checking whether bounded search is available…</p>
+        <p className="search-notice">Loading search…</p>
       </div>
     ) : surface === 'search' &&
       (bootstrap.data?.capabilities.bounded_json === false ||
@@ -1004,14 +830,7 @@ export function ProductApp({
         <section className="surface-empty" aria-labelledby="search-unavailable-heading">
           <AlertTriangle aria-hidden="true" />
           <div>
-            <span className="availability-tag">Committed · unavailable</span>
-            <h2 id="search-unavailable-heading">
-              This daemon contract does not advertise bounded lexical search
-            </h2>
-            <p>
-              The search surface is ready, but the connected daemon does not expose the bounded
-              search capability. Signalbox will not infer or fabricate results.
-            </p>
+            <h2 id="search-unavailable-heading">Search unavailable</h2>
           </div>
         </section>
       </div>
@@ -1032,19 +851,12 @@ export function ProductApp({
         <section className="surface-empty" aria-labelledby="imports-unavailable-heading">
           <AlertTriangle aria-hidden="true" />
           <div>
-            <span className="availability-tag">Contract required</span>
-            <h2 id="imports-unavailable-heading">
-              Imports are unavailable until bootstrap admission succeeds
-            </h2>
-            <p>
-              Signalbox will not issue import reads or enable continuation mutations without an
-              admitted daemon contract.
-            </p>
+            <h2 id="imports-unavailable-heading">Imports unavailable</h2>
           </div>
         </section>
       </div>
     ) : surface === 'reviews' ? (
-      <ReviewsArtifactSurface commandContext={context} />
+      <DeferredSurface surface="reviews" />
     ) : (
       <DeferredSurface surface={surface} />
     )
@@ -1055,104 +867,92 @@ export function ProductApp({
   } as CSSProperties
 
   return (
-    <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
+    <div
+      className={`product-shell layout-${app.layout} ${artifactOpen && !inspectorInSheet ? 'has-artifact-inspector' : ''}`}
+      style={shellStyle}
+    >
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} context={context} disabled={navigationDisabled} />
       </aside>
       <main className={`product-main product-main-${surface}`} ref={mainRef} tabIndex={-1}>
         <header className="product-header">
-          <div>
-            <span className="eyebrow">{copy.eyebrow}</span>
-            <h1>{copy.title}</h1>
-          </div>
-          <ProductToolbar
-            artifactAvailable={artifactAvailable}
-            artifactButtonRef={artifactButtonRef}
-            context={context}
-            onOpenPalette={(opener) => {
-              paletteOpenerRef.current = opener
-            }}
-          />
-        </header>
-        <div className="surface-question">
-          <p>{copy.question}</p>
-          {surface === 'settings' ? (
-            <span className="contract-state ready" role="status">
-              Browser-local preferences
-            </span>
-          ) : (
-            <span
-              ref={bootstrapStatusRef}
-              className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
-              role="status"
-              aria-live="polite"
-              aria-atomic="true"
-              tabIndex={-1}
-            >
-              {bootstrap.isSuccess
-                ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
-                : bootstrap.isError
-                  ? bootstrapFailure
-                  : 'Checking contract…'}
-            </span>
-          )}
-          {surface !== 'settings' && bootstrap.isError && (
-            <button
-              type="button"
-              className="bootstrap-retry"
-              onClick={(event) => {
-                const opener = event.currentTarget
-                let restoreFocus = document.activeElement === opener
-                const recordBlur = () => {
-                  queueMicrotask(() => {
-                    if (opener.isConnected) restoreFocus = false
-                  })
-                }
-                const recordPointerMove = () => {
-                  restoreFocus = false
-                }
-                opener.addEventListener('blur', recordBlur)
-                document.addEventListener('pointerdown', recordPointerMove)
-                void bootstrap.refetch().then((result) => {
-                  opener.removeEventListener('blur', recordBlur)
-                  document.removeEventListener('pointerdown', recordPointerMove)
-                  if (result.isSuccess && restoreFocus) {
-                    requestAnimationFrame(() => {
-                      if (
-                        document.activeElement === opener ||
-                        (!opener.isConnected && document.activeElement === document.body)
-                      )
-                        bootstrapStatusRef.current?.focus()
+          <h1>{title}</h1>
+          <div className="product-header-actions">
+            <div className="product-connection">
+              {surface === 'settings' ? null : (
+                <span
+                  ref={bootstrapStatusRef}
+                  className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                  tabIndex={-1}
+                >
+                  {bootstrap.isSuccess
+                    ? 'Connected'
+                    : bootstrap.isError
+                      ? bootstrapFailure
+                      : 'Connecting…'}
+                </span>
+              )}
+              {surface !== 'settings' && bootstrap.isError && (
+                <button
+                  type="button"
+                  className="bootstrap-retry"
+                  onClick={(event) => {
+                    const opener = event.currentTarget
+                    let restoreFocus = document.activeElement === opener
+                    const recordBlur = () => {
+                      queueMicrotask(() => {
+                        if (opener.isConnected) restoreFocus = false
+                      })
+                    }
+                    const recordPointerMove = () => {
+                      restoreFocus = false
+                    }
+                    opener.addEventListener('blur', recordBlur)
+                    document.addEventListener('pointerdown', recordPointerMove)
+                    void bootstrap.refetch().then((result) => {
+                      opener.removeEventListener('blur', recordBlur)
+                      document.removeEventListener('pointerdown', recordPointerMove)
+                      if (result.isSuccess && restoreFocus) {
+                        requestAnimationFrame(() => {
+                          if (
+                            document.activeElement === opener ||
+                            (!opener.isConnected && document.activeElement === document.body)
+                          )
+                            bootstrapStatusRef.current?.focus()
+                        })
+                      }
                     })
-                  }
-                })
+                  }}
+                >
+                  Retry connection
+                </button>
+              )}
+            </div>
+            <ProductToolbar
+              artifactAvailable={artifactAvailable}
+              artifactButtonRef={artifactButtonRef}
+              context={context}
+              onOpenPalette={(opener) => {
+                paletteOpenerRef.current = opener
               }}
-            >
-              Retry bootstrap
-            </button>
-          )}
-        </div>
+            />
+          </div>
+        </header>
         {content}
       </main>
-      {app.layout === 'workbench' && (
+      {artifactOpen && !inspectorInSheet && (
         <aside className="product-inspector" aria-label="Inspector">
-          {artifactOpen && !inspectorInSheet ? (
-            <ArtifactInspector
-              available={artifactAvailable}
-              commandContext={context}
-              digestInputRef={artifactDigestRef}
-              onClose={closeArtifactInspector}
-              state={artifactInspectorState}
-              onStateChange={setArtifactInspectorState}
-            />
-          ) : (
-            <SelectionInspector
-              cacheLabel={cacheLabel}
-              selectionEvidence={selectionEvidence}
-              surface={surface}
-              title={copy.title}
-            />
-          )}
+          <ArtifactInspector
+            available={artifactAvailable}
+            commandContext={context}
+            digestInputRef={artifactDigestRef}
+            onClose={closeArtifactInspector}
+            state={artifactInspectorState}
+            onStateChange={setArtifactInspectorState}
+          />
         </aside>
       )}
       <CommandPalette
