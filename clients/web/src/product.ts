@@ -11,6 +11,7 @@ import {
   decodeWebSessionRates,
   decodeWebSessionTimelineDetailPage,
   decodeWebSubmitInputRequest,
+  MAX_SESSION_PAGE_ITEMS,
   type WebApiErrorResponse,
   type WebAttentionSnapshot,
   type WebAttentionStreamEvent,
@@ -191,7 +192,7 @@ export const MAX_DISPLAY_FILENAME_BYTES = 1_024
 // The Attention projection contract pages at 32 summaries; the byte ceilings are the shared
 // product JSON and NDJSON item limits the bootstrap already pins.
 export const MAX_ATTENTION_SNAPSHOT_ITEMS = 32
-export const MAX_SESSION_PAGE_ITEMS = 32
+export { MAX_SESSION_PAGE_ITEMS } from './generated/web-contract.mjs'
 export const MAX_SESSION_SEARCH_BYTES = 1_024
 const MAX_SESSION_SUMMARY_SCALARS = 128
 // Hard safety ceiling: bounds search-response allocation and parse work in the browser. Search
@@ -589,6 +590,7 @@ const readBoundedJson = async (
 ): Promise<unknown> => {
   const declaredLength = Number(response.headers.get('content-length'))
   if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    await response.body?.cancel().catch(() => undefined)
     throw new Error('response exceeded the product JSON byte limit')
   }
 

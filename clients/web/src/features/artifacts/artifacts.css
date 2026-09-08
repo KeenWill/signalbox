@@ -35,7 +35,7 @@
   color: var(--text-muted);
   background: var(--surface-1);
   font:
-    0.59rem ui-monospace,
+    0.59rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 
@@ -95,7 +95,7 @@
 .artifact-heading small {
   color: var(--text-muted);
   font:
-    0.57rem ui-monospace,
+    0.57rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 
@@ -117,7 +117,7 @@
   color: var(--text);
   background: var(--canvas);
   font:
-    0.66rem / 1.55 ui-monospace,
+    0.66rem / 1.55 var(--signalbox-font-mono, ui-monospace),
     monospace;
   resize: none;
   tab-size: 2;
@@ -144,7 +144,7 @@
   color: var(--text-muted);
   background: var(--surface-3);
   font:
-    0.57rem ui-monospace,
+    0.57rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 
@@ -245,7 +245,7 @@
   align-self: center;
   color: var(--text-muted);
   font:
-    0.58rem ui-monospace,
+    0.58rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 
@@ -309,7 +309,7 @@
   overflow: hidden;
   margin: 0;
   font:
-    0.6rem ui-monospace,
+    0.6rem var(--signalbox-font-mono, ui-monospace),
     monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -391,7 +391,7 @@
 .attachment-bound {
   color: var(--text-muted);
   font:
-    0.58rem ui-monospace,
+    0.58rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 
@@ -444,7 +444,7 @@
 .attachment-surface > header span {
   color: var(--text-muted);
   font:
-    0.55rem ui-monospace,
+    0.55rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 
@@ -491,7 +491,7 @@
 .attachment-select small {
   color: var(--text-muted);
   font:
-    0.54rem ui-monospace,
+    0.54rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 

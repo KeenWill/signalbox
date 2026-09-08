@@ -73,13 +73,14 @@ pub(super) async fn serve_connections(
         imported_conversations,
     };
     let mut connections = JoinSet::new();
+    let mut accept_retry_at = Instant::now();
     loop {
         if shutdown_requested(&shutdown) {
             break;
         }
         tokio::select! {
             () = wait_for_shutdown(&mut shutdown) => break,
-            accepted = listener.accept(), if connections.len() < MAX_ACTIVE_CONNECTIONS => {
+            accepted = accept_with_retry(&mut accept_retry_at, || listener.accept()), if connections.len() < MAX_ACTIVE_CONNECTIONS => {
                 let (stream, _) = accepted.map_err(ProcessRuntimeError::Accept)?;
                 connections.spawn(serve_connection(
                     stream,
@@ -99,6 +100,48 @@ pub(super) async fn serve_connections(
     Ok(())
 }
 
+// Bounds accept retry frequency during transient resource exhaustion.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+async fn accept_with_retry<T, Accept, Accepted>(
+    retry_at: &mut Instant,
+    mut accept: Accept,
+) -> io::Result<T>
+where
+    Accept: FnMut() -> Accepted,
+    Accepted: Future<Output = io::Result<T>>,
+{
+    loop {
+        // The deadline survives cancellation when a connection completes in select!.
+        sleep_until(*retry_at).await;
+        match accept().await {
+            Ok(stream) => return Ok(stream),
+            Err(error) if recoverable_accept_error(&error) => {
+                tracing::warn!("process listener retrying a recoverable accept failure");
+                *retry_at = Instant::now() + ACCEPT_RETRY_DELAY;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn recoverable_accept_error(error: &io::Error) -> bool {
+    use rustix::io::Errno;
+    matches!(
+        Errno::from_io_error(error),
+        Some(
+            Errno::INTR
+                | Errno::AGAIN
+                | Errno::CONNABORTED
+                | Errno::CONNRESET
+                | Errno::MFILE
+                | Errno::NFILE
+                | Errno::NOBUFS
+                | Errno::NOMEM
+        )
+    )
+}
+
 pub(super) fn inspect_connection_completion(
     completed: Option<Result<Result<(), ProcessConnectionError>, JoinError>>,
 ) -> Result<(), ProcessRuntimeError> {
@@ -111,12 +154,11 @@ pub(super) fn inspect_connection_completion(
         Some(Ok(Err(ProcessConnectionError::SpoolIo(error)))) => {
             Err(ProcessRuntimeError::SpoolIo(error))
         }
-        Some(Ok(Err(ProcessConnectionError::Encode(FrameEncodeError::OversizedFrame)))) => Ok(()),
-        Some(Ok(Err(ProcessConnectionError::Encode(error)))) => {
-            Err(ProcessRuntimeError::Encode(error))
-        }
-        Some(Ok(Err(ProcessConnectionError::EncodeInvariant))) => {
-            Err(ProcessRuntimeError::EncodeInvariant)
+        Some(Ok(Err(
+            ProcessConnectionError::Encode(_) | ProcessConnectionError::EncodeInvariant,
+        ))) => {
+            tracing::error!("process connection closed after an encoding failure");
+            Ok(())
         }
         Some(Ok(Err(ProcessConnectionError::InboundFrameBudgetClosed))) => {
             Err(ProcessRuntimeError::InboundFrameBudgetClosed)
@@ -495,6 +537,7 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::ReadRunnerStatus { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
@@ -699,6 +742,7 @@ impl SnapshotReaderAdmission {
         match request {
             ClientRequest::ListSessions {}
             | ClientRequest::ReadOperatorStatus {}
+            | ClientRequest::ReadRunnerStatus { .. }
             | ClientRequest::ReadGoal { .. }
             | ClientRequest::ReadTranscript { .. }
             | ClientRequest::FollowSession { .. }
@@ -968,4 +1012,80 @@ pub(super) struct PendingConversationImport {
     pub(super) import_permit: OwnedSemaphorePermit,
     pub(super) started_at: Instant,
     pub(super) idle_since: Instant,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustix::io::Errno;
+    use std::future::ready;
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_accept_failures_retry_until_a_connection_arrives() {
+        let started = Instant::now();
+        let mut retry_at = started;
+        let mut attempts = [
+            Err(Errno::CONNABORTED.into()),
+            Err(Errno::MFILE.into()),
+            Ok(()),
+        ]
+        .into_iter();
+        let result = accept_with_retry(&mut retry_at, || {
+            ready(attempts.next().expect("three accept outcomes"))
+        })
+        .await;
+        assert!(result.is_ok());
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        assert!(attempts.next().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn permanent_listener_failure_is_not_retried() {
+        let mut retry_at = Instant::now();
+        let mut attempts = [Err::<(), _>(io::Error::from(Errno::BADF))].into_iter();
+        let error = accept_with_retry(&mut retry_at, || {
+            ready(attempts.next().expect("only one accept attempt"))
+        })
+        .await
+        .expect_err("invalid listener fails");
+        assert_eq!(error.raw_os_error(), Some(Errno::BADF.raw_os_error()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_completion_does_not_reset_accept_backoff() {
+        let started = Instant::now();
+        let mut retry_at = started;
+        let mut calls = 0;
+        tokio::select! {
+            _ = sleep(Duration::from_millis(100)) => {},
+            _ = accept_with_retry(&mut retry_at, || {
+                calls += 1;
+                ready(Err::<(), _>(io::Error::from(Errno::MFILE)))
+            }) => panic!("recoverable failure must wait"),
+        }
+        assert_eq!(calls, 1);
+        accept_with_retry(&mut retry_at, || ready(Ok(())))
+            .await
+            .expect("next connection accepted");
+        assert!(started.elapsed() >= Duration::from_millis(250));
+    }
+
+    #[test]
+    fn connection_frame_validation_failure_does_not_fail_the_runtime() {
+        let failure = FrameEncodeError::Validation(
+            signalbox_process_protocol::FrameValidationError::UnsupportedVersion,
+        );
+        assert!(
+            inspect_connection_completion(Some(Ok(Err(ProcessConnectionError::Encode(failure)))))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn connection_encoding_invariant_does_not_fail_the_runtime() {
+        assert!(
+            inspect_connection_completion(Some(Ok(Err(ProcessConnectionError::EncodeInvariant))))
+                .is_ok()
+        );
+    }
 }

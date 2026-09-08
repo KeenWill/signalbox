@@ -11,7 +11,7 @@ rust_library(
     deps = [
         "//crates/application:signalbox_application",
         "//crates/domain:signalbox_domain",
-        "//crates/egress-transport:signalbox_egress_transport",
+        "//crates/github-transport:signalbox_github_transport",
         "//crates/model-runtime:signalbox_model_runtime",
         "//crates/tool-contract:signalbox_tool_contract",
     ],
@@ -48,7 +48,7 @@ rust_integration_test(
     deps = [
         "//crates/application:signalbox_application",
         "//crates/domain:signalbox_domain",
-        "//crates/egress-transport:signalbox_egress_transport",
+        "//crates/github-transport:signalbox_github_transport",
         "//crates/model-runtime:signalbox_model_runtime",
         "//crates/tool-contract:signalbox_tool_contract",
         "//crates/tools-github:signalbox_tools_github",

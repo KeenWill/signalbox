@@ -9,8 +9,8 @@ use signalbox_file_media_runtime::{
 
 use crate::{
     AdapterFormat, DIMENSION_LIMIT_EXCEEDED_REASON, MALFORMED_IMAGE_REASON, MAX_IMAGE_AXIS,
-    MAX_IMAGE_DECODED_PIXELS, MAX_IMAGE_SOURCE_BYTES, METADATA_VIEW_NAME,
-    PIXEL_LIMIT_EXCEEDED_REASON, SOURCE_TOO_LARGE_REASON, options_are_empty, source,
+    MAX_IMAGE_DECODED_PIXELS, METADATA_VIEW_NAME, PIXEL_LIMIT_EXCEEDED_REASON,
+    SOURCE_TOO_LARGE_REASON, options_are_empty, source,
 };
 
 const MAX_DECODER_ALLOCATION_BYTES: u64 = 128 * 1024 * 1024;
@@ -72,7 +72,7 @@ pub(crate) async fn inspect(
 pub(crate) async fn read(
     format: AdapterFormat,
     request: FileMediaProviderReadRequest,
-    source: &dyn VerifiedBlobSource,
+    _source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
     let signalbox_file_media_runtime::FileReadInput::Initial { options } = &request.input else {
@@ -81,19 +81,30 @@ pub(crate) async fn read(
     if request.view.as_str() != METADATA_VIEW_NAME || !options_are_empty(options) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
-    let Some(bytes) = source::read_complete(source, cancellation, MAX_IMAGE_SOURCE_BYTES).await?
-    else {
-        return Ok(ProcessorReadOutput::SourceTooLarge {
-            maximum_bytes: MAX_IMAGE_SOURCE_BYTES,
-        });
+    if cancellation.is_cancelled() {
+        return Err(ProcessorFailure::Cancelled);
+    }
+    if request.detected_media_type.as_str() != format.media_type() {
+        return Err(ProcessorFailure::Protocol);
+    }
+    let metadata = request.metadata.value();
+    let metadata = ImageMetadata {
+        width: metadata
+            .get("width")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(ProcessorFailure::Protocol)?,
+        height: metadata
+            .get("height")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(ProcessorFailure::Protocol)?,
+        channels: metadata
+            .get("channels")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or(ProcessorFailure::Protocol)?,
     };
-    let metadata = decode(
-        format,
-        &bytes,
-        request.maximum_image_axis,
-        request.maximum_decoded_image_pixels,
-    )
-    .map_err(|_| ProcessorFailure::Failed)?;
     Ok(ProcessorReadOutput::Structured {
         body_json: metadata_json(metadata)?,
         truncated: false,

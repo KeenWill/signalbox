@@ -292,7 +292,7 @@ impl<'de> Visitor<'de> for ObjectVisitor {
 
 #[cfg(test)]
 mod tests {
-    use signalbox_domain::{ImportedStructuredValue, ImportedText};
+    use signalbox_domain::{ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText};
 
     use super::{
         JsonFailure, JsonlRecordSplitFailure, one_based_ordinal, parse_record, split_jsonl_records,
@@ -321,6 +321,36 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert_eq!(members[0].name().as_str(), "same");
         assert_eq!(members[1].name().as_str(), "same");
+    }
+
+    #[test]
+    fn preserves_reserved_number_key_objects() {
+        let parsed =
+            parse_record(br#"{"nested":{"\u0024serde_json::private::Number":"1","tail":true}}"#)
+                .expect("magic-key-bearing input is ordinary JSON");
+
+        assert_eq!(
+            parsed,
+            ImportedStructuredValue::Object(
+                vec![ImportedStructuredObjectMember::new(
+                    ImportedText::new("nested".to_owned()),
+                    ImportedStructuredValue::Object(
+                        vec![
+                            ImportedStructuredObjectMember::new(
+                                ImportedText::new("$serde_json::private::Number".to_owned()),
+                                ImportedStructuredValue::String(ImportedText::new("1".to_owned())),
+                            ),
+                            ImportedStructuredObjectMember::new(
+                                ImportedText::new("tail".to_owned()),
+                                ImportedStructuredValue::Boolean(true),
+                            ),
+                        ]
+                        .into()
+                    ),
+                )]
+                .into()
+            )
+        );
     }
 
     #[test]
