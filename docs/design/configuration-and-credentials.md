@@ -199,9 +199,7 @@ preparation never resolves it through the current document's pool table. Before
 credential resolution, preparation requires the selected member's frozen adapter
 to equal the resolved target's adapter and requires the current registration to
 retain both that adapter and delivery kind; absence or mismatch is a typed
-pre-send credential-configuration failure that blocks scheduling. Each call pins
-the interned `pool_policy_id` at the `Prepared` insert beside its credential
-reference, and observation commit reloads that pinned policy. The one-time
+pre-send credential-configuration failure that blocks scheduling. The one-time
 migration of existing family-to-reference entries is deterministic: each entry
 becomes a singleton policy retaining exactly the stored reference, one member at
 priority 1, no headroom reserve, `first_listed`, `on_pool_exhausted = "fail"`,
@@ -299,10 +297,10 @@ model-provider names; runner credential execution adds no such field.
   delivery-origin one ends by re-provisioning or deletion except a `codex_home`
   quarantine, which an operator clears once the store is repaired, and repeated
   triggers of one origin coalesce onto one generation.
-- Session credential history carries the complete pool policy, each call pins
-  its policy id, every existing entry whose profile is still registered migrates
-  to a singleton policy that resolves the same credential it did before, and an
-  entry naming no current registration blocks scheduling.
+- Session credential history carries the complete pool policy, every existing
+  entry whose profile is still registered migrates to a singleton policy that
+  resolves the same credential it did before, and an entry naming no current
+  registration blocks scheduling.
 - An explicit credential update appends one event and advances the head by one.
 - A runner injects a granted credential only under the configured environment
   name inside the sandbox, the Git helper answers only the matching canonical
