@@ -444,7 +444,9 @@ including failure, refusal, cancellation or ambiguity, permits installation and
 retains the turn state that observation produced. A tool-round observation
 installs a ready staged replacement at its yielded frontier before classifying
 the new requests for placement loss; that round retains the relocation in its
-boundary. Pre-pin installation appends no boundary.
+boundary. A delegated logical terminal retains any issued provider call as an
+observation barrier; its late correlated observation retires the physical call
+without changing the logical terminal. Pre-pin installation appends no boundary.
 
 A queued turn cannot activate while its placement is lost. Replacement and
 abandonment outbox events wake queued work, retaining hints when the eligibility

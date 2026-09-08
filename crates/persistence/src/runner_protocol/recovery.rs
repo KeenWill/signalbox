@@ -316,7 +316,9 @@ impl RunnerProtocolStore {
             .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
         let compacting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM context_compaction_model_call WHERE session_id = $1 AND state_kind <> 'terminal')")
             .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
-        if compacting || (active && boundary.is_none()) {
+        let observing: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM model_call WHERE session_id = $1 AND state_kind IN ('in_flight', 'cancellation_requested'))")
+            .bind(session.into_uuid()).fetch_one(&mut **transaction).await?;
+        if observing || compacting || (active && boundary.is_none()) {
             return Ok(None);
         }
         let mut request = stored.placement().request().clone();

@@ -495,7 +495,11 @@ impl PostgresModelCallRepository {
                 ));
             }
             if delegation_logically_terminal {
-                return Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal);
+                return Ok(if stored.state == "terminal" {
+                    RetainedModelCallObservationStatus::DiscardedByLogicalTerminal
+                } else {
+                    RetainedModelCallObservationStatus::Pending
+                });
             }
             match (stored.state.as_str(), stored.disposition.as_deref()) {
                 ("in_flight", None) => {

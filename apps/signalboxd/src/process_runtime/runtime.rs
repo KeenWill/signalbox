@@ -256,11 +256,11 @@ async fn forward_runner_recovery_notifications(
             .resume_runner_replacements()
             .await
             .map_err(ProcessRuntimeError::RunnerRecoveryCommands)?;
+        // Also wake continuations after the initial scan and listener reconnects.
+        notifications.send_replace(());
         tokio::select! {
             notification = listener.try_recv() => {
                 notification.map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
-                // A reconnect also rechecks durable results after missed notifications.
-                notifications.send_replace(());
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() { return Ok(()); }
@@ -667,6 +667,9 @@ mod runner_recovery_tests {
             notifications,
             receiver,
         ));
+        for waiter in &mut waiters {
+            tokio::time::timeout(COMPLETION_DEADLINE, waiter.changed()).await??;
+        }
         tokio::time::timeout(
             COMPLETION_DEADLINE,
             sqlx::query("SELECT pg_notify('runner_recovery', '')").execute(&pool),

@@ -493,6 +493,12 @@ impl PostgresModelCallRepository {
             if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
                 .await?
             {
+                super::delegation_lock::retire_logically_terminal_observation(
+                    &mut transaction,
+                    session,
+                    &observation,
+                )
+                .await?;
                 return Ok(None);
             }
             let execution = require_exact_call(
