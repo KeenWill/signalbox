@@ -169,6 +169,7 @@ pub async fn inject_deadline_diagnostic_failure(pool: &PgPool) -> Result<(), sql
          CREATE VIEW session_deadline AS
          SELECT private_deadline_source() AS session_id,
                 'admission'::text AS deadline_kind,
+                false AS settled,
                 clock_timestamp() AS armed_at,
                 clock_timestamp() - INTERVAL '1 hour' AS expires_at;",
     )
