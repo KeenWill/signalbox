@@ -838,7 +838,7 @@ impl PostgresModelCallRepository {
                             observation_frontier,
                         )
                         .await?;
-                    if observation_frontier.is_some() && !settled {
+                    if !settled {
                         transaction.rollback().await?;
                         notifications
                             .as_mut()
