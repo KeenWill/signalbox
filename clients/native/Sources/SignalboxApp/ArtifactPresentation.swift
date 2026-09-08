@@ -34,7 +34,7 @@ extension SignalboxArtifact {
     }
 
     var presentationSubtitle: String {
-        "\(presentationKindLabel)  \(mimeType ?? "unknown type")"
+        "\(presentationKindLabel), \(mimeType ?? "unknown type")"
     }
 
     var presentationSystemImageName: String {

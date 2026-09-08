@@ -501,6 +501,12 @@ pub fn redact_evidence(
                 LossCause::ResponseUnintelligible { detail } => LossCause::ResponseUnintelligible {
                     detail: redact(detail),
                 },
+                LossCause::ResponseEnvelopeRejected { stage, detail } => {
+                    LossCause::ResponseEnvelopeRejected {
+                        stage,
+                        detail: redact(detail),
+                    }
+                }
                 LossCause::StreamProtocolViolation { detail } => {
                     LossCause::StreamProtocolViolation {
                         detail: redact(detail),
@@ -1493,6 +1499,33 @@ mod tests {
         // The tool fact carries no provider text, so redaction passes it
         // through rather than weakening it to `Unobserved`.
         assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    #[test]
+    fn envelope_rejection_redacts_detail_while_preserving_its_stage() {
+        let key = credential("key_loop");
+        let stage = crate::ResponseEnvelopeRejectionStage::ToolCallId;
+        let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseEnvelopeRejected {
+                stage,
+                detail: "decode-key_loop".into(),
+            },
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
+            usage: TokenUsage::unreported(),
+        });
+        let TerminalEvidence::BoundaryLoss(loss) = redact_evidence(evidence, &key) else {
+            panic!("boundary loss remains boundary-loss evidence");
+        };
+        assert_eq!(
+            loss.cause,
+            LossCause::ResponseEnvelopeRejected {
+                stage,
+                detail: "decode-[redacted]".into(),
+            }
+        );
     }
 
     #[test]
