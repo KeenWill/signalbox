@@ -57,8 +57,18 @@ pub async fn active_processes(
 pub async fn release_unregistered_terminal_calls(
     pool: &PgPool,
 ) -> Result<(), ModelCallRepositoryError> {
-    sqlx::query("SELECT release_credential_invocation(reservation.model_call_id) FROM credential_invocation_reservation AS reservation JOIN model_call AS call USING (model_call_id) WHERE reservation.released_at IS NULL AND reservation.process_group_id IS NULL AND call.state_kind = 'terminal'")
-        .execute(pool).await?;
+    let mut transaction = pool.begin().await?;
+    let reservations: Vec<(Uuid, String)> = sqlx::query_as("SELECT reservation.model_call_id, reservation.profile FROM credential_invocation_reservation AS reservation JOIN model_call AS call USING (model_call_id) WHERE reservation.released_at IS NULL AND reservation.process_group_id IS NULL AND call.state_kind = 'terminal'")
+        .fetch_all(&mut *transaction).await?;
+    let (calls, profiles): (Vec<_>, Vec<_>) = reservations.into_iter().unzip();
+    lock_profiles(
+        &mut transaction,
+        &profiles.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .await?;
+    sqlx::query("SELECT release_credential_invocation(reservation.model_call_id) FROM credential_invocation_reservation AS reservation JOIN model_call AS call USING (model_call_id) WHERE reservation.model_call_id = ANY($1) AND reservation.released_at IS NULL AND reservation.process_group_id IS NULL AND call.state_kind = 'terminal'")
+        .bind(&calls).execute(&mut *transaction).await?;
+    transaction.commit().await?;
     Ok(())
 }
 
