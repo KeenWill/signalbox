@@ -369,7 +369,7 @@ impl PostgresConvergenceSweepStore {
 
     /// Reconciles durable operator-visible membership with configured targets.
     ///
-    /// Returns sessions restored after their removed target stopped owning a park.
+    /// Returns removed targets' restored sessions, including pending nudge handoffs.
     pub async fn reconcile_configured_targets(
         &self,
         configured: &[(RepositorySlug, PullRequestNumber)],
@@ -391,9 +391,8 @@ impl PostgresConvergenceSweepStore {
         .await?;
         let mut restored = Vec::with_capacity(parked_sessions.len());
         for parked_session in parked_sessions {
-            if restore_commissioned_dispatch_park(&mut transaction, parked_session).await? {
-                restored.push(SessionId::from_uuid(parked_session));
-            }
+            restore_commissioned_dispatch_park(&mut transaction, parked_session).await?;
+            restored.push(SessionId::from_uuid(parked_session));
         }
         transaction.commit().await?;
         Ok(restored)

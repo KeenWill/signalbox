@@ -1414,6 +1414,43 @@ async fn target_removal_restores_its_commissioned_session_park() -> Result<(), B
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn target_removal_returns_an_unacknowledged_restoration_handoff() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let session = park_commissioned_session(
+        &pool,
+        &store,
+        &repository,
+        &observation,
+        0x89_266,
+        0x89_267,
+        0x89_268,
+    )
+    .await?;
+    assert_eq!(
+        store.reenroll_target(&repository, pull_request()).await?,
+        Some(session)
+    );
+    assert!(
+        !SessionLifecycleRepository::new(pool)
+            .load(session)
+            .await?
+            .expect("the restored session retains its lifecycle row")
+            .state()
+            .is_parked()
+    );
+    assert_eq!(
+        store.reconcile_configured_targets(&[]).await?,
+        vec![session]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_live_session_observation_is_retained_for_movement_detection()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
