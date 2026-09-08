@@ -1465,7 +1465,7 @@ mod tests {
 
         assert_eq!(bytes.get(&source), Some(&(expected.len() as u64)));
 
-        let expected_cli = r#"{"role":"user","parts":[{"type":"tool_result","tool_call_id":"00000000-0000-0000-0000-000000000003","content":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}","is_error":true}]}"#;
+        let expected_cli = r#"[{"role":"user","parts":[{"type":"tool_result","tool_call_id":"00000000-0000-0000-0000-000000000003","content":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}","is_error":true}]}]"#;
         let codex = rendered_entry_bytes(
             &messages,
             &[],
