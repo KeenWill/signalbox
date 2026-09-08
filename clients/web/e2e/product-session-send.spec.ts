@@ -504,6 +504,14 @@ test('uses smaller advertised transcript limits in the workspace', async ({ page
 
 test('resets text pagination when only the window observation changes', async ({ page }) => {
   const api = await sessionApi(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_timeline_detail_items: 1 },
+      },
+    }),
+  )
   const cursors: Array<string | null> = []
   await page.route(`**/api/sessions/${sessionId}/timeline-detail?**`, (route) => {
     const cursor = new URL(route.request().url()).searchParams.get('cursor_address')
@@ -646,6 +654,14 @@ for (const growth of [false, true]) {
     page,
   }) => {
     const api = await sessionApi(page)
+    await page.route('**/api/bootstrap', (route) =>
+      route.fulfill({
+        json: {
+          ...bootstrapFixture,
+          limits: { ...bootstrapFixture.limits, max_timeline_detail_items: 1 },
+        },
+      }),
+    )
     let resynchronize = () => {}
     const ready = new Promise<void>((resolve) => {
       resynchronize = resolve

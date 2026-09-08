@@ -1146,6 +1146,8 @@ export async function* followSession(
 // Selected page limits keep mounted transcript text and its attachment metadata bounded.
 const SESSION_TRANSCRIPT_MAX_ITEMS = 8
 const SESSION_TRANSCRIPT_MAX_BYTES = 65536
+// Protocol floor: TimelineDetailLimits requires at least 256 projected bytes per read.
+const MIN_SESSION_TRANSCRIPT_PAGE_BYTES = 256
 
 export type SessionTranscriptLimits = Pick<
   WebContractBootstrap['limits'],
@@ -1229,6 +1231,56 @@ export interface HeldSessionTranscript {
   omittedThrough: string | null
 }
 
+async function readSessionTextPage(
+  sessionId: string,
+  first: string,
+  through: string,
+  continuation: WebTimelineDetailContinuation | null,
+  limits: SessionTranscriptLimits,
+  signal?: AbortSignal,
+) {
+  const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
+  const maxBytes = Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
+  const items: Array<Awaited<ReturnType<typeof readSessionTranscript>>['items'][number]> = []
+  let bytes = 0
+  let cursor = continuation
+  do {
+    const page = await readSessionTranscript(
+      sessionId,
+      first,
+      through,
+      cursor,
+      {
+        max_timeline_detail_items: maxItems - items.length,
+        max_timeline_detail_bytes: maxBytes - bytes,
+      },
+      signal,
+    )
+    for (const item of page.items) {
+      if (
+        item.body.type === 'user_input' ||
+        (item.body.type === 'model_call' && item.body.response != null)
+      ) {
+        items.push(item)
+        bytes += item.projected_body_bytes
+      }
+    }
+    cursor = page.continuation ?? null
+    if (
+      cursor?.type === 'more_at' &&
+      BigInt(cursor.address.event_sequence) <=
+        BigInt(page.items.at(-1)?.address.event_sequence ?? through)
+    ) {
+      throw new TypeError('Transcript continuation does not advance')
+    }
+  } while (
+    cursor?.type === 'more_at' &&
+    items.length < maxItems &&
+    maxBytes - bytes >= MIN_SESSION_TRANSCRIPT_PAGE_BYTES
+  )
+  return { session_id: sessionId, items, projected_body_bytes: bytes, continuation: cursor }
+}
+
 export async function readExtendedSessionTranscript(
   window: Pick<HeldSessionTranscript, 'sessionId' | 'first' | 'through'>,
   continuation: WebTimelineDetailContinuation | null,
@@ -1263,7 +1315,7 @@ export async function readExtendedSessionTranscript(
   const page =
     append && held.through === window.through
       ? { ...held.page, items: [], projected_body_bytes: 0 }
-      : await readSessionTranscript(
+      : await readSessionTextPage(
           window.sessionId,
           append ? String(BigInt(held.through) + 1n) : window.first,
           window.through,

@@ -474,6 +474,38 @@ it('reads only new transcript addresses and keeps appended text within the item 
   expect(fetch).toHaveBeenCalledTimes(2)
 })
 
+it('loads messages beyond metadata-only detail pages without spending the retained item budget', async () => {
+  const metadata = Array.from({ length: 8 }, (_, index) => ({
+    address: { event_sequence: String(index + 1) },
+    kind: 'injection_settled',
+    projected_body_bytes: 128,
+    body: { type: 'event_fact', kind: 'injection_settled' },
+  }))
+  const message = inputPage(1)
+  message.items = message.items.map((item) => ({ ...item, address: { event_sequence: '9' } }))
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(
+      Response.json({
+        session_id: sessionId,
+        items: metadata,
+        projected_body_bytes: 1024,
+        continuation: { type: 'more_at', address: { event_sequence: '9' } },
+      }),
+    )
+    .mockResolvedValueOnce(Response.json(message))
+  vi.stubGlobal('fetch', fetch)
+  const result = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '9' },
+    null,
+    limits,
+    null,
+  )
+  expect(result.page).toEqual(message)
+  expect(fetch).toHaveBeenCalledTimes(2)
+  expect(fetch.mock.calls[1]?.[0]).toContain('cursor_address=9')
+})
+
 it('bounds appended transcript bytes even when the item count is small', async () => {
   const initial = inputPage(1, 60_000)
   const addition = inputPage(1, 10_000)
