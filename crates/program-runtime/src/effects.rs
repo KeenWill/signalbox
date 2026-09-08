@@ -97,13 +97,11 @@ impl ProgramHost {
         let result = self
             .execute_loaded(run, journal, &artifact, &mut deliveries)
             .await;
-        if result.is_err()
-            && let Some(outcome) = self.journal.load(run).await?.and_then(|journal| {
-                journal
-                    .terminal_delivery()
-                    .and_then(crate::terminal_outcome)
-            })
-        {
+        if let Some(outcome) = self.journal.load(run).await?.and_then(|journal| {
+            journal
+                .terminal_delivery()
+                .and_then(crate::terminal_outcome)
+        }) {
             return Ok(outcome);
         }
         result

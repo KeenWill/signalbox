@@ -1749,3 +1749,70 @@ async fn invalid_session_requests_are_refused_live_and_after_recovery() -> Resul
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_cancellation_after_the_initial_load_outranks_successful_completion()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::program_registration::ProgramGrants;
+    let (_container, pool) = migrated_postgres().await?;
+    let run = registered_run(
+        &pool,
+        &ProgramArtifact::new("export {};"),
+        ProgramGrants::new([]),
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let mut registration_lock = pool.begin().await?;
+    sqlx::query("LOCK TABLE program_registration IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *registration_lock)
+        .await?;
+    let host = ProgramHost::new(journal.clone());
+    let mut primitives = ScriptedDeliveries::new([]);
+    let mut effects = EffectProbe {
+        policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    let execute = async {
+        host.execute_registered(run, &mut primitives, &mut effects)
+            .await
+            .map_err(Box::<dyn Error>::from)
+    };
+    let cancel = async {
+        loop {
+            let registration_read_blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = 'program_registration'::regclass AND mode = 'AccessShareLock' AND NOT granted)",
+            ).fetch_one(&pool).await?;
+            if registration_read_blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        journal
+            .append_delivery(run, DeliveryKind::RunCancel(payload(b"cancelled")))
+            .await?;
+        registration_lock.commit().await?;
+        Ok::<_, Box<dyn Error>>(())
+    };
+    let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::try_join!(execute, cancel)
+    })
+    .await??;
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::RunCancelled(payload(b"cancelled"))
+    );
+    assert_eq!(
+        journal
+            .load(run)
+            .await?
+            .expect("registered journal exists")
+            .entries()
+            .len(),
+        1
+    );
+    pool.close().await;
+    Ok(())
+}
