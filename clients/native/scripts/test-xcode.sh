@@ -59,8 +59,8 @@ if [[ -n "${SIGNALBOX_NATIVE_SKIP_TESTING:-}" ]]; then
 fi
 
 # The counterpart selector, in the same space-separated identifier vocabulary.
-# CI's snapshot step (currently skipped while Swift client work is shelved)
-# runs the suite through a second invocation of this script rather than a
+# CI's report-only snapshot step runs the suite through a second invocation of
+# this script rather than a
 # second job: the build is already in the derived data, so selecting one
 # suite costs a test pass and not a build.
 if [[ -n "${SIGNALBOX_NATIVE_ONLY_TESTING:-}" ]]; then
