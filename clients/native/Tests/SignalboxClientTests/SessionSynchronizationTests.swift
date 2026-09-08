@@ -2249,7 +2249,7 @@ final class SessionSynchronizationTests: XCTestCase {
     let effects = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.textEntry(
+        message: try SynchronizationFixture.userEntry(
           index: 1,
           entryID: SynchronizationFixture.secondAcceptedInput,
           turnID: SynchronizationFixture.secondTurn,
@@ -2392,7 +2392,7 @@ final class SessionSynchronizationTests: XCTestCase {
     let effects = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.textEntry(
+        message: try SynchronizationFixture.userEntry(
           index: 2,
           entryID: SynchronizationFixture.toolRequest
         )
@@ -3910,6 +3910,27 @@ private enum SynchronizationFixture {
             "state":{"type":"\(currentModelCallState)"}
           }
         }
+      }
+      """
+    )
+  }
+
+  static func userEntry(
+    index: UInt64 = 0,
+    entryID: String = entry,
+    turnID: String = turn,
+    sourceSessionID: String = session
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_user_entry",
+        "entry_index":"\(index)",
+        "source_session_id":"\(sourceSessionID)",
+        "entry_id":"\(entryID)",
+        "accepted_input_id":"\(acceptedInput)",
+        "turn_id":"\(turnID)",
+        "content":[{"type":"text","text":"fixture user input"}]
       }
       """
     )
