@@ -24,6 +24,13 @@ impl error::Error for InvalidDurableCommandId {
 pub struct CreateSessionRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CreateSessionRequest {
+    pub fn with_runner_placement(
+        self,
+        placement: option::Option<signalbox_domain::SessionRunnerPlacementRequest>,
+    ) -> Self;
+    pub const fn runner_placement(
+        &self,
+    ) -> option::Option<&signalbox_domain::SessionRunnerPlacementRequest>;
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         initial_configuration_defaults: signalbox_domain::SessionConfigurationDefaults,
