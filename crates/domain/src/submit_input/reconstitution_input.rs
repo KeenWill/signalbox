@@ -503,7 +503,7 @@ pub struct SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
     /// The unavailable attachment digest stored in the result.
     pub result_digest: BlobDigest,
     /// Canonically ordered attachment digests verified before the first unavailable digest.
-    pub verified_prefix: Box<[BlobDigest]>,
+    pub verified_prefix: Option<Box<[BlobDigest]>>,
 }
 
 /// Named facts for reconstructing an attachment-byte-budget rejection.

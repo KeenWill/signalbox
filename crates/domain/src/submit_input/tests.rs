@@ -2155,7 +2155,7 @@ fn attachment_authority_rejections_reconstitute_exact_evidence() {
             stored_actor: Actor::User,
             result_session: session_id(1),
             result_digest: digest,
-            verified_prefix: Box::new([]),
+            verified_prefix: Some(Box::new([])),
         },
     )
     .reconstitute()
@@ -2207,7 +2207,7 @@ fn attachment_authority_rejections_reconstitute_exact_evidence() {
             stored_actor: Actor::User,
             result_session: session_id(1),
             result_digest: BlobDigest::from_bytes([0x6b; 32]),
-            verified_prefix: Box::new([]),
+            verified_prefix: Some(Box::new([])),
         },
     )
     .reconstitute()
@@ -4072,7 +4072,7 @@ fn missing_attachment_reconstitution_requires_its_canonical_verified_prefix() {
                 stored_actor: Actor::User,
                 result_session: session_id(1),
                 result_digest,
-                verified_prefix: vec![first].into_boxed_slice(),
+                verified_prefix: Some(vec![first].into_boxed_slice()),
             },
         );
         if result_digest == missing {

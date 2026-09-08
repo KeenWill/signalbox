@@ -103,7 +103,7 @@ pub(super) enum SubmitInputReconstitutionFacts {
     RejectedAttachmentBlobNotFound {
         result_session: SessionId,
         result_digest: BlobDigest,
-        verified_prefix: Box<[BlobDigest]>,
+        verified_prefix: Option<Box<[BlobDigest]>>,
     },
     RejectedAttachmentByteBudgetExceeded {
         result_session: SessionId,
@@ -916,7 +916,9 @@ impl SubmitInputReconstitutionInput {
                     .take_while(|digest| *digest < result_digest)
                     .collect::<Vec<_>>();
                 if !digests.contains(&result_digest)
-                    || expected_prefix.as_slice() != verified_prefix.as_ref()
+                    || verified_prefix
+                        .as_ref()
+                        .is_some_and(|prefix| expected_prefix.as_slice() != prefix.as_ref())
                 {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::AttachmentDigestMismatch,

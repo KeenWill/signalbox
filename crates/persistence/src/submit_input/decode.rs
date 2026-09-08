@@ -982,21 +982,21 @@ fn decode_rejected(
                             .try_get::<Option<Vec<Vec<u8>>>, _>(
                                 "result_attachment_verified_prefix",
                             )?
-                            .ok_or(SubmitInputCorruption::Missing(
-                                "result_attachment_verified_prefix",
-                            ))?
-                            .into_iter()
-                            .map(|digest| {
-                                <[u8; 32]>::try_from(digest)
-                                    .map(signalbox_domain::BlobDigest::from_bytes)
-                                    .map_err(|_| {
-                                        SubmitInputCorruption::Inconsistent(
-                                            "attachment verified prefix digest",
-                                        )
+                            .map(|prefix| {
+                                prefix
+                                    .into_iter()
+                                    .map(|digest| {
+                                        <[u8; 32]>::try_from(digest)
+                                            .map(signalbox_domain::BlobDigest::from_bytes)
+                                            .map_err(|_| {
+                                                SubmitInputCorruption::Inconsistent(
+                                                    "attachment verified prefix digest",
+                                                )
+                                            })
                                     })
+                                    .collect::<Result<Box<[_]>, _>>()
                             })
-                            .collect::<Result<Vec<_>, _>>()?
-                            .into_boxed_slice(),
+                            .transpose()?,
                     },
                 ),
             )
