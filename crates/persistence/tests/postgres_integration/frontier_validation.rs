@@ -14,9 +14,15 @@ const OBSOLETE_COMPACTION_COUNT: i32 = 256;
 /// guard so their boundedness claims cannot drift apart.
 const BOUNDED_PROBE_STATEMENT_TIMEOUT: &str = "SET statement_timeout = '10s'";
 
-async fn insert_deep_frontier_fixture(
-    pool: &PgPool,
-) -> Result<(Uuid, Uuid, Uuid, Uuid, Uuid), sqlx::Error> {
+struct FrontierFixture {
+    session: Uuid,
+    prefix: Uuid,
+    checked: Uuid,
+    divergent: Uuid,
+    equivalent: Uuid,
+}
+
+async fn insert_deep_frontier_fixture(pool: &PgPool) -> Result<FrontierFixture, sqlx::Error> {
     let session = insert_outbox_session_fixture(pool, 0xf604).await?;
     let prefix: Uuid = sqlx::query_scalar("SELECT md5('frontier-' || $1)::uuid")
         .bind(PREFIX_MEMBER_COUNT)
@@ -189,15 +195,26 @@ async fn insert_deep_frontier_fixture(
     .execute(pool)
     .await?;
 
-    Ok((session, prefix, checked, divergent, equivalent))
+    Ok(FrontierFixture {
+        session,
+        prefix,
+        checked,
+        divergent,
+        equivalent,
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let (session, prefix, checked, divergent, equivalent) =
-        insert_deep_frontier_fixture(&pool).await?;
+    let FrontierFixture {
+        session,
+        prefix,
+        checked,
+        divergent,
+        equivalent,
+    } = insert_deep_frontier_fixture(&pool).await?;
     let compaction = Uuid::from_u128(0xf605_0001);
     let producing_call = Uuid::from_u128(0xf605_0002);
     sqlx::raw_sql("ALTER TABLE context_compaction DISABLE TRIGGER ALL;")
