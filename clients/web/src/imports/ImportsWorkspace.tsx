@@ -47,7 +47,6 @@ const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
 
 const DEFINITIVE_CONTINUATION_ERRORS = new Set([
   'conflicting_command_reuse',
-  'continuation_corrupt',
   'import_frontier_not_found',
   'import_not_found',
   'invalid_import_request',
@@ -743,7 +742,7 @@ export function ImportsWorkspace({
                   )}
                   {retainedCommandNeedsAction && pendingCommand && (
                     <p role="alert">
-                      The exact command for import{' '}
+                      The continuation outcome is unresolved. The exact command for import{' '}
                       {pendingCommand.frontier.imported_conversation_id}, position{' '}
                       {pendingCommand.frontier.position.toLocaleString()}, is retained for retry.
                       Abandon it before selecting another import or frontier.
