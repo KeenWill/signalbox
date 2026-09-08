@@ -48,51 +48,22 @@ immediate-successor attempt carrying the applied-interrupt proof, ends that
 attempt cancelled, appends the cancellation entry after the wait's latest
 frontier, and terminalizes the turn cancelled.
 
-Runner-loss recovery has two user commands, replace and abandon, whose request
-shapes and placement transitions are owned by
-[runner-protocol](../spec/runner-protocol.md). This subsystem owns their effect
-on the turn; [runner design](runner-protocol.md) owns the installation
-transaction. Replacement is never refused because a model call is in flight; it
-stays staged and resumable while daemon-locus requests execute on the current
-placement. [Tool loop](tool-loop.md) owns lost-placement resolution. After every
-request resolves, replacement takes over in the
-[continuation transaction](../spec/tool-loop.md), after all tool results are
-appended and before the next call is prepared against the changed placement. The
-one exception is an offered runner attempt, either pure or idempotent or backed
-by durable no-execution proof, that must be retried on the successor: after
-every preceding request resolves, the tool-loop design's distinct
-pre-continuation takeover transaction installs the successor and consumes the
-staged replacement while that request remains recovery-pending. That transaction
-fences successor execution but defers the relocation entry until after all batch
-results, as the runner design requires. It projects no result and prepares no
-call; result projection and continuation remain deferred until the retry and
-later requests resolve and the whole batch is complete. When an interrupt or
-crash-loss reconciliation terminalizes the batch, that path completes or retires
-the staged replacement before terminalizing the turn. If terminalization wins
-before retry dispatch, its transaction resolves the retained attempt and request
-with the terminal-turn outcome, projects `ToolClosed`, and suppresses the retry.
-If dispatch wins, terminalization waits for the retry attempt's completion or
-crash classification and closes the retained dependency before ending the turn.
-The command claims its identity immediately and provisioning authorization only
-when needed, and its terminal transaction commits only after any authorized
-in-flight daemon-local call for the session reaches its observation boundary. A
-pinned loss installs the successor placement in that transaction; the runner
-design orders its relocation entry and frontier after the call's entries and
-batch results. A pre-pin replacement returns the placement to unpinned at the
-successor revision and appends no boundary. The terminal transaction also moves
-the turn out of the runner-recovery wait when it is still parked there: to
-running with a fresh attempt when the loss interrupted no tool attempt, and
-otherwise to the phase the retained tool attempt justifies. A staged call that
-completed, refused, failed, cancelled, or ended ambiguous leaves the turn in the
-state that outcome produced. A call that ends known-failed, refused, cancelled,
-or ambiguous reaches an observation boundary too, so staging never waits
-indefinitely. Abandonment requires no active turn; with a turn active it records
-that the turn needs existing control, and the user empties the slot through the
-stop, approval, or reconciliation flow first. A queued turn remains queued and
-cannot activate while its placement is lost. Both commands are administrative
-recovery: they neither widen the interrupt delivery nor create a standalone
-cancellation path, and no case turns ambiguous effect evidence into known
-failure.
+For an offered runner attempt, either pure or idempotent or backed by durable
+no-execution proof, that must be retried on the successor, every preceding
+request resolves before the tool-loop design's distinct pre-continuation
+takeover transaction installs the successor and consumes the staged replacement
+while that request remains recovery-pending. That transaction fences successor
+execution but defers the relocation entry until after all batch results, as the
+runner design requires. It projects no result and prepares no call; result
+projection and continuation remain deferred until the retry and later requests
+resolve and the whole batch is complete. If terminalization wins before retry
+dispatch, its transaction resolves the retained attempt and request with the
+terminal-turn outcome, projects `ToolClosed`, and suppresses the retry. If
+dispatch wins, terminalization waits for the retry attempt's completion or crash
+classification and closes the retained dependency before ending the turn. The
+terminal transaction also moves the turn out of the runner-recovery wait when it
+is still parked there: to running with a fresh attempt when the loss interrupted
+no tool attempt, and otherwise to the phase the retained tool attempt justifies.
 
 Recovery-only startup binds the runner socket in recovery-only mode after
 migrations, reconciles retained runner inventory, evidence, and nonterminal
@@ -133,12 +104,6 @@ authority that retained runner evidence resolves. The present order, generic
 scan before runner-socket bind, stays compatible with inserting a runner
 reconciliation phase before the scan.
 
-No present surface performs retained runner reconnect or replacement recovery,
-and no runner execution surface depends on the projected loss state. The present
-loss projection, which marks the placement lost and moves an active turn at a
-runner boundary to the runner-recovery wait, remains the only producer of that
-state.
-
 Only the path that prepares the turn's initial model call inside the activation
 transaction records the manifest there. The ordinary path records it after
 activation, and a turn that stops being active first has none. The freeze moves
@@ -162,16 +127,6 @@ than contended, so its wake re-runs the exhaustion decision and a `fail` pool
 terminalizes it through the same failure rows. A stop-turn request against a
 parked turn terminalizes it cancelled through a fresh cancelled successor
 attempt and leaves no wait stored.
-
-A pinned-loss replacement command issued while a call is in flight is accepted,
-and its placement boundary commits after that call's observation boundary. A
-commit that places the replacement boundary before the call's observation
-boundary is rejected.
-
-An abandonment command against a session with an active turn is rejected with
-the existing-control result and creates no cancellation.
-
-A queued turn whose placement is lost is not activated by any pass or sweep.
 
 A restart with retained runner work resolves every runner-owned attempt before
 the generic scan runs, and the generic scan ends no attempt a runner still owns.

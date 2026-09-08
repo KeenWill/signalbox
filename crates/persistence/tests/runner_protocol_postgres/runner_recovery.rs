@@ -1541,8 +1541,8 @@ async fn stop_terminalizes_runner_recovery_wait() -> Result<(), Box<dyn Error>> 
     );
     assert_eq!(retained_loss, "runner_lost_before_pin");
     assert!(
-        reload.is_some(),
-        "the terminalized runner wait must reload before its queued successor starts"
+        reload.is_none(),
+        "the successor remains queued while placement is lost"
     );
     assert_eq!(
         persisted_effect,
@@ -1897,8 +1897,8 @@ async fn runner_recovery_stop_preserves_tool_ambiguity() -> Result<(), Box<dyn E
     assert_eq!(persisted.1, interrupted_attempt.into_uuid());
     assert_eq!(persisted.2, boundary.into_uuid());
     assert!(
-        reload.is_some(),
-        "the terminalized ambiguous runner wait must reload before its queued successor starts"
+        reload.is_none(),
+        "the successor remains queued while placement is lost"
     );
     assert_eq!(closure.0, "tool_closed_by_turn_end");
     assert_eq!(closure.1, request.into_uuid());
@@ -2205,8 +2205,8 @@ async fn stop_retires_retryable_runner_attempt() -> Result<(), Box<dyn Error>> {
     assert_eq!(closure_request, request.into_uuid());
     assert_eq!(consumed_retry, RunnerDomainError::InvalidState);
     assert!(
-        reload.is_some(),
-        "the cancelled retryable runner wait must reload before its queued successor starts"
+        reload.is_none(),
+        "the successor remains queued while placement is lost"
     );
     drop(pool);
     Ok(())
@@ -2556,12 +2556,19 @@ async fn stop_terminalizes_delegated_runner_recovery_wait() -> Result<(), Box<dy
             ),
         )
         .await?;
-    let reloaded_turn = reload
-        .as_ref()
-        .expect("the delegated interrupt successor must reload")
-        .prepared()
-        .turn()
-        .turn();
+    assert!(
+        reload.is_none(),
+        "the delegated successor remains queued while placement is lost"
+    );
+    let reloaded_turn = TurnId::from_uuid(
+        sqlx::query_scalar(
+            "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2 AND state_kind = 'queued'",
+        )
+        .bind(session.into_uuid())
+        .bind(interrupt_successor.into_uuid())
+        .fetch_one(&pool)
+        .await?,
+    );
     let terminal: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind,
                 runner_recovery_runner_id
@@ -2620,8 +2627,8 @@ async fn stop_terminalizes_delegated_runner_recovery_wait() -> Result<(), Box<dy
         "the interrupt receipt must reload with its non-accepted predecessor"
     );
     assert!(
-        reload.is_some(),
-        "the delegated runner-recovery successor must reload after its predecessor stops"
+        reload.is_none(),
+        "the delegated successor remains queued while its runner placement is lost"
     );
     drop(pool);
     Ok(())

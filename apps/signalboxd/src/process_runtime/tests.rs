@@ -80,7 +80,7 @@ mod tests {
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, lifecycle_command_needs_eligibility_nudge, map_rejection,
         nudge_after_process_await_rejection, nudge_after_process_message_rejection,
-        nudge_delegation_issuer, nudge_delegation_wake, observe_outbox_metrics_once,
+        nudge_delegation_issuer, nudge_eligible_outbox_wake, observe_outbox_metrics_once,
         operational_import_error, preserve_committed_foreground_wait, process_delegation_rejection,
         process_delegation_rejection_for_recipient, read_frame_line,
         retain_inbound_frame_permit_during_import_admission,
@@ -3334,7 +3334,7 @@ mod tests {
         let nudge = RecordingEligibilityNudge::default();
         let recorded = Arc::clone(&nudge.sessions);
 
-        nudge_delegation_wake(
+        let _ = nudge_eligible_outbox_wake(
             &nudge,
             recipient,
             &DispatchedOutboxEventKind::DelegationWake(
@@ -3352,6 +3352,22 @@ mod tests {
                 .as_slice(),
             &[recipient]
         );
+    }
+
+    #[test]
+    fn runner_recovery_outbox_wakes_queued_work_after_placement_recovers() {
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let nudge = RecordingEligibilityNudge::default();
+        for state in [DispatchedRunnerState::Replaced, DispatchedRunnerState::WorkingDirectoryChanged, DispatchedRunnerState::Abandoned] {
+            let _ = nudge_eligible_outbox_wake(&nudge, session, &DispatchedOutboxEventKind::RunnerStateTransition {
+                runner: signalbox_domain::RunnerId::from_uuid(Uuid::now_v7()),
+                placement_revision: signalbox_domain::RunnerGeneration::try_from_u64(2).expect("replacement revision is positive"),
+                sandbox: signalbox_domain::RunnerSandboxProfile::Ambient,
+                working_directory: None,
+                state,
+            });
+        }
+        assert_eq!(nudge.sessions.lock().expect("recorded nudges").as_slice(), &[session, session, session]);
     }
 
     #[test]

@@ -601,6 +601,7 @@ pub struct PostgresModelCallRepository {
     pool: PgPool,
     targets: ModelTargetCatalog,
     credential_reference: ModelCallCredentialReference,
+    runner_recovery: Option<crate::runner_protocol::RunnerProtocolStore>,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: CredentialPoolRuntimeCatalog,
     same_credential_attempt_bound: NonZeroUsize,
@@ -642,6 +643,22 @@ const fn prepared_failure_cause(
     }
 }
 
+pub(crate) async fn retire_terminal_batch_replacement(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), ModelCallRepositoryError> {
+    crate::runner_protocol::retire_replacement_for_terminal_batch(connection, session, turn)
+        .await
+        .map_err(|error| match error {
+            crate::runner_protocol::RunnerProtocolStoreError::Database(source) => {
+                ModelCallRepositoryError::from(source)
+            }
+            _ => ModelCallCorruption::Inconsistent("terminal batch runner replacement").into(),
+        })?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn terminalize_lifecycle(
     connection: &mut PgConnection,
@@ -653,6 +670,7 @@ async fn terminalize_lifecycle(
     terminal_attempt: Option<signalbox_domain::TurnAttemptId>,
     terminal_call: Option<ModelCallId>,
 ) -> Result<(), ModelCallRepositoryError> {
+    retire_terminal_batch_replacement(connection, session, turn).await?;
     let runner_recovery_terminal_attempt: Option<Uuid> = sqlx::query_scalar(
         "SELECT yielded_turn_attempt_id
            FROM turn_runner_recovery_interrupt_effect

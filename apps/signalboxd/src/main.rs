@@ -844,8 +844,17 @@ async fn disarm_staging_sweep_unless_guarded(
 /// I/O, and join-error prose is never formatted into the classification.
 fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailureClass {
     use signalbox_persistence::outbox::OutboxDispatchError;
+    use signalbox_persistence::runner_protocol::{RunnerProtocolStoreError, RunnerRecoveryError};
 
     match error {
+        ProcessRuntimeError::RunnerRecoveryCommands(RunnerRecoveryError::Store(
+            RunnerProtocolStoreError::CommitAmbiguous(_),
+        )) => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: true,
+        },
+        ProcessRuntimeError::RunnerRecoveryCommands(RunnerRecoveryError::Store(
+            RunnerProtocolStoreError::Corruption(_),
+        )) => OperatorFailureClass::FailClosedCorruption,
         ProcessRuntimeError::OauthRecovery(error) => OperatorFailureClass::Infrastructure {
             commit_ambiguous: matches!(error, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError::CommitAmbiguous),
         },
@@ -854,6 +863,7 @@ fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailure
         | ProcessRuntimeError::InsufficientPoolCapacity
         | ProcessRuntimeError::CleanupSocket(_)
         | ProcessRuntimeError::RunnerRecoveryNotifications(_)
+        | ProcessRuntimeError::RunnerRecoveryCommands(_)
         | ProcessRuntimeError::Dispatch(OutboxDispatchError::Database(_)) => {
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
@@ -1647,6 +1657,16 @@ async fn run_hub(
                 let turn = error.repository_error().corruption_turn();
                 erase_startup_scan_cause(failure_class, cause_code, session, turn)
             })?;
+            scan_runner_service
+                .recovery_store()
+                .resume_runner_replacements()
+                .await
+                .map_err(|_| {
+                    erase_startup_cause(
+                        RuntimePhase::StartupScan,
+                        SanitizedStartupCause::Static("runner_replacement_recovery_failed"),
+                    )
+                })?;
             tracing::info!(
                 phase = ?RuntimePhase::StartupScan,
                 recovered_turn_count = outcome.recovered_turn_count(),
@@ -2012,6 +2032,9 @@ async fn run_hub(
     let web_http_runtime = web_http_listener
         .into_runtime(process_runtime.monitor(), eligibility_nudge.clone())
         .with_configuration_reload(configuration_reload.clone());
+    let runner_recovery = runner_service
+        .recovery_store()
+        .with_recovery_notifications(process_runtime.runner_recovery_notifications());
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let text_deltas = process_runtime.provider_text_delta_sink();
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
@@ -2050,6 +2073,7 @@ async fn run_hub(
         )
         .with_session_credentials(model_configuration.credential_family_catalog())
         .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
+        .with_runner_recovery(runner_recovery.clone())
         .with_same_credential_attempt_bound(same_credential_attempt_bound)
         .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
         .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());

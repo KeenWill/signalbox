@@ -43,6 +43,7 @@ pub use signalbox_domain::RunnerEnrollmentRequestId;
 mod provisioning;
 mod recovery;
 pub mod status;
+pub(crate) use recovery::retire_replacement_for_terminal_batch;
 pub use recovery::{RunnerRecoveryError, RunnerRecoveryOutcome};
 
 use crate::lock_inventory::{
@@ -567,6 +568,7 @@ struct RegistrationAuthority<'a> {
 pub struct RunnerProtocolStore {
     pool: PgPool,
     catalog: Arc<RunnerCatalog>,
+    recovery_notifications: Option<tokio::sync::watch::Receiver<()>>,
 }
 
 impl RunnerProtocolStore {
@@ -575,7 +577,22 @@ impl RunnerProtocolStore {
         Self {
             pool,
             catalog: Arc::new(catalog),
+            recovery_notifications: None,
         }
+    }
+
+    /// Shares the daemon's committed runner-authority notifications with boundary waiters.
+    #[must_use]
+    pub fn with_recovery_notifications(
+        mut self,
+        notifications: tokio::sync::watch::Receiver<()>,
+    ) -> Self {
+        self.recovery_notifications = Some(notifications);
+        self
+    }
+
+    pub(crate) fn recovery_notifications(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        self.recovery_notifications.clone()
     }
 
     /// Allocates and durably records the next connection epoch for an enrollment.

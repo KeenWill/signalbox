@@ -49,12 +49,62 @@ impl PostgresModelCallRepository {
             pool,
             targets,
             credential_reference,
+            runner_recovery: None,
             credential_families: None,
             credential_pools: HashMap::new(),
             same_credential_attempt_bound: NonZeroUsize::MIN,
             cache_inclusive_input_targets: HashSet::new(),
             continuation_usage_limits: HashMap::new(),
         }
+    }
+
+    /// Shares the runner authority used at model and tool continuation boundaries.
+    pub fn with_runner_recovery(
+        mut self,
+        runner: crate::runner_protocol::RunnerProtocolStore,
+    ) -> Self {
+        self.runner_recovery = Some(runner);
+        self
+    }
+
+    pub(super) async fn settle_runner_replacement_after_observation(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        session: SessionId,
+        observation_frontier: Option<ContextFrontierId>,
+    ) -> Result<bool, ModelCallRepositoryError> {
+        if let Some(runner) = &self.runner_recovery {
+            let boundary = match observation_frontier {
+                Some(frontier) => Some(
+                    super::live_turn::load_call_snapshot(transaction.as_mut(), session, frontier)
+                        .await?
+                        .reconstitute()
+                        .ok_or(ModelCallCorruption::Inconsistent(
+                            "runner replacement observation snapshot",
+                        ))?,
+                ),
+                None => None,
+            };
+            let (settled, _) = runner
+                .settle_replacement_at_boundary(transaction, session, boundary.as_ref())
+                .await
+                .map_err(|error| match error {
+                    crate::runner_protocol::RunnerProtocolStoreError::Database(source) => {
+                        ModelCallRepositoryError::from(source)
+                    }
+                    _ => {
+                        ModelCallCorruption::Inconsistent("runner replacement observation boundary")
+                            .into()
+                    }
+                })?;
+            return Ok(settled);
+        }
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT NOT EXISTS (SELECT 1 FROM runner_replacement_stage WHERE session_id = $1)",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?)
     }
 
     /// Selects credentials from each session's latest append-only snapshot.
@@ -619,6 +669,7 @@ impl PostgresModelCallRepository {
         .with_continuation_usage_limits(self.continuation_usage_limits.clone())
         .with_session_credentials(self.credential_families.clone())
         .with_credential_pools(self.credential_pools.clone())
+        .with_runner_recovery(self.runner_recovery.clone())
     }
 
     /// Derives approval-judge storage from this repository's exact database
