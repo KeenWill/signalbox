@@ -398,6 +398,29 @@ impl PostgresConvergenceSweepStore {
         Ok(restored)
     }
 
+    /// Clears removed targets' handoffs after their session's scheduler nudge is retained.
+    pub async fn acknowledge_removed_target_nudge(
+        &self,
+        session: SessionId,
+    ) -> Result<(), ConvergenceSweepStoreError> {
+        sqlx::query(
+            "UPDATE convergence_sweep_target
+                SET state_kind = $2, failure_kind = NULL,
+                    consecutive_failures = 0, retry_not_before = NULL,
+                    parked_at = NULL, operator_need = NULL,
+                    parked_dispatch_id = NULL, parked_session_id = NULL,
+                    parked_dispatched_at = NULL
+              WHERE NOT enrolled AND parked_session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::Observed,
+        ))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Restores a configured target's session and retains its durable nudge handoff.
     ///
     /// A returned session remains pending until its scheduler nudge is acknowledged.

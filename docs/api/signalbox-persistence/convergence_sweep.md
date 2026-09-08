@@ -148,6 +148,10 @@ impl convergence_sweep::PostgresConvergenceSweepStore {
         vec::Vec<signalbox_domain::SessionId>,
         convergence_sweep::ConvergenceSweepStoreError,
     >;
+    pub async fn acknowledge_removed_target_nudge(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<(), convergence_sweep::ConvergenceSweepStoreError>;
     pub async fn reenroll_target(
         &self,
         repository: &signalbox_domain::RepositorySlug,

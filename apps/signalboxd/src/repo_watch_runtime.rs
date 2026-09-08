@@ -246,7 +246,15 @@ impl RepositoryWatchRuntime {
     }
 
     pub(crate) async fn nudge_restored(&self, sessions: Vec<signalbox_domain::SessionId>) {
-        let nudge = self.state.lock().await.eligibility_nudge.clone();
+        let (nudge, store) = {
+            let state = self.state.lock().await;
+            (
+                state.eligibility_nudge.clone(),
+                signalbox_persistence::convergence_sweep::PostgresConvergenceSweepStore::new(
+                    state.core_pool.clone(),
+                ),
+            )
+        };
         // Startup recovery hands off before the scheduler drains the buffer.
         // The target references remain durable if this task stops with the process.
         tokio::spawn(async move {
@@ -255,6 +263,9 @@ impl RepositoryWatchRuntime {
                     == EligibilityNudgeOutcome::WorkSourceClosed
                 {
                     break;
+                }
+                if let Err(error) = store.acknowledge_removed_target_nudge(session).await {
+                    tracing::error!(cause = %error, "removed-target nudge acknowledgement failed; handoff remains pending");
                 }
             }
         });
@@ -694,6 +705,7 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://unused:unused@localhost/unused")
             .expect("lazy pool");
+        pool.close().await;
         let runtime = RepositoryWatchRuntime::unstarted(
             pool.clone(),
             RepositoryWatchServices {

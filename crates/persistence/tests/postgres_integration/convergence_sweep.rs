@@ -1414,8 +1414,7 @@ async fn target_removal_restores_its_commissioned_session_park() -> Result<(), B
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn target_removal_returns_an_unacknowledged_restoration_handoff() -> Result<(), Box<dyn Error>>
-{
+async fn target_removal_retains_a_handoff_until_acknowledgement() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;
@@ -1446,6 +1445,8 @@ async fn target_removal_returns_an_unacknowledged_restoration_handoff() -> Resul
         store.reconcile_configured_targets(&[]).await?,
         vec![session]
     );
+    store.acknowledge_removed_target_nudge(session).await?;
+    assert!(store.reconcile_configured_targets(&[]).await?.is_empty());
     Ok(())
 }
 

@@ -90,7 +90,8 @@ restoring a parked session, re-enrollment waits for scheduler nudge capacity.
 The target retains the session reference until that handoff is acknowledged, so
 restart retries an interrupted handoff. Removed targets hand their restored
 sessions to a task that waits for nudge capacity without blocking startup
-recovery.
+recovery. The task clears each removed-target handoff after its nudge is
+retained.
 
 The daemon composes the repository-watch module when `[repository_watch]` is
 configured and enabled. Dispatch actions and lifecycle reactions are retained in
