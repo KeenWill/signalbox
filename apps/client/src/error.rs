@@ -402,6 +402,10 @@ struct RejectionDisplay(RejectionDetail);
 impl fmt::Display for RejectionDisplay {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
+            RejectionDetail::StaleGeneration {} => formatter.write_str("stale_generation"),
+            RejectionDetail::UnknownCredentialExclusion {} => {
+                formatter.write_str("unknown_credential_exclusion")
+            }
             RejectionDetail::UnsupportedReasoningLevel {
                 selection_id,
                 requested,

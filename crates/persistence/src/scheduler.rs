@@ -64,7 +64,8 @@ impl PostgresEligibilitySweep {
     }
 
     /// Finds the next bounded page of sessions with queued work, a durable
-    /// active tool batch, or a terminal goal turn owed disposition.
+    /// active tool batch, a terminal goal turn owed disposition, or a terminal
+    /// repository-watch continuation still owed a successor.
     ///
     /// The result is only a set of hints. The authoritative per-session pass
     /// reconstitutes complete queue and lifecycle state under its scheduler-row
@@ -91,6 +92,27 @@ impl PostgresEligibilitySweep {
                           AND NOT active.delegation_runtime_terminal
                  )
                  GROUP BY queued.session_id
+                UNION
+                SELECT failed.session_id
+                  FROM turn_lifecycle AS failed
+                  JOIN tool_continuation_context_headroom AS headroom
+                    ON headroom.terminal_attempt_id = failed.terminal_attempt_id
+                  JOIN session AS owner ON owner.session_id = failed.session_id
+                   AND owner.creation_cause = 'module_dispatched'
+                   AND owner.dispatching_module = 'repo_watch'
+                  JOIN session_lifecycle AS lifecycle
+                    ON lifecycle.session_id = failed.session_id
+                   AND lifecycle.state_kind <> 'terminal'
+                 WHERE NOT EXISTS (
+                       SELECT 1 FROM turn_lifecycle AS later
+                        WHERE later.session_id = failed.session_id
+                          AND later.acceptance_position > failed.acceptance_position
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM goal_turn AS goal
+                        WHERE goal.session_id = failed.session_id
+                          AND goal.turn_id = failed.turn_id
+                   )
                 UNION
                 SELECT current_event.session_id
                   FROM (

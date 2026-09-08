@@ -194,6 +194,20 @@ impl GoalDeclarationTool {
     }
 }
 
+/// Composes the production goal declaration tool for isolated integration tests.
+#[cfg(feature = "test-support")]
+pub fn goal_declaration_test_tools(
+    pool: PgPool,
+) -> Result<
+    (
+        CompiledToolCatalog,
+        impl ToolExecutor<Error: Error + Send> + Clone + Send + Sync,
+    ),
+    impl Error,
+> {
+    GoalDeclarationTool::try_new(pool).map(GoalDeclarationTool::into_parts)
+}
+
 #[derive(Clone, Debug)]
 struct GoalDeclarationArgumentValidator {
     invalid_arguments: ToolExecutionErrorDetail,

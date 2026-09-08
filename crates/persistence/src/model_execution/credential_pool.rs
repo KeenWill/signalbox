@@ -243,10 +243,11 @@ pub(super) struct DurablePoolExclusions {
     headroom: HashMap<String, Option<i64>>,
 }
 
+use super::credential_pool_records;
+
 /// Serializes action-head reads and writes for one credential profile.
 ///
-/// Quarantine and membership exclusion are global to a profile rather than to a
-/// pool, so the profile reference alone is the lock key. Callers needing
+/// A quarantine spans pools, so the profile reference alone is the lock key. Callers needing
 /// several profiles take them in sorted order, so two sessions preparing calls
 /// over the same pool cannot deadlock against each other.
 async fn lock_credential_pool_action_head(
@@ -310,6 +311,7 @@ pub(super) async fn load_durable_pool_exclusions(
 ) -> Result<DurablePoolExclusions, ModelCallRepositoryError> {
     let members = credential_pool_member_references(policy);
     lock_credential_pool_action_heads(connection, policy).await?;
+    let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
     let mut excluded = sqlx::query_scalar::<_, String>(
         "SELECT credential_reference
            FROM credential_pool_chain_exclusion
@@ -358,10 +360,16 @@ pub(super) async fn load_durable_pool_exclusions(
     let actions = sqlx::query_as::<_, (i64, String, String, Uuid, Uuid)>(
         "SELECT action_id, credential_reference, action_kind,
                 observed_session_id, observed_turn_id
-           FROM credential_pool_member_action
+           FROM credential_pool_member_action AS action
           WHERE consumed_turn_id IS NULL
-            AND (pool_name = $1 OR action_kind = 'quarantine')",
+            AND (EXISTS (SELECT 1 FROM credential_exclusion_state AS exclusion
+                         WHERE exclusion.action_id = action.action_id AND exclusion.active
+                           AND (exclusion.pool_policy_id = $1 OR exclusion.kind = 'profile_quarantine'))
+                 OR (NOT EXISTS (SELECT 1 FROM credential_exclusion_state AS exclusion
+                                 WHERE exclusion.action_id = action.action_id)
+                     AND (action.pool_name = $2 OR action.action_kind = 'quarantine')))",
     )
+    .bind(policy_id)
     .bind(policy.name())
     .fetch_all(&mut *connection)
     .await?;
@@ -393,6 +401,9 @@ pub(super) async fn load_durable_pool_exclusions(
             }
         }
     }
+    excluded.extend(sqlx::query_scalar::<_, String>(
+        "SELECT profile FROM credential_exclusion_state WHERE active AND kind = 'profile_quarantine' AND origin <> 'pool_trigger' AND profile = ANY($1)")
+        .bind(&member_references).fetch_all(&mut *connection).await?);
     let mut headroom = HashMap::new();
     let now = std::time::SystemTime::now();
     for member in policy.members().iter().filter(|member| {
@@ -657,6 +668,14 @@ pub(super) async fn persist_call_pool_policy(
         .execute(&mut *connection)
         .await?;
     }
+    let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
+    sqlx::query(
+        "UPDATE model_call_credential_pool_policy SET pool_policy_id = $2 WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .bind(policy_id)
+    .execute(connection)
+    .await?;
     Ok(())
 }
 

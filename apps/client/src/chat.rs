@@ -1089,6 +1089,7 @@ async fn stop(
         DescendantTerminationScope::ParentAlone,
     )
     .await
+    .map(|receipt| receipt.turn_id)
 }
 
 async fn steer(

@@ -470,7 +470,7 @@ fn decode_stored_turn_origin_provenance(
                     )?))
                 }
                 (None, Some(predecessor)) => {
-                    GoalTurnSource::SuccessfulTurn(turn_id_from_uuid(predecessor))
+                    GoalTurnSource::PredecessorTurn(turn_id_from_uuid(predecessor))
                 }
                 (Some(_), Some(_)) | (None, None) => {
                     return Err(SubmitInputCorruption::Inconsistent("goal origin source").into());

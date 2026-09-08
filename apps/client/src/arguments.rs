@@ -59,6 +59,7 @@ pub(crate) enum Command {
     Runner(RunnerCommand),
 
     Credential(CredentialCommand),
+    Program(ProgramCommand),
     Create {
         selection: Option<ModelSelection>,
         template: Option<String>,
@@ -421,7 +422,7 @@ struct CredentialArguments {
     command: CredentialCommand,
 }
 
-/// Operator-invoked OAuth administration.
+/// Operator credential administration.
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialCommand {
     /// Begin device authorization for a credential profile.
@@ -430,6 +431,20 @@ pub(crate) enum CredentialCommand {
     Reprovision(CredentialTarget),
     /// Delete the profile's retained OAuth authorization.
     Delete(CredentialTarget),
+    /// List one page of active clearable exclusion targets.
+    Exclusions {
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
+        page_size: u32,
+        #[arg(long, value_parser = parse_exclusion_target)]
+        after: Option<signalbox_process_protocol::CredentialExclusionTarget>,
+    },
+    /// Clear one exact target returned by credential exclusions.
+    Clear {
+        #[arg(value_parser = parse_exclusion_target)]
+        target: signalbox_process_protocol::CredentialExclusionTarget,
+        #[arg(long, value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
 }
 
 #[derive(Debug, ClapArgs)]
@@ -442,8 +457,34 @@ pub(crate) struct CredentialTarget {
     pub(crate) command_id: Option<CommandId>,
 }
 
+fn parse_exclusion_target(
+    text: &str,
+) -> Result<signalbox_process_protocol::CredentialExclusionTarget, String> {
+    serde_json::from_str(text).map_err(|error| error.to_string())
+}
+
+#[derive(Debug, ClapArgs)]
+struct ProgramArguments {
+    #[command(subcommand)]
+    command: ProgramCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProgramCommand {
+    /// Cancel a retained program run.
+    Cancel {
+        #[arg(value_name = "RUN_ID", value_parser = canonical_uuid)]
+        run_id: CanonicalUuid,
+        #[arg(long, value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Operate retained program runs.
+    Program(ProgramArguments),
+
     /// Re-read and validate the daemon configuration and reload its catalogs.
     ReloadConfiguration {
         /// Reuse an exact non-reserved durable command identity.
@@ -453,7 +494,7 @@ enum CliCommand {
     /// Recover a lost runner placement or promote its pending successor.
     Runner(RunnerArguments),
 
-    /// Provision, replace, or delete an OAuth credential.
+    /// Administer OAuth credentials and retained exclusions.
     Credential(CredentialArguments),
     /// Create a session.
     Create(CreateArguments),
@@ -1994,6 +2035,7 @@ pub(crate) fn parse(
                 content: delegation_text_argument(arguments.content, arguments.content_file)?,
             },
         }),
+        CliCommand::Program(arguments) => Command::Program(arguments.command),
         CliCommand::Credential(arguments) => Command::Credential(arguments.command),
         CliCommand::Goal(arguments) => Command::Goal(match arguments.command {
             GoalSubcommand::Attach(arguments) => GoalCommand::Attach {

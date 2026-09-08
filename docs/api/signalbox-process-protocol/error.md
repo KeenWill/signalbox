@@ -40,6 +40,8 @@ impl BulkIngestKind {
 
 ```rust
 pub enum RejectionDetail {
+    StaleGeneration {},
+    UnknownCredentialExclusion {},
     BulkIngestAlreadyInProgress {
         active_kind: BulkIngestKind,
     },

@@ -975,6 +975,9 @@ pub enum FrameValidationError {
     #[error("OAuth credential frame shape is inconsistent")]
     /// An OAuth profile or device-authorization detail violates its bounds.
     OauthCredentialShape,
+    /// A credential-exclusion request or response has an invalid target or page.
+    #[error("credential-exclusion frame shape is inconsistent")]
+    CredentialExclusionShape,
     #[error("frame version is unsupported")]
     /// In-memory frame used another version.
     UnsupportedVersion,

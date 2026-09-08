@@ -3,6 +3,8 @@
 //! The event stream is authoritative. Loads decode every durable event and
 //! replay it through the domain aggregate; no mutable current-state row exists.
 
+mod compaction;
+
 use std::num::NonZeroU64;
 
 use rust_decimal::Decimal;
@@ -579,7 +581,9 @@ impl GoalRepository {
                 | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential,
+                | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun,
             ) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -930,7 +934,7 @@ impl GoalRepository {
             &mut transaction,
             session,
             generation,
-            GoalTurnSource::SuccessfulTurn(predecessor),
+            GoalTurnSource::PredecessorTurn(predecessor),
             goal.current().statement().as_str(),
             &configuration,
             GoalTurnInsertion::new(position, candidates),
@@ -1737,7 +1741,9 @@ async fn existing_or_conflicting(
         | CommandKind::PromotePendingRunner
         | CommandKind::ProvisionOauthCredential
         | CommandKind::ReprovisionOauthCredential
-        | CommandKind::DeleteOauthCredential => {
+        | CommandKind::DeleteOauthCredential
+        | CommandKind::ClearCredentialExclusion
+        | CommandKind::CancelProgramRun => {
             return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });

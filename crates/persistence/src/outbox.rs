@@ -1578,6 +1578,7 @@ pub(crate) async fn load_event(
                                                 'tool_execution_result',
                                                 'tool_denied',
                                                 'tool_closed_by_turn_end',
+                                                'tool_inadmissible',
                                                 'delegation_result'
                                            )
                                            AND (

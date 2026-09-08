@@ -435,15 +435,22 @@ async fn reconcile_turn_replays_a_committed_decision() -> Result<(), Box<dyn Err
     connection
         .request_version(ProtocolVersion::One, 3, decision.clone())
         .await?;
-    let successor_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let recorded = response_within(&mut connection).await?;
+    assert!(
+        matches!(recorded.message(), ServerMessage::InputSubmitted {
+        termination: None, session_id: recorded_session, acceptance_position, ..
+    } if *recorded_session == session_id && acceptance_position.value() == 2),
+        "reconciliation must omit stop-only termination metadata: {recorded:?}"
+    );
 
     connection
         .request_version(ProtocolVersion::One, 4, decision)
         .await?;
-    let replayed_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let replayed = response_within(&mut connection).await?;
 
     assert_eq!(
-        replayed_turn_id, successor_turn_id,
+        replayed.message(),
+        recorded.message(),
         "an equal reconciliation retry returns its recorded successor, never a refusal"
     );
 

@@ -255,4 +255,20 @@ impl goal::GoalRepository {
         provenance: signalbox_domain::GoalSchedulerProvenance,
     ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
 }
+impl goal::GoalRepository {
+    pub async fn continue_after_context_exhaustion<SelectDefinition>(
+        &self,
+        session: signalbox_domain::SessionId,
+        predecessor: signalbox_domain::TurnId,
+        candidates: goal_turn::GoalTurnCandidates,
+        content: &str,
+        select_definition: SelectDefinition,
+    ) -> result::Result<goal_turn::GoalTurnContinuationOutcome, goal::GoalRepositoryError>
+    where
+        SelectDefinition: function::FnOnce(
+            signalbox_domain::ModelAlias,
+        ) -> option::Option<
+            signalbox_domain::FrozenAliasDefinition,
+        >;
+}
 ```

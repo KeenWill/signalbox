@@ -494,22 +494,32 @@ async fn stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn Error>
         expected_active_turn_id: stopped_turn_id,
         content: UserInputContent::text(String::from("continue after the stop")),
         expected_defaults_version: CanonicalU64::new(1),
-        descendant_scope: DescendantTerminationScope::ParentAlone,
+        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
         model_settings: ModelSettingsOverlay::inherit_all(),
     };
     connection
         .request_version(ProtocolVersion::One, 3, decision.clone())
         .await?;
-    let successor_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let recorded = response_within(&mut connection).await?.message().clone();
+    assert!(
+        matches!(&recorded, ServerMessage::InputSubmitted {
+        session_id: received_session,
+        acceptance_position,
+        termination: Some(signalbox_process_protocol::TerminationReceipt {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            descendant_count,
+        }), ..
+    } if *received_session == session_id && acceptance_position.value() == 2 && descendant_count.value() == 0),
+        "{recorded:?}"
+    );
 
     connection
         .request_version(ProtocolVersion::One, 4, decision)
         .await?;
-    let replayed_turn_id = accepted_successor_turn(&mut connection, session_id, 2).await?;
-
+    let replayed = response_within(&mut connection).await?.message().clone();
     assert_eq!(
-        replayed_turn_id, successor_turn_id,
-        "an equal stop retry returns its recorded successor"
+        replayed, recorded,
+        "an equal stop retry returns its recorded successor, scope, and count"
     );
 
     drop(connection);
