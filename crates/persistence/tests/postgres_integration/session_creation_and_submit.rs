@@ -3539,7 +3539,7 @@ async fn unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Er
     assert_eq!(
         durable,
         (
-            3,
+            4,
             String::from("attachment_blob_not_found"),
             fixture.digest.as_bytes().to_vec()
         )
