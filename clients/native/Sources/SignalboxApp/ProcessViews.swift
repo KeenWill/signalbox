@@ -35,13 +35,18 @@ final class ProcessSessionListViewModel: ObservableObject {
   @Published var errorMessage: String?
   @Published private(set) var isLoading = false
 
+  private let maximumMetadataPages: UInt
   private var requestedConversation: SignalboxProcessConversation?
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
   private var activeRefreshID = UUID()
   private var serviceGeneration: UInt64 = 0
   private var publicationGeneration: UInt64 = 0
 
-  init(serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?) {
+  init(
+    policy: SignalboxProcessApplicationPolicy = .nativeDefault,
+    serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?
+  ) {
+    maximumMetadataPages = policy.maximumMetadataPages
     self.serviceProvider = serviceProvider
   }
 
@@ -118,12 +123,18 @@ final class ProcessSessionListViewModel: ObservableObject {
     do {
       let archived = showArchived
       var cursor = pageAfter
+      var pageCount: UInt = 0
       while true {
+        guard pageCount < maximumMetadataPages else {
+          throw SignalboxProcessServiceError.invalidPage(
+            "The native conversation-list page cap was reached.")
+        }
         let page = try await service.listConversations(includeArchived: archived, after: cursor)
         guard activeRefreshID == refreshID, serviceGeneration == generation,
           publicationGeneration == publication else { return }
         let matching = page.conversations.filter { $0.archived == archived }
-        if !matching.isEmpty || page.nextAfter == nil {
+        pageCount += 1
+        if !matching.isEmpty || page.nextAfter == nil || pageCount == maximumMetadataPages {
           conversations = matching
           pageAfter = cursor
           nextAfter = page.nextAfter
@@ -318,8 +329,12 @@ struct ProcessSessionsScreen: View {
         if viewModel.visibleConversations.isEmpty && !viewModel.isLoading {
           EmptyStateView(
             systemImage: viewModel.showArchived ? "archivebox" : "bubble.left.and.bubble.right",
-            title: viewModel.showArchived ? "No archived sessions" : "No active sessions",
-            message: "Refresh after connecting to a local signalboxd Unix socket."
+            title: viewModel.nextAfter != nil
+              ? "No matching conversations on these pages"
+              : (viewModel.showArchived ? "No archived sessions" : "No active sessions"),
+            message: viewModel.nextAfter != nil
+              ? "Choose Next page to continue looking."
+              : "Refresh after connecting to a local signalboxd Unix socket."
           )
         } else {
           List(viewModel.visibleConversations) { conversation in

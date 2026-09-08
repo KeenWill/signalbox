@@ -24,6 +24,27 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testArchivedScanStopsAtItsPageBudgetAndCanContinue() async throws {
+    let policy = ProcessDriverFixture.singlePageMetadataPolicy
+    let service = makeService(policy: policy)
+    let viewModel = ProcessSessionListViewModel(policy: policy) { service }
+    viewModel.showArchived = true
+    await viewModel.refresh()
+    XCTAssertTrue(viewModel.visibleConversations.isEmpty)
+    XCTAssertNotNil(viewModel.nextAfter)
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertFalse(viewModel.isLoading)
+
+    while viewModel.visibleConversations.isEmpty, let cursor = viewModel.nextAfter {
+      await viewModel.nextPage()
+      XCTAssertEqual(viewModel.pageAfter, cursor)
+      XCTAssertNil(viewModel.errorMessage)
+    }
+    XCTAssertFalse(viewModel.visibleConversations.isEmpty)
+    XCTAssertTrue(viewModel.visibleConversations.allSatisfy(\.archived))
+  }
+
+  @MainActor
   func testArchiveSelectionFindsMatchingRowsAcrossPages() async throws {
     let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
     let viewModel = ProcessSessionListViewModel { service }
@@ -6024,6 +6045,14 @@ private enum ProcessDriverFixture {
       """
     )
   }
+  // One page per refresh exposes the continuation boundary between fixture rows.
+  static let singlePageMetadataPolicy = SignalboxProcessApplicationPolicy(
+    metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
+    maximumMetadataPages: 1,
+    ambiguousMutationRetryDelays:
+      SignalboxProcessApplicationPolicy.nativeDefault.ambiguousMutationRetryDelays,
+    synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+  )
   static let oneRowMetadataPolicy = SignalboxProcessApplicationPolicy(
     metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
     maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
