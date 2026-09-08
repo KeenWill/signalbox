@@ -99,7 +99,12 @@ impl PostgresModelCallRepository {
                 })?;
             return Ok(settled);
         }
-        Ok(true)
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT NOT EXISTS (SELECT 1 FROM runner_replacement_stage WHERE session_id = $1)",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?)
     }
 
     /// Selects credentials from each session's latest append-only snapshot.
