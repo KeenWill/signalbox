@@ -400,7 +400,11 @@ struct ProcessSessionCreationSheet: View {
               .frame(maxWidth: .infinity, alignment: .leading)
             }
             .accessibilityLabel("Model alias")
-            .accessibilityValue(selectedAliasID?.rawValue ?? "None selected")
+            .accessibilityValue(
+              aliases.first(where: { $0.aliasID == selectedAliasID }).map { alias in
+                "\(alias.aliasID.rawValue), selection \(alias.selectionID.rawValue)"
+              } ?? "None selected"
+            )
             .accessibilityIdentifier("model-alias-picker")
           }
           TextField("Optional system prompt", text: $systemPrompt, axis: .vertical)
