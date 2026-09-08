@@ -20,9 +20,13 @@ import {
   type WebSearchPage,
   type WebSessionCatalogSnapshot,
   type WebSessionLiveStreamEvent,
+  type WebSessionTimelineDetailPage,
   type WebSubmitInputRequest,
   type WebTimelineDetailContinuation,
 } from './generated/web-contract.mjs'
+import { hasConversationContent } from './session-timeline/conversation'
+import { validateDetailContinuation } from './session-timeline/model'
+import { SESSION_WINDOW_ITEMS } from './session-workspace'
 
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
@@ -1175,7 +1179,7 @@ const SESSION_TRANSCRIPT_MAX_BYTES = 65536
 
 export type SessionTranscriptLimits = Pick<
   WebContractBootstrap['limits'],
-  'max_timeline_detail_items' | 'max_timeline_detail_bytes'
+  'max_timeline_detail_items' | 'max_timeline_detail_bytes' | 'min_timeline_detail_bytes'
 >
 
 export async function readSessionTranscript(
@@ -1185,7 +1189,17 @@ export async function readSessionTranscript(
   continuation: WebTimelineDetailContinuation | null,
   limits: SessionTranscriptLimits,
   signal?: AbortSignal,
+  previous?: Pick<WebSessionTimelineDetailPage, 'items'>,
 ) {
+  if (
+    !Number.isSafeInteger(limits.max_timeline_detail_items) ||
+    limits.max_timeline_detail_items < 1 ||
+    limits.max_timeline_detail_items > 128 ||
+    !Number.isSafeInteger(limits.max_timeline_detail_bytes) ||
+    limits.max_timeline_detail_bytes < limits.min_timeline_detail_bytes ||
+    limits.max_timeline_detail_bytes > SESSION_TRANSCRIPT_MAX_BYTES
+  )
+    throw new TypeError('Invalid advertised timeline detail limits')
   const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
   const maxBytes = Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
   const query = new URLSearchParams({
@@ -1225,34 +1239,89 @@ export async function readSessionTranscript(
     )
   )
     throw new TypeError('Transcript detail belongs to another window')
-  if (continuation !== null) {
-    const initial = page.items[0]
-    const address =
-      continuation.type === 'more_at' ? continuation.address : continuation.body.address
-    if (initial?.address.event_sequence !== address.event_sequence)
-      throw new TypeError('Transcript detail does not match the requested continuation address')
-    if (continuation.type === 'more_body') {
-      const cursor = continuation.body
-      const excerpt =
-        cursor.field === 'input_text' && initial.body.type === 'user_input'
-          ? initial.body.text
-          : cursor.field === 'model_response' && initial.body.type === 'model_call'
-            ? initial.body.response
-            : null
-      if (cursor.member_index !== 0 || excerpt?.offset_bytes !== cursor.offset_bytes)
-        throw new TypeError('Transcript detail does not match the requested body continuation')
-    }
-  }
+  validateDetailContinuation(page, continuation, previous)
   return page
+}
+
+// Filtered pages can exhaust their scan budget without retaining an item.
+export interface SessionTranscriptPage {
+  items: WebSessionTimelineDetailPage['items']
+  projected_body_bytes: number
+  continuation: WebTimelineDetailContinuation | null
 }
 
 export interface HeldSessionTranscript {
   sessionId: string
   first: string
   through: string
-  page: Awaited<ReturnType<typeof readSessionTranscript>>
+  page: SessionTranscriptPage
+  rawPage: WebSessionTimelineDetailPage
   continuation: WebTimelineDetailContinuation | null
   omittedThrough: string | null
+}
+
+async function readSessionTextPage(
+  sessionId: string,
+  first: string,
+  through: string,
+  continuation: WebTimelineDetailContinuation | null,
+  limits: SessionTranscriptLimits,
+  signal?: AbortSignal,
+  previous?: Pick<WebSessionTimelineDetailPage, 'items'>,
+  retained: WebSessionTimelineDetailPage['items'] = [],
+): Promise<Pick<HeldSessionTranscript, 'page' | 'rawPage'>> {
+  const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
+  const maxScannedItems = Math.min(SESSION_WINDOW_ITEMS, limits.max_timeline_detail_items)
+  const maxBytes = Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
+  const items: Array<SessionTranscriptPage['items'][number]> = []
+  let bytes = 0
+  let scannedItems = 0
+  let scannedBytes = 0
+  let cursor = continuation
+  let rawPage: WebSessionTimelineDetailPage
+  do {
+    const page = await readSessionTranscript(
+      sessionId,
+      first,
+      through,
+      cursor,
+      {
+        min_timeline_detail_bytes: limits.min_timeline_detail_bytes,
+        max_timeline_detail_items: Math.min(
+          maxItems - items.length,
+          maxScannedItems - scannedItems,
+        ),
+        max_timeline_detail_bytes: maxBytes - scannedBytes,
+      },
+      signal,
+      previous,
+    )
+    scannedItems += page.items.length
+    scannedBytes += page.projected_body_bytes
+    previous = page
+    rawPage = page
+    for (const item of page.items) {
+      if (hasConversationContent(item, [...retained, ...items])) {
+        items.push(item)
+        bytes += item.projected_body_bytes
+      }
+    }
+    cursor = page.continuation ?? null
+    if (
+      cursor?.type === 'more_at' &&
+      BigInt(cursor.address.event_sequence) <=
+        BigInt(page.items.at(-1)?.address.event_sequence ?? through)
+    ) {
+      throw new TypeError('Transcript continuation does not advance')
+    }
+  } while (
+    (cursor?.type === 'more_at' ||
+      (cursor?.type === 'more_body' && cursor.body.offset_bytes === '0')) &&
+    scannedItems < maxScannedItems &&
+    items.length < maxItems &&
+    maxBytes - scannedBytes >= limits.min_timeline_detail_bytes
+  )
+  return { page: { items, projected_body_bytes: bytes, continuation: cursor }, rawPage }
 }
 
 export async function readExtendedSessionTranscript(
@@ -1286,24 +1355,29 @@ export async function readExtendedSessionTranscript(
     BigInt(window.first) <= BigInt(held.through) &&
     BigInt(held.through) <= BigInt(window.through) &&
     held.page.continuation === null
-  const page =
+  const retained = append
+    ? held.page.items.filter((item) => BigInt(item.address.event_sequence) >= BigInt(window.first))
+    : []
+  const { page, rawPage } =
     append && held.through === window.through
-      ? { ...held.page, items: [], projected_body_bytes: 0 }
-      : await readSessionTranscript(
+      ? { page: { ...held.page, items: [], projected_body_bytes: 0 }, rawPage: held.rawPage }
+      : await readSessionTextPage(
           window.sessionId,
           append ? String(BigInt(held.through) + 1n) : window.first,
           window.through,
           continuation,
           limits,
           signal,
+          continuation?.type === 'more_body' &&
+            held?.sessionId === window.sessionId &&
+            held.first === window.first &&
+            held.through === window.through
+            ? held.rawPage
+            : undefined,
+          retained,
         )
-  if (!append) return { ...window, page, continuation, omittedThrough: null }
-  const items = [
-    ...held.page.items.filter(
-      (item) => BigInt(item.address.event_sequence) >= BigInt(window.first),
-    ),
-    ...page.items,
-  ]
+  if (!append) return { ...window, page, rawPage, continuation, omittedThrough: null }
+  const items = [...retained, ...page.items]
   let bytes = items.reduce((sum, item) => sum + item.projected_body_bytes, 0)
   let omittedThrough = held.omittedThrough
   while (
@@ -1322,6 +1396,7 @@ export async function readExtendedSessionTranscript(
     ...window,
     continuation,
     omittedThrough,
+    rawPage,
     page: { ...page, items, projected_body_bytes: bytes },
   }
 }

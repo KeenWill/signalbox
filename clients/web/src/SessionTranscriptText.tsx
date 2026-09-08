@@ -3,17 +3,70 @@ import { type RefObject, useRef, useState } from 'react'
 import type {
   WebSessionTimelineDetailBody,
   WebTimelineDetailContinuation,
+  WebTimelineTextExcerpt,
 } from './generated/web-contract.mjs'
 import {
   type HeldSessionTranscript,
   readExtendedSessionTranscript,
   type SessionTranscriptLimits,
 } from './product'
+import { conversationEntryKey } from './session-timeline/conversation'
+
+function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
+  let content = excerpt.text
+  try {
+    content = JSON.stringify(JSON.parse(excerpt.text), null, 2)
+  } catch {
+    // Plain text and partial JSON remain readable as supplied.
+  }
+  return (
+    <section className="session-tool-text" aria-label={label}>
+      <strong>{label}</strong>
+      <pre>{content}</pre>
+      {(excerpt.offset_bytes !== '0' || excerpt.continuation != null) && (
+        <small>
+          Text excerpt · byte {excerpt.offset_bytes} of {excerpt.total_bytes}
+        </small>
+      )}
+    </section>
+  )
+}
 
 function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
+  if (body.type === 'tool_batch')
+    return (
+      <>
+        {body.tools.map((tool) => {
+          const physical = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
+          return (
+            <div key={tool.request_id} className="session-tool-entry">
+              <strong>{tool.tool_name}</strong>
+              {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
+              {physical?.result && <ToolText label="Output" excerpt={physical.result} />}
+              {physical?.failure && <ToolText label="Failure" excerpt={physical.failure} />}
+            </div>
+          )
+        })}
+      </>
+    )
+  if (body.type === 'reconciliation')
+    return (
+      <p className="session-turn-outcome">
+        Turn reconciliation required · {body.operation.type.replaceAll('_', ' ')}
+      </p>
+    )
+  if (body.type === 'turn_lifecycle')
+    return <p className="session-turn-outcome">Turn {body.cause_code.replaceAll('_', ' ')}</p>
+  if (body.type === 'event_fact' && body.kind === 'goal_turn_retired')
+    return <p className="session-turn-outcome">Goal turn retired</p>
   const excerpt =
     body.type === 'user_input' ? body.text : body.type === 'model_call' ? body.response : null
-  if (!excerpt) return null
+  if (!excerpt)
+    return body.type === 'model_call' && body.provider_failure_cause ? (
+      <p className="session-turn-outcome">
+        Assistant error: {body.provider_failure_cause.replaceAll('_', ' ')}
+      </p>
+    ) : null
   return (
     <>
       <span className="eyebrow">{body.type === 'user_input' ? 'You' : 'Assistant'}</span>
@@ -91,7 +144,11 @@ function TranscriptWindow({
         </p>
       )}
       {transcript.data?.items.map((item) => (
-        <div key={item.address.event_sequence} className="session-message-entry">
+        <div
+          key={conversationEntryKey(item)}
+          className="session-message-entry"
+          data-event-sequence={item.address.event_sequence}
+        >
           <BodyText body={item.body} />
         </div>
       ))}

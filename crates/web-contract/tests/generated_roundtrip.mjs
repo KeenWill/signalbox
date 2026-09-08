@@ -216,6 +216,7 @@ test("generated bootstrap decoder rejects another contract version", () => {
           max_json_body_bytes: 65536,
           max_ndjson_item_bytes: 65536,
           max_timeline_detail_items: 128,
+          min_timeline_detail_bytes: 256,
           max_timeline_detail_bytes: 65536,
           max_search_page_items: 100,
           max_search_query_bytes: 512,
@@ -258,6 +259,7 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
           max_search_query_bytes: 512,
           max_search_snippet_bytes: 512,
           max_timeline_detail_items: 128,
+          min_timeline_detail_bytes: 256,
           max_timeline_detail_bytes: 65536,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
@@ -1292,6 +1294,7 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
           max_search_query_bytes: 512,
           max_search_snippet_bytes: 512,
           max_timeline_detail_items: 128,
+          min_timeline_detail_bytes: 256,
           max_timeline_detail_bytes: 65536,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
@@ -2184,7 +2187,7 @@ test("generated detail decoder rejects a nonzero input member index", () => {
   };
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
-    /zero for a singular body field/,
+    /the projected member the excerpt belongs to/,
   );
 });
 
@@ -2210,7 +2213,7 @@ test("generated detail decoder rejects a nonzero response member index", () => {
   };
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
-    /zero for a singular body field/,
+    /the projected member the excerpt belongs to/,
   );
 });
 
@@ -3095,6 +3098,225 @@ test("rates retain the disposition of a session closed with a live goal", async 
   assert.equal(decodeWebSessionRates(fixture).sessions[0].goal_disposition, "session_closed");
 });
 
+
+test("policy denials decode with runtime-safety rationale or lifecycle closure", () => {
+  for (const text of [null, "runtime safety denial"]) {
+    const page = userInputDetailPage();
+    const rationale = text === null ? null : { text, offset_bytes: "0", total_bytes: String(text.length), continuation: null };
+    page.items[0].kind = "tool_approval_decided";
+    page.items[0].body = {
+      type: "tool_approval_decision", turn_id: page.session_id, request_id: page.session_id,
+      tool_name: "exec_command", decision: "deny", actor: { type: "policy" },
+      rationale, approval_judge_escalated: false,
+    };
+    page.items[0].projected_body_bytes = 128 + (text?.length ?? 0);
+    page.projected_body_bytes = page.items[0].projected_body_bytes;
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+});
+
+
+test("ownership detail rejects creation-only ownership transitions", () => {
+  for (const transition of ["created_owned", "created_unmonitored"]) {
+    const page = userInputDetailPage();
+    page.items[0].kind = "session_ownership_changed";
+    page.items[0].body = { type: "ownership", transition };
+    page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+  }
+});
+
+test("override approval retains the command and overridden denial", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "tool_approval_decided";
+  page.items[0].body = {
+    type: "tool_approval_decision", turn_id: page.session_id, request_id: page.session_id,
+    tool_name: "exec_command", decision: "approve",
+    actor: {
+      type: "user_override", command_id: "00000000-0000-0000-0000-000000000992",
+      denied_request_id: "00000000-0000-0000-0000-000000000993",
+    },
+    rationale: null, approval_judge_escalated: true,
+  };
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.decision = "deny";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /approve for a user override/);
+  page.items[0].body.decision = "approve";
+  delete page.items[0].body.actor.denied_request_id;
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+});
+
+test("goal closure rejects achievement outcomes but terminal sessions retain them", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "goal_changed";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  for (const outcome of ["failed_retryable", "failed_structural", "failed_unknown", "stopped", "superseded", "abandoned", "retired"]) {
+    page.items[0].body = { type: "goal_event", session_id: page.session_id,
+      event: { type: "session_closed", generation: "1", outcome } };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+  for (const outcome of ["achieved_verified", "achieved_declared"]) {
+    page.items[0].kind = "goal_changed";
+    page.items[0].body = { type: "goal_event", session_id: page.session_id,
+      event: { type: "session_closed", generation: "1", outcome } };
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a session closure outcome/);
+    page.items[0].kind = "session_terminal";
+    page.items[0].body = { type: "session_terminal", outcome };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+});
+
+test("tool batches accept only tool-produced goal events", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "tool_batch_transition";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  const text = { text: "", offset_bytes: "0", total_bytes: "0", continuation: null };
+  const event = { generation: "1", text };
+  const body = { type: "tool_batch", turn_id: page.session_id,
+    producing_model_call_id: page.session_id,
+    state: { type: "results_projected", frontier_id: page.session_id },
+    projected_member_index: 0, tools: [], goal_events: [] };
+  page.items[0].body = body;
+  for (const goal of [
+    { ...event, type: "achieved" },
+    ...["user_input_required", "external_change_required", "authorization_required", "finish_check_failed"]
+      .map(reason => ({ ...event, type: "blocked", reason })),
+  ]) {
+    body.goal_events = [goal];
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+  for (const goal of [
+    { ...event, type: "commissioned" },
+    { ...event, type: "resumed" },
+    { generation: "1", type: "user_stopped" },
+    { ...event, type: "superseded" },
+    { generation: "1", type: "session_closed", outcome: "stopped" },
+    { ...event, type: "blocked", reason: "execution_failure" },
+  ]) {
+    body.goal_events = [goal];
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a tool-produced blocked or achieved goal event/);
+    const direct = structuredClone(page);
+    direct.items[0].kind = "goal_changed";
+    direct.items[0].body = { type: "goal_event", session_id: page.session_id, event: goal };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(direct), direct);
+  }
+});
+
+test("goal evidence belongs to the enclosing detail session", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "goal_changed";
+  page.items[0].body = { type: "goal_event", session_id: page.session_id,
+    event: { type: "user_stopped", generation: "1" } };
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.session_id = "00000000-0000-0000-0000-000000000992";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /body.session_id must be the enclosing page session/);
+});
+
+test("injection settlements reject contradictory delivery evidence", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "injection_settled";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  for (const delivered of [true, false]) {
+    for (const rejection of [undefined, null, "session_closed"]) {
+      for (const turn_id of [undefined, null, page.session_id]) {
+        page.items[0].body = { type: "injection_settlement", command_id: page.session_id,
+          delivered, ...(rejection === undefined ? {} : { rejection }),
+          ...(turn_id === undefined ? {} : { turn_id }) };
+        if (delivered && rejection != null) {
+          assert.throws(() => decodeWebSessionTimelineDetailPage(page), /rejection must be absent for a delivered injection/);
+        } else if (!delivered && turn_id != null) {
+          assert.throws(() => decodeWebSessionTimelineDetailPage(page), /turn_id must be absent for an undelivered injection/);
+        } else {
+          assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+        }
+      }
+    }
+  }
+});
+
+test("child lifecycle disposition permits only its parent and child outboxes", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "delegation_update";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  page.items[0].body = { type: "delegation", detail: {
+    type: "child_lifecycle_disposition", relationship_id: page.session_id,
+    child_session_id: "00000000-0000-0000-0000-000000000992", event_ordinal: "1",
+    outcome: "child_cancelled", reason: "parent_cancelled_with_descendants",
+    provenance: { type: "parent_lifecycle_command", session_id: page.session_id, command_id: page.session_id },
+  } };
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  const parentSession = page.session_id;
+  page.session_id = page.items[0].body.detail.child_session_id;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.session_id = "00000000-0000-0000-0000-000000000993";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a lifecycle disposition on the parent or child timeline/);
+  page.items[0].body.detail.child_session_id = parentSession;
+  page.session_id = parentSession;
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /child_session_id must be a session other than the relationship parent/);
+});
+
+test("creation details retain typed causes and require their originating identity", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "session_created";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  for (const cause of [
+    { type: "interactive" },
+    { type: "repository_watch", dispatch_id: page.session_id },
+    { type: "commissioned", dispatch_id: page.session_id },
+    { type: "delegated", spawning_request_id: page.session_id },
+  ]) {
+    page.items[0].body = { type: "session_created", cause, imported_evidence: null };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+    if (cause.type !== "interactive") {
+      page.items[0].body.cause = { type: cause.type };
+      assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+    }
+  }
+  delete page.items[0].body.cause;
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+});
+
+test("child results bind parent-command provenance to the enclosing session", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "delegation_update";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  const child = "00000000-0000-0000-0000-000000000992";
+  const unrelated = "00000000-0000-0000-0000-000000000993";
+  for (const provenance of [
+    { type: "parent_turn_command", session_id: page.session_id, turn_id: page.session_id, command_id: page.session_id },
+    { type: "parent_goal_command", session_id: page.session_id, goal_generation: "1", command_id: page.session_id },
+    { type: "parent_lifecycle_command", session_id: page.session_id, command_id: page.session_id },
+  ]) {
+    page.items[0].body = { type: "delegation", detail: {
+      type: "child_result", relationship_id: page.session_id, child_session_id: child,
+      outcome: "child_cancelled", reason: "parent_cancelled_with_descendants",
+      provenance, content: null,
+    } };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+    for (const session of [child, unrelated]) {
+      provenance.session_id = session;
+      assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a durable delegation outcome shape/);
+    }
+  }
+});
+
+test("delegation messages require distinct sender and recipient sessions", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "delegation_update";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  page.items[0].body = { type: "delegation", detail: {
+    type: "session_message", relationship_id: page.session_id, message_id: page.session_id,
+    sender_session_id: "00000000-0000-0000-0000-000000000992",
+    recipient_session_id: page.session_id, message_ordinal: "1", delivery_sequence: "1",
+    content: { text: "", offset_bytes: "0", total_bytes: "0", continuation: null },
+  } };
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.detail.sender_session_id = page.session_id;
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a session other than the recipient/);
+});
+
 test("repository watch provenance preserves exact ledger identities and rejects unknown events", () => {
   const descriptor = {
     session_id: "00000000-0000-0000-0000-000000000001",
@@ -3111,4 +3333,25 @@ test("repository watch provenance preserves exact ledger identities and rejects 
   assert.deepEqual(decodeWebSessionTimelineDescriptor(descriptor).repository_watch, descriptor.repository_watch);
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, event_kind: "unknown" } }));
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, action_ordinal: "0" } }));
+});
+
+test("escalated approvals can close with a policy denial", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "tool_approval_decided";
+  for (const text of [null, "Interrupted before a user decision."]) {
+    const rationale = text === null ? null : {
+      text, offset_bytes: "0", total_bytes: String(text.length), continuation: null,
+    };
+    page.items[0].body = {
+      type: "tool_approval_decision", turn_id: page.session_id, request_id: page.session_id,
+      tool_name: "exec_command", decision: "deny", actor: { type: "policy" },
+      rationale, approval_judge_escalated: true,
+    };
+    page.items[0].projected_body_bytes = page.projected_body_bytes = 128 + (text?.length ?? 0);
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+  page.items[0].body.rationale = null;
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  page.items[0].body.decision = "approve";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a user actor or policy denial when the approval judge escalated/);
 });

@@ -2948,7 +2948,7 @@ async fn load_runner_state_transition(
     })
 }
 
-async fn load_delegation_update(
+pub(crate) async fn load_delegation_update(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     expected_sequence: u64,
     stored_session: Uuid,
@@ -3090,15 +3090,6 @@ async fn load_delegation_update(
             })
         }
     }
-}
-
-pub(crate) async fn validate_delegation_update_fact(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    expected_sequence: u64,
-    session: SessionId,
-) -> Result<(), OutboxDispatchError> {
-    load_delegation_update(transaction, expected_sequence, session.into_uuid(), false).await?;
-    Ok(())
 }
 
 async fn load_delegation_wake(
@@ -3953,7 +3944,7 @@ async fn append_tool_batch_transition(
             ("recovery_required", None, Some(attempt))
         }
     };
-    sqlx::query(
+    let event_sequence: Decimal = sqlx::query_scalar(
         "WITH header AS (
             INSERT INTO outbox_event
                 (event_kind, storage_version, session_id)
@@ -3966,7 +3957,8 @@ async fn append_tool_batch_transition(
              tool_attempt_id)
          SELECT event_sequence, event_kind, storage_version, session_id,
                 $4, $5, $6, $7, $8
-           FROM header",
+           FROM header
+         RETURNING event_sequence",
     )
     .bind(TOOL_BATCH_TRANSITION)
     .bind(STORAGE_VERSION)
@@ -3976,7 +3968,93 @@ async fn append_tool_batch_transition(
     .bind(transition)
     .bind(frontier.map(ContextFrontierId::into_uuid))
     .bind(attempt.map(ToolAttemptId::into_uuid))
-    .execute(connection)
+    .fetch_one(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_batch_transition_detail_member
+            (event_sequence, session_id, member_kind, member_index,
+             request_id, attempt_id, approval_judge_escalated,
+             attempt_state_kind, attempt_terminal_disposition_kind,
+             attempt_error_kind, attempt_has_result, attempt_has_failure,
+             attempt_sandbox_posture, attempt_result_text,
+             attempt_error_detail)
+         SELECT $1, $2, 'tool', request.request_ordinal,
+                request.request_id, attempt.attempt_id, EXISTS (
+                    SELECT 1
+                      FROM tool_approval_judge_model_call AS judge
+                     WHERE judge.request_id = request.request_id
+                       AND judge.recommendation_kind = 'escalate_to_human'
+                ),
+                attempt.state_kind, attempt.terminal_disposition_kind,
+                attempt.error_kind,
+                CASE WHEN attempt.attempt_id IS NULL THEN NULL
+                     ELSE attempt.result_text IS NOT NULL END,
+                CASE WHEN attempt.attempt_id IS NULL THEN NULL
+                     ELSE attempt.error_detail IS NOT NULL END,
+                (
+                    SELECT CASE placement.requested_sandbox_profile
+                        WHEN 'ambient' THEN 'unsandboxed'
+                        WHEN 'workspace_restricted' THEN 'sandboxed'
+                    END
+                      FROM runner_physical_attempt_lease_binding
+                           AS sandbox_binding
+                      JOIN runner_lease_generation AS sandbox_lease
+                        ON sandbox_lease.lease_id = sandbox_binding.lease_id
+                       AND sandbox_lease.attempt_id = sandbox_binding.attempt_id
+                      JOIN runner_session_placement_record AS placement
+                        ON placement.session_id = sandbox_lease.session_id
+                       AND placement.event_ordinal =
+                           sandbox_lease.placement_event_ordinal
+                     WHERE sandbox_binding.attempt_id = attempt.attempt_id
+                     ORDER BY sandbox_lease.generation DESC
+                     LIMIT 1
+                ),
+                attempt.result_text, attempt.error_detail
+           FROM tool_batch_transition_outbox_event AS transition
+           JOIN tool_round AS round
+             ON round.producing_model_call_id = transition.producing_model_call_id
+           JOIN context_frontier AS boundary
+             ON boundary.context_frontier_id = round.boundary_frontier_id
+            AND boundary.owning_session_id = transition.session_id
+           JOIN tool_request AS request
+             ON request.producing_model_call_id = transition.producing_model_call_id
+           LEFT JOIN context_frontier_member AS member
+             ON transition.transition_kind = 'results_projected'
+            AND member.owning_session_id = transition.session_id
+            AND member.context_frontier_id = transition.frontier_id
+            AND member.member_position = boundary.member_count + request.request_ordinal + 1
+           LEFT JOIN semantic_transcript_entry AS payload
+             ON payload.source_session_id = member.source_session_id
+            AND payload.semantic_entry_id = member.semantic_entry_id
+           LEFT JOIN tool_attempt AS attempt
+             ON attempt.attempt_id = CASE transition.transition_kind
+                 WHEN 'results_projected' THEN payload.tool_result_attempt_id
+                 WHEN 'recovery_required' THEN transition.tool_attempt_id
+             END
+            AND attempt.request_id = request.request_id
+            AND attempt.state_kind = 'terminal'
+          WHERE transition.event_sequence = $1",
+    )
+    .bind(event_sequence)
+    .bind(session_id_to_uuid(session))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_batch_transition_detail_member
+            (event_sequence, session_id, member_kind, member_index,
+             goal_event_ordinal)
+         SELECT $1, $2, 'goal', row_number() OVER (
+                    ORDER BY request.request_ordinal, event.event_ordinal
+                ) - 1, event.event_ordinal
+           FROM goal_event AS event
+           JOIN tool_request AS request
+             ON request.request_id = event.model_tool_request_id
+          WHERE request.producing_model_call_id = $3",
+    )
+    .bind(event_sequence)
+    .bind(session_id_to_uuid(session))
+    .bind(producing_call.into_uuid())
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }
