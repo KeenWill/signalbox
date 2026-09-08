@@ -367,6 +367,11 @@ system_prompt = "Inspect repository activity."
         })
     }
 
+    async fn dispatch(&mut self) {
+        self.submit_without_lifecycle_settlement().await;
+        self.settle().await;
+    }
+
     async fn submit_without_lifecycle_settlement(&mut self) {
         let configuration = self
             .sink
@@ -384,8 +389,7 @@ system_prompt = "Inspect repository activity."
         .expect("dispatch with checkout");
     }
 
-    async fn dispatch(&mut self) {
-        self.submit_without_lifecycle_settlement().await;
+    async fn settle(&self) {
         let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(self.core.clone());
         while let Some(event) = lifecycle.next().await.expect("next lifecycle event") {
             self.store
@@ -2003,4 +2007,227 @@ async fn assert_git_status(
         recorded.take(),
         Some(ToolExecutorEvidence::CompletedText(_))
     ));
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatched_session_projects_retained_origin_after_rule_removal()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::new().await?;
+    let planned = fixture
+        .store
+        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+        .await?[0]
+        .clone();
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let stored = signalbox_persistence::session::SessionRepository::new(fixture.core.clone())
+        .load_session(session)
+        .await?
+        .expect("created session");
+    assert_eq!(
+        stored.creation_provenance().cause(),
+        SessionCreationCause::ModuleDispatched {
+            dispatch: ModuleDispatch::RepositoryWatch {
+                dispatch: planned.dispatch()
+            }
+        }
+    );
+    let actor: (String, Option<String>) = sqlx::query_as(
+        "SELECT actor_kind, actor_module FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(
+        actor,
+        (String::from("module"), Some(String::from("repo_watch")))
+    );
+    fixture
+        .store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(planned.repository(), &[])],
+            OffsetDateTime::now_utc(),
+        )
+        .await?;
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    let origin = restarted
+        .reaction_origin_for_session(session)
+        .await?
+        .expect("retained origin");
+    assert_eq!(origin.dispatch(), planned.dispatch());
+    assert_eq!(origin.event_id(), planned.event_id());
+    assert_eq!(origin.rule_id(), planned.rule_id());
+    assert_eq!(origin.action_ordinal().get(), planned.action_ordinal());
+    assert_eq!(origin.pull_request().map(PullRequestNumber::get), Some(1));
+    assert_eq!(
+        origin.event_kind(),
+        RepoWatchEventKindNameV1::PullRequestOpened
+    );
+
+    assert_projected_origin(&fixture, &planned, session).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatched_session_projects_origin_before_ledger_settlement() -> Result<(), Box<dyn Error>>
+{
+    let mut fixture = CheckoutFixture::new().await?;
+    let planned = fixture
+        .store
+        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+        .await?[0]
+        .clone();
+    fixture.submit_without_lifecycle_settlement().await;
+    let session = SessionId::from_uuid(
+        sqlx::query_scalar(
+            "SELECT created_session_id FROM create_session_command WHERE command_id = $1",
+        )
+        .bind(fixture.command.into_uuid())
+        .fetch_one(&fixture.core)
+        .await?,
+    );
+    let ledger: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, created_session_id FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert_eq!(ledger, (String::from("pending"), None));
+    assert_projected_origin(&fixture, &planned, session).await?;
+    fixture.settle().await;
+    assert_eq!(fixture.session().await, session);
+    assert_projected_origin(&fixture, &planned, session).await
+}
+
+async fn assert_projected_origin(
+    fixture: &CheckoutFixture,
+    planned: &signalbox_module_repo_watch_v2::PlannedCommand,
+    session: SessionId,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{
+        CanonicalUuid, ClientFrame, ClientRequest, ProtocolVersion, RequestId, ServerMessage,
+        decode_server_line, encode_client_line,
+    };
+    use signalbox_web_contract::WebSessionTimelineDescriptor;
+    use signalboxd::{
+        LocalProcessListener, ProcessRuntime,
+        repo_watch_runtime::{RepositoryWatchRuntime, RepositoryWatchServices},
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tower::ServiceExt;
+
+    let models = (*fixture.sink.models).clone();
+    let templates = signalboxd::SessionTemplateConfiguration::default();
+    let watch = RepositoryWatchRuntime::unstarted(
+        fixture.module.clone(),
+        RepositoryWatchServices {
+            core_pool: fixture.core.clone(),
+            checkout_runner: None,
+            models: Arc::new(models.clone()),
+            templates: Arc::new(templates.clone()),
+            eligibility_nudge: fixture.sink.eligibility_nudge.clone(),
+            tool_dispatch_gate: fixture.sink.tool_dispatch_gate.clone(),
+        },
+    );
+    let reload = signalboxd::configuration_reload::ConfigurationReload::new(
+        fixture.core.clone(),
+        models.clone(),
+        templates,
+        fixture._files.path().join("models.toml"),
+        fixture._files.path().join("templates.toml"),
+        None,
+    )
+    .expect("reload composition")
+    .with_repository_watch(watch);
+    let router = signalboxd::web_http::production_router(
+        None,
+        Some(fixture.core.clone()),
+        None,
+        Some(models.clone()),
+        None,
+        None,
+        None,
+    )
+    .layer(axum::Extension(reload.clone()));
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/api/sessions/{}", session.into_uuid()))
+                .header("host", "127.0.0.1")
+                .body(axum::body::Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let descriptor: WebSessionTimelineDescriptor = serde_json::from_slice(&bytes)?;
+    let web = descriptor.repository_watch.expect("browser origin");
+    assert_eq!(
+        serde_json::to_value(&web.dispatch_id)?,
+        planned.dispatch().into_uuid().to_string()
+    );
+    assert_eq!(
+        serde_json::to_value(&web.event_id)?,
+        planned.event_id().into_uuid().to_string()
+    );
+    assert_eq!(
+        web.action_ordinal.as_str(),
+        planned.action_ordinal().to_string()
+    );
+    assert_eq!(web.rule_id, planned.rule_id().as_str());
+    assert_eq!(web.repository, planned.repository().as_str());
+    assert_eq!(
+        web.pull_request.as_ref().map(|number| number.as_str()),
+        Some("1")
+    );
+
+    let sockets = tempfile::tempdir_in("/tmp")?;
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(sockets.path(), std::fs::Permissions::from_mode(0o700))?;
+    let socket = sockets.path().join("hub.sock");
+    let runtime = ProcessRuntime::new(
+        LocalProcessListener::bind(&socket)?,
+        fixture.core.clone(),
+        fixture.sink.eligibility_nudge.clone(),
+        fixture.sink.tool_dispatch_gate.clone(),
+        models,
+    )
+    .with_configuration_reload(reload);
+    let (shutdown, receiver) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(runtime.run(receiver));
+    let stream = tokio::net::UnixStream::connect(&socket).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let request = ClientFrame::try_new_for_version(
+        ProtocolVersion::One,
+        RequestId::try_new(1)?,
+        ClientRequest::ReadTranscript {
+            session_id: CanonicalUuid::from_uuid(session.into_uuid()),
+        },
+    )?;
+    writer.write_all(&encode_client_line(&request)?).await?;
+    let mut line = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), reader.read_until(b'\n', &mut line)).await??;
+    let frame = decode_server_line(&line)?;
+    let ServerMessage::TranscriptSnapshotStart {
+        repository_watch: Some(wire),
+        ..
+    } = frame.message()
+    else {
+        panic!(
+            "snapshot must expose retained origin: {:?}",
+            frame.message()
+        );
+    };
+    assert_eq!(wire.dispatch_id.into_uuid(), planned.dispatch().into_uuid());
+    assert_eq!(wire.event_id.into_uuid(), planned.event_id().into_uuid());
+    assert_eq!(wire.action_ordinal.value(), planned.action_ordinal());
+    assert_eq!(wire.rule_id, planned.rule_id().as_str());
+    assert_eq!(wire.repository, planned.repository().as_str());
+    assert_eq!(wire.pull_request.map(|number| number.value()), Some(1));
+    shutdown.send(true)?;
+    drop(writer);
+    drop(reader);
+    task.await??;
+    Ok(())
 }

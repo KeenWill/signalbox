@@ -584,6 +584,9 @@ belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
 version-1 encoding, and the closed receipt algebra belong here, and a later
 incompatible shape requires a new protocol version.
 
+Transcript snapshot starts include nullable `repository_watch` provenance
+resolved from the retained dispatch ledger.
+
 If counted-activation revalidation selects pre-call exhaustion failure,
 activation and terminalization commit together before execution resumes.
 

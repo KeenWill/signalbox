@@ -2821,6 +2821,22 @@ kbd {
   border: 1px solid var(--border);
   background: var(--surface-2);
 }
+.session-provenance {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.session-provenance p {
+  margin: 4px 0 0;
+}
+
+.session-provenance summary {
+  cursor: pointer;
+}
+
 .session-workspace-header {
   display: flex;
   align-items: flex-start;

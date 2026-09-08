@@ -189,3 +189,42 @@ impl ConversationSummary {
     pub const fn cursor(&self) -> ConversationCursor;
 }
 ```
+
+## RepositoryWatchProvenance
+
+```rust
+pub struct RepositoryWatchProvenance {
+    pub dispatch_id: CanonicalUuid,
+    pub action_ordinal: PositiveCanonicalU64,
+    pub repository: string::String,
+    pub rule_id: string::String,
+    pub rule_revision: PositiveCanonicalU64,
+    pub event_id: CanonicalUuid,
+    pub event_kind: RepositoryWatchEventKind,
+    pub pull_request: option::Option<PositiveCanonicalU64>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, cmp::PartialEq, ser::Serialize
+```
+
+## RepositoryWatchEventKind
+
+```rust
+pub enum RepositoryWatchEventKind {
+    PullRequestOpened,
+    PullRequestClosed,
+    PullRequestMerged,
+    HeadChanged,
+    MergeableStateChanged,
+    ChecksCompleted,
+    CheckRunCompleted,
+    BranchWorkflowRunCompleted,
+    ReviewSubmitted,
+    ThreadOpened,
+    ThreadResolved,
+    Labeled,
+    Unlabeled,
+    BaseAdvanced,
+    ReactionChanged,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, cmp::PartialEq, ser::Serialize
+```

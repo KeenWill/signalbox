@@ -1,6 +1,11 @@
-import type { WebSessionTimelineDetail } from '../src/generated/web-contract.mjs'
+import type {
+  WebSessionTimelineDescriptor,
+  WebSessionTimelineDetail,
+} from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, type Page, test } from './fontTest'
+
+type WebRepositoryWatchProvenance = NonNullable<WebSessionTimelineDescriptor['repository_watch']>
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
 const turnId = '00000000-0000-0000-0000-000000000992'
@@ -13,7 +18,12 @@ const excerpt = (text: string) => ({
   continuation: null,
 })
 
-async function sessionApi(page: Page, busy = false, selectedSessionId = sessionId) {
+async function sessionApi(
+  page: Page,
+  busy = false,
+  selectedSessionId = sessionId,
+  origin: WebRepositoryWatchProvenance | null = null,
+) {
   const state = {
     active: busy,
     grown: false,
@@ -148,6 +158,7 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
     return route.fulfill({
       json: {
         session_id: selectedSessionId,
+        repository_watch: origin,
         sizes: {
           item_count: state.grown ? '3' : '2',
           projected_text_bytes: String(
@@ -543,6 +554,7 @@ test('keeps earlier text reachable after live appending evicts a text-page entry
     route.fulfill({
       json: {
         session_id: sessionId,
+        repository_watch: null,
         sizes: {
           item_count: String(latest()),
           projected_text_bytes: String(latest() * 7),
@@ -690,6 +702,39 @@ for (const growth of [false, true]) {
     await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
     if (growth) expect(api.state.historyReads).toContain('after')
     expect(textReads).toBe(1)
+  })
+}
+
+for (const viewport of [
+  { name: 'desktop', width: 1440, height: 1000 },
+  { name: 'phone', width: 390, height: 844 },
+]) {
+  test(`repository watch origin at ${viewport.name} size`, async ({ page, browserName }) => {
+    await page.setViewportSize(viewport)
+    const origin: WebRepositoryWatchProvenance = {
+      dispatch_id: '00000000-0000-0000-0000-000000000063',
+      action_ordinal: '2',
+      repository: 'signalbox/example',
+      rule_id: 'review-response',
+      rule_revision: '3',
+      event_id: '00000000-0000-0000-0000-000000000064',
+      event_kind: 'review_submitted',
+      pull_request: '81',
+    }
+    const api = await sessionApi(page, false, sessionId, origin)
+    await openSession(page)
+    const provenance = page.getByLabel('Repository watch origin')
+    await expect(provenance).toContainText('Repository watch · signalbox/example #81')
+    await expect(provenance).toContainText('Rule review-response v3 · review submitted')
+    await provenance.getByText('Dispatch provenance', { exact: true }).click()
+    await expect(provenance).toContainText(`Dispatch ${origin.dispatch_id} · Action 2`)
+    await expect(provenance).toContainText(`Event ${origin.event_id}`)
+    if (browserName === 'chromium') {
+      await expect(page).toHaveScreenshot(`repository-watch-origin-${viewport.name}.png`, {
+        fullPage: true,
+      })
+    }
+    api.grow()
   })
 }
 

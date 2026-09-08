@@ -118,7 +118,6 @@ anchor, unless the anchor is a heading on the linking page.
 - [File and media interpretation design](../design/file-and-media.md)
 - [Conversation import design](../design/conversation-import.md)
 - [Runner protocol design](../design/runner-protocol.md)
-- [Repository watch design](../design/repo-watch.md)
 - [Review workflows design](../design/review-workflows.md)
 - [Git authority threat model design](../design/git-authority-threat-model.md)
 - [Workspace instructions design](../design/workspace-instructions.md)

@@ -1256,6 +1256,7 @@ async fn queued_send_wait_uses_active_slot_not_acceptance_order_or_terminal_hist
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1418,6 +1419,7 @@ async fn selected_send_polls_after_an_automatic_recovery_transition() -> Result<
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1552,6 +1554,7 @@ async fn selected_send_recovery_poll_is_not_postponed_by_follow_traffic()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1714,6 +1717,7 @@ async fn selected_send_polls_after_an_automatic_tool_recovery_transition()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1854,6 +1858,7 @@ async fn send_wait_continues_after_a_superseded_runner_loss_event() -> Result<()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1986,6 +1991,7 @@ async fn send_wait_ignores_streamed_text_until_the_durable_terminal_event()
                 .map_err(io::Error::other)
         };
         let mut response = encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+            repository_watch: None,
             session_id,
             cursor: CanonicalU64::new(0),
             runner: None,
@@ -2077,6 +2083,7 @@ async fn send_wait_rejects_streamed_text_for_another_session() -> Result<(), Box
                 .map_err(io::Error::other)
         };
         let mut response = encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+            repository_watch: None,
             session_id,
             cursor: CanonicalU64::new(0),
             runner: None,
