@@ -1280,5 +1280,213 @@ async fn workspace_operator_records_generated_facts_and_replays_original_identit
     .fetch_one(&pool)
     .await?;
     assert_eq!(live_mints, 1);
+    // Distinct command IDs make each state rejection an independent request.
+    let rejected_operations = [
+        register.operation().clone(),
+        WorkspaceOperation::MintRemote {
+            workspace: WorkspaceId::from_uuid(Uuid::from_u128(9999)),
+            name: GitRemoteName::try_new(NAME.to_owned())?,
+            url: GitRemoteUrl::try_new(URL.to_owned())?,
+        },
+        mint.operation().clone(),
+        WorkspaceOperation::WithdrawRemote {
+            mint: GitRemoteMintId::from_uuid(Uuid::from_u128(9999)),
+        },
+        withdrawal.operation().clone(),
+    ];
+    for (index, operation) in rejected_operations.into_iter().enumerate() {
+        let command_id = command_id(10 + index as u128);
+        assert!(matches!(
+            repository
+                .handle(WorkspaceCommand::new(command_id, operation), &mut ids)
+                .await,
+            Err(signalbox_persistence::workspace::WorkspaceError::Rejected)
+        ));
+        let claimed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1)",
+        )
+        .bind(command_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert!(!claimed);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn workspace_registration_replays_after_its_original_symlink_disappears()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::workspace::UuidV7WorkspaceIdentityGenerator;
+    use signalbox_persistence::workspace::WorkspaceRepository;
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = WorkspaceRepository::new(pool);
+    let temporary = tempfile::tempdir()?;
+    let directory = temporary.path().join("workspace");
+    let link = temporary.path().join("request-path");
+    std::fs::create_dir(&directory)?;
+    std::os::unix::fs::symlink(&directory, &link)?;
+    let requested = link.to_str().expect("fixture path is UTF-8");
+    let root = WorkspaceRootPath::try_new(
+        std::fs::canonicalize(&link)?
+            .to_str()
+            .expect("fixture path is UTF-8")
+            .to_owned(),
+    )?;
+    let command = command_id(1);
+    let receipt = repository
+        .register(
+            command,
+            requested,
+            root,
+            &mut UuidV7WorkspaceIdentityGenerator,
+        )
+        .await?;
+    std::fs::remove_file(&link)?;
+    std::fs::remove_dir(&directory)?;
+    assert_eq!(
+        repository.registration_replay(command, requested).await?,
+        Some(receipt)
+    );
+    assert_eq!(
+        repository
+            .registration_replay(command, OTHER_WORKSPACE_ROOT)
+            .await?,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn workspace_registration_without_request_path_replays_only_at_its_original_version()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::WorkspaceCommandResult;
+    use signalbox_persistence::workspace::{WorkspaceError, WorkspaceOutcome, WorkspaceRepository};
+    let (_container, pool) = migrated_postgres().await?;
+    let mut tx = pool.begin().await?;
+    insert_command(&mut tx, command_id(1), "register_workspace").await?;
+    sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1)")
+        .bind(workspace_id(1).into_uuid()).bind(WORKSPACE_ROOT).bind(command_id(1).into_uuid())
+        .execute(&mut *tx).await?;
+    tx.commit().await?;
+    let repository = WorkspaceRepository::new(pool.clone());
+    assert_eq!(
+        repository
+            .registration_replay(command_id(1), WORKSPACE_ROOT)
+            .await?,
+        Some(WorkspaceOutcome::Applied(
+            WorkspaceCommandResult::Registered(workspace_id(1))
+        ))
+    );
+    assert_eq!(
+        repository
+            .registration_replay(command_id(1), OTHER_WORKSPACE_ROOT)
+            .await?,
+        None
+    );
+
+    // Bypass immutable-row triggers and the shape constraint to exercise a corrupt record reader.
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE workspace DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    let error = sqlx::query("UPDATE workspace SET storage_version = 2")
+        .execute(&mut *tx)
+        .await
+        .expect_err("new registration version requires the request path");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("workspace_registration_request_required")
+    );
+    tx.rollback().await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE workspace DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE workspace DROP CONSTRAINT workspace_registration_request_required")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE workspace SET storage_version = 2")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE durable_command SET storage_version = 2")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert!(matches!(
+        repository
+            .registration_replay(command_id(1), WORKSPACE_ROOT)
+            .await,
+        Err(WorkspaceError::Corruption("registration request root"))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn workspace_registration_replay_detects_an_earlier_field_and_a_missing_typed_record()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::workspace::{WorkspaceError, WorkspaceRepository};
+    let (_container, pool) = migrated_postgres().await?;
+    let mut tx = pool.begin().await?;
+    insert_command(&mut tx, command_id(1), "register_workspace").await?;
+    sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1)")
+        .bind(workspace_id(1).into_uuid()).bind(WORKSPACE_ROOT).bind(command_id(1).into_uuid())
+        .execute(&mut *tx).await?;
+    tx.commit().await?;
+    let repository = WorkspaceRepository::new(pool.clone());
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE workspace DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    let error = sqlx::query("UPDATE workspace SET registration_request_root = root_path")
+        .execute(&mut *tx)
+        .await
+        .expect_err("earlier registration cannot carry the request path");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("workspace_registration_request_versioned")
+    );
+    tx.rollback().await?;
+
+    // Retain invalid storage only to exercise the corruption reader.
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE workspace DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE workspace DROP CONSTRAINT workspace_registration_request_versioned")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE workspace SET registration_request_root = root_path")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert!(matches!(
+        repository
+            .registration_replay(command_id(1), WORKSPACE_ROOT)
+            .await,
+        Err(WorkspaceError::Corruption(
+            "registration request root version"
+        ))
+    ));
+    sqlx::query("DELETE FROM workspace").execute(&pool).await?;
+    assert!(matches!(
+        repository
+            .registration_replay(command_id(1), WORKSPACE_ROOT)
+            .await,
+        Err(WorkspaceError::Corruption("registry typed record"))
+    ));
     Ok(())
 }
