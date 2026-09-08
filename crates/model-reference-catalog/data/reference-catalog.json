@@ -54,7 +54,7 @@
       "url": "https://community.openai.com/t/announcing-gpt-4o-in-the-api/744700",
       "published": "2024-05-13",
       "retrieved": "2026-08-24",
-      "evidence": "OpenAI staff announcement of GPT-4o API availability and USD 5 input / USD 15 output per million-token launch rates. August 6 partitions the May and August snapshot records; it does not establish the rolling alias cutover. The exact historical alias cutover is unrecovered, so rolling-alias pricing before the October 1 observation remains unknown."
+      "evidence": "OpenAI staff announcement of GPT-4o API availability and USD 5 input / USD 15 output per million-token launch rates."
     },
     {
       "id": "oai-gpt4o-mini-2024-07-18",
