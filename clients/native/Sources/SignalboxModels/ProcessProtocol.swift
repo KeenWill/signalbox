@@ -3356,6 +3356,33 @@ public struct SignalboxTranscriptUserEntryMessage: Decodable, Equatable, Sendabl
   }
 }
 
+public enum SignalboxBoundChildAction: String, Decodable, Equatable, Sendable {
+  case keepRunning = "keep_running"
+  case stop
+  case cancel
+}
+
+public enum SignalboxDelegationPolicy: Decodable, Equatable, Sendable {
+  case background
+  case bound(onParentStopped: SignalboxBoundChildAction, onParentCancelled: SignalboxBoundChildAction)
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "background":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+      self = .background
+    case "bound":
+      try tagged.rejectUnadmittedFields(["type", "on_parent_stopped", "on_parent_cancelled"], decoder: decoder)
+      self = .bound(onParentStopped: try decoder.decode("on_parent_stopped"),
+        onParentCancelled: try decoder.decode("on_parent_cancelled"))
+    default:
+      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+        debugDescription: "Unknown delegation policy."))
+    }
+  }
+}
+
 public enum SignalboxDelegationWaitMode: String, Decodable, Equatable, Sendable {
   case foreground
   case background
@@ -3680,7 +3707,7 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     }
   }
 
-  private static func delegationResultShapeIsValid(
+  fileprivate static func delegationResultShapeIsValid(
     childSessionID: SignalboxCanonicalUUID,
     outcome: SignalboxDelegationOutcome,
     content: String?,
@@ -3710,7 +3737,7 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     }
   }
 
-  private static func delegationContentIsValid(_ content: String) -> Bool {
+  fileprivate static func delegationContentIsValid(_ content: String) -> Bool {
     !content.isEmpty
       && content.utf8.count <= SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes
       && !content.contains("\0")
@@ -3907,6 +3934,23 @@ public struct SignalboxFollowedSessionEvent: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let event: SignalboxProcessSessionEvent
 
+  public init(cursor: SignalboxCanonicalUInt64, sessionID: SignalboxCanonicalUUID,
+    event: SignalboxProcessSessionEvent) {
+    self.cursor = cursor
+    self.sessionID = sessionID
+    self.event = event
+  }
+
+  public init(from decoder: Decoder) throws {
+    cursor = try decoder.decode("cursor")
+    sessionID = try decoder.decode("session_id")
+    event = try decoder.decode("event")
+    guard event.delegationIsValid(sessionID: sessionID) else {
+      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+        debugDescription: "Delegation event correlations or outcome are inconsistent."))
+    }
+  }
+
   private enum CodingKeys: String, CodingKey {
     case cursor
     case sessionID = "session_id"
@@ -4072,6 +4116,12 @@ private struct SignalboxTurnModelSettingsResolvedShape: Decodable {
 }
 
 public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
+  case goalTurnRetired(turnID: SignalboxCanonicalUUID)
+  case childSpawned(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, relationship: SignalboxDelegationPolicy)
+  case childWaiting(awaitRequestID: SignalboxCanonicalUUID, spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, mode: SignalboxDelegationWaitMode)
+  case sessionMessage(spawningRequestID: SignalboxCanonicalUUID, messageID: SignalboxCanonicalUUID, senderSessionID: SignalboxCanonicalUUID, recipientSessionID: SignalboxCanonicalUUID, ordinal: SignalboxCanonicalUInt64, deliverySequence: SignalboxCanonicalUInt64, content: String)
+  case childResult(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, outcome: SignalboxDelegationOutcome, content: String?, reason: SignalboxDelegationReason, provenance: SignalboxDelegationProvenance)
+  case childLifecycleDisposition(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, outcome: SignalboxDelegationOutcome, reason: SignalboxDelegationReason, provenance: SignalboxDelegationProvenance)
   case sessionCreated
   case sessionModelSettingsChanged
   case turnModelSettingsResolved
@@ -4132,6 +4182,51 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     do {
       switch tagged.kind {
+      case "goal_turn_retired":
+        try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
+        self = .goalTurnRetired(
+          turnID: try decoder.decode("turn_id"))
+      case "child_spawned":
+        try tagged.rejectUnadmittedFields(["type", "spawning_request_id", "child_session_id", "relationship"], decoder: decoder)
+        self = .childSpawned(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id"),
+          relationship: try decoder.decode("relationship"))
+      case "child_waiting":
+        try tagged.rejectUnadmittedFields(["type", "await_request_id", "spawning_request_id", "child_session_id", "mode"], decoder: decoder)
+        self = .childWaiting(
+          awaitRequestID: try decoder.decode("await_request_id"),
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id"),
+          mode: try decoder.decode("mode"))
+      case "session_message":
+        try tagged.rejectUnadmittedFields(["type", "spawning_request_id", "message_id", "sender_session_id", "recipient_session_id", "ordinal", "delivery_sequence", "content"], decoder: decoder)
+        self = .sessionMessage(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          messageID: try decoder.decode("message_id"),
+          senderSessionID: try decoder.decode("sender_session_id"),
+          recipientSessionID: try decoder.decode("recipient_session_id"),
+          ordinal: try decoder.decode("ordinal"),
+          deliverySequence: try decoder.decode("delivery_sequence"),
+          content: try decoder.decode("content"))
+      case "child_result":
+        try tagged.rejectUnadmittedFields(["type", "spawning_request_id", "child_session_id", "outcome", "content", "reason", "provenance"], decoder: decoder)
+        try tagged.requireFields(["content"], decoder: decoder)
+        self = .childResult(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id"),
+          outcome: try decoder.decode("outcome"),
+          content: try decoder.decodeIfPresent("content"),
+          reason: try decoder.decode("reason"),
+          provenance: try decoder.decode("provenance"))
+      case "child_lifecycle_disposition":
+        try tagged.rejectUnadmittedFields(["type", "spawning_request_id", "child_session_id", "outcome", "reason", "provenance"], decoder: decoder)
+        self = .childLifecycleDisposition(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id"),
+          outcome: try decoder.decode("outcome"),
+          reason: try decoder.decode("reason"),
+          provenance: try decoder.decode("provenance"))
       case "session_created":
         try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
         self = .sessionCreated
@@ -5215,5 +5310,51 @@ extension Decoder {
       Value.self,
       forKey: SignalboxDynamicCodingKey(key)
     )
+  }
+}
+
+extension SignalboxProcessSessionEvent {
+  fileprivate func delegationIsValid(sessionID: SignalboxCanonicalUUID) -> Bool {
+    switch self {
+    case .childSpawned(_, let child, _), .childWaiting(_, _, let child, _):
+      return child != sessionID
+    case .sessionMessage(_, _, let sender, let recipient, let ordinal, let delivery, let content):
+      return recipient == sessionID && sender != recipient && ordinal.rawValue > 0
+        && delivery.rawValue > 0 && SignalboxTranscriptEntry.delegationContentIsValid(content)
+    case .childResult(_, let child, let outcome, let content, let reason, let provenance):
+      return child != sessionID
+        && (provenance.delegationParentID.map { $0 == sessionID } ?? true)
+        && SignalboxTranscriptEntry.delegationResultShapeIsValid(
+          childSessionID: child, outcome: outcome, content: content, reason: reason, provenance: provenance)
+        && (content.map(SignalboxTranscriptEntry.delegationContentIsValid) ?? true)
+        && ((outcome == .returned && content != nil)
+          || ([.failed, .stopped, .cancelled].contains(outcome) && content == nil))
+    case .childLifecycleDisposition(_, let child, let outcome, let reason, let provenance):
+      guard [.parentStopped, .parentCancelled].contains(reason), provenance.hasDelegationCascade,
+        let parent = provenance.delegationParentID else { return false }
+      if child == sessionID {
+        return parent != sessionID && [.stopped, .cancelled].contains(outcome)
+      }
+      return parent == sessionID
+        && [.stopped, .cancelled, .alreadyTerminal, .continueRunning].contains(outcome)
+    default: return true
+    }
+  }
+}
+
+extension SignalboxDelegationProvenance {
+  fileprivate var delegationParentID: SignalboxCanonicalUUID? {
+    switch self {
+    case .childTurn: return nil
+    case .parentTurnCommand(let parent, _, _, _), .parentGoalCommand(let parent, _, _, _): return parent
+    }
+  }
+
+  fileprivate var hasDelegationCascade: Bool {
+    switch self {
+    case .parentTurnCommand(_, _, _, .parentAndDescendants),
+      .parentGoalCommand(_, _, _, .parentAndDescendants): return true
+    default: return false
+    }
   }
 }
