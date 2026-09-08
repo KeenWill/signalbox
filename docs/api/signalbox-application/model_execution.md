@@ -741,6 +741,23 @@ pub fn render_model_user_content(
 ) -> result::Result<ModelUserContent, ModelFrontierRenderingError>;
 ```
 
+## projected_frontier_content_bytes
+
+```rust
+pub fn projected_frontier_content_bytes<'a>(
+    entries: impl collect::IntoIterator<
+        Item = (
+            signalbox_domain::SemanticTranscriptEntryRef,
+            &'a signalbox_domain::SemanticTranscriptEntryPayload,
+        ),
+    >,
+    origin_content: impl function::FnMut(
+        signalbox_domain::AcceptedInputId,
+    ) -> option::Option<&'a signalbox_domain::UserContent>,
+    tool_entries: impl collect::IntoIterator<Item = &'a ResolvedToolConversationEntry>,
+) -> usize;
+```
+
 ## ModelFrontierRenderingError
 
 ```rust

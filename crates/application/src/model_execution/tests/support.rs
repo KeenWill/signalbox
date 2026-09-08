@@ -761,7 +761,7 @@ pub(super) fn tool_round_saturated_fixture_with_assistant_text(
             ModelCallReconstitutionState::Prepared,
         )],
     )
-    .with_tool_denial_correlations(denials.clone())
+    .with_tool_denial_correlations(denials.iter().cloned().map(Into::into).collect())
     .with_call_snapshot(ResolvedContextFrontierReconstitutionInput::new(
         session_id,
         current_frontier,

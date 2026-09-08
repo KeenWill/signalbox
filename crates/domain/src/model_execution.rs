@@ -92,8 +92,8 @@ pub struct ModelCallExecutionReconstitutionInput {
     pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
     calls: Vec<ModelCallReconstitutionInput>,
     tool_result_correlations: Vec<ToolResultAttemptCorrelation>,
-    tool_denial_correlations: Vec<ToolApprovalResolution>,
-    tool_inadmissible_correlations: Vec<crate::ToolRequest>,
+    tool_denial_correlations: Vec<ToolDenialCorrelation>,
+    tool_inadmissible_correlations: Vec<ToolInadmissibleCorrelation>,
     uncommitted_tool_result_projection: Option<PreparedToolResultProjection>,
     availability_successor: bool,
 }
@@ -144,20 +144,19 @@ impl ModelCallExecutionReconstitutionInput {
         self
     }
 
-    /// Supplies the exact durable denial resolution for every denied request
-    /// Supplies request-level terminal evidence for inadmissible result entries.
+    /// Supplies request ownership and inadmissibility facts for result entries.
     pub fn with_tool_inadmissible_correlations(
         mut self,
-        requests: Vec<crate::ToolRequest>,
+        requests: Vec<ToolInadmissibleCorrelation>,
     ) -> Self {
         self.tool_inadmissible_correlations = requests;
         self
     }
 
-    /// referenced by the current frontier.
+    /// Supplies request identity and denial status for every denied result entry.
     pub fn with_tool_denial_correlations(
         mut self,
-        correlations: Vec<ToolApprovalResolution>,
+        correlations: Vec<ToolDenialCorrelation>,
     ) -> Self {
         self.tool_denial_correlations = correlations;
         self
@@ -211,6 +210,39 @@ impl ModelCallExecutionReconstitutionInput {
     pub fn reconstitute(self) -> Result<ModelCallExecution, ModelCallExecutionReconstitutionError> {
         reconstitute(self)
     }
+}
+
+/// Request identity and decision status for a denied result entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolDenialCorrelation {
+    /// The logical request named by the decision.
+    pub request: crate::ToolRequestId,
+    /// Whether its recorded decision is a denial.
+    pub denied: bool,
+}
+
+impl From<ToolApprovalResolution> for ToolDenialCorrelation {
+    fn from(resolution: ToolApprovalResolution) -> Self {
+        Self {
+            request: resolution.request(),
+            denied: matches!(resolution.decision(), ToolApprovalDecision::Deny { .. }),
+        }
+    }
+}
+
+/// Request ownership and inadmissibility status for a result entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolInadmissibleCorrelation {
+    /// The logical request named by the result.
+    pub request: crate::ToolRequestId,
+    /// The session owning the request.
+    pub session: SessionId,
+    /// The turn owning the request.
+    pub turn: TurnId,
+    /// The model call that proposed the request.
+    pub producing_call: ModelCallId,
+    /// Whether the request records an inadmissibility reason.
+    pub inadmissible: bool,
 }
 
 /// Stored ownership facts for one tool attempt referenced by model input.
@@ -1742,9 +1774,7 @@ fn reconstitute(
         .collect::<Vec<_>>();
     let mut tool_denial_correlations = BTreeSet::new();
     for correlation in &input.tool_denial_correlations {
-        if !matches!(correlation.decision(), ToolApprovalDecision::Deny { .. })
-            || !tool_denial_correlations.insert(correlation.request())
-        {
+        if !correlation.denied || !tool_denial_correlations.insert(correlation.request) {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::ToolDenialCorrelationMismatch,
@@ -1763,13 +1793,13 @@ fn reconstitute(
     }
     let mut tool_inadmissible_correlations = BTreeSet::new();
     for request in &input.tool_inadmissible_correlations {
-        if request.inadmissible_reason().is_none()
-            || !tool_inadmissible_correlations.insert(request.id())
+        if !request.inadmissible
+            || !tool_inadmissible_correlations.insert(request.request)
             || !input.frontier_entries.iter().any(|entry| {
-                entry.source_session() == request.session()
+                entry.source_session() == request.session
                     && entry.payload()
                         == &SemanticTranscriptEntryPayload::ToolInadmissible {
-                            request: request.id(),
+                            request: request.request,
                         }
             })
         {

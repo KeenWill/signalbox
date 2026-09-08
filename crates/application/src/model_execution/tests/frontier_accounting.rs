@@ -573,6 +573,7 @@ async fn evidence_loading_limit_closes_before_provider_preparation() {
     assert_eq!(
         service
             .execute(session)
+            .with_subscriber(tracing_subscriber::registry())
             .await
             .expect("the oversized prepared call closes"),
         ModelCallExecutionOutcome::ToolRoundLimitReached(Box::new(failed))

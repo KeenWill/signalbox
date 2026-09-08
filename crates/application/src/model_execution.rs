@@ -72,8 +72,10 @@ pub use scripted::{
 mod render;
 #[cfg(test)]
 use render::render_frontier_messages;
-pub use render::{ModelFrontierRenderingError, render_model_user_content};
-use render::{projected_frontier_content_bytes, render_frontier_messages_with_placements};
+use render::render_frontier_messages_with_placements;
+pub use render::{
+    ModelFrontierRenderingError, projected_frontier_content_bytes, render_model_user_content,
+};
 
 mod prepared;
 pub use prepared::PreparedModelOperation;

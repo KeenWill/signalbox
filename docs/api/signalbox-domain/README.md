@@ -18,7 +18,7 @@
 | imported_conversation | 32 | 0 | 5 | [imported_conversation](imported_conversation.md) |
 | imported_session | 20 | 0 | 0 | [imported_session](imported_session.md) |
 | model_call | 12 | 0 | 0 | [model_call](model_call.md) |
-| model_execution | 54 | 0 | 0 | [model_execution](model_execution.md) |
+| model_execution | 56 | 0 | 0 | [model_execution](model_execution.md) |
 | model_settings | 25 | 0 | 0 | [model_settings](model_settings.md) |
 | program_journal | 25 | 0 | 0 | [program_journal](program_journal.md) |
 | provider_evidence | 5 | 0 | 0 | [provider_evidence](provider_evidence.md) |

@@ -14,7 +14,7 @@
 | create_session_from_imported_frontier | 4 | 2 | 0 | [create_session_from_imported_frontier](create_session_from_imported_frontier.md) |
 | list_conversations | 6 | 2 | 0 | [list_conversations](list_conversations.md) |
 | load_session | 1 | 1 | 0 | [load_session](load_session.md) |
-| model_execution | 33 | 8 | 1 | [model_execution](model_execution.md) |
+| model_execution | 33 | 8 | 2 | [model_execution](model_execution.md) |
 | operator_failure | 1 | 1 | 0 | [operator_failure](operator_failure.md) |
 | replace_session_defaults | 4 | 1 | 0 | [replace_session_defaults](replace_session_defaults.md) |
 | repo_watch | 29 | 1 | 3 | [repo_watch](repo_watch.md) |

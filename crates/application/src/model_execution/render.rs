@@ -487,7 +487,8 @@ fn user_content_text_bytes(content: &UserContent) -> usize {
         })
 }
 
-pub(super) fn projected_frontier_content_bytes<'a>(
+/// Counts projected text retained by rendering, including resolved tool content.
+pub fn projected_frontier_content_bytes<'a>(
     entries: impl IntoIterator<
         Item = (
             SemanticTranscriptEntryRef,

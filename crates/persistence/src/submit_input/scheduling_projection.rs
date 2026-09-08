@@ -3209,19 +3209,25 @@ pub(super) async fn load_scheduling_projection_with_semantic_frontiers(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let inadmissible_request_ids: Vec<Uuid> = sqlx::query_scalar("SELECT request_id FROM tool_request WHERE session_id = $1 AND inadmissible_reason IS NOT NULL")
-        .bind(session_id.into_uuid()).fetch_all(&mut *connection).await?;
-    let inadmissible_requests = crate::tool_loop::load_requests_by_id(
-        connection,
-        &inadmissible_request_ids
-            .into_iter()
-            .map(ToolRequestId::from_uuid)
-            .collect::<Vec<_>>(),
+    let inadmissible_rows: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT request_id, turn_id, producing_model_call_id FROM tool_request
+          WHERE session_id = $1 AND inadmissible_reason IS NOT NULL",
     )
-    .await
-    .map_err(map_tool_loop_error)?
-    .into_values()
-    .collect();
+    .bind(session_id.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    let inadmissible_requests = inadmissible_rows
+        .into_iter()
+        .map(
+            |(request, turn, producing_call)| signalbox_domain::ToolInadmissibleCorrelation {
+                request: ToolRequestId::from_uuid(request),
+                session: session_id,
+                turn: TurnId::from_uuid(turn),
+                producing_call: ModelCallId::from_uuid(producing_call),
+                inadmissible: true,
+            },
+        )
+        .collect();
     let mut input = AcceptedInputSchedulingReconstitutionInput::new(
         session,
         turns,

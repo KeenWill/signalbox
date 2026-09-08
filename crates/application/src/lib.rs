@@ -102,7 +102,8 @@ pub use model_execution::{
     PreparedModelOperation, ProviderReasoningProvenance, RetainedModelCallExecutionState,
     RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallCapability,
     ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
-    UuidV7ModelCallExecutionIdGenerator, render_model_user_content,
+    UuidV7ModelCallExecutionIdGenerator, projected_frontier_content_bytes,
+    render_model_user_content,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{

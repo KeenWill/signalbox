@@ -354,15 +354,41 @@ pub(super) async fn load_tool_conversation_entries(
         request.frontier_entry_slice(),
     )
     .map_err(|_| ModelCallCorruption::Inconsistent("prepared frontier projection"))?;
-    let container_bytes = projection
-        .ordered_entries()
-        .count()
-        .saturating_mul(std::mem::size_of::<ResolvedToolConversationEntry>());
+    let projected = projection.ordered_entries().collect::<BTreeSet<_>>();
+    let projected_entries = request
+        .frontier_entry_slice()
+        .iter()
+        .filter(|entry| projected.contains(&entry.reference()));
+    let non_tool_bytes = signalbox_application::projected_frontier_content_bytes(
+        projected_entries
+            .clone()
+            .map(|entry| (entry.reference(), entry.payload())),
+        |accepted| request.origin_content(accepted),
+        std::iter::empty(),
+    );
+    let resident_bytes = projected_entries.fold(non_tool_bytes, |bytes, entry| {
+        let parts = match entry.payload() {
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+                request
+                    .origin_content(*accepted_input)
+                    .map_or(0, |content| content.parts().len())
+            }
+            _ => 0,
+        };
+        bytes
+            .saturating_add(std::mem::size_of::<ResolvedToolConversationEntry>())
+            .saturating_add(std::mem::size_of::<
+                signalbox_application::ModelConversationMessage,
+            >())
+            .saturating_add(parts.saturating_mul(std::mem::size_of::<
+                signalbox_application::ModelUserContentPart,
+            >()))
+    });
     let limit_bytes = signalbox_application::MAX_RETAINED_FRONTIER_CONTENT_BYTES;
-    if container_bytes > limit_bytes {
+    if resident_bytes > limit_bytes {
         return Ok(None);
     }
-    let projected = projection.ordered_entries().collect::<BTreeSet<_>>();
     let mut request_ids = BTreeSet::new();
     let mut attempt_ids = BTreeSet::new();
     let mut approval_ids = BTreeSet::new();
@@ -417,7 +443,7 @@ pub(super) async fn load_tool_conversation_entries(
             .iter()
             .map(|id: &signalbox_domain::ToolRequestId| id.into_uuid())
             .collect::<Vec<_>>(),
-        container_bytes,
+        resident_bytes,
         limit_bytes,
     )
     .await?
@@ -547,7 +573,7 @@ async fn tool_evidence_fits_before_loading(
     requests: &[Uuid],
     attempts: &[Uuid],
     approvals: &[Uuid],
-    container_bytes: usize,
+    resident_bytes: usize,
     limit_bytes: usize,
 ) -> Result<bool, ModelCallRepositoryError> {
     let content_bytes: Decimal = sqlx::query_scalar(
@@ -573,7 +599,7 @@ async fn tool_evidence_fits_before_loading(
     .fetch_one(connection)
     .await?;
     let content_bytes = usize::try_from(content_bytes).unwrap_or(usize::MAX);
-    Ok(container_bytes.saturating_add(content_bytes) <= limit_bytes)
+    Ok(resident_bytes.saturating_add(content_bytes) <= limit_bytes)
 }
 
 pub(super) fn map_tool_evidence_error(
@@ -896,6 +922,90 @@ mod preflight_tests {
                 .await?
             );
         }
+        let resident_text = signalbox_domain::AssistantText::try_new(String::from("resident ☃"))
+            .expect("nonempty fixture text");
+        let payload = SemanticTranscriptEntryPayload::AssistantText {
+            producing_call: ModelCallId::from_uuid(Uuid::from_u128(9)),
+            value: resident_text,
+        };
+        let source = SemanticTranscriptEntryRef::from_source(
+            SessionId::from_uuid(Uuid::from_u128(4)),
+            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(5)),
+        );
+        let resident = signalbox_application::projected_frontier_content_bytes(
+            [(source, &payload)],
+            |_| None,
+            std::iter::empty(),
+        );
+        assert_eq!(resident, 12);
+        assert!(
+            tool_evidence_fits_before_loading(
+                &mut connection,
+                &[request],
+                &[attempt],
+                &[request],
+                resident,
+                31
+            )
+            .await?
+        );
+        assert!(
+            !tool_evidence_fits_before_loading(
+                &mut connection,
+                &[request],
+                &[attempt],
+                &[request],
+                resident,
+                30
+            )
+            .await?
+        );
+
+        sqlx::raw_sql(
+            "DROP TABLE tool_request; DROP TABLE tool_approval_decision;
+             CREATE FUNCTION pg_temp.forbidden_payload() RETURNS text STABLE LANGUAGE plpgsql AS $$
+             BEGIN RAISE EXCEPTION 'tool payload was materialized'; END; $$;
+             CREATE TEMP TABLE request_facts (request_id uuid, session_id uuid, turn_id uuid, producing_model_call_id uuid, inadmissible_reason text);
+             CREATE TEMP VIEW tool_request AS SELECT facts.*, pg_temp.forbidden_payload() AS arguments_text FROM request_facts AS facts;
+             CREATE TEMP TABLE decision_facts (request_id uuid, decision_kind text);
+             CREATE TEMP VIEW tool_approval_decision AS SELECT facts.*, pg_temp.forbidden_payload() AS denial_reason, pg_temp.forbidden_payload() AS rationale FROM decision_facts AS facts;",
+        ).execute(&mut *connection).await?;
+        let owner = Uuid::from_u128(6);
+        let turn = Uuid::from_u128(7);
+        let call = Uuid::from_u128(8);
+        sqlx::query("INSERT INTO request_facts VALUES ($1, $2, $3, $4, 'not callable')")
+            .bind(request)
+            .bind(owner)
+            .bind(turn)
+            .bind(call)
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("INSERT INTO decision_facts VALUES ($1, 'deny')")
+            .bind(request)
+            .execute(&mut *connection)
+            .await?;
+        let inadmissible =
+            super::super::live_turn::load_tool_inadmissibility_facts(&mut connection, &[request])
+                .await?;
+        assert_eq!(
+            inadmissible,
+            vec![signalbox_domain::ToolInadmissibleCorrelation {
+                request: signalbox_domain::ToolRequestId::from_uuid(request),
+                session: SessionId::from_uuid(owner),
+                turn: signalbox_domain::TurnId::from_uuid(turn),
+                producing_call: ModelCallId::from_uuid(call),
+                inadmissible: true,
+            }]
+        );
+        let denied =
+            super::super::live_turn::load_tool_denial_facts(&mut connection, &[request]).await?;
+        assert_eq!(
+            denied,
+            vec![signalbox_domain::ToolDenialCorrelation {
+                request: signalbox_domain::ToolRequestId::from_uuid(request),
+                denied: true,
+            }]
+        );
         drop(connection);
         pool.close().await;
         drop(container);
