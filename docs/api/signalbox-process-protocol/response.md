@@ -382,6 +382,7 @@ pub enum ServerMessage {
         entry_count: CanonicalU64,
     },
     TranscriptSnapshotStart {
+        repository_watch: option::Option<RepositoryWatchProvenance>,
         session_id: CanonicalUuid,
         cursor: CanonicalU64,
         runner: option::Option<RunnerProjection>,

@@ -104,11 +104,12 @@ fn server_message_family_has_exact_closed_wire_shapes() -> Result<(), Box<dyn st
     assert_server_message_round_trip(
         request(6)?,
         ServerMessage::TranscriptSnapshotStart {
+            repository_watch: None,
             session_id: uuid(1),
             cursor: CanonicalU64::new(5),
             runner: None,
         },
-        r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"5","runner":null}"#,
+        r#"{"type":"transcript_snapshot_start","repository_watch":null,"session_id":"00000000-0000-0000-0000-000000000001","cursor":"5","runner":null}"#,
     )?;
     assert_server_message_round_trip(
         request(7)?,
@@ -500,6 +501,7 @@ fn runner_projection_round_trips_complete_current_loss() -> Result<(), Box<dyn s
     assert_server_message_round_trip(
         request(1)?,
         ServerMessage::TranscriptSnapshotStart {
+            repository_watch: None,
             session_id: uuid(1),
             cursor: CanonicalU64::new(9),
             runner: Some(RunnerProjection::try_new(
@@ -520,7 +522,7 @@ fn runner_projection_round_trips_complete_current_loss() -> Result<(), Box<dyn s
                 RunnerProjectionState::RunnerLost,
             )?),
         },
-        r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"9","runner":{"selector":{"type":"capability_class","name":"linux.workspace"},"runner_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":"readonly","repository":"signalbox","working_directory":"workspace/project","connection_health":null,"state":"runner_lost"}}"#,
+        r#"{"type":"transcript_snapshot_start","repository_watch":null,"session_id":"00000000-0000-0000-0000-000000000001","cursor":"9","runner":{"selector":{"type":"capability_class","name":"linux.workspace"},"runner_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":"readonly","repository":"signalbox","working_directory":"workspace/project","connection_health":null,"state":"runner_lost"}}"#,
     )
 }
 
@@ -529,6 +531,7 @@ fn runner_projection_round_trips_pinned_suspect_health() -> Result<(), Box<dyn s
     assert_server_message_round_trip(
         request(1)?,
         ServerMessage::TranscriptSnapshotStart {
+            repository_watch: None,
             session_id: uuid(1),
             cursor: CanonicalU64::new(9),
             runner: Some(RunnerProjection::try_new(
@@ -543,7 +546,7 @@ fn runner_projection_round_trips_pinned_suspect_health() -> Result<(), Box<dyn s
                 RunnerProjectionState::Pinned,
             )?),
         },
-        r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"9","runner":{"selector":{"type":"runner","runner_id":"00000000-0000-0000-0000-000000000002"},"runner_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":null,"repository":null,"working_directory":null,"connection_health":"suspect","state":"pinned"}}"#,
+        r#"{"type":"transcript_snapshot_start","repository_watch":null,"session_id":"00000000-0000-0000-0000-000000000001","cursor":"9","runner":{"selector":{"type":"runner","runner_id":"00000000-0000-0000-0000-000000000002"},"runner_id":"00000000-0000-0000-0000-000000000002","placement_revision":"3","sandbox_profile":"workspace-restricted","credential_profile":null,"repository":null,"working_directory":null,"connection_health":"suspect","state":"pinned"}}"#,
     )
 }
 

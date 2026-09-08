@@ -2388,6 +2388,7 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
     () =>
       decodeWebSessionTimelineDescriptor({
         session_id: "00000000-0000-0000-0000-000000000991",
+        repository_watch: null,
         sizes: {
           item_count: "18446744073709551616",
           projected_text_bytes: "0",
@@ -3044,6 +3045,7 @@ test("generated descriptor decoder rejects an invalid session ID", () => {
     () =>
       decodeWebSessionTimelineDescriptor({
         session_id: "not-a-uuid",
+        repository_watch: null,
         sizes: {
           item_count: "1",
           projected_text_bytes: "0",
@@ -3091,4 +3093,22 @@ test("rates retain the disposition of a session closed with a live goal", async 
   const { decodeWebSessionRates } = await import("../../../clients/web/src/generated/web-contract.mjs");
   const fixture = JSON.parse(await readFile(new URL("./fixtures/session-closed-rates.json", import.meta.url), "utf8"));
   assert.equal(decodeWebSessionRates(fixture).sessions[0].goal_disposition, "session_closed");
+});
+
+test("repository watch provenance preserves exact ledger identities and rejects unknown events", () => {
+  const descriptor = {
+    session_id: "00000000-0000-0000-0000-000000000001",
+    repository_watch: {
+      dispatch_id: "00000000-0000-0000-0000-000000000063",
+      event_id: "00000000-0000-0000-0000-000000000064",
+      repository: "signalbox/example", rule_id: "review-response", rule_revision: "3",
+      action_ordinal: "2", event_kind: "review_submitted", pull_request: "81",
+    },
+    sizes: { item_count: "1", projected_text_bytes: "0", projected_structured_bytes: "96", referenced_blob_count: "0", referenced_blob_bytes: "0" },
+    first_address: { event_sequence: "1" }, latest_address: { event_sequence: "1" },
+    work: { active_turn_count: "0", queued_turn_count: "0" }, observed_through: "1",
+  };
+  assert.deepEqual(decodeWebSessionTimelineDescriptor(descriptor).repository_watch, descriptor.repository_watch);
+  assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, event_kind: "unknown" } }));
+  assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, action_ordinal: "0" } }));
 });

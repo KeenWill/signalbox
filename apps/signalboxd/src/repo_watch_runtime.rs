@@ -139,6 +139,17 @@ pub(crate) struct PreparedRepositoryWatchReload {
 }
 
 impl RepositoryWatchRuntime {
+    pub(crate) async fn session_origin(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> Result<
+        Option<signalbox_module_repo_watch_v2::RetainedDispatchAction>,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        let store = self.state.lock().await.store.clone();
+        store.reaction_origin_for_session(session).await
+    }
+
     /// Reconciles the configured revision set before starting repository tasks.
     pub async fn new(
         module_pool: PgPool,

@@ -356,6 +356,8 @@ impl PlannedCommand {
 /// Retained origin of the create action that produced one session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetainedDispatchAction {
+    event_kind: RepoWatchEventKindNameV1,
+    pull_request: Option<PullRequestNumber>,
     dispatch: RepoWatchDispatchId,
     action_ordinal: NonZeroU64,
     repository: RepositorySlug,
@@ -365,6 +367,16 @@ pub struct RetainedDispatchAction {
 }
 
 impl RetainedDispatchAction {
+    /// Returns the retained triggering event kind.
+    pub const fn event_kind(&self) -> RepoWatchEventKindNameV1 {
+        self.event_kind
+    }
+
+    /// Returns the triggering pull request, absent for branch events.
+    pub const fn pull_request(&self) -> Option<PullRequestNumber> {
+        self.pull_request
+    }
+
     /// Returns the committed dispatch reference.
     pub const fn dispatch(&self) -> RepoWatchDispatchId {
         self.dispatch
@@ -2292,10 +2304,20 @@ impl RepoWatchStore {
         &self,
         session: SessionId,
     ) -> Result<Option<RetainedDispatchAction>, StoreError> {
-        type OriginRow = (Uuid, Decimal, String, String, Decimal, Uuid);
+        type OriginRow = (
+            Uuid,
+            Decimal,
+            String,
+            String,
+            Decimal,
+            Uuid,
+            String,
+            Option<Decimal>,
+        );
         let rows: Vec<OriginRow> = sqlx::query_as(
             "SELECT ledger.dispatch_ref, ledger.action_ordinal, ledger.repository,
-                    ledger.rule_id, ledger.rule_revision, ledger.event_id
+                    ledger.rule_id, ledger.rule_revision, ledger.event_id,
+                    retained_event.event_kind, retained_event.pull_request_number
                FROM dispatch_ledger AS ledger
                JOIN rule_revision AS retained_rule
                  ON retained_rule.repository = ledger.repository
@@ -2319,7 +2341,16 @@ impl RepoWatchStore {
                 Err(StoreError::InvalidRetainedCommand)
             };
         };
-        let (dispatch, ordinal, repository, rule_id, rule_revision, event_id) = row;
+        let (
+            dispatch,
+            ordinal,
+            repository,
+            rule_id,
+            rule_revision,
+            event_id,
+            event_kind,
+            pull_request,
+        ) = row;
         let action_ordinal = ordinal
             .to_u64()
             .and_then(NonZeroU64::new)
@@ -2330,6 +2361,17 @@ impl RepoWatchStore {
             .and_then(RepoWatchRuleVersion::new)
             .ok_or(StoreError::InvalidRetainedCommand)?;
         Ok(Some(RetainedDispatchAction {
+            event_kind: event_kind_from_storage(event_kind)
+                .ok_or(StoreError::InvalidRetainedCommand)?,
+            pull_request: pull_request
+                .map(|number| {
+                    number
+                        .to_u64()
+                        .and_then(NonZeroU64::new)
+                        .map(PullRequestNumber::new)
+                        .ok_or(StoreError::InvalidRetainedCommand)
+                })
+                .transpose()?,
             dispatch: RepoWatchDispatchId::from_uuid(*dispatch),
             action_ordinal,
             repository: RepositorySlug::try_new(repository.clone())
@@ -2706,6 +2748,29 @@ async fn advance_evaluation(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+fn event_kind_from_storage(value: &str) -> Option<RepoWatchEventKindNameV1> {
+    match value {
+        "pull_request_opened" => Some(RepoWatchEventKindNameV1::PullRequestOpened),
+        "pull_request_closed" => Some(RepoWatchEventKindNameV1::PullRequestClosed),
+        "pull_request_merged" => Some(RepoWatchEventKindNameV1::PullRequestMerged),
+        "head_changed" => Some(RepoWatchEventKindNameV1::HeadChanged),
+        "mergeable_state_changed" => Some(RepoWatchEventKindNameV1::MergeableStateChanged),
+        "checks_completed" => Some(RepoWatchEventKindNameV1::ChecksCompleted),
+        "check_run_completed" => Some(RepoWatchEventKindNameV1::CheckRunCompleted),
+        "branch_workflow_run_completed" => {
+            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        }
+        "review_submitted" => Some(RepoWatchEventKindNameV1::ReviewSubmitted),
+        "thread_opened" => Some(RepoWatchEventKindNameV1::ThreadOpened),
+        "thread_resolved" => Some(RepoWatchEventKindNameV1::ThreadResolved),
+        "labeled" => Some(RepoWatchEventKindNameV1::Labeled),
+        "unlabeled" => Some(RepoWatchEventKindNameV1::Unlabeled),
+        "base_advanced" => Some(RepoWatchEventKindNameV1::BaseAdvanced),
+        "reaction_changed" => Some(RepoWatchEventKindNameV1::ReactionChanged),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

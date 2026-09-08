@@ -1162,6 +1162,7 @@ where
                     session_id,
                     &services.pool,
                     &services.model_configuration,
+                    services.configuration_reload.as_ref(),
                     snapshot_permit,
                 )
                 .await
@@ -1180,6 +1181,7 @@ where
                     session_id,
                     &services.pool,
                     &services.model_configuration,
+                    services.configuration_reload.as_ref(),
                     &services.fanouts,
                     shutdown,
                     snapshot_permit,

@@ -504,6 +504,9 @@ advertised limits, with exact byte accounting and continuation matching.
 Pagination resets when the session, window bounds, or observation cursor
 changes; the response bound includes their attachment references.
 
+The session timeline descriptor includes nullable repository-watch provenance
+resolved from the retained dispatch ledger.
+
 The session timeline descriptor reports the first and latest addresses, the item
 and projected-size facts, the active and queued turn counts, and the observation
 cursor, all from one snapshot. The timeline sequence is allocated once across

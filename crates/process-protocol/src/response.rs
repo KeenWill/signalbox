@@ -722,6 +722,9 @@ pub enum ServerMessage {
     },
     /// Begins one transcript snapshot sequence.
     TranscriptSnapshotStart {
+        /// Retained repository-watch origin, absent for other creation causes.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        repository_watch: Option<crate::RepositoryWatchProvenance>,
         /// Selected session.
         session_id: CanonicalUuid,
         /// Snapshot outbox cursor.

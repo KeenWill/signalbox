@@ -281,7 +281,10 @@ with a persisted validator. After a complete accepted observation, cache
 retention removes untraversed resources and terminal pull-request pages;
 unchanged responses retain their traversed pages.
 
-## Planned
-
-Repository-watch dispatch provenance is planned in the
-[repository watch design](../design/repo-watch.md).
+Dispatched sessions retain the repository-watch creation cause, module actor,
+and dispatch reference. Their provenance resolves the existing dispatch ledger
+row and its created session, rule revision, event, action ordinal, repository,
+and optional pull request, without a second stored copy of the dispatch or
+session identity. Transcript snapshots and browser session descriptors project
+that retained origin; the browser workspace displays it. Held creation submits
+no initial input and creates no turn.

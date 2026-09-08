@@ -17,6 +17,7 @@ use crate::{connection::Connection, error::ClientError};
 pub(crate) struct TranscriptSnapshot {
     cursor: u64,
     runner: Option<RunnerProjection>,
+    repository_watch: Option<signalbox_process_protocol::RepositoryWatchProvenance>,
     spool: File,
 }
 
@@ -27,6 +28,12 @@ impl TranscriptSnapshot {
 
     pub(crate) const fn runner(&self) -> Option<&RunnerProjection> {
         self.runner.as_ref()
+    }
+
+    pub(crate) fn repository_watch(
+        &self,
+    ) -> Option<&signalbox_process_protocol::RepositoryWatchProvenance> {
+        self.repository_watch.as_ref()
     }
 
     pub(crate) fn replay(&mut self) -> Result<SnapshotReplay<'_>, ClientError> {
@@ -115,6 +122,7 @@ impl TranscriptSnapshot {
         Ok(Self {
             cursor,
             runner,
+            repository_watch: None,
             spool,
         })
     }
@@ -212,12 +220,15 @@ pub(crate) async fn read_snapshot(
     connection: &mut Connection,
     expected_session: CanonicalUuid,
 ) -> Result<TranscriptSnapshot, ClientError> {
-    let (session_id, cursor, runner) = match connection.message().await? {
+    let (session_id, cursor, runner, repository_watch) = match connection.message().await? {
         ServerMessage::TranscriptSnapshotStart {
             session_id,
             cursor,
             runner,
-        } if session_id == expected_session => (session_id, cursor.value(), runner),
+            repository_watch,
+        } if session_id == expected_session => {
+            (session_id, cursor.value(), runner, repository_watch)
+        }
         ServerMessage::Error {
             code,
             message,
@@ -367,6 +378,7 @@ pub(crate) async fn read_snapshot(
                 return Ok(TranscriptSnapshot {
                     cursor,
                     runner,
+                    repository_watch,
                     spool,
                 });
             }

@@ -41,6 +41,7 @@ fn snapshot(
 ) -> io::Result<Vec<u8>> {
     let turn_count = u64::from(turn.is_some());
     let mut messages = vec![ServerMessage::TranscriptSnapshotStart {
+        repository_watch: None,
         session_id,
         cursor: CanonicalU64::new(1),
         runner: None,
