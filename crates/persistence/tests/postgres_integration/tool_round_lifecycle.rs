@@ -725,6 +725,149 @@ async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tool_continuation_reserves_steering_before_a_colliding_result()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let seed = 0x1375_0000;
+    let (first, first_repository) = completed_continuation_fixture(&pool, seed).await?;
+    let (second, second_repository) = completed_continuation_fixture(&pool, seed + 0x100).await?;
+    let pending = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x40));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x41)),
+                first.session,
+                UserContent::try_text("pending steering".to_owned()).unwrap(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: first.turn,
+                },
+            ),
+            pending,
+            None,
+        )
+        .await?;
+    let shared_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x42));
+    let candidates = |offset, result_entry| {
+        signalbox_application::ToolContinuationIdentities::new(
+            vec![result_entry],
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + offset + 0x27)),
+            ModelCallId::from_uuid(Uuid::from_u128(seed + offset + 0x28)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + offset + 0x29)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + offset + 0x2a)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + offset + 0x2b)),
+        )
+    };
+    let first_candidates = candidates(
+        0,
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x26)),
+    );
+    let first_call = first_candidates.call();
+    let second_candidates = candidates(0x100, shared_entry);
+    let (validation, reconstruction) =
+        lock_tool_continuation_frontier_reads(&pool, first_candidates.result_frontier()).await?;
+    let allocator = lock_tool_continuation_outbox_allocator(&pool).await?;
+    let first_preparation = tokio::spawn(async move {
+        let mut generated = 0;
+        let result = first_repository
+            .tool_loop_repository()
+            .prepare_continuation(
+                first.session,
+                first.turn,
+                first.call,
+                first_candidates,
+                |input| {
+                    assert_eq!(input, pending);
+                    generated += 1;
+                    (
+                        shared_entry,
+                        TurnId::from_uuid(Uuid::from_u128(seed + 0x43)),
+                    )
+                },
+            )
+            .await;
+        assert_eq!(generated, 1, "the reserved steering candidate is reused");
+        result
+    });
+    assert!(frontier_probe_reached(&pool, 137501).await?);
+    let second_preparation = tokio::spawn(async move {
+        second_repository
+            .tool_loop_repository()
+            .prepare_continuation(
+                second.session,
+                second.turn,
+                second.call,
+                second_candidates,
+                |_| panic!("second fixture has no pending steering"),
+            )
+            .await
+    });
+    assert!(blocked_backends_reached(&pool, 2).await?);
+    assert!(
+        tool_continuation_order_guard_is_available(&pool).await?,
+        "the colliding result waits for the steering reservation before the guard"
+    );
+    validation.rollback().await?;
+    assert!(frontier_probe_reached(&pool, 137502).await?);
+    reconstruction.rollback().await?;
+    allocator.rollback().await?;
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), first_preparation).await???,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(first_call),
+    );
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), second_preparation).await??,
+        Err(signalbox_persistence::tool_loop::ToolLoopRepositoryError::IdentityCollision)
+    ));
+    Ok(())
+}
+
+async fn completed_continuation_fixture(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<(RestartModelCallFixture, PostgresModelCallRepository), Box<dyn Error>> {
+    let (fixture, repository, _, request) =
+        checkpoint_confirmed_tool_round(pool, seed, "current_time", "{}").await?;
+    let tools = repository.tool_loop_repository();
+    tools
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tools
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tools
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    tools
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new("ok".to_owned()).unwrap(),
+                    ),
+                }),
+        )
+        .await?;
+    Ok((fixture, repository))
+}
+
 /// A turn-state check does not rescan immutable historical tool-round
 /// frontiers; the round-specific validator still owns that exact evidence.
 #[tokio::test(flavor = "multi_thread")]

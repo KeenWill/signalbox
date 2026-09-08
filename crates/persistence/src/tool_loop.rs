@@ -1360,12 +1360,34 @@ impl PostgresToolLoopRepository {
                         "tool batch is not ready for continuation",
                     )
                 })?;
+                let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT accepted_input_id FROM accepted_input
+                      WHERE session_id = $1 AND expected_active_turn_id = $2
+                        AND disposition_kind = 'pending_steering'
+                      ORDER BY acceptance_position",
+                )
+                .bind(session.into_uuid())
+                .bind(turn.into_uuid())
+                .fetch_all(&mut *transaction)
+                .await?;
+                let steering_candidates = pending_inputs
+                    .into_iter()
+                    .map(|input| {
+                        let input = signalbox_domain::AcceptedInputId::from_uuid(input);
+                        (input, next_steering(input))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
                 crate::model_execution::reserve_frontier_write_identities(
                     &mut transaction,
                     identities
                         .result_entries()
                         .iter()
                         .map(|entry| entry.into_uuid())
+                        .chain(
+                            steering_candidates
+                                .values()
+                                .map(|(entry, _)| entry.into_uuid()),
+                        )
                         .chain([
                             identities.result_frontier().into_uuid(),
                             identities.steering_frontier().into_uuid(),
@@ -1458,7 +1480,7 @@ impl PostgresToolLoopRepository {
                     identities.call(),
                     identities.target_failure().clone(),
                     identities.steering_frontier(),
-                    &mut next_steering,
+                    steering_candidates,
                 )
                 .await
                 .map_err(map_model_call_error)?;
