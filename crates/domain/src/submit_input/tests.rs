@@ -4045,3 +4045,25 @@ fn preparation_rejects_a_cross_wired_session() {
     );
     assert_eq!(error.command(), &command);
 }
+
+#[test]
+fn program_submit_replay_compares_the_issuing_run_and_excludes_command_identity() {
+    use crate::{ProgramRunId, ProgramSessionCapability};
+    // These run values are arbitrary fixture identities.
+    let capability = ProgramSessionCapability::reconstitute(ProgramRunId::from_uuid(
+        uuid::Uuid::from_u128(1),
+    ));
+    let other = ProgramSessionCapability::reconstitute(ProgramRunId::from_uuid(
+        uuid::Uuid::from_u128(2),
+    ));
+    let user = start_command(1, "program input", 1);
+    let program = |id, capability| SubmitInput::new_program(
+        command_id(id), user.session(), user.content().clone(), user.delivery(), capability,
+    );
+    assert_ne!(program(1, capability), user);
+    assert_ne!(program(1, capability), program(1, other));
+    assert_eq!(program(1, capability), program(2, capability));
+    assert_eq!(hash(&program(1, capability)), hash(&program(2, capability)));
+    assert_ne!(hash(&program(1, capability)), hash(&user));
+    assert_ne!(hash(&program(1, capability)), hash(&program(1, other)));
+}

@@ -4,7 +4,7 @@
 //! This value records agency only; it grants no lifecycle, authentication,
 //! authorization, or approval authority.
 
-use crate::{ToolRequestId, TurnId};
+use crate::{ProgramRunId, ToolRequestId, TurnId};
 
 /// The initiating agency of a durable command or attributed transition.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -18,6 +18,11 @@ pub enum Actor {
         /// The turn whose model output acted.
         turn: TurnId,
     },
+    /// Input issued through the host-side session capability of one verified program run.
+    Program {
+        /// The verified issuing run; this reference confers no authority.
+        run: ProgramActor,
+    },
     /// The startup recovery scan acting under its accepted authority.
     Recovery,
     /// Agency exercised by execution of one exact tool request.
@@ -25,6 +30,46 @@ pub enum Actor {
         /// The tool request whose execution acted.
         request: ToolRequestId,
     },
+}
+
+/// A verified reference to an issuing run, carrying provenance and no authority.
+///
+/// ```compile_fail
+/// use signalbox_domain::{ProgramActor, ProgramRunId};
+/// fn forge(run: ProgramRunId) { let _ = ProgramActor { run }; }
+/// ```
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ProgramActor {
+    run: ProgramRunId,
+}
+
+impl ProgramActor {
+    /// Returns the exact issuing run.
+    pub const fn run(self) -> ProgramRunId {
+        self.run
+    }
+}
+
+/// The host-side session capability's attribution for one retained run.
+///
+/// This value grants no authentication, lifecycle, approval, or execution authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProgramSessionCapability {
+    run: ProgramRunId,
+}
+
+impl ProgramSessionCapability {
+    /// Reconstitutes the host capability after storage verifies the retained run reference.
+    pub const fn reconstitute(run: ProgramRunId) -> Self {
+        Self { run }
+    }
+
+    /// Fixes input attribution to this capability's run.
+    pub const fn actor(self) -> Actor {
+        Actor::Program {
+            run: ProgramActor { run: self.run },
+        }
+    }
 }
 
 #[cfg(test)]

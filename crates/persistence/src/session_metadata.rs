@@ -648,7 +648,7 @@ async fn replace_current_snapshot(
     command: &ReplaceSessionMetadata,
     updated_at: SessionMetadataUpdatedAt,
 ) -> Result<(), SessionMetadataRepositoryError> {
-    let actor = encode_actor(command.actor());
+    let actor = encode_actor(command.actor())?;
     sqlx::query(
         "INSERT INTO session_metadata
             (session_id, source_command_id, title, archived, updated_at, actor_kind,
@@ -720,7 +720,7 @@ async fn insert_typed_record(
     updated_at: Option<SessionMetadataUpdatedAt>,
 ) -> Result<(), SessionMetadataRepositoryError> {
     let command = prepared.command();
-    let actor = encode_actor(command.actor());
+    let actor = encode_actor(command.actor())?;
     let applied = matches!(prepared.result(), ReplaceSessionMetadataResult::Applied(_));
     let (result_kind, rejection_kind) = if applied {
         (APPLIED, None)
@@ -1160,8 +1160,11 @@ struct EncodedActor {
     tool_request: Option<Uuid>,
 }
 
-fn encode_actor(actor: Actor) -> EncodedActor {
-    match actor {
+fn encode_actor(actor: Actor) -> Result<EncodedActor, SessionMetadataRepositoryError> {
+    Ok(match actor {
+        Actor::Program { .. } => {
+            return Err(SessionMetadataCorruption::Inconsistent("metadata actor").into());
+        }
         Actor::User => EncodedActor {
             kind: "user",
             turn: None,
@@ -1187,7 +1190,7 @@ fn encode_actor(actor: Actor) -> EncodedActor {
             turn: None,
             tool_request: Some(request.into_uuid()),
         },
-    }
+    })
 }
 
 fn decode_actor(
@@ -1312,7 +1315,7 @@ mod tests {
 
     #[track_caller]
     fn assert_actor_storage_round_trip(actor: Actor) {
-        let encoded = encode_actor(actor);
+        let encoded = encode_actor(actor).expect("metadata actor is supported");
         let decoded = decode_actor(
             encoded.kind.to_owned(),
             encoded.turn,
@@ -1324,7 +1327,7 @@ mod tests {
     }
 
     #[test]
-    fn actor_storage_round_trips_every_variant() {
+    fn actor_storage_round_trips_every_metadata_variant() {
         assert_actor_storage_round_trip(Actor::User);
         assert_actor_storage_round_trip(Actor::Core);
         assert_actor_storage_round_trip(Actor::Model {
@@ -1339,7 +1342,10 @@ mod tests {
     #[test]
     fn invalid_actor_shapes_fail_closed() {
         let error = decode_actor(
-            encode_actor(Actor::User).kind.to_owned(),
+            encode_actor(Actor::User)
+                .expect("user actor is supported")
+                .kind
+                .to_owned(),
             Some(Uuid::from_u128(1)),
             None,
             "fixture actor",

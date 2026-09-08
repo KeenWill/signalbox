@@ -109,7 +109,7 @@ impl LifecycleActor {
     pub const fn classify(actor: Actor) -> Self {
         match actor {
             Actor::User => Self::Operator,
-            Actor::Core => Self::Core {
+            Actor::Core | Actor::Program { .. } => Self::Core {
                 agency: CoreAgency::Daemon,
             },
             Actor::Recovery => Self::Watchdog,

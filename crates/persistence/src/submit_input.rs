@@ -53,7 +53,7 @@ use crate::{
     session::SessionCorruption,
 };
 
-const STORAGE_VERSION: i16 = 3;
+const STORAGE_VERSION: i16 = 4;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 
@@ -635,7 +635,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, SubmitInputRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if actual == STORAGE_VERSION {
+    if matches!(actual, 3 | 4) {
         Ok(actual)
     } else {
         Err(SubmitInputCorruption::Unsupported {
@@ -675,7 +675,30 @@ fn decode_actor(
     kind: String,
     turn: Option<Uuid>,
     tool_request: Option<Uuid>,
+    program_run: Option<Uuid>,
+    verified_program_run: Option<Uuid>,
+    version: i16,
 ) -> Result<Actor, SubmitInputRepositoryError> {
+    if program_run.is_some() || verified_program_run.is_some() {
+        return match (
+            kind.as_str(),
+            turn,
+            tool_request,
+            program_run,
+            verified_program_run,
+            version,
+        ) {
+            ("program", None, None, Some(run), Some(verified), 4) if run == verified => {
+                Ok(signalbox_domain::ProgramSessionCapability::reconstitute(
+                    signalbox_domain::ProgramRunId::from_uuid(run),
+                )
+                .actor())
+            }
+            _ => Err(
+                SubmitInputCorruption::Inconsistent("program actor reference or version").into(),
+            ),
+        };
+    }
     match (kind.as_str(), turn, tool_request) {
         ("user", None, None) => Ok(Actor::User),
         ("core", None, None) => Ok(Actor::Core),
@@ -686,7 +709,7 @@ fn decode_actor(
         ("tool", None, Some(request)) => Ok(Actor::Tool {
             request: ToolRequestId::from_uuid(request),
         }),
-        ("user" | "model" | "recovery" | "tool", _, _) => {
+        ("user" | "core" | "model" | "recovery" | "tool" | "program", _, _) => {
             Err(SubmitInputCorruption::Inconsistent("actor fields").into())
         }
         _ => Err(SubmitInputCorruption::Unsupported {

@@ -55,7 +55,7 @@ pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
     SteeringBinding, SteeringReclassificationReason,
 };
-pub use actor::Actor;
+pub use actor::{Actor, ProgramActor, ProgramSessionCapability};
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
 pub use blob::{
     BlobDerivation, BlobDerivationError, BlobDerivationProducer, BlobDigest, BlobDigestParseError,

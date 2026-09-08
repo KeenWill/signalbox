@@ -86,6 +86,34 @@ impl SubmitInput {
         }
     }
 
+    /// Constructs input attributed only to the verified host session capability.
+    pub const fn new_program(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        capability: crate::ProgramSessionCapability,
+    ) -> Self {
+        Self::from_recorded_fields(command_id, session, capability.actor(), content, delivery)
+    }
+
+    /// Reconstitutes canonical fields after storage validates their references and spelling.
+    pub const fn from_recorded_fields(
+        command_id: DurableCommandId,
+        session: SessionId,
+        actor: Actor,
+        content: UserContent,
+        delivery: DeliveryRequest,
+    ) -> Self {
+        Self {
+            command_id,
+            session,
+            actor,
+            content,
+            delivery,
+        }
+    }
+
     /// Constructs a daemon-core interrupt without model, tool, or user agency.
     pub const fn new_core_interrupt(
         command_id: DurableCommandId,

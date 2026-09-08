@@ -61,6 +61,10 @@ pub struct SubmitInputRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SubmitInputRequestKind {
     User(DeliveryRequest),
+    Program {
+        capability: signalbox_domain::ProgramSessionCapability,
+        delivery: DeliveryRequest,
+    },
     CoreContinuation(PerInputConfigurationChoices),
     CoreInterrupt {
         expected_active_turn: TurnId,
@@ -72,7 +76,7 @@ enum SubmitInputRequestKind {
 impl SubmitInputRequestKind {
     const fn delivery(&self) -> DeliveryRequest {
         match self {
-            Self::User(delivery) => *delivery,
+            Self::User(delivery) | Self::Program { delivery, .. } => *delivery,
             Self::CoreContinuation(configuration) => DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: *configuration,
             },
@@ -135,6 +139,26 @@ impl SubmitInputRequest {
             session,
             content,
             SubmitInputRequestKind::CoreContinuation(configuration),
+            None,
+        )
+    }
+
+    /// Validates input issued by the host-side session capability of a retained run.
+    pub fn try_new_program(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        capability: signalbox_domain::ProgramSessionCapability,
+    ) -> Result<Self, SubmitInputRequestError> {
+        Self::admit(
+            command_id,
+            session,
+            content,
+            SubmitInputRequestKind::Program {
+                capability,
+                delivery,
+            },
             None,
         )
     }
@@ -434,6 +458,10 @@ where
                     configuration,
                 )
             }
+            SubmitInputRequestKind::Program {
+                capability,
+                delivery,
+            } => DomainSubmitInput::new_program(command_id, session, content, delivery, capability),
             SubmitInputRequestKind::CoreInterrupt {
                 expected_active_turn,
                 descendant_scope,

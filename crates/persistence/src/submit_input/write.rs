@@ -238,11 +238,11 @@ pub(super) async fn insert_prepared_command(
              result_current_defaults_version, result_unknown_alias_id,
              result_selected_defaults_version, result_last_position,
              result_existing_interrupt_command_id,
-             result_attachment_digest, result_attachment_maximum_bytes)
+             result_attachment_digest, result_attachment_maximum_bytes, actor_program_run_id)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
              $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-             $24, $25, $26, $27, $28, $29, $30, $31)",
+             $24, $25, $26, $27, $28, $29, $30, $31, $32)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SUBMIT_INPUT_KIND)
@@ -275,6 +275,7 @@ pub(super) async fn insert_prepared_command(
     .bind(result.existing_interrupt_command)
     .bind(result.attachment_digest)
     .bind(result.attachment_maximum_bytes)
+    .bind(actor.program_run)
     .execute(&mut *connection)
     .await?;
 

@@ -35,7 +35,7 @@ impl CommandPrincipal {
             Actor::User => Self::Operator,
             Actor::Core => Self::Core,
             Actor::Recovery => Self::Watchdog,
-            Actor::Model { .. } | Actor::Tool { .. } => Self::Core,
+            Actor::Model { .. } | Actor::Tool { .. } | Actor::Program { .. } => Self::Core,
         }
     }
 

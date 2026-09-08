@@ -480,6 +480,9 @@ pub(super) fn decode_complete(
         required(&row, "actor_kind")?,
         row.try_get("actor_turn_id")?,
         row.try_get("actor_tool_request_id")?,
+        row.try_get("actor_program_run_id")?,
+        row.try_get("verified_actor_program_run_id")?,
+        typed_version,
     )?;
     let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
     let session = session_id_from_uuid(required(&row, "command_session_id")?);
@@ -496,27 +499,7 @@ pub(super) fn decode_complete(
         command_model_settings_override,
         "command delivery",
     )?;
-    let command = match (actor, delivery) {
-        (Actor::Core, DeliveryRequest::StartWhenNoActiveTurn { configuration }) => {
-            SubmitInput::new_core_continuation(command_id, session, content, configuration)
-        }
-        (
-            Actor::Core,
-            DeliveryRequest::Interrupt {
-                expected_active_turn,
-                descendant_scope,
-                configuration,
-            },
-        ) => SubmitInput::new_core_interrupt(
-            command_id,
-            session,
-            content,
-            expected_active_turn,
-            descendant_scope,
-            configuration,
-        ),
-        (_, delivery) => SubmitInput::new(command_id, session, content, delivery),
-    };
+    let command = SubmitInput::from_recorded_fields(command_id, session, actor, content, delivery);
 
     let result_kind: String = required(&row, "result_kind")?;
     let rejection_kind: Option<String> = row.try_get("rejection_kind")?;

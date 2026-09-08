@@ -73,6 +73,8 @@ pub(super) async fn load_complete_rows(
             typed.actor_kind,
             typed.actor_turn_id,
             typed.actor_tool_request_id,
+            typed.actor_program_run_id,
+            actor_program.run_id AS verified_actor_program_run_id,
             (
                 SELECT COALESCE(
                     jsonb_agg(
@@ -207,6 +209,8 @@ pub(super) async fn load_complete_rows(
          FROM durable_command AS registry
          LEFT JOIN submit_input_command AS typed
            ON typed.command_id = registry.command_id
+         LEFT JOIN program_run_journal_stream AS actor_program
+           ON actor_program.run_id = typed.actor_program_run_id
          LEFT JOIN accepted_input AS accepted
            ON accepted.accepted_input_id = typed.result_accepted_input_id
          LEFT JOIN queued_input_origin AS queued

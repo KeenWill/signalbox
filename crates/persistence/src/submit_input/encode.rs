@@ -58,31 +58,43 @@ pub(super) struct EncodedActor {
     pub(super) kind: &'static str,
     pub(super) turn: Option<Uuid>,
     pub(super) tool_request: Option<Uuid>,
+    pub(super) program_run: Option<Uuid>,
 }
 
 pub(super) fn encode_actor(actor: Actor) -> EncodedActor {
     match actor {
+        Actor::Program { run } => EncodedActor {
+            kind: "program",
+            turn: None,
+            tool_request: None,
+            program_run: Some(run.run().into_uuid()),
+        },
         Actor::User => EncodedActor {
+            program_run: None,
             kind: "user",
             turn: None,
             tool_request: None,
         },
         Actor::Core => EncodedActor {
+            program_run: None,
             kind: "core",
             turn: None,
             tool_request: None,
         },
         Actor::Model { turn } => EncodedActor {
+            program_run: None,
             kind: "model",
             turn: Some(turn.into_uuid()),
             tool_request: None,
         },
         Actor::Recovery => EncodedActor {
+            program_run: None,
             kind: "recovery",
             turn: None,
             tool_request: None,
         },
         Actor::Tool { request } => EncodedActor {
+            program_run: None,
             kind: "tool",
             turn: None,
             tool_request: Some(request.into_uuid()),
