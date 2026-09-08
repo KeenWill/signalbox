@@ -106,6 +106,9 @@ impl FileMediaProvider for ArchiveProvider {
                     let strength = match kind.probe_strength_with_complete_bytes(&complete) {
                         Ok(Some(strength)) => strength,
                         Ok(None) => return Ok(ProcessorProbeOutput::NoMatch),
+                        Err(ArchiveIssue::ZipScanWork) if kind != ArchiveKind::Zip => {
+                            return Ok(ProcessorProbeOutput::NoMatch);
+                        }
                         Err(issue) => {
                             return Ok(ProcessorProbeOutput::RecognizedMalformed {
                                 media_type: String::from(kind.media_type()),

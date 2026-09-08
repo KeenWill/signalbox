@@ -739,13 +739,16 @@ async fn zip_scan_exhaustion_preserves_its_reason_through_registry_inspection()
         footer[10..12].copy_from_slice(&1_u16.to_le_bytes());
         bytes.extend_from_slice(&footer);
     }
-    for source in [
-        MemorySource::unknown(bytes.clone())?,
-        MemorySource::new(bytes, "application/zip")?,
-    ] {
-        let inspection = inspect(&DirectProcessor::new(), &source).await?;
-        assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
-        assert_eq!(malformed_reason(&inspection)?, "zip_scan_work_limit");
+    for prefix in [&[][..], &b"\x1f\x8b\x08"[..], &b"\x28\xb5\x2f\xfd"[..]] {
+        bytes[..prefix.len()].copy_from_slice(prefix);
+        for source in [
+            MemorySource::unknown(bytes.clone())?,
+            MemorySource::new(bytes.clone(), "application/zip")?,
+        ] {
+            let inspection = inspect(&DirectProcessor::new(), &source).await?;
+            assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+            assert_eq!(malformed_reason(&inspection)?, "zip_scan_work_limit");
+        }
     }
     Ok(())
 }
