@@ -279,6 +279,10 @@ pub struct PreparedToolResultProjection {/* private */}
 impl PreparedToolResultProjection {
     pub fn entries(&self) -> &[SemanticTranscriptEntry];
     pub const fn snapshot(&self) -> &ResolvedContextFrontierSnapshot;
+    pub fn with_runner_placement_boundary(
+        self,
+        boundary: &RunnerPlacementBoundary,
+    ) -> result::Result<Self, RunnerDomainError>;
     pub fn into_parts(
         self,
     ) -> (

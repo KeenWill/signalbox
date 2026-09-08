@@ -103,7 +103,12 @@ pub(super) fn assemble_tool_round(
                 if !used_entries.insert(entry) || !used_requests.insert(request) {
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
                 }
-                if !initial_tool_approval_matches_posture(dangerous_tool_auto_approval, approval) {
+                if proposal.is_suppressed() != (approval == InitialToolApproval::RuntimeSafetyDeny)
+                    || !initial_tool_approval_matches_posture(
+                        dangerous_tool_auto_approval,
+                        approval,
+                    )
+                {
                     return Err(ModelCallClosureError::InitialToolApprovalMismatch);
                 }
                 let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)
@@ -308,7 +313,12 @@ pub(super) fn assemble_stopped_tool_round(
                 {
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
                 }
-                if !initial_tool_approval_matches_posture(dangerous_tool_auto_approval, approval) {
+                if proposal.is_suppressed() != (approval == InitialToolApproval::RuntimeSafetyDeny)
+                    || !initial_tool_approval_matches_posture(
+                        dangerous_tool_auto_approval,
+                        approval,
+                    )
+                {
                     return Err(ModelCallClosureError::InitialToolApprovalMismatch);
                 }
                 let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)

@@ -697,7 +697,7 @@ async fn run_session(
                 .map_err(|_| ProcessorFailure::Protocol)?;
             }
             WorkerFrame::ProbeResult { output } if expected == ExpectedOutput::Probe => {
-                break CompletedOutput::Probe(output);
+                break CompletedOutput::Probe(broker.probe_result(output));
             }
             WorkerFrame::ValidationResult { output } if expected == ExpectedOutput::Validation => {
                 break CompletedOutput::Validation(output);

@@ -23,6 +23,9 @@ pub enum SessionDeadlinePassOutcome {
     Armed {
         session: signalbox_domain::SessionId,
     },
+    Superseded {
+        session: signalbox_domain::SessionId,
+    },
     Retired {
         session: signalbox_domain::SessionId,
     },

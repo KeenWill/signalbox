@@ -2182,3 +2182,199 @@ async fn foreground_delegation_result_resumes_parked_tool_batch() -> Result<(), 
     drop(container);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_physical_observation_unblocks_staged_runner_replacement()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{
+        CommitModelCallObservationTransaction, ModelCallTerminalIdentityCandidates,
+    };
+    use signalbox_domain::{
+        CommandPrincipal, DescendantTerminationScope, ReplaceLostRunner, ReplaceLostRunnerResult,
+        RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
+        RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerId, RunnerSandboxProfile,
+        RunnerSelector, RunnerToolPermissionOverrides, RunnerWorkingDirectory,
+        SessionLifecycleCommand, SessionLifecycleOperation, SessionRunnerPlacement,
+        SessionRunnerPlacementRequest, StopStickiness, WorkingDirectorySelection,
+        WorkspaceRequirement,
+    };
+    use signalbox_persistence::{
+        runner_protocol::{
+            IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest,
+            RunnerConnectionTransition, RunnerProtocolStore, RunnerRecoveryOutcome,
+        },
+        session_lifecycle_command::SessionLifecycleCommandRepository,
+    };
+    let (_container, pool, _) = migrated_postgres().await?;
+    let fixture = authorize_delegated_model_call_fixture(&pool, 0x11fe_b000).await?;
+    let class = RunnerCapabilityClass::try_new(String::from("delegated-recovery"))
+        .expect("fixture capability is valid");
+    let store = RunnerProtocolStore::new(
+        pool.clone(),
+        RunnerCatalog::try_new([class.clone()], [], [], [], [RunnerSandboxProfile::Ambient])
+            .expect("fixture runner catalog is valid"),
+    );
+    let enrollment_request = || {
+        PristineRunnerEnrollmentRequest::new(
+            RunnerEnrollmentRequestId::from_uuid(Uuid::now_v7()),
+            IssuedRunnerEnrollmentIdentities::new(
+                RunnerEnrollmentId::from_uuid(Uuid::now_v7()),
+                RunnerId::from_uuid(Uuid::now_v7()),
+                RunnerAuthenticationId::from_uuid(Uuid::now_v7()),
+            ),
+            [class.clone()],
+            RunnerAdvertisement::new(
+                [class.clone()],
+                [],
+                [],
+                [],
+                [RunnerSandboxProfile::Ambient],
+                [],
+            ),
+        )
+    };
+    let predecessor = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    let connected = store
+        .open_connection(predecessor.identities().enrollment())
+        .await?;
+    store
+        .store_placement(
+            &SessionRunnerPlacement::new(
+                fixture.child,
+                SessionRunnerPlacementRequest {
+                    selector: RunnerSelector::Identity(predecessor.identities().runner()),
+                    working_directory: WorkingDirectorySelection::Exact(
+                        RunnerWorkingDirectory::try_new(String::from("/workspace/delegated"))
+                            .expect("fixture directory is absolute"),
+                    ),
+                    credential_profile: None,
+                    workspace: WorkspaceRequirement::None,
+                    sandbox: RunnerSandboxProfile::Ambient,
+                    permission_overrides: RunnerToolPermissionOverrides::try_new([])
+                        .expect("empty overrides are valid"),
+                },
+            ),
+            None,
+            None,
+        )
+        .await?;
+    store
+        .transition_connection(
+            predecessor.identities().enrollment(),
+            connected.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store.load_pending_connection_losses().await?[0];
+    store
+        .propagate_connection_loss_session(loss, fixture.child)
+        .await?;
+    let candidate = store
+        .enroll_pristine(enrollment_request())
+        .await?
+        .into_receipt();
+    store
+        .open_connection(candidate.identities().enrollment())
+        .await?;
+    sqlx::query("ALTER TABLE session_delegation DISABLE TRIGGER session_delegation_is_append_only")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE session_delegation SET policy_kind = 'bound', on_parent_stopped = 'stop', on_parent_cancelled = 'cancel' WHERE spawning_tool_request_id = $1")
+        .bind(fixture.spawning_request.into_uuid()).execute(&pool).await?;
+    sqlx::query("ALTER TABLE session_delegation ENABLE TRIGGER session_delegation_is_append_only")
+        .execute(&pool)
+        .await?;
+    SessionLifecycleCommandRepository::new(pool.clone())
+        .handle(
+            SessionLifecycleCommand::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                fixture.parent,
+                SessionLifecycleOperation::Stop {
+                    sticky: StopStickiness::Sticky,
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+            ),
+            CommandPrincipal::Operator,
+        )
+        .await?;
+    let call = fixture.authorized.observation_correlation().call();
+    let logical_frontier: Uuid = sqlx::query_scalar("SELECT terminal_frontier_id FROM session_delegation_logical_terminal WHERE child_session_id = $1")
+        .bind(fixture.child.into_uuid()).fetch_one(&pool).await?;
+    let state: (bool, String) = sqlx::query_as("SELECT turn.delegation_runtime_terminal, call.state_kind FROM turn_lifecycle AS turn JOIN model_call AS call USING (turn_id, session_id) WHERE call.model_call_id = $1")
+        .bind(call.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(state, (true, String::from("in_flight")));
+    let command = ReplaceLostRunner {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        session: fixture.child,
+        revision: None,
+    };
+    assert_eq!(
+        store.replace_lost_runner(command.clone()).await?,
+        RunnerRecoveryOutcome::Pending
+    );
+    assert_eq!(
+        store.resume_runner_replacement(command.command_id).await?,
+        RunnerRecoveryOutcome::Pending
+    );
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new(String::from("late result must stay inert"))
+                    .expect("late fixture result is nonempty"),
+            ],
+        });
+    let mut repository = fixture.repository.with_runner_recovery(store.clone());
+    assert_eq!(
+        repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::Pending
+    );
+    let identities = ModelCallTerminalIdentityCandidates::Exact(
+        ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+            vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+            SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+            ContextFrontierId::from_uuid(Uuid::now_v7()),
+        )),
+    );
+    for _ in 0..2 {
+        assert!(
+            repository
+                .commit_observation(
+                    fixture.child,
+                    observation.clone(),
+                    identities.clone(),
+                    |_| panic!("no steering in retired delegated turn")
+                )
+                .await?
+                .is_none()
+        );
+    }
+    assert_eq!(
+        repository
+            .reread_terminal_observation(fixture.child, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::DiscardedByLogicalTerminal
+    );
+    assert!(
+        matches!(store.replace_lost_runner(command).await?, RunnerRecoveryOutcome::Recorded(ReplaceLostRunnerResult::Replaced { runner, .. }) if runner == candidate.identities().runner())
+    );
+    let closure: (String, String, Uuid, i64) = sqlx::query_as("SELECT call.state_kind, call.terminal_disposition_kind, terminal.terminal_frontier_id, (SELECT count(*) FROM semantic_transcript_entry WHERE producing_model_call_id = $1) FROM model_call AS call JOIN session_delegation_logical_terminal AS terminal ON terminal.child_session_id = call.session_id AND terminal.child_turn_id = call.turn_id WHERE call.model_call_id = $1")
+        .bind(call.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(
+        closure,
+        (
+            String::from("terminal"),
+            String::from("cancelled"),
+            logical_frontier,
+            0
+        )
+    );
+    Ok(())
+}

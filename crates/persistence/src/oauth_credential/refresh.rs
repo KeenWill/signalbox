@@ -101,10 +101,13 @@ impl OauthDispatchLease {
             .as_ref()
             .ok_or(OauthCredentialRepositoryError::Corruption)?;
         let cause = stored.quarantine.unwrap_or(cause);
-        if cause == OauthQuarantineCause::CredentialHome {
-            sqlx::query("INSERT INTO credential_exclusion (kind, profile, origin, oauth_generation) VALUES ('profile_quarantine', $1, 'codex_home', $2)")
-                .bind(&self.profile).bind(stored.generation).execute(&mut *self.transaction).await?;
-        }
+        let origin = if cause == OauthQuarantineCause::CredentialHome {
+            "codex_home"
+        } else {
+            "oauth_refresh"
+        };
+        sqlx::query("INSERT INTO credential_exclusion (kind, profile, origin, oauth_generation) VALUES ('profile_quarantine', $1, $2, $3)")
+            .bind(&self.profile).bind(origin).bind(stored.generation).execute(&mut *self.transaction).await?;
         sqlx::query("INSERT INTO oauth_credential_failure (profile, generation, cause) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
             .bind(&self.profile).bind(stored.generation).bind(cause.spelling()).execute(&mut *self.transaction).await?;
         sqlx::query("UPDATE oauth_credential_authorization SET quarantined = true, quarantine_cause = $2 WHERE profile = $1")

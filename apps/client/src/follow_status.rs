@@ -14,7 +14,7 @@ pub(crate) async fn transcript(
     let mut connection = client
         .request(ClientRequest::ReadTranscript { session_id })
         .await?;
-    read_snapshot(&mut connection, session_id).await
+    read_snapshot(client, &mut connection, session_id).await
 }
 
 pub(crate) async fn follow(
@@ -29,7 +29,7 @@ pub(crate) async fn follow(
             let mut connection = client
                 .request(ClientRequest::FollowSession { session_id })
                 .await?;
-            let mut snapshot = read_snapshot(&mut connection, session_id).await?;
+            let mut snapshot = read_snapshot(client, &mut connection, session_id).await?;
             output.followed_snapshot(&mut snapshot, &mut displayed_entries)?;
             let mut observed_cursor = snapshot.cursor();
             loop {
@@ -42,6 +42,7 @@ pub(crate) async fn follow(
                         if cursor.value() <= observed_cursor {
                             continue;
                         }
+                        crate::credential_pool::validate_event(client, session_id, &event).await?;
                         observed_cursor = cursor.value();
                         output.event(observed_cursor, session_id, &event)?;
                         if let Some(selection) = terminal_snapshot_selection(&event, session_id) {
@@ -113,7 +114,12 @@ pub(crate) fn terminal_snapshot_selection(
             model_call_id: *model_call_id,
             terminal_entry_id: *completion_entry_id,
         }),
-        SessionEvent::TurnFailed {
+        SessionEvent::TurnCredentialPoolExhausted {
+            turn_id,
+            failure_entry_id,
+            ..
+        }
+        | SessionEvent::TurnFailed {
             turn_id,
             failure_entry_id,
             ..
