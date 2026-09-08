@@ -111,8 +111,13 @@ pub async fn scavenge_checkouts(
             continue;
         }
         let workspace_root = PathBuf::from(OsString::from_vec(checkout.location.workspace_root));
-        let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(&workspace_root)
-            .map_err(|_| RepositoryWatchCommandError::CheckoutRemovalFailed)?;
+        let Ok(roots) = crate::daemon_tools::SessionWorkspaceRoots::try_new(&workspace_root) else {
+            tracing::warn!(
+                reason = "checkout_workspace_root_rejected",
+                "repository-watch checkout removal skipped"
+            );
+            continue;
+        };
         let removal = tokio::task::spawn_blocking(move || {
             crate::repo_watch_checkout::remove(
                 &roots,

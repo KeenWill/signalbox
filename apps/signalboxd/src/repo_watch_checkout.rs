@@ -461,7 +461,7 @@ fn marker_matches(
     let marker = match rustix::fs::openat2(
         &git_directory,
         DISPATCH_MARKER,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        OFlags::PATH | OFlags::CLOEXEC,
         Mode::empty(),
         rustix::fs::ResolveFlags::NO_SYMLINKS | rustix::fs::ResolveFlags::NO_XDEV,
     ) {
@@ -476,6 +476,12 @@ fn marker_matches(
     {
         return Ok(false);
     }
+    restore_owner_permissions(&marker, Mode::RUSR)?;
+    let marker = rustix::fs::open(
+        format!("/proc/self/fd/{}", marker.as_raw_fd()),
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
     // One extra byte distinguishes the exact UUID spelling from a longer file.
     let mut contents = [0; uuid::fmt::Hyphenated::LENGTH + 1];
     let count = rustix::io::read(&marker, &mut contents)?;
@@ -506,7 +512,7 @@ fn read_removal_directory(directory: &OwnedFd) -> Result<OwnedFd, rustix::io::Er
 fn restore_owner_permissions(directory: &OwnedFd, required: Mode) -> Result<(), rustix::io::Errno> {
     let mode = Mode::from_raw_mode(rustix::fs::fstat(directory)?.st_mode);
     if !mode.contains(required) {
-        // O_PATH pins unreadable directories; procfs addresses that inode for chmod.
+        // O_PATH pins unreadable entries; procfs addresses that inode for chmod.
         rustix::fs::chmodat(
             rustix::fs::CWD,
             format!("/proc/self/fd/{}", directory.as_raw_fd()),
