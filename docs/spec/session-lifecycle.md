@@ -171,6 +171,7 @@ that records the cause.
 
 A lifecycle command carries no domain actor: its lifecycle actor derives from
 the authenticated principal, and a module principal classifies as that module.
+Program domain agency has no lifecycle classification.
 
 Message injection (operator text, coordinator guidance, steering) is legal in
 every non-terminal state regardless of ownership, except while a terminal

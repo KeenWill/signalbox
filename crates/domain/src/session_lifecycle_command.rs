@@ -45,15 +45,16 @@ impl CommandPrincipal {
     ///
     /// A module principal is the classification; otherwise the domain actor
     /// decides, and a command with no actor field reads as its principal.
-    pub const fn classify(self, actor: Option<Actor>) -> LifecycleActor {
+    /// Program agency has no lifecycle classification.
+    pub const fn classify(self, actor: Option<Actor>) -> Option<LifecycleActor> {
         match (self, actor) {
-            (Self::Module { module }, _) => LifecycleActor::Module { module },
+            (Self::Module { module }, _) => Some(LifecycleActor::Module { module }),
             (_, Some(actor)) => LifecycleActor::classify(actor),
-            (Self::Core, None) => LifecycleActor::Core {
+            (Self::Core, None) => Some(LifecycleActor::Core {
                 agency: crate::CoreAgency::Daemon,
-            },
-            (Self::Operator, None) => LifecycleActor::Operator,
-            (Self::Watchdog, None) => LifecycleActor::Watchdog,
+            }),
+            (Self::Operator, None) => Some(LifecycleActor::Operator),
+            (Self::Watchdog, None) => Some(LifecycleActor::Watchdog),
         }
     }
 }
@@ -266,7 +267,8 @@ mod tests {
             CommandPrincipal::Module {
                 module: DispatchingModule::RepositoryWatch,
             }
-            .classify(Some(Actor::User)),
+            .classify(Some(Actor::User))
+            .expect("module classification exists"),
             LifecycleActor::Module {
                 module: DispatchingModule::RepositoryWatch,
             }
@@ -276,19 +278,42 @@ mod tests {
     #[test]
     fn the_domain_actor_classifies_under_a_core_principal() {
         assert_eq!(
-            CommandPrincipal::Core.classify(Some(Actor::Model { turn: turn_id(3) })),
+            CommandPrincipal::Core
+                .classify(Some(Actor::Model { turn: turn_id(3) }))
+                .expect("model classification exists"),
             LifecycleActor::Core {
                 agency: CoreAgency::Model { turn: turn_id(3) },
             }
         );
         assert_eq!(
-            CommandPrincipal::Operator.classify(None),
+            CommandPrincipal::Operator
+                .classify(None)
+                .expect("principal classification exists"),
             LifecycleActor::Operator
         );
         assert_eq!(
-            CommandPrincipal::Watchdog.classify(None),
+            CommandPrincipal::Watchdog
+                .classify(None)
+                .expect("principal classification exists"),
             LifecycleActor::Watchdog
         );
+    }
+
+    #[test]
+    fn program_agency_has_no_core_lifecycle_classification() {
+        let actor = Actor::Program {
+            run: crate::ProgramActor::from_recorded_run(crate::ProgramRunId::from_uuid(
+                uuid::Uuid::from_u128(3),
+            )),
+        };
+        assert_eq!(LifecycleActor::classify(actor), None);
+        for principal in [
+            CommandPrincipal::Core,
+            CommandPrincipal::Operator,
+            CommandPrincipal::Watchdog,
+        ] {
+            assert_eq!(principal.classify(Some(actor)), None);
+        }
     }
 
     #[test]

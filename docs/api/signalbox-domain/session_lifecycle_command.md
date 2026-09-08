@@ -14,7 +14,7 @@ pub enum CommandPrincipal {
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl CommandPrincipal {
     pub const fn for_actor(actor: Actor) -> option::Option<Self>;
-    pub const fn classify(self, actor: option::Option<Actor>) -> LifecycleActor;
+    pub const fn classify(self, actor: option::Option<Actor>) -> option::Option<LifecycleActor>;
 }
 ```
 
