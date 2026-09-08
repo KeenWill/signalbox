@@ -20,7 +20,17 @@ final class ProcessSessionListViewModel: ObservableObject {
   @Published private(set) var conversations: [SignalboxProcessConversation] = []
   @Published private(set) var pageAfter: SignalboxConversationCursor?
   @Published private(set) var nextAfter: SignalboxConversationCursor?
-  @Published var showArchived = false
+  @Published var showArchived = false {
+    didSet {
+      guard oldValue != showArchived else { return }
+      pageAfter = nil
+      nextAfter = nil
+      conversations = []
+      activeRefreshID = UUID()
+      publicationGeneration &+= 1
+      isLoading = false
+    }
+  }
   @Published var searchText = ""
   @Published var errorMessage: String?
   @Published private(set) var isLoading = false
@@ -106,14 +116,22 @@ final class ProcessSessionListViewModel: ObservableObject {
       }
     }
     do {
-      let page = try await service.listConversations(includeArchived: true, after: pageAfter)
-      guard activeRefreshID == refreshID, serviceGeneration == generation,
-        publicationGeneration == publication
-      else {
-        return
+      let archived = showArchived
+      var cursor = pageAfter
+      while true {
+        let page = try await service.listConversations(includeArchived: archived, after: cursor)
+        guard activeRefreshID == refreshID, serviceGeneration == generation,
+          publicationGeneration == publication else { return }
+        let matching = page.conversations.filter { $0.archived == archived }
+        if !matching.isEmpty || page.nextAfter == nil {
+          conversations = matching
+          pageAfter = cursor
+          nextAfter = page.nextAfter
+          break
+        }
+        // The wire filter excludes archived rows but has no archived-only arm.
+        cursor = page.nextAfter
       }
-      conversations = page.conversations
-      nextAfter = page.nextAfter
       errorMessage = nil
     } catch {
       guard activeRefreshID == refreshID, serviceGeneration == generation,
@@ -275,6 +293,9 @@ struct ProcessSessionsScreen: View {
         .pickerStyle(.segmented)
         .padding([.horizontal, .top])
         .accessibilityIdentifier("session-state-picker")
+        .onChange(of: viewModel.showArchived) { _, _ in
+          Task { await viewModel.refresh() }
+        }
 
         if let errorMessage = viewModel.errorMessage {
           ErrorBanner(message: errorMessage)

@@ -23,6 +23,24 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertNil(viewModel.errorMessage)
   }
 
+  @MainActor
+  func testArchiveSelectionFindsMatchingRowsAcrossPages() async throws {
+    let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let viewModel = ProcessSessionListViewModel { service }
+    viewModel.showArchived = true
+    await viewModel.refresh()
+    XCTAssertFalse(viewModel.visibleConversations.isEmpty)
+    XCTAssertTrue(viewModel.visibleConversations.allSatisfy(\.archived))
+    XCTAssertNil(viewModel.errorMessage)
+
+    viewModel.showArchived = false
+    XCTAssertNil(viewModel.pageAfter)
+    await viewModel.refresh()
+    XCTAssertFalse(viewModel.visibleConversations.isEmpty)
+    XCTAssertTrue(viewModel.visibleConversations.allSatisfy { !$0.archived })
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
   func testImportedInventoryDecodesOnlyTheSelectedEntryPage() async throws {
     let service = makeService()
     let conversations = try await service.listConversations(includeArchived: true).conversations
