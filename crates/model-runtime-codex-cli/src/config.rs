@@ -119,4 +119,24 @@ mod tests {
         assert!(debug.contains("fixture-profile"));
         assert!(debug.contains("credential_home_count: 1"));
     }
+
+    #[test]
+    fn constructed_runtime_debug_omits_host_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let executable = workspace.path().join("synthetic-private-codex");
+        let reference = signalbox_model_runtime::CredentialReference::new("fixture-profile");
+        let runtime = crate::CodexCliRuntime::new(CodexCliConfig::new(
+            &executable,
+            workspace.path(),
+            reference,
+            None,
+        ))?;
+
+        let debug = format!("{runtime:?}");
+
+        assert!(!debug.contains(executable.to_string_lossy().as_ref()));
+        assert!(!debug.contains(workspace.path().to_string_lossy().as_ref()));
+        assert!(debug.contains("fixture-profile"));
+        Ok(())
+    }
 }
