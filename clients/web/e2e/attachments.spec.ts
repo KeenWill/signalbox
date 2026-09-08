@@ -38,8 +38,9 @@ test.beforeEach(async ({ page }) => {
   )
 })
 
-for (const width of [820, 1440]) {
+for (const width of [790, 1440]) {
   test(`stacks attachments within the available pane at viewport ${width}`, async ({ page }) => {
+    const problems = watchBrowser(page)
     await page.addInitScript(
       (preferences) => {
         localStorage.setItem('signalbox.web.preferences.v1', JSON.stringify(preferences))
@@ -49,6 +50,9 @@ for (const width of [820, 1440]) {
     await page.setViewportSize({ width, height: 900 })
     await page.goto('/scenario/attachments')
     const layout = page.locator('.attachment-layout')
+    if (width === 790) {
+      expect(await layout.evaluate((element) => element.clientWidth)).toBeLessThan(450)
+    }
     await expect(layout).toHaveCSS('display', 'block')
     expect(await layout.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
       true,
@@ -57,6 +61,7 @@ for (const width of [820, 1440]) {
     await download.scrollIntoViewIfNeeded()
     await expect(download).toBeInViewport()
     await page.screenshot({ path: test.info().outputPath('attachment-pane.png') })
+    expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
   })
 }
 
