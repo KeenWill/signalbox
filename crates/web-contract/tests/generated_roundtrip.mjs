@@ -3331,3 +3331,24 @@ test("repository watch provenance preserves exact ledger identities and rejects 
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, event_kind: "unknown" } }));
   assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, action_ordinal: "0" } }));
 });
+
+test("escalated approvals can close with a policy denial", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "tool_approval_decided";
+  for (const text of [null, "Interrupted before a user decision."]) {
+    const rationale = text === null ? null : {
+      text, offset_bytes: "0", total_bytes: String(text.length), continuation: null,
+    };
+    page.items[0].body = {
+      type: "tool_approval_decision", turn_id: page.session_id, request_id: page.session_id,
+      tool_name: "exec_command", decision: "deny", actor: { type: "policy" },
+      rationale, approval_judge_escalated: true,
+    };
+    page.items[0].projected_body_bytes = page.projected_body_bytes = 128 + (text?.length ?? 0);
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+  page.items[0].body.rationale = null;
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  page.items[0].body.decision = "approve";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a user actor or policy denial when the approval judge escalated/);
+});
