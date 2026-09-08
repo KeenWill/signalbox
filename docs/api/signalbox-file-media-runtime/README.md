@@ -8,5 +8,5 @@
 | detection | 19 | 3 | 0 | [detection](detection.md) |
 | limits | 3 | 0 | 0 | [limits](limits.md) |
 | registry | 3 | 0 | 2 | [registry](registry.md) |
-| value | 19 | 0 | 2 | [value](value.md) |
+| value | 20 | 0 | 2 | [value](value.md) |
 | root | 0 | 0 | 0 | [root](root.md) |

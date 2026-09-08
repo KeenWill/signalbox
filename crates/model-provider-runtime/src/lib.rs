@@ -541,6 +541,12 @@ impl BoundaryLossCode {
             LossCause::TransportFailed(_) => Self::TransportFailed,
             LossCause::ResponseBodyLost(_) => Self::ResponseBodyLost,
             LossCause::ResponseUnintelligible { .. } => Self::ResponseUnintelligible,
+            LossCause::ResponseEnvelopeRejected { stage, .. } => match stage {
+                signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers => {
+                    Self::StreamProtocolViolation
+                }
+                _ => Self::ResponseUnintelligible,
+            },
             LossCause::UnexpectedHttpStatus => Self::UnexpectedHttpStatus,
             LossCause::StreamEndedWithoutTerminalMarker { .. } => {
                 Self::StreamEndedWithoutTerminalMarker
@@ -1162,15 +1168,16 @@ where
             self.runtime
                 .count_input_tokens(runtime_operation, CancellationSignal::when(cancellation))
                 .await,
-            correlation,
+            telemetry,
         )
     }
 }
 
 fn classify_runtime_input_count(
     outcome: signalbox_model_runtime::InputTokenCountOutcome<ModelCallId>,
-    correlation: ModelCallId,
+    telemetry: ModelCallTelemetry,
 ) -> Result<ModelCallInputTokenCount, RuntimeInputTokenCountError> {
+    let correlation = telemetry.call;
     match outcome {
         signalbox_model_runtime::InputTokenCountOutcome::Counted {
             correlation: returned,
@@ -1184,7 +1191,18 @@ fn classify_runtime_input_count(
         } if returned == correlation => Ok(ModelCallInputTokenCount::Unavailable),
         signalbox_model_runtime::InputTokenCountOutcome::Failed {
             correlation: returned,
-        } if returned == correlation => Ok(ModelCallInputTokenCount::Unavailable),
+            failure,
+        } if returned == correlation => {
+            tracing::warn!(
+                cause_code = "model_input_count_failed",
+                failure = %failure,
+                session_id = %telemetry.session.as_uuid(),
+                turn_id = %telemetry.turn.as_uuid(),
+                model_call_id = %telemetry.call.as_uuid(),
+                "provider input-token count failed"
+            );
+            Ok(ModelCallInputTokenCount::Unavailable)
+        }
         signalbox_model_runtime::InputTokenCountOutcome::Counted { .. }
         | signalbox_model_runtime::InputTokenCountOutcome::Cancelled { .. }
         | signalbox_model_runtime::InputTokenCountOutcome::Unavailable { .. }
@@ -1530,6 +1548,7 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
                 session_id = %telemetry.session.as_uuid(),
                 turn_id = %telemetry.turn.as_uuid(),
                 model_call_id = %telemetry.call.as_uuid(),
+                stage = classified.envelope_stage.map(signalbox_model_runtime::ResponseEnvelopeRejectionStage::as_str),
                 "model call produced no assistant material"
             );
         }
@@ -1986,6 +2005,7 @@ pub fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
 /// explain it to an operator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TerminalClassification {
+    envelope_stage: Option<signalbox_model_runtime::ResponseEnvelopeRejectionStage>,
     observation: ModelCallTerminalObservation,
     cause: ModelCallCauseCode,
     /// The concrete provider identity that served the exchange, retained
@@ -2050,8 +2070,17 @@ fn classify_terminal(
         }
     }
 
+    let envelope_stage = match &evidence {
+        TerminalEvidence::BoundaryLoss(signalbox_model_runtime::BoundaryLossEvidence {
+            cause: LossCause::ResponseEnvelopeRejected { stage, .. },
+            ..
+        }) => Some(*stage),
+        _ => None,
+    };
+
     let classify = |observation, cause| {
         Ok(TerminalClassification {
+            envelope_stage,
             observation,
             cause,
             concrete_target: concrete_target.clone(),
@@ -4194,11 +4223,173 @@ mod tests {
             super::classify_runtime_input_count(
                 signalbox_model_runtime::InputTokenCountOutcome::Failed {
                     correlation: call(),
+                    failure: signalbox_model_runtime::InputTokenCountFailure::Transport,
                 },
-                call(),
+                telemetry(),
             ),
             Ok(signalbox_application::ModelCallInputTokenCount::Unavailable)
         );
+    }
+
+    #[derive(Clone, Default)]
+    struct InputCountLog(std::sync::Arc<std::sync::Mutex<Vec<RecordedInputCountLog>>>);
+
+    #[derive(Debug)]
+    struct RecordedInputCountLog {
+        level: tracing::Level,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    impl tracing::field::Visit for RecordedInputCountLog {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    impl tracing::Subscriber for InputCountLog {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut recorded = RecordedInputCountLog {
+                level: *event.metadata().level(),
+                fields: std::collections::BTreeMap::new(),
+            };
+            event.record(&mut recorded);
+            self.0.lock().expect("test log lock").push(recorded);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn envelope_rejection_logs_one_correlated_stage_without_provider_detail() {
+        let log = InputCountLog::default();
+        let telemetry = telemetry();
+        let classified = classify_terminal(
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause: LossCause::ResponseEnvelopeRejected {
+                    stage:
+                        signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,
+                    detail: String::from("provider-controlled rejection detail"),
+                },
+                exchange: ExchangeFacts::default(),
+                reported_model: None,
+                finish_reported: None,
+                tool_calls: ToolCallsAtLoss::Unobserved,
+                usage: TokenUsage::unreported(),
+            }),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("envelope rejection remains ambiguous");
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::Ambiguous
+        );
+        tracing::subscriber::with_default(log.clone(), || {
+            super::report_classified_outcome(telemetry, &classified);
+        });
+        let records = log.0.lock().expect("test log lock");
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.level, tracing::Level::WARN);
+        assert_eq!(record.fields["stage"], "\"duplicate_members\"");
+        assert_eq!(
+            record.fields["cause_code"],
+            "\"boundary_loss_stream_protocol_violation\""
+        );
+        assert_eq!(
+            record.fields["session_id"],
+            telemetry.session.as_uuid().to_string()
+        );
+        assert_eq!(
+            record.fields["turn_id"],
+            telemetry.turn.as_uuid().to_string()
+        );
+        assert_eq!(
+            record.fields["model_call_id"],
+            telemetry.call.as_uuid().to_string()
+        );
+        assert!(!format!("{record:?}").contains("provider-controlled rejection detail"));
+    }
+
+    #[test]
+    fn failed_input_count_logs_one_correlated_warning() {
+        let log = InputCountLog::default();
+        let telemetry = telemetry();
+
+        let result = tracing::subscriber::with_default(log.clone(), || {
+            super::classify_runtime_input_count(
+                signalbox_model_runtime::InputTokenCountOutcome::Failed {
+                    correlation: telemetry.call,
+                    failure: signalbox_model_runtime::InputTokenCountFailure::HttpStatus {
+                        status: 429,
+                    },
+                },
+                telemetry,
+            )
+        });
+
+        assert_eq!(
+            result,
+            Ok(signalbox_application::ModelCallInputTokenCount::Unavailable)
+        );
+        let records = log.0.lock().expect("test log lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, tracing::Level::WARN);
+        assert_eq!(
+            records[0].fields["cause_code"],
+            "\"model_input_count_failed\""
+        );
+        assert_eq!(records[0].fields["failure"], "http_status(429)");
+        assert_eq!(
+            records[0].fields["session_id"],
+            telemetry.session.as_uuid().to_string()
+        );
+        assert_eq!(
+            records[0].fields["turn_id"],
+            telemetry.turn.as_uuid().to_string()
+        );
+        assert_eq!(
+            records[0].fields["model_call_id"],
+            telemetry.call.as_uuid().to_string()
+        );
+    }
+
+    #[test]
+    fn mismatched_input_count_is_not_logged_as_the_current_call() {
+        let log = InputCountLog::default();
+        const OTHER_CALL: u128 = 2;
+        let other_call = ModelCallId::from_uuid(Uuid::from_u128(OTHER_CALL));
+
+        let result = tracing::subscriber::with_default(log.clone(), || {
+            super::classify_runtime_input_count(
+                signalbox_model_runtime::InputTokenCountOutcome::Failed {
+                    correlation: other_call,
+                    failure: signalbox_model_runtime::InputTokenCountFailure::Transport,
+                },
+                telemetry(),
+            )
+        });
+
+        assert_eq!(
+            result,
+            Err(RuntimeInputTokenCountError::CorrelationMismatch)
+        );
+        assert!(log.0.lock().expect("test log lock").is_empty());
     }
 
     #[test]

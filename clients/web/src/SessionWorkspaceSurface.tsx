@@ -119,6 +119,7 @@ export const pruneExpandedSessionItems = (
 
 export function SessionWorkspaceSurface({
   initialSessionId,
+  onSessionOpen,
   onSelectionEvidence,
   onTimelineIds,
   onTimelineWindowAvailable,
@@ -130,6 +131,7 @@ export function SessionWorkspaceSurface({
   windowRequest,
 }: {
   initialSessionId?: string
+  onSessionOpen: (sessionId: string) => void
   onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
@@ -143,6 +145,8 @@ export function SessionWorkspaceSurface({
   const dispatch = useAppDispatch()
   const queryClient = useQueryClient()
   const app = useAppSelector(selectApp)
+  const entryInput = useRef<HTMLInputElement>(null)
+  useEffect(() => entryInput.current?.focus(), [])
   const [draftId, setDraftId] = useState(initialSessionId ?? '')
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId ?? null)
   const [awaitingSessionId, setAwaitingSessionId] = useState<string | null>(null)
@@ -357,6 +361,7 @@ export function SessionWorkspaceSurface({
   }, [app.selectedTimeline])
 
   const openSession = (candidate: string) => {
+    onSessionOpen(candidate)
     const reopeningCurrentSession = candidate === sessionId
     setOpeningPosition(app.lastLogicalPositions[candidate])
     manualAnchorRef.current = null
@@ -451,6 +456,7 @@ export function SessionWorkspaceSurface({
         <label>
           Exact session ID
           <input
+            ref={entryInput}
             aria-label="Exact session ID"
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}

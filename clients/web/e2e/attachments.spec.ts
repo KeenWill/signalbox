@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { defaultBrowserPreferences } from '../src/preferences'
+import { expect, type Page, type TestInfo, test } from './fontTest'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -13,7 +14,6 @@ const originalPath =
   '/api/blobs/sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e/content/image-png'
 const documentDownloadPath = `/api/blobs/sha256:${'6f'.repeat(32)}/download`
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
-const MOBILE_ATTACHMENT_RASTERIZATION_TOLERANCE = 0.08
 
 const watchBrowser = (page: Page): BrowserProblems => {
   const problems: BrowserProblems = { consoleErrors: [], pageErrors: [] }
@@ -37,6 +37,33 @@ test.beforeEach(async ({ page }) => {
   )
 })
 
+for (const width of [790, 1440]) {
+  test(`stacks attachments within the available pane at viewport ${width}`, async ({ page }) => {
+    const problems = watchBrowser(page)
+    await page.addInitScript(
+      (preferences) => {
+        localStorage.setItem('signalbox.web.preferences.v1', JSON.stringify(preferences))
+      },
+      { ...defaultBrowserPreferences, paneSizes: { navigation: 360, inspector: 480 } },
+    )
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/scenario/attachments')
+    const layout = page.locator('.attachment-layout')
+    if (width === 790) {
+      expect(await layout.evaluate((element) => element.clientWidth)).toBeLessThan(450)
+    }
+    await expect(layout).toHaveCSS('display', 'block')
+    expect(await layout.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+      true,
+    )
+    const download = page.getByRole('link', { name: 'Download', exact: true })
+    await download.scrollIntoViewIfNeeded()
+    await expect(download).toBeInViewport()
+    await page.screenshot({ path: test.info().outputPath('attachment-pane.png') })
+    expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+  })
+}
+
 test('keeps document bytes behind the admitted download-only affordance', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/attachments')
@@ -49,7 +76,10 @@ test('keeps document bytes behind the admitted download-only affordance', async 
   await expect(download).toHaveAttribute('href', new RegExp(`^${documentDownloadPath}`))
   expect(
     await page.evaluate(
-      (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
+      (path) =>
+        performance
+          .getEntriesByType('resource')
+          .filter((entry) => new URL(entry.name).pathname === path).length,
       documentDownloadPath,
     ),
   ).toBe(0)
@@ -153,7 +183,6 @@ test('captures mobile attachment evidence', async ({ page }, testInfo) => {
   await page.goto('/scenario/attachments')
   await expect(page.getByRole('region', { name: 'Artifact attachments' })).toHaveScreenshot(
     'attachments-mobile-dark.png',
-    { maxDiffPixelRatio: MOBILE_ATTACHMENT_RASTERIZATION_TOLERANCE },
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

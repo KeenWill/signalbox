@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { activityTime } from './AttentionSurface'
-import { reduceAttentionEvent, synchronizeAttention } from './attention'
+import { attentionSnapshotsMatch, reduceAttentionEvent, synchronizeAttention } from './attention'
 import type { WebAttentionSnapshot, WebAttentionStreamEvent } from './generated/web-contract.mjs'
 import type { ProductTransport } from './product'
 
@@ -19,7 +19,7 @@ const summary = {
   state: 'awaiting_approval',
 } as const
 const snapshot = {
-  continuation_after_session_id: sessionId,
+  continuation_after_session_id: null,
   cursor: '17',
   summaries: [summary],
 } as const satisfies WebAttentionSnapshot
@@ -86,7 +86,18 @@ describe('attention projection recovery', () => {
   })
 
   it('ignores updates beyond the bounded page while advancing the cursor', () => {
-    const reduction = reduceAttentionEvent(snapshot, {
+    const fullPage = {
+      ...snapshot,
+      continuation_after_session_id: sessionId,
+      summaries: [
+        ...Array.from({ length: 31 }, (_, index) => ({
+          ...summary,
+          session_id: `00000000-0000-7000-8000-${String(index + 1).padStart(12, '0')}`,
+        })),
+        summary,
+      ],
+    }
+    const reduction = reduceAttentionEvent(fullPage, {
       kind: 'update',
       cursor: '18',
       summaries: [{ ...replacement, session_id: anotherSessionId }],
@@ -94,7 +105,7 @@ describe('attention projection recovery', () => {
 
     expect(reduction).toEqual({
       kind: 'projection',
-      snapshot: { ...snapshot, cursor: '18' },
+      snapshot: { ...fullPage, cursor: '18' },
     })
   })
 
@@ -216,49 +227,41 @@ describe('attention projection recovery', () => {
     expect(phases).toEqual(['connecting', 'live', 'failed'])
   })
 
-  it('resets the immediate resync budget after accepted incremental progress', async () => {
-    const phases: string[] = []
-    const resync = { kind: 'resync_required', cursor: '18' } as const
-    const recovered = { kind: 'snapshot', snapshot } as const
-    const progressed = { kind: 'update', cursor: '18', summaries: [replacement] } as const
-
-    await synchronizeAttention({
-      transport: streamTransport([
-        [recovered, resync],
-        [recovered, progressed, resync],
-        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } }],
-      ]),
-      signal: new AbortController().signal,
-      onPhase: (phase) => phases.push(phase),
-      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
-    })
-
-    expect(phases.at(-1)).toBe('stale')
-  })
-
-  it('resets the resync budget when a reconnect snapshot advances the cursor', async () => {
-    const phases: string[] = []
-    const advancingRecovery = (cursor: string) =>
-      [
-        { kind: 'snapshot', snapshot: { ...snapshot, cursor } },
-        { kind: 'resync_required', cursor },
-      ] as const
-
-    await synchronizeAttention({
-      transport: streamTransport([
-        advancingRecovery('17'),
-        advancingRecovery('18'),
-        advancingRecovery('19'),
-        advancingRecovery('20'),
-        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '21' } }],
-      ]),
-      signal: new AbortController().signal,
-      onPhase: (phase) => phases.push(phase),
-      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
-    })
-
-    expect(phases.at(-1)).toBe('stale')
-  })
+  it.each(['snapshot', 'update'] as const)(
+    'bounds repeated resyncs even when %s cursors advance',
+    async (progress) => {
+      const phases: string[] = []
+      const batches: WebAttentionStreamEvent[][] = Array.from({ length: 5 }, (_, index) => {
+        const cursor = String(17 + index * 2)
+        return [
+          { kind: 'snapshot', snapshot: { ...snapshot, cursor } },
+          ...(progress === 'update'
+            ? [
+                {
+                  kind: 'update' as const,
+                  cursor: String(18 + index * 2),
+                  summaries: [replacement],
+                },
+              ]
+            : []),
+          { kind: 'resync_required', cursor: String(18 + index * 2) },
+        ]
+      })
+      const projections: WebAttentionSnapshot[] = []
+      await synchronizeAttention({
+        transport: streamTransport(batches),
+        signal: new AbortController().signal,
+        onPhase: (phase) => phases.push(phase),
+        onProjection: (projection) => {
+          projections.push(projection)
+          return { snapshot: projection, accepted: true }
+        },
+      })
+      expect(phases.at(-1)).toBe('failed')
+      expect(projections).toHaveLength(progress === 'update' ? 8 : 4)
+      expect(projections.some((projection) => projection.cursor === '25')).toBe(false)
+    },
+  )
 
   it('rejects reconnect snapshots below the advertised resync cursor', async () => {
     const phases: string[] = []
@@ -327,7 +330,8 @@ describe('attention projection recovery', () => {
   })
 
   it('uses the projection accepted by the cache as the follower baseline', async () => {
-    const newerSnapshot = { ...snapshot, cursor: '19' }
+    const preserved = { ...summary, session_id: anotherSessionId }
+    const newerSnapshot = { ...snapshot, cursor: '19', summaries: [summary, preserved] }
     const projections: WebAttentionSnapshot[] = []
 
     await synchronizeAttention({
@@ -340,8 +344,7 @@ describe('attention projection recovery', () => {
       signal: new AbortController().signal,
       onPhase: () => undefined,
       onProjection: (projection) => {
-        const accepted =
-          BigInt(projection.cursor) < BigInt(newerSnapshot.cursor) ? newerSnapshot : projection
+        const accepted = projections.length === 0 ? newerSnapshot : projection
         projections.push(accepted)
         return { snapshot: accepted, accepted: accepted === projection }
       },
@@ -349,7 +352,7 @@ describe('attention projection recovery', () => {
 
     expect(projections).toEqual([
       newerSnapshot,
-      { ...newerSnapshot, cursor: '20', summaries: [replacement] },
+      { ...newerSnapshot, cursor: '20', summaries: [replacement, preserved] },
     ])
   })
 
@@ -376,4 +379,13 @@ describe('attention projection recovery', () => {
 
     expect(phases.at(-1)).toBe('failed')
   })
+})
+
+it('compares admitted attention values independently of object key order and absent optionals', () => {
+  const reordered = {
+    summaries: [{ ...summary, goal_block: undefined, current_turn_id: turnId }],
+    cursor: snapshot.cursor,
+  }
+  expect(attentionSnapshotsMatch(snapshot, reordered)).toBe(true)
+  expect(attentionSnapshotsMatch(snapshot, { ...reordered, summaries: [replacement] })).toBe(false)
 })

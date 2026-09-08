@@ -349,8 +349,8 @@ pub struct TurnLivenessRuntime {
 impl TurnLivenessRuntime {
     /// Supervises turn liveness with the supplied bound and cadence.
     ///
-    /// `staleness_bound` governs both quiescent and slot-held observation. The
-    /// required deployment configuration may disable stale-turn
+    /// `staleness_bound` governs quiescent observation; slot-held observation
+    /// uses its fixed ceiling. The deployment configuration may disable stale-turn
     /// terminalization with `none` while leaving ambiguity reconciliation
     /// active.
     pub fn new(
@@ -450,7 +450,6 @@ impl TurnLivenessRuntime {
         );
         let slot_held = run_slot_held_watchdog(
             self.repository,
-            staleness_bound,
             scan_interval,
             numeric_bounds,
             slot_held_shutdown,
@@ -506,16 +505,27 @@ async fn run_quiescent_watchdog(
     }
 }
 
+// The turn-lifecycle-and-scheduling contract keeps live slot-held work out of
+// the configurable quiescent watchdog's shorter staleness window.
+const SLOT_HELD_STALENESS_CEILING: Duration = Duration::from_secs(30 * 60);
+
+fn slot_held_ledger(scan_interval: TurnLivenessScanInterval) -> Option<TurnLivenessLedger> {
+    StaleActiveTurnBound::try_new(SLOT_HELD_STALENESS_CEILING)
+        .ok()
+        .map(|bound| TurnLivenessLedger::new(bound, scan_interval))
+}
+
 async fn run_slot_held_watchdog(
     repository: PostgresTurnLivenessRepository,
-    staleness_bound: StaleActiveTurnBound,
     scan_interval: TurnLivenessScanInterval,
     numeric_bounds: TurnLivenessNumericBounds,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut ticker = interval(scan_interval.get());
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let ledger = TurnLivenessLedger::new(staleness_bound, scan_interval);
+    let Some(ledger) = slot_held_ledger(scan_interval) else {
+        return;
+    };
     let mut window = TerminalizationWindow::new(numeric_bounds.terminalizations_per_scan);
     let mut first_scan_after_restart = true;
     loop {
@@ -1384,7 +1394,7 @@ mod tests {
         StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TerminalizationWindow,
         TurnLivenessNumericBounds, TurnLivenessWake, batch_admits_another_reconciliation,
         complete_before_shutdown, drain_quiescent_rotation, next_turn_liveness_wake,
-        reconcile_turn_liveness, reconciliation_deadline,
+        reconcile_turn_liveness, reconciliation_deadline, slot_held_ledger,
     };
     use signalbox_application::{
         DurableTurnLivenessObservation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
@@ -1403,6 +1413,30 @@ mod tests {
         time::Duration,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn lowering_quiescent_staleness_does_not_shorten_slot_held_observation() {
+        let lowered = StaleActiveTurnBound::try_new(Duration::from_secs(60)).unwrap();
+        let cadence = TurnLivenessScanInterval::try_new(Duration::from_secs(60)).unwrap();
+        let quiescent = TurnLivenessLedger::new(lowered, cadence);
+        let slot_held = slot_held_ledger(cadence).expect("the fixed ceiling is valid");
+        let active = candidate(1);
+        let after_one_minute = [DurableTurnLivenessObservation::new(
+            active,
+            NonZeroU64::new(2).unwrap(),
+        )];
+        let after_thirty_minutes = [DurableTurnLivenessObservation::new(
+            active,
+            NonZeroU64::new(31).unwrap(),
+        )];
+
+        assert_eq!(quiescent.reconcile(&after_one_minute).as_ref(), &[active]);
+        assert!(slot_held.reconcile(&after_one_minute).is_empty());
+        assert_eq!(
+            slot_held.reconcile(&after_thirty_minutes).as_ref(),
+            &[active]
+        );
+    }
 
     fn fixture_staleness_bound() -> StaleActiveTurnBound {
         StaleActiveTurnBound::try_new(Duration::from_secs(37))

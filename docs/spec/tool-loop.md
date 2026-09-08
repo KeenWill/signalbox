@@ -271,6 +271,10 @@ requests already closed by placement loss. A `KnownFailed`, `Refused`,
 `Cancelled`, or `Ambiguous` terminal judge call for an admissible request
 retains the attended park while immediately admitting a user decision.
 
+A completed judge call records the provider's offered recommendation, the
+effective recommendation, and the cause when withdrawn authority substitutes
+escalation. Completion replay compares the recorded provider offer.
+
 Deny-and-end composes the recorded denial with the applied-interrupt stop path,
 and the interrupt remains the proof-bearing authority for ending the turn. An
 interrupt alone against an approval wait is not a denial and does not bypass the
@@ -484,7 +488,10 @@ infrastructure failure, while a mutation transport loss, server failure, or
 malformed acknowledgement is commit-ambiguous. `change_request_thread_reply` and
 `change_request_thread_resolve` query thread ownership before they mutate, and a
 failure of that query classifies the mutation as not dispatched rather than
-ambiguous. The adapter never returns code-host response bodies as error detail.
+ambiguous. HTTP failures retain content-free authentication, permission,
+rate-limit, not-found, conflict, validation, and server classes. Authentication
+refusals use the credential-unavailable detail. The adapter never returns
+code-host response bodies as error detail.
 
 Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round

@@ -422,7 +422,8 @@ fn collect_loss_cause(cause: &LossCause, material: &mut Vec<String>) {
                 StreamInterruption::TransportFailure(facts) | StreamInterruption::TimedOut(facts),
         } => material.push(facts.detail.clone()),
         LossCause::ResponseUnintelligible { detail }
-        | LossCause::StreamProtocolViolation { detail } => material.push(detail.clone()),
+        | LossCause::StreamProtocolViolation { detail }
+        | LossCause::ResponseEnvelopeRejected { detail, .. } => material.push(detail.clone()),
     }
 }
 
@@ -1347,6 +1348,13 @@ async fn duplicate_response_envelope_members_are_stream_protocol_violations() {
 
     let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
     assert!(detail.contains("response envelope"));
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,
+            ..
+        }
+    ));
 }
 
 /// a marker-bearing object field that sorts before a benign sibling
@@ -2036,6 +2044,13 @@ async fn credential_shaped_envelope_errors_are_content_silent() {
         detail,
         "last agent message does not match the response envelope"
     );
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::Shape,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -2051,6 +2066,13 @@ async fn deeply_nested_decoded_envelope_is_boundary_loss() {
     assert!(
         response_unintelligible(&boundary_loss(&result.evidence).cause).contains("JSON nesting")
     );
+    assert!(matches!(
+        boundary_loss(&result.evidence).cause,
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::NestingBound,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -2071,6 +2093,26 @@ async fn tool_call_arguments_remain_verbatim() {
     assert_eq!(
         observed_tool_arguments(&result.observations),
         Some(fixtures::TOOL_ARGUMENTS)
+    );
+}
+
+#[tokio::test]
+async fn tool_arguments_preserve_reserved_number_key_objects() {
+    let result = execute_scenario(
+        "tool_call_reserved_key",
+        DeliveryMode::Streamed,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        tool_proposal(&completed(&result.evidence).content).arguments_json,
+        fixtures::RESERVED_KEY_TOOL_ARGUMENTS
+    );
+    assert_eq!(
+        observed_tool_arguments(&result.observations),
+        Some(fixtures::RESERVED_KEY_TOOL_ARGUMENTS)
     );
 }
 
@@ -2744,7 +2786,10 @@ async fn completed_turn_without_an_envelope_is_boundary_loss() {
     .await;
     assert!(matches!(
         boundary_loss(&result.evidence).cause,
-        LossCause::ResponseUnintelligible { .. }
+        LossCause::ResponseEnvelopeRejected {
+            stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::Missing,
+            ..
+        }
     ));
     assert_eq!(result.spawns, 1);
 }
@@ -3047,7 +3092,7 @@ async fn cancellation_after_spawn_interrupts_once_without_respawn() {
     assert_eq!(spawn_count(temporary.path()), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancellation_is_not_starved_by_continuously_ready_stdout() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let runtime = runtime(temporary.path(), fake_cli());
@@ -3056,12 +3101,29 @@ async fn cancellation_is_not_starved_by_continuously_ready_stdout() {
         operation("busy_stdout", DeliveryMode::Streamed, OperationShape::Text),
     )
     .await;
-    let cancellation = cancel_after_record(temporary.path().join("fake-codex-busy-stdout"));
+    let cancellation =
+        cancel_after_wall_clock_record(temporary.path().join("fake-codex-busy-stdout"));
     let mut observations = Vec::new();
+    let (finished, completion) = std::sync::mpsc::channel::<()>();
+    let (expired, watchdog) = tokio::sync::oneshot::channel();
+    let watchdog_thread = std::thread::spawn(move || {
+        if matches!(
+            completion.recv_timeout(OFFLINE_HARNESS_TIMEOUT),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            let _ = expired.send(());
+        }
+    });
 
-    let report = runtime
-        .execute(prepared, &mut observations, cancellation)
-        .await;
+    let report = tokio::select! {
+        biased;
+        _ = watchdog => panic!("stdout-flood cancellation completes within the wall-clock bound"),
+        report = runtime.execute(prepared, &mut observations, cancellation) => report,
+    };
+    drop(finished);
+    watchdog_thread
+        .join()
+        .expect("the wall-clock watchdog exits");
 
     assert_eq!(
         boundary_loss(&report.evidence).cause,
@@ -5151,6 +5213,31 @@ fn linux_own_process_group_has_a_live_member() {
     assert!(process_group_has_live_member(rustix::process::getpgrp()));
 }
 
+/// Keeps paused Tokio time from advancing the exchange deadline while the
+/// operating-system child is still starting; only the readiness watchdog uses
+/// wall time, and completion of that barrier makes cancellation ready.
+fn cancel_after_wall_clock_record(path: std::path::PathBuf) -> CancellationSignal {
+    let watcher = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + OFFLINE_HARNESS_TIMEOUT;
+        while std::fs::read_to_string(&path)
+            .map(|content| content.lines().count())
+            .unwrap_or_default()
+            == 0
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fake CLI records readiness before the wall-clock bound"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    CancellationSignal::when(async move {
+        watcher
+            .await
+            .expect("the wall-clock readiness barrier completes");
+    })
+}
+
 fn cancel_after_record(path: std::path::PathBuf) -> CancellationSignal {
     let watcher = tokio::spawn(wait_for_record(path));
     CancellationSignal::when(async move {
@@ -5247,14 +5334,21 @@ fn transport_failed(cause: &LossCause) -> &signalbox_model_runtime::TransportFac
 }
 
 fn response_unintelligible(cause: &LossCause) -> &str {
-    let LossCause::ResponseUnintelligible { detail } = cause else {
+    let (LossCause::ResponseUnintelligible { detail }
+    | LossCause::ResponseEnvelopeRejected { detail, .. }) = cause
+    else {
         panic!("expected unintelligible-response loss, got {cause:?}");
     };
     detail
 }
 
 fn stream_protocol_violation(cause: &LossCause) -> &str {
-    let LossCause::StreamProtocolViolation { detail } = cause else {
+    let (LossCause::StreamProtocolViolation { detail }
+    | LossCause::ResponseEnvelopeRejected {
+        stage: signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,
+        detail,
+    }) = cause
+    else {
         panic!("expected stream-protocol violation, got {cause:?}");
     };
     detail

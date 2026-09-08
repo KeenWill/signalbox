@@ -617,6 +617,37 @@ async fn impossible_projection_structured_bytes_are_corruption() -> Result<(), B
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn full_window_with_smaller_byte_total_is_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x99d);
+    create_session(&pool, identity).await?;
+    sqlx::query(
+        "UPDATE session_timeline_fact SET event_kind_bytes = event_kind_bytes + 1
+          WHERE session_id = $1",
+    )
+    .bind(identity.into_uuid())
+    .execute(&pool)
+    .await?;
+    let limits = TimelineWindowLimits::new(256, 64 * 1024).expect("fixture limits are bounded");
+    let error = SessionTimelineRepository::new(pool.clone())
+        .read_window(identity, TimelineWindowAnchor::First, limits)
+        .await
+        .expect_err("a full window must account for every descriptor byte");
+
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "window totals"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn window_outside_projection_facts_is_corruption() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let identity = session(0x997);
