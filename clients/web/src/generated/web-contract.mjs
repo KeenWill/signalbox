@@ -922,6 +922,12 @@ const schemas = {
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "min_timeline_detail_bytes": {
+            "description": "Minimum projected typed-body byte budget accepted for a detail request.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -930,6 +936,7 @@ const schemas = {
           "max_timeline_window_items",
           "max_timeline_window_bytes",
           "max_timeline_detail_items",
+          "min_timeline_detail_bytes",
           "max_timeline_detail_bytes",
           "max_session_live_queued_turns",
           "max_search_query_bytes",

@@ -42,6 +42,7 @@ pub struct WebContractLimits {
     pub max_timeline_window_items: u32,
     pub max_timeline_window_bytes: u32,
     pub max_timeline_detail_items: u32,
+    pub min_timeline_detail_bytes: u32,
     pub max_timeline_detail_bytes: u32,
     pub max_session_live_queued_turns: u32,
     pub max_search_query_bytes: u32,

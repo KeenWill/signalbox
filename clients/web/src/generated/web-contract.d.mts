@@ -117,6 +117,7 @@ export type WebContractLimits = {
   readonly max_timeline_window_items: number;
   readonly max_usage_aggregate_groups: number;
   readonly max_usage_call_page_items: number;
+  readonly min_timeline_detail_bytes: number;
 };
 
 export type WebDollarAmount = string;
