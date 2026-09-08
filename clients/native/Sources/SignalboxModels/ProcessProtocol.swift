@@ -3462,6 +3462,7 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
   case toolExecutionResult(
     toolRequestID: SignalboxCanonicalUUID, toolAttemptID: SignalboxCanonicalUUID, content: String)
   case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String)
+  case toolInadmissible(toolRequestID: SignalboxCanonicalUUID, content: String)
   case toolClosed(toolRequestID: SignalboxCanonicalUUID, content: String)
   case turnCompleted(turnID: SignalboxCanonicalUUID)
   case turnFailed(turnID: SignalboxCanonicalUUID)
@@ -3626,6 +3627,14 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           decoder: decoder
         )
         self = .toolDenied(
+          toolRequestID: try decoder.decode("tool_request_id"),
+          content: try decoder.decode("content"))
+      case "tool_inadmissible":
+        try tagged.rejectUnadmittedFields(
+          ["type", "tool_request_id", "content"],
+          decoder: decoder
+        )
+        self = .toolInadmissible(
           toolRequestID: try decoder.decode("tool_request_id"),
           content: try decoder.decode("content"))
       case "tool_closed":

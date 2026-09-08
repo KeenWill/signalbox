@@ -93,7 +93,7 @@ pub enum GoalTurnContinuationOutcome {
     },
     /// The current goal state is absent or scheduler-terminal.
     NotPursuing,
-    /// The completed turn is not owned by the current goal generation.
+    /// The source turn is not owned by the current goal generation.
     NotCurrentGoalTurn,
     /// The selected defaults name an alias with no available definition.
     UnknownModelAlias {
@@ -314,7 +314,7 @@ pub(crate) async fn bind_goal_turn(
 ) -> Result<(), GoalRepositoryError> {
     let (source_event, predecessor) = match source {
         GoalTurnSource::UserEvent(event) => (Some(Decimal::from(event.get())), None),
-        GoalTurnSource::SuccessfulTurn(predecessor) => (None, Some(turn_id_to_uuid(predecessor))),
+        GoalTurnSource::PredecessorTurn(predecessor) => (None, Some(turn_id_to_uuid(predecessor))),
     };
     sqlx::query(
         "INSERT INTO goal_turn

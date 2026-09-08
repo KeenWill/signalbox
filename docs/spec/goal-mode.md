@@ -25,10 +25,12 @@ checked goal operations, but the inactive module dispatches no sessions or
 goals.
 
 While a generation is pursuing, each successful turn's end makes the scheduler
-create and start the next turn without user input. A failed goal turn is not
-retried; the daemon appends a blocked event with the execution-failure reason,
-need text, and the failed turn's provenance. Every goal turn is either scheduled
-by this machinery or bound to a turn a command already accepted.
+create and start the next turn without user input. Except for the
+[repository-watch compaction successor](model-call-execution.md#model-call-execution),
+a failed goal turn is not retried; the daemon appends a blocked event with the
+execution-failure reason, need text, and the failed turn's provenance. Every
+goal turn is either scheduled by this machinery or bound to a turn a command
+already accepted.
 
 The planner in `apps/signalboxd/src/goal_mode.rs` resumes an execution-failure
 block on an owned session automatically and within bounds. It derives from the

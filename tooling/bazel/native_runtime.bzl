@@ -23,7 +23,21 @@ def _native_runtime_impl(ctx):
             # Script launchers already select their declared interpreter.
             'IFS= read -r -n 4 magic < "$1" || true',
             'if [[ "$magic" != $\'\\x7fELF\' ]]; then exec "$@"; fi',
+            'if [[ -n "${COVERAGE_DIR:-}" ]]; then',
+            '  mkdir -p "${TEST_TMPDIR:?}/coverage-runtime"',
+        ] + [
+            '  ln -sfn "${RUNFILES_DIR}/%s" "${TEST_TMPDIR}/coverage-runtime/%s"' % (_runfile_path(file), file.basename)
+            for file in runtime.libraries
+        ] + [
+            "fi",
             "patch_binary() {",
+            '  if [[ -n "${COVERAGE_DIR:-}" ]]; then',
+            '    "${RUNFILES_DIR}/%s" --set-interpreter "${RUNFILES_DIR}/%s" --output "$2" "$1"' % (
+                _runfile_path(ctx.file.patchelf),
+                _runfile_path(runtime.loader),
+            ),
+            "    return",
+            "  fi",
             '  "${RUNFILES_DIR:?}/%s" --set-interpreter "${RUNFILES_DIR}/%s" --set-rpath "%s" --output "$2" "$1"' % (
                 _runfile_path(ctx.file.patchelf),
                 _runfile_path(runtime.loader),
