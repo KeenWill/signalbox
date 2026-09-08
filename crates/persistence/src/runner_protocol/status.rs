@@ -6,9 +6,13 @@ use crate::process_read::{
 };
 use signalbox_domain::RunnerReplacementProvisioning;
 
-/// Exclusive position in the failure-before-leak traversal.
+/// Exclusive position in the enrollment, placement, failure, then leak traversal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerStatusAfter {
+    /// Last emitted enrollment, ordered by runner identity.
+    Enrollment(Uuid),
+    /// Last emitted placement, ordered by session identity.
+    Placement(Uuid),
     /// Last emitted immutable provisioning authorization.
     OperationFailure(Uuid),
     /// A leak cursor is beyond every provisioning failure.
@@ -40,12 +44,12 @@ pub struct RunnerStatusFailure {
     pub detail: serde_json::Value,
 }
 
-/// First-page placement facts and a bounded page of failures.
+/// One bounded page of current runner facts followed by retained failures.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerStatusPage {
     pub runners: Vec<RunnerStatusFact>,
     pub failures: Vec<RunnerStatusFailure>,
-    pub next_after: Option<Uuid>,
+    pub next_after: Option<RunnerStatusAfter>,
 }
 
 /// Failure to read a coherent status page.
@@ -88,7 +92,12 @@ pub async fn read_runner_status(
         .execute(&mut *transaction)
         .await?;
     let mut runners = Vec::new();
-    if after.is_none() {
+    let limit = page_size as usize + 1;
+    if matches!(after, None | Some(RunnerStatusAfter::Enrollment(_))) {
+        let last = match after {
+            Some(RunnerStatusAfter::Enrollment(id)) => Some(id),
+            _ => None,
+        };
         let rows = sqlx::query(
             "SELECT enrollment.runner_id, receipt.request_id, enrollment.state_kind,
             connection.state_kind AS connection_state
@@ -97,8 +106,11 @@ pub async fn read_runner_status(
             LEFT JOIN LATERAL (SELECT state_kind FROM runner_connection_event
                 WHERE enrollment_id = enrollment.enrollment_id
                 ORDER BY connection_epoch DESC, event_ordinal DESC LIMIT 1) AS connection ON true
-            ORDER BY enrollment.runner_id",
+            WHERE ($1::uuid IS NULL OR enrollment.runner_id > $1)
+            ORDER BY enrollment.runner_id LIMIT $2",
         )
+        .bind(last)
+        .bind(limit as i64)
         .fetch_all(&mut *transaction)
         .await?;
         for row in rows {
@@ -126,9 +138,23 @@ pub async fn read_runner_status(
                 connection,
             });
         }
-        let sessions: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT session_id FROM runner_current_session_placement ORDER BY session_id",
+    }
+    if runners.len() < limit
+        && matches!(
+            after,
+            None | Some(RunnerStatusAfter::Enrollment(_) | RunnerStatusAfter::Placement(_))
         )
+    {
+        let last = match after {
+            Some(RunnerStatusAfter::Placement(id)) => Some(id),
+            _ => None,
+        };
+        let sessions: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT session_id FROM runner_current_session_placement
+            WHERE ($1::uuid IS NULL OR session_id > $1) ORDER BY session_id LIMIT $2",
+        )
+        .bind(last)
+        .bind((limit - runners.len()) as i64)
         .fetch_all(&mut *transaction)
         .await?;
         for session in sessions {
@@ -144,7 +170,7 @@ pub async fn read_runner_status(
         }
     }
     let mut failures = Vec::new();
-    if !matches!(after, Some(RunnerStatusAfter::WorkspaceLeak)) {
+    if runners.len() < limit && !matches!(after, Some(RunnerStatusAfter::WorkspaceLeak)) {
         let last = match after {
             Some(RunnerStatusAfter::OperationFailure(id)) => Some(id),
             _ => None,
@@ -157,7 +183,7 @@ pub async fn read_runner_status(
             ORDER BY failure.authorization_id LIMIT $2",
         )
         .bind(last)
-        .bind(i64::from(page_size) + 1)
+        .bind((limit - runners.len()) as i64)
         .fetch_all(&mut *transaction)
         .await?;
         for row in rows {
@@ -176,11 +202,25 @@ pub async fn read_runner_status(
             });
         }
     }
-    let next_after = if failures.len() > page_size as usize {
-        failures.truncate(page_size as usize);
+    let next_after = if runners.len() + failures.len() > page_size as usize {
+        if failures.pop().is_none() {
+            runners.pop();
+        }
         failures
             .last()
-            .map(|row| row.authorization.authorization.into_uuid())
+            .map(|row| {
+                RunnerStatusAfter::OperationFailure(row.authorization.authorization.into_uuid())
+            })
+            .or_else(|| {
+                runners.last().map(|row| match row {
+                    RunnerStatusFact::Enrollment { runner, .. } => {
+                        RunnerStatusAfter::Enrollment(runner.into_uuid())
+                    }
+                    RunnerStatusFact::Placement { session, .. } => {
+                        RunnerStatusAfter::Placement(session.into_uuid())
+                    }
+                })
+            })
     } else {
         None
     };

@@ -605,11 +605,14 @@ authority.
 
 Runner status reads current enrollment authority, enrollment-request receipts,
 current session placements, and retained replacement-provisioning failures in
-one read-only repeatable-read transaction, closed before protocol output.
-Failure rows join their immutable provisioning authorization and order by its
-UUID bytes; an `operation_failure { authorization_id }` cursor continues
-exclusively, with one lookahead row establishing whether another page exists.
-Enrollment and placement facts appear only without a cursor. A
+one read-only repeatable-read transaction, closed before protocol output. The
+daemon spools the complete page to an anonymous temporary file before
+transmission. Failure rows join their immutable provisioning authorization and
+order by its UUID bytes; an `operation_failure { authorization_id }` cursor
+continues exclusively, with one lookahead row establishing whether another page
+exists. The shared page budget traverses enrollments by runner UUID, placements
+by session UUID, then failures; each query is limited to the remaining budget
+plus one lookahead row. Enrollment and placement cursors continue exclusively. A
 `workspace_leak { runner_id, locator, entry_digest }` cursor is beyond failures;
 there are no retained leak rows.
 

@@ -115,6 +115,41 @@ async fn runner_status_exposes_pending_enrollment_identity_over_the_socket()
         &ServerMessage::RunnerStatusStart {}
     );
     let first = response_within(&mut connection).await?;
+    let end = response_within(&mut connection).await?;
+    let ServerMessage::RunnerStatusEnd {
+        runner_count,
+        failure_count,
+        leak_count,
+        next_after,
+    } = end.message()
+    else {
+        panic!("page must end");
+    };
+    assert_eq!(
+        (
+            runner_count.value(),
+            failure_count.value(),
+            leak_count.value()
+        ),
+        (1, 0, 0)
+    );
+    assert!(matches!(
+        next_after,
+        Some(signalbox_process_protocol::RunnerStatusCursor::Enrollment { .. })
+    ));
+    connection
+        .request(
+            2,
+            ClientRequest::ReadRunnerStatus {
+                page_size: 1,
+                after: next_after.clone(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::RunnerStatusStart {}
+    );
     let second = response_within(&mut connection).await?;
     let pending = ServerMessage::RunnerStatus {
         status: RunnerStatusFact::Enrollment {
@@ -125,13 +160,14 @@ async fn runner_status_exposes_pending_enrollment_identity_over_the_socket()
         },
     };
     assert!([first.message(), second.message()].contains(&&pending));
+    assert_ne!(first.message(), second.message());
     assert_eq!(
         response_within(&mut connection).await?.message(),
         &ServerMessage::RunnerStatusEnd {
-            runner_count: CanonicalU64::new(2),
+            runner_count: CanonicalU64::new(1),
             failure_count: CanonicalU64::new(0),
             leak_count: CanonicalU64::new(0),
-            next_after: None
+            next_after: None,
         }
     );
     drop(connection);
@@ -155,5 +191,36 @@ async fn runner_status_out_of_range_page_size_rejects_before_page_start()
             }
         ));
     }
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn runner_status_read_failure_does_not_transmit_a_partial_page() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start().await?;
+    sqlx::query(
+        "ALTER TABLE runner_replacement_provisioning_failure RENAME TO unavailable_runner_failure",
+    )
+    .execute(&runtime.pool)
+    .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(
+            1,
+            ClientRequest::ReadRunnerStatus {
+                page_size: 1,
+                after: None,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::Unavailable,
+            ..
+        }
+    ));
+    drop(connection);
     runtime.stop().await
 }

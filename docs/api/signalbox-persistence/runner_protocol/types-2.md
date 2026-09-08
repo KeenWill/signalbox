@@ -107,6 +107,8 @@ impl convert::From<error::Error> for runner_protocol::RunnerRecoveryError {
 
 ```rust
 pub enum RunnerStatusAfter {
+    Enrollment(uuid::Uuid),
+    Placement(uuid::Uuid),
     OperationFailure(uuid::Uuid),
     WorkspaceLeak,
 }
@@ -148,7 +150,7 @@ pub struct RunnerStatusFailure {
 pub struct RunnerStatusPage {
     pub runners: vec::Vec<runner_protocol::status::RunnerStatusFact>,
     pub failures: vec::Vec<runner_protocol::status::RunnerStatusFailure>,
-    pub next_after: option::Option<uuid::Uuid>,
+    pub next_after: option::Option<runner_protocol::status::RunnerStatusAfter>,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

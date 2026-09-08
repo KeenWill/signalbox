@@ -453,8 +453,17 @@ where
                 .await
         }
         ClientRequest::ReadRunnerStatus { page_size, after } => {
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
             super::runner_status::handle_read_runner_status(
-                writer, version, request_id, page_size, after, services,
+                writer,
+                version,
+                request_id,
+                page_size,
+                after,
+                services,
+                snapshot_permit,
             )
             .await
         }

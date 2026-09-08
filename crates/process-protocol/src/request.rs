@@ -38,7 +38,7 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
-    /// Read current runner facts and one page of retained diagnostics.
+    /// Read one bounded page of current runner facts and retained diagnostics.
     ReadRunnerStatus {
         page_size: u32,
         #[serde(deserialize_with = "deserialize_required_nullable")]

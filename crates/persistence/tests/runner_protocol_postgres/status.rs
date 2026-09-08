@@ -94,49 +94,62 @@ async fn runner_status_pages_retained_failures_without_repeating_current_facts()
             .await?;
         authorizations.push(authorization);
     }
-    let first = read_runner_status(&pool, 1, None).await?;
-    assert_eq!(first.failures.len(), 1);
-    assert_eq!(first.runners.len(), 3);
-    assert!(first.runners.contains(&RunnerStatusFact::Enrollment {
+    let mut after = None;
+    let mut runners = Vec::new();
+    let mut failures = Vec::new();
+    let mut cursors = Vec::new();
+    loop {
+        let page = read_runner_status(&pool, 1, after).await?;
+        assert_eq!(page.runners.len() + page.failures.len(), 1);
+        if let Some(next) = page.next_after {
+            assert_ne!(Some(next), after);
+            cursors.push(next);
+        }
+        runners.extend(page.runners);
+        failures.extend(page.failures);
+        after = page.next_after;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(runners.len(), 3);
+    assert_eq!(failures.len(), 3);
+    assert!(matches!(
+        cursors.as_slice(),
+        [
+            RunnerStatusAfter::Enrollment(_),
+            RunnerStatusAfter::Enrollment(_),
+            RunnerStatusAfter::Placement(_),
+            RunnerStatusAfter::OperationFailure(_),
+            RunnerStatusAfter::OperationFailure(_)
+        ]
+    ));
+    assert!(runners.contains(&RunnerStatusFact::Enrollment {
         runner: candidate.identities().runner(),
         request: candidate.request(),
         authority: signalbox_domain::RunnerEnrollmentState::Pending,
         connection: Some(RunnerConnectionState::Connected),
     }));
     assert!(
-        matches!(first.runners.last(), Some(RunnerStatusFact::Placement { session: observed, runner }) if *observed == session && runner.state() == ProcessRunnerProjectionState::RunnerLost)
+        matches!(runners.last(), Some(RunnerStatusFact::Placement { session: observed, runner }) if *observed == session && runner.state() == ProcessRunnerProjectionState::RunnerLost)
     );
-    let cursor = first.next_after.expect("two more failures remain");
-    assert_eq!(
-        cursor,
-        first.failures[0].authorization.authorization.into_uuid()
-    );
-    let second =
-        read_runner_status(&pool, 1, Some(RunnerStatusAfter::OperationFailure(cursor))).await?;
-    assert!(second.runners.is_empty());
-    assert_eq!(second.failures.len(), 1);
-    let cursor = second.next_after.expect("one more failure remains");
-    assert_eq!(
-        cursor,
-        second.failures[0].authorization.authorization.into_uuid()
-    );
-    let last =
-        read_runner_status(&pool, 1, Some(RunnerStatusAfter::OperationFailure(cursor))).await?;
-    assert!(last.runners.is_empty());
-    assert_eq!(last.failures.len(), 1);
-    assert!(last.next_after.is_none());
-    assert!(
-        first.failures[0].authorization.authorization.into_uuid()
-            < second.failures[0].authorization.authorization.into_uuid()
-    );
-    assert!(
-        second.failures[0].authorization.authorization.into_uuid()
-            < last.failures[0].authorization.authorization.into_uuid()
-    );
-    for failure in [&first.failures[0], &second.failures[0], &last.failures[0]] {
-        assert!(authorizations.contains(&failure.authorization));
+    for (failure, authorization) in failures.iter().zip(&authorizations) {
+        assert_eq!(&failure.authorization, authorization);
         assert_eq!(failure.detail, detail);
     }
+    let mixed = read_runner_status(&pool, 4, None).await?;
+    assert_eq!(mixed.runners, runners);
+    assert_eq!(mixed.failures, failures[..1]);
+    assert_eq!(
+        mixed.next_after,
+        Some(RunnerStatusAfter::OperationFailure(
+            authorizations[0].authorization.into_uuid()
+        ))
+    );
+    let all = read_runner_status(&pool, 100, None).await?;
+    assert_eq!(all.runners, runners);
+    assert_eq!(all.failures, failures);
+    assert!(all.next_after.is_none());
     let beyond = read_runner_status(&pool, 100, Some(RunnerStatusAfter::WorkspaceLeak)).await?;
     assert!(beyond.runners.is_empty());
     assert!(beyond.failures.is_empty());

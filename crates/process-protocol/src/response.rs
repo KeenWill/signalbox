@@ -157,7 +157,7 @@ pub fn validate_oauth_authorization(
 pub enum ServerMessage {
     /// Opens one runner-status page.
     RunnerStatusStart {},
-    /// One current enrollment or session placement, on the first page only.
+    /// One current enrollment or session placement.
     RunnerStatus { status: crate::RunnerStatusFact },
     /// One retained refusal with redacted diagnostic detail.
     RunnerOperationFailure {
@@ -974,14 +974,16 @@ impl ServerMessage {
             Self::RunnerOperationFailure { failure } => failure.validate()?,
             Self::RunnerWorkspaceLeak { leak } => leak.validate()?,
             Self::RunnerStatusEnd {
+                runner_count,
                 failure_count,
                 leak_count,
                 next_after,
                 ..
             } => {
-                let count = failure_count
+                let count = runner_count
                     .value()
-                    .checked_add(leak_count.value())
+                    .checked_add(failure_count.value())
+                    .and_then(|count| count.checked_add(leak_count.value()))
                     .ok_or(FrameValidationError::RunnerStatusShape)?;
                 if count > 100 || (count == 0 && next_after.is_some()) {
                     return Err(FrameValidationError::RunnerStatusShape);

@@ -7,10 +7,14 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Exclusive key identifying the last diagnostic emitted by a page.
+/// Exclusive key identifying the last fact emitted by a page.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunnerStatusCursor {
+    /// Current enrollment identity.
+    Enrollment { runner_id: CanonicalUuid },
+    /// Current session placement identity.
+    Placement { session_id: CanonicalUuid },
     /// Immutable replacement-provisioning refusal.
     OperationFailure { authorization_id: CanonicalUuid },
     /// Retained workspace leak identity.

@@ -14,135 +14,194 @@ pub(super) async fn handle_read_runner_status<Writer: AsyncWrite + Unpin>(
     page_size: u32,
     after: Option<RunnerStatusCursor>,
     services: &ConnectionServices,
+    snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError> {
     let after = after.map(|cursor| match cursor {
+        RunnerStatusCursor::Enrollment { runner_id } => {
+            RunnerStatusAfter::Enrollment(runner_id.into_uuid())
+        }
+        RunnerStatusCursor::Placement { session_id } => {
+            RunnerStatusAfter::Placement(session_id.into_uuid())
+        }
         RunnerStatusCursor::OperationFailure { authorization_id } => {
             RunnerStatusAfter::OperationFailure(authorization_id.into_uuid())
         }
         RunnerStatusCursor::WorkspaceLeak { .. } => RunnerStatusAfter::WorkspaceLeak,
     });
-    let messages = match store::read_runner_status(&services.pool, page_size, after).await {
-        Ok(page) => project_page(page),
-        Err(store::RunnerStatusError::InvalidPageSize) => Err(ErrorCode::InvalidRequest),
-        Err(store::RunnerStatusError::Database(_)) => Err(ErrorCode::Unavailable),
-        Err(store::RunnerStatusError::Corruption) => Err(ErrorCode::Internal),
-    };
-    let messages = match messages {
-        Ok(messages) => messages,
+    let spool = spool_runner_status(&services.pool, version, request_id, page_size, after).await;
+    drop(snapshot_permit);
+    match spool {
+        Ok(mut file) => write_spooled_file(writer, &mut file).await,
         Err(code) => {
-            return write_error(
+            write_error(
                 writer,
                 version,
                 request_id,
                 ProtocolError::without_detail(code),
             )
-            .await;
+            .await
         }
-    };
-    for message in messages {
-        write_message(writer, version, request_id, message).await?;
     }
-    Ok(())
 }
 
-fn project_page(page: store::RunnerStatusPage) -> Result<Vec<ServerMessage>, ErrorCode> {
+async fn spool_runner_status(
+    pool: &PgPool,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    page_size: u32,
+    after: Option<RunnerStatusAfter>,
+) -> Result<tokio::fs::File, ErrorCode> {
+    let page = store::read_runner_status(pool, page_size, after)
+        .await
+        .map_err(read_error)?;
+    let mut file =
+        tokio::fs::File::from_std(tempfile::tempfile().map_err(|_| ErrorCode::Unavailable)?);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::RunnerStatusStart {},
+    )
+    .await
+    .map_err(|_| ErrorCode::Unavailable)?;
+    let runner_count = page.runners.len() as u64;
+    for fact in page.runners {
+        let message = project_fact(fact)?;
+        write_spool_message(&mut file, version, request_id, message)
+            .await
+            .map_err(|_| ErrorCode::Unavailable)?;
+    }
+    let failure_count = CanonicalU64::new(page.failures.len() as u64);
+    for failure in page.failures {
+        write_spool_message(&mut file, version, request_id, project_failure(failure)?)
+            .await
+            .map_err(|_| ErrorCode::Unavailable)?;
+    }
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::RunnerStatusEnd {
+            runner_count: CanonicalU64::new(runner_count),
+            failure_count,
+            leak_count: CanonicalU64::new(0),
+            next_after: page
+                .next_after
+                .map(|after| match after {
+                    RunnerStatusAfter::Enrollment(id) => Ok(RunnerStatusCursor::Enrollment {
+                        runner_id: wire_uuid(id),
+                    }),
+                    RunnerStatusAfter::Placement(id) => Ok(RunnerStatusCursor::Placement {
+                        session_id: wire_uuid(id),
+                    }),
+                    RunnerStatusAfter::OperationFailure(id) => {
+                        Ok(RunnerStatusCursor::OperationFailure {
+                            authorization_id: wire_uuid(id),
+                        })
+                    }
+                    RunnerStatusAfter::WorkspaceLeak => Err(ErrorCode::Internal),
+                })
+                .transpose()?,
+        },
+    )
+    .await
+    .map_err(|_| ErrorCode::Unavailable)?;
+    file.flush().await.map_err(|_| ErrorCode::Unavailable)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|_| ErrorCode::Unavailable)?;
+    Ok(file)
+}
+
+fn read_error(error: store::RunnerStatusError) -> ErrorCode {
+    match error {
+        store::RunnerStatusError::InvalidPageSize => ErrorCode::InvalidRequest,
+        store::RunnerStatusError::Database(_) => ErrorCode::Unavailable,
+        store::RunnerStatusError::Corruption => ErrorCode::Internal,
+    }
+}
+
+fn project_fact(status: store::RunnerStatusFact) -> Result<ServerMessage, ErrorCode> {
     use signalbox_domain::RunnerEnrollmentState as Authority;
     use signalbox_persistence::runner_protocol::RunnerConnectionState as Connection;
     use signalbox_process_protocol::RunnerConnectionHealth as Health;
-    let mut messages = vec![ServerMessage::RunnerStatusStart {}];
-    let runner_count = CanonicalU64::new(page.runners.len() as u64);
-    let failure_count = CanonicalU64::new(page.failures.len() as u64);
-    for status in page.runners {
-        let status = match status {
-            store::RunnerStatusFact::Enrollment {
-                runner,
-                request,
-                authority,
-                connection,
-            } => RunnerStatusFact::Enrollment {
-                runner_id: wire_uuid(runner.into_uuid()),
-                enrollment_request_id: wire_uuid(request.into_uuid()),
-                authority: match authority {
-                    Authority::Pending => RunnerAuthorityState::Pending,
-                    Authority::Active => RunnerAuthorityState::Active,
-                    Authority::Revoked => RunnerAuthorityState::Revoked,
-                },
-                connection_health: connection.map(|connection| match connection {
-                    Connection::Connected => Health::Connected,
-                    Connection::Suspect => Health::Suspect,
-                    Connection::Shutdown => Health::Shutdown,
-                    Connection::Lost => Health::Lost,
-                }),
+    let status = match status {
+        store::RunnerStatusFact::Enrollment {
+            runner,
+            request,
+            authority,
+            connection,
+        } => RunnerStatusFact::Enrollment {
+            runner_id: wire_uuid(runner.into_uuid()),
+            enrollment_request_id: wire_uuid(request.into_uuid()),
+            authority: match authority {
+                Authority::Pending => RunnerAuthorityState::Pending,
+                Authority::Active => RunnerAuthorityState::Active,
+                Authority::Revoked => RunnerAuthorityState::Revoked,
             },
-            store::RunnerStatusFact::Placement { session, runner } => RunnerStatusFact::Placement {
-                session_id: wire_uuid(session.into_uuid()),
-                runner: super::transcript::wire_runner_projection(&runner)
-                    .map_err(|_| ErrorCode::Internal)?,
-            },
-        };
-        messages.push(ServerMessage::RunnerStatus { status });
-    }
-    for failure in page.failures {
-        let authorization = failure.authorization;
-        use signalbox_domain::RunnerProvisioningFailureKind as Category;
-        let category = match failure.category {
-            Category::CredentialUnavailable => RunnerFailureCategory::CredentialUnavailable,
-            Category::RepositoryUnavailable => RunnerFailureCategory::RepositoryUnavailable,
-            Category::SandboxUnavailable => RunnerFailureCategory::SandboxUnavailable,
-            Category::WorkspaceConflict => RunnerFailureCategory::WorkspaceConflict,
-        };
-        let correlation = RunnerProvisionFailureCorrelation {
-            authorization_id: wire_uuid(authorization.authorization.into_uuid()),
-            session_id: wire_uuid(authorization.session.into_uuid()),
-            placement_revision: authorization.placement_revision.into(),
-            runner_id: wire_uuid(authorization.runner.into_uuid()),
-            registration_revision: authorization.registration_revision.into(),
-            repository: authorization
-                .repository
-                .map(|key| {
-                    signalbox_process_protocol::RunnerRepositoryKey::try_new(
-                        key.as_str().to_owned(),
-                    )
-                })
-                .transpose()
-                .map_err(|_| ErrorCode::Internal)?,
-            sandbox_profile: match authorization.sandbox {
-                signalbox_domain::RunnerSandboxProfile::Ambient => {
-                    signalbox_process_protocol::RunnerSandboxProfile::Ambient
-                }
-                signalbox_domain::RunnerSandboxProfile::WorkspaceRestricted => {
-                    signalbox_process_protocol::RunnerSandboxProfile::WorkspaceRestricted
-                }
-            },
-            credential_profile: authorization
-                .credential_profile
-                .map(|profile| {
-                    signalbox_process_protocol::RunnerCredentialProfileName::try_new(
-                        profile.as_str().to_owned(),
-                    )
-                })
-                .transpose()
-                .map_err(|_| ErrorCode::Internal)?,
-        };
-        messages.push(ServerMessage::RunnerOperationFailure {
-            failure: RunnerOperationFailure::Provision {
-                correlation,
-                category,
-                detail: redact_detail(failure.detail)?,
-            },
-        });
-    }
-    messages.push(ServerMessage::RunnerStatusEnd {
-        runner_count,
-        failure_count,
-        leak_count: CanonicalU64::new(0),
-        next_after: page
-            .next_after
-            .map(|id| RunnerStatusCursor::OperationFailure {
-                authorization_id: wire_uuid(id),
+            connection_health: connection.map(|connection| match connection {
+                Connection::Connected => Health::Connected,
+                Connection::Suspect => Health::Suspect,
+                Connection::Shutdown => Health::Shutdown,
+                Connection::Lost => Health::Lost,
             }),
-    });
-    Ok(messages)
+        },
+        store::RunnerStatusFact::Placement { session, runner } => RunnerStatusFact::Placement {
+            session_id: wire_uuid(session.into_uuid()),
+            runner: super::transcript::wire_runner_projection(&runner)
+                .map_err(|_| ErrorCode::Internal)?,
+        },
+    };
+    Ok(ServerMessage::RunnerStatus { status })
+}
+
+fn project_failure(failure: store::RunnerStatusFailure) -> Result<ServerMessage, ErrorCode> {
+    let authorization = failure.authorization;
+    use signalbox_domain::RunnerProvisioningFailureKind as Category;
+    let category = match failure.category {
+        Category::CredentialUnavailable => RunnerFailureCategory::CredentialUnavailable,
+        Category::RepositoryUnavailable => RunnerFailureCategory::RepositoryUnavailable,
+        Category::SandboxUnavailable => RunnerFailureCategory::SandboxUnavailable,
+        Category::WorkspaceConflict => RunnerFailureCategory::WorkspaceConflict,
+    };
+    let correlation = RunnerProvisionFailureCorrelation {
+        authorization_id: wire_uuid(authorization.authorization.into_uuid()),
+        session_id: wire_uuid(authorization.session.into_uuid()),
+        placement_revision: authorization.placement_revision.into(),
+        runner_id: wire_uuid(authorization.runner.into_uuid()),
+        registration_revision: authorization.registration_revision.into(),
+        repository: authorization
+            .repository
+            .map(|key| {
+                signalbox_process_protocol::RunnerRepositoryKey::try_new(key.as_str().to_owned())
+            })
+            .transpose()
+            .map_err(|_| ErrorCode::Internal)?,
+        sandbox_profile: match authorization.sandbox {
+            signalbox_domain::RunnerSandboxProfile::Ambient => {
+                signalbox_process_protocol::RunnerSandboxProfile::Ambient
+            }
+            signalbox_domain::RunnerSandboxProfile::WorkspaceRestricted => {
+                signalbox_process_protocol::RunnerSandboxProfile::WorkspaceRestricted
+            }
+        },
+        credential_profile: authorization
+            .credential_profile
+            .map(|profile| {
+                signalbox_process_protocol::RunnerCredentialProfileName::try_new(
+                    profile.as_str().to_owned(),
+                )
+            })
+            .transpose()
+            .map_err(|_| ErrorCode::Internal)?,
+    };
+    Ok(ServerMessage::RunnerOperationFailure {
+        failure: RunnerOperationFailure::Provision {
+            correlation,
+            category,
+            detail: redact_detail(failure.detail)?,
+        },
+    })
 }
 
 fn redact_detail(value: serde_json::Value) -> Result<RunnerFailureDetail, ErrorCode> {
@@ -264,35 +323,24 @@ mod tests {
                 )?,
             ),
         };
-        let projected = project_page(store::RunnerStatusPage {
-            runners: vec![],
-            failures: vec![store::RunnerStatusFailure { authorization,
-                category: RunnerProvisioningFailureKind::RepositoryUnavailable,
-                detail: serde_json::json!({"code":"repository_unavailable", "message":"/host/repository", "payload":{}}),
-            }], next_after: None,
+        let projected = project_failure(store::RunnerStatusFailure {
+            authorization,
+            category: RunnerProvisioningFailureKind::RepositoryUnavailable,
+            detail: serde_json::json!({"code":"repository_unavailable", "message":"/host/repository", "payload":{}}),
         }).expect("retained fixture projects");
         assert_eq!(
             projected,
-            vec![
-                ServerMessage::RunnerStatusStart {},
-                ServerMessage::RunnerOperationFailure {
-                    failure: RunnerOperationFailure::Provision {
-                        correlation: expected,
-                        category: RunnerFailureCategory::RepositoryUnavailable,
-                        detail: RunnerFailureDetail {
-                            code: "repository_unavailable".to_owned(),
-                            message: "[redacted]".to_owned(),
-                            payload: serde_json::json!({})
-                        },
-                    }
+            ServerMessage::RunnerOperationFailure {
+                failure: RunnerOperationFailure::Provision {
+                    correlation: expected,
+                    category: RunnerFailureCategory::RepositoryUnavailable,
+                    detail: RunnerFailureDetail {
+                        code: "repository_unavailable".to_owned(),
+                        message: "[redacted]".to_owned(),
+                        payload: serde_json::json!({}),
+                    },
                 },
-                ServerMessage::RunnerStatusEnd {
-                    runner_count: CanonicalU64::new(0),
-                    failure_count: CanonicalU64::new(1),
-                    leak_count: CanonicalU64::new(0),
-                    next_after: None
-                },
-            ]
+            }
         );
         Ok(())
     }

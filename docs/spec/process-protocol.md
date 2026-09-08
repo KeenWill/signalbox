@@ -429,22 +429,23 @@ installed sections or failure phase and reason.
 
 Runner placement inspection is `read_runner_status { page_size, after }`, with
 `page_size` 1 through 100; other sizes reject the request. Each page opens with
-`runner_status_start`, returns `runner_status` only for a null `after`, then
-`runner_operation_failure` and `runner_workspace_leak` in that order, and closes
-with
+`runner_status_start`, returns `runner_status`, then `runner_operation_failure`
+and `runner_workspace_leak` in that order, and closes with
 `runner_status_end { runner_count, failure_count, leak_count, next_after }`. The
-counts name messages on this page; `page_size` bounds failures and leaks
-together. `after` and `next_after` are null or one tagged cursor naming the last
-emitted diagnostic, exclusive on continuation; `next_after` is null at the end.
+counts name messages on this page; `page_size` bounds runner facts, failures,
+and leaks together. `after` and `next_after` are null or one tagged cursor
+naming the last emitted fact, exclusive on continuation; `next_after` is null at
+the end.
 
 `runner_status` carries one enrollment or current session placement. Enrollment
 facts include the runner, its enrollment-request identity, current authority
 (`pending`, `active`, or `revoked`), and nullable connection health. Session
 placement facts carry the snapshot's complete runner object. Enrollment facts
-sort by runner UUID before placements sorted by session UUID. A pending
-provisioning-only successor is visible by the identity `promote_pending_runner`
-accepts. The terminal client exposes
-`runner status [--page-size N] [--after JSON]` and verifies diagnostic ordering,
+sort by runner UUID before placements sorted by session UUID, with
+`enrollment { runner_id }` and `placement { session_id }` cursors respectively.
+A pending provisioning-only successor is visible by the identity
+`promote_pending_runner` accepts. The terminal client exposes
+`runner status [--page-size N] [--after JSON]` and verifies fact ordering,
 counts, and continuation before rendering the page.
 
 The failure projection's `operation_kind` selects the refused operation's

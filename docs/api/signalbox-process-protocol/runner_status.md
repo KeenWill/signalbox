@@ -6,6 +6,12 @@
 
 ```rust
 pub enum RunnerStatusCursor {
+    Enrollment {
+        runner_id: CanonicalUuid,
+    },
+    Placement {
+        session_id: CanonicalUuid,
+    },
     OperationFailure {
         authorization_id: CanonicalUuid,
     },

@@ -47,7 +47,7 @@ fn runner_status_cursor_requires_one_closed_identity() {
 #[test]
 fn runner_status_empty_page_cannot_claim_continuation() -> Result<(), Box<dyn std::error::Error>> {
     let message = ServerMessage::RunnerStatusEnd {
-        runner_count: CanonicalU64::new(2),
+        runner_count: CanonicalU64::new(0),
         failure_count: CanonicalU64::new(0),
         leak_count: CanonicalU64::new(0),
         next_after: Some(RunnerStatusCursor::OperationFailure {
@@ -58,5 +58,45 @@ fn runner_status_empty_page_cannot_claim_continuation() -> Result<(), Box<dyn st
         ServerFrame::try_new(request(1)?, message),
         Err(FrameValidationError::RunnerStatusShape)
     );
+    Ok(())
+}
+
+#[test]
+fn runner_status_count_limit_includes_current_facts() -> Result<(), Box<dyn std::error::Error>> {
+    for (runners, failures, accepted) in [
+        (100, 0, true),
+        (99, 1, true),
+        (100, 1, false),
+        (101, 0, false),
+        (u64::MAX, 1, false),
+    ] {
+        let result = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::RunnerStatusEnd {
+                runner_count: CanonicalU64::new(runners),
+                failure_count: CanonicalU64::new(failures),
+                leak_count: CanonicalU64::new(0),
+                next_after: None,
+            },
+        );
+        assert_eq!(result.is_ok(), accepted);
+    }
+    for after in [
+        RunnerStatusCursor::Enrollment {
+            runner_id: CanonicalUuid::from_uuid(uuid::Uuid::from_u128(1)),
+        },
+        RunnerStatusCursor::Placement {
+            session_id: CanonicalUuid::from_uuid(uuid::Uuid::from_u128(2)),
+        },
+    ] {
+        let frame = ClientFrame::try_new(
+            request(1)?,
+            ClientRequest::ReadRunnerStatus {
+                page_size: 1,
+                after: Some(after),
+            },
+        )?;
+        assert_eq!(decode_client_line(&encode_client_line(&frame)?)?, frame);
+    }
     Ok(())
 }
