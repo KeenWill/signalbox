@@ -803,6 +803,7 @@ impl GitHubCodeHostTransport {
                 "name": arguments.repository().name(),
                 "number": arguments.number().get(),
                 "owner": arguments.repository().owner(),
+                "pageSize": self.bounds.result_items().unwrap_or(MAX_COLLECTION_MEMBERS),
             }
         }))
         .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
@@ -5491,7 +5492,9 @@ mod tests {
             .await
             .expect("first page completes the bounded read")
             .into_json_value();
-        repository_server_result(server).await;
+        let request: serde_json::Value =
+            serde_json::from_str(&repository_server_result(server).await).expect("GraphQL request");
+        assert_eq!(request["variables"]["pageSize"], 100);
         assert_eq!(
             result["threads"][0]["comments"]
                 .as_array()
@@ -5532,7 +5535,9 @@ mod tests {
             .await
             .expect("over-bound comments produce a bounded result")
             .into_json_value();
-        repository_server_result(server).await;
+        let request: serde_json::Value =
+            serde_json::from_str(&repository_server_result(server).await).expect("GraphQL request");
+        assert_eq!(request["variables"]["pageSize"], 1);
         assert_eq!(
             result["threads"][0]["comments"]
                 .as_array()
