@@ -5061,7 +5061,7 @@ async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
 }
 
 #[path = "credential_wait.rs"]
-mod credential_wait;
+pub(super) mod credential_wait;
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn exhausted_page_settles_attempt_outside_abandoned_page() -> Result<(), Box<dyn Error>> {

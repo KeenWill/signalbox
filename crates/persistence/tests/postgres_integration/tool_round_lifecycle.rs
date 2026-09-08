@@ -919,6 +919,106 @@ async fn frontier_writer_reservations_cover_terminal_capacity_observation()
     .await
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn frontier_writer_reservations_cover_credential_wait_release() -> Result<(), Box<dyn Error>>
+{
+    use super::model_call_execution_and_recovery::credential_wait::{
+        park_policy, prepare_wait_admission,
+    };
+    use super::model_call_execution_and_recovery::{
+        active_credential_pool_fixture, prepare_and_authorize_pool_call,
+    };
+    let (_container, pool, _) = migrated_postgres().await?;
+    let source_seed = 0x1377_0000;
+    let seed = 0x1378_0000;
+    let pool_name = "wait-collision-pool";
+    let member = "wait-collision-member";
+    let (source_session, _, source_repository) = active_credential_pool_fixture(
+        &pool,
+        source_seed,
+        pool_name,
+        &[member],
+        CredentialPoolRuntimeAction::Stay,
+        CredentialPoolRuntimeAction::Stay,
+    )
+    .await?;
+    let (source, _) =
+        prepare_and_authorize_pool_call(&source_repository, source_session, source_seed + 100)
+            .await?;
+    let observation = source.observation_correlation().call().into_uuid();
+    sqlx::query("INSERT INTO credential_pool_transient_exclusion (observation_model_call_id, credential_reference, cause_kind, reset_at) VALUES ($1,$2,'overloaded',transaction_timestamp() + interval '1 hour')")
+        .bind(observation).bind(member).execute(&pool).await?;
+    let (session, turn, repository) = active_credential_pool_fixture(
+        &pool,
+        seed,
+        pool_name,
+        &[member],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4)));
+    let repository = repository.with_credential_pools(std::collections::HashMap::from([(
+        target,
+        park_policy(pool_name, &[member]),
+    )]));
+    let PrepareInitialModelCallOutcome::CredentialWait(wait) =
+        prepare_wait_admission(&repository, session, seed + 100).await?
+    else {
+        panic!("excluded credential parks the initial preparation");
+    };
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 110)),
+                session,
+                UserContent::try_text("steering during credential wait".to_owned()).unwrap(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 111)),
+            None,
+        )
+        .await?;
+    sqlx::query("UPDATE credential_pool_transient_exclusion SET reset_at = transaction_timestamp() WHERE observation_model_call_id = $1")
+        .bind(observation).execute(&pool).await?;
+    sqlx::query(
+        "UPDATE credential_availability_wait SET eligible = true WHERE wait_attempt_id = $1",
+    )
+    .bind(wait.attempt().into_uuid())
+    .execute(&pool)
+    .await?;
+    let shared = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 112));
+    assert_frontier_writer_collision(&pool, shared, async move {
+        let mut generated = 0;
+        let result = repository
+            .prepare_initial_call(
+                session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 120)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 121)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 122)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 123)),
+                |_| {
+                    generated += 1;
+                    (shared, TurnId::from_uuid(Uuid::from_u128(seed + 124)))
+                },
+            )
+            .await
+            .map(|_| ());
+        assert_eq!(
+            generated, 1,
+            "wait release reuses its reserved steering candidate"
+        );
+        result
+    })
+    .await
+}
+
 enum PreviewFailureWriter {
     Counted,
     Attachment,

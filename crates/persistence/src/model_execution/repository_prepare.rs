@@ -49,7 +49,7 @@ use signalbox_domain::{
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
     ResolvedProviderTarget, SessionId, TurnId, TurnTerminalCause,
 };
-use sqlx::Row;
+use sqlx::{Row, types::Uuid};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -71,6 +71,47 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
+            let waiting_turn: Option<Uuid> = sqlx::query_scalar(
+                "SELECT turn_id FROM credential_availability_wait
+                  WHERE session_id = $1 AND consumed_by_attempt_id IS NULL",
+            )
+            .bind(session.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let mut wait_steering_candidates = if let Some(turn) = waiting_turn {
+                let pending: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT accepted_input_id FROM accepted_input
+                      WHERE session_id = $1 AND expected_active_turn_id = $2
+                        AND disposition_kind = 'pending_steering'
+                      ORDER BY acceptance_position",
+                )
+                .bind(session.into_uuid())
+                .bind(turn)
+                .fetch_all(&mut *transaction)
+                .await?;
+                let candidates = pending
+                    .into_iter()
+                    .map(|input| {
+                        let input = AcceptedInputId::from_uuid(input);
+                        (input, next_steering_identities(input))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                super::reserve_frontier_write_identities(
+                    &mut transaction,
+                    candidates
+                        .values()
+                        .map(|(entry, _)| entry.into_uuid())
+                        .chain([
+                            steering_frontier.into_uuid(),
+                            failure_identities.failure_entry().into_uuid(),
+                            failure_identities.terminal_frontier().into_uuid(),
+                        ]),
+                )
+                .await?;
+                Some(candidates)
+            } else {
+                None
+            };
             if let Some(wait) = super::credential_wait::prepare_release(
                 &mut transaction,
                 self,
@@ -158,7 +199,15 @@ impl PostgresModelCallRepository {
                 Vec::with_capacity(execution.active_turn().pending_steering().len());
             for pending in execution.active_turn().pending_steering() {
                 let accepted_input = pending.accepted_input();
-                let (entry, turn) = next_steering_identities(accepted_input);
+                let (entry, turn) =
+                    match &mut wait_steering_candidates {
+                        Some(candidates) => candidates.remove(&accepted_input).ok_or(
+                            ModelCallCorruption::Missing(
+                                "reserved credential-wait steering identities",
+                            ),
+                        )?,
+                        None => next_steering_identities(accepted_input),
+                    };
                 if !reserved_entries.insert(entry) {
                     return Err(ModelCallRepositoryError::IdentityCollision(
                         ModelCallIdentityCollision::SemanticEntry,
