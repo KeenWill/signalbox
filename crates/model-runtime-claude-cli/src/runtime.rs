@@ -509,19 +509,20 @@ impl ClaudeCliRuntime {
             let support =
                 create_support_files(&bridge, &translated, request_fast_mode, credential.as_ref());
             (support, translated, credential)
-        })
-        .await;
-        let (support, mut translated, credential) = match support_worker {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return PreparationOutcome::Defect {
-                    correlation,
-                    defect: PreparationDefect::RequestConstructionFailed {
-                        detail: format!("support-file worker failed: {error}"),
-                    },
-                };
-            }
-        };
+        });
+        let (support, mut translated, credential) =
+            match cancellation.run_until_cancelled(support_worker).await {
+                None => return PreparationOutcome::Cancelled { correlation },
+                Some(Ok(prepared)) => prepared,
+                Some(Err(error)) => {
+                    return PreparationOutcome::Defect {
+                        correlation,
+                        defect: PreparationDefect::RequestConstructionFailed {
+                            detail: format!("support-file worker failed: {error}"),
+                        },
+                    };
+                }
+            };
         let support = match support {
             Ok(support) => support,
             Err(detail) => {
