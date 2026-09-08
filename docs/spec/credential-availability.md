@@ -189,5 +189,5 @@ retain the active turn and its slot without rejection detail.
 
 ## Planned
 
-- Contention and capacity reservations, wake delivery, and the typed wait
-  projection ([design](../design/credential-availability.md)).
+- Contention and capacity reservations and wake delivery
+  ([design](../design/credential-availability.md)).
