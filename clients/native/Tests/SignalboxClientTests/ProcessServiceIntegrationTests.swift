@@ -3139,6 +3139,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
     viewModel.apply(.event(try ProcessProjectionFixture.overrideConsumptionEvent()))
     XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
   }
 
   @MainActor
@@ -3170,6 +3174,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     viewModel.apply(.event(try ProcessProjectionFixture.overrideConsumptionEvent()))
     await viewModel.overrideToolDenial(invocationID)
     XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs.count, 1)
   }
 
   @MainActor
@@ -3190,6 +3197,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       )
     )
     XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
   }
 
   @MainActor

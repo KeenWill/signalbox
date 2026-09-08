@@ -1349,6 +1349,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   @Published private(set) var isSubmitting = false
   @Published private(set) var isDecidingTool = false
   @Published private(set) var armedToolDenials: Set<String> = []
+  @Published private(set) var retiredToolDenials: Set<String> = []
   @Published var composerText = ""
   @Published var errorMessage: String?
 
@@ -1588,6 +1589,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       !isDecidingTool,
       isDelegateDenied(invocationID),
       !armedToolDenials.contains(invocationID.rawValue),
+      !retiredToolDenials.contains(invocationID.rawValue),
       mutationBlocksByTurnID.isEmpty,
       let service = connectedService
     else {
@@ -2250,6 +2252,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     unresolvedToolDecision = nil
     unresolvedToolOverride = nil
     armedToolDenials = []
+    retiredToolDenials = []
     streamedText = nil
     materializedAcceptedInputIDs = []
     terminalTurnIDs = []
@@ -2477,6 +2480,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private func retireConsumedToolOverrides() {
     for approval in toolApprovalDecisionsByRequestID.values {
       if case .userOverride(_, let deniedRequestID) = approval.decider {
+        retiredToolDenials.insert(deniedRequestID.rawValue)
         armedToolDenials.remove(deniedRequestID.rawValue)
       }
     }
@@ -2496,6 +2500,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         else {
           continue
         }
+        retiredToolDenials.insert(denied.toolRequestID.rawValue)
         armedToolDenials.remove(denied.toolRequestID.rawValue)
         break
       }
@@ -3204,6 +3209,8 @@ struct ProcessSessionDetailScreen: View {
         if tool.status == .denied && viewModel.isDelegateDenied(tool.invocationID) {
           if viewModel.armedToolDenials.contains(tool.invocationID.rawValue) {
             Text("One-shot override armed")
+          } else if viewModel.retiredToolDenials.contains(tool.invocationID.rawValue) {
+            Text("One-shot override retired")
           } else {
             Button("Arm one-shot override") {
               Task { await viewModel.overrideToolDenial(tool.invocationID) }
