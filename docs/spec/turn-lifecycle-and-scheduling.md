@@ -44,7 +44,8 @@ the execution ports owned by [model-call-execution](model-call-execution.md) and
 [tool-loop](tool-loop.md).
 
 Connection-loss propagation retains a post-commit eligibility hint when the
-nudge channel is full and retries when capacity becomes available.
+nudge channel is full and retries when capacity becomes available. A nudge that
+waits for capacity only coalesces with a hint already queued in the channel.
 
 Every component deadline covers one physical operation. A running turn with no
 model call, tool attempt, or durable wait outstanding is reached by none of them
