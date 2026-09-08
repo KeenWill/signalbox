@@ -69,7 +69,9 @@ and any probe completion order.
 
 The service repeats inspection for every read, and `file_read` accepts no
 model-supplied media type or reader identity. Why: no classification from an
-earlier call is trusted.
+earlier call is trusted. A registered streaming-text reader is selected through
+streaming validation even for declared `text/plain`. JSON container-entry
+ceilings are enforced while parsing, before constructing an excessive tree.
 
 The raw processor output types carry strings and JSON text rather than checked
 registry values, and the registry reparses and cross-checks every claim against
