@@ -3,7 +3,8 @@ use super::{
     ModelCallCredentialReference, ModelConversationMessage, ModelFrontierRenderingError,
     ModelUserContentPart, PreparedModelCallRequest, ProviderReasoningProvenance,
     ResolvedToolConversationEntry, SessionSystemPrompt, ToolDefinition,
-    projected_frontier_content_bytes, render_frontier_messages_with_placements,
+    projected_frontier_container_bytes, projected_frontier_content_bytes,
+    render_frontier_messages_with_placements,
 };
 
 /// A checked prepared call plus its provider-neutral ordered messages.
@@ -91,27 +92,10 @@ impl PreparedModelOperation {
             |accepted_input| request.origin_content(accepted_input),
             projected_tool_entries.clone(),
         );
-        let container_bytes = projected_entries
-            .iter()
-            .fold(0_usize, |bytes, (_, payload)| {
-                let parts = match payload {
-                    signalbox_domain::SemanticTranscriptEntryPayload::OriginAcceptedInput {
-                        accepted_input,
-                    }
-                    | signalbox_domain::SemanticTranscriptEntryPayload::SteeringAcceptedInput {
-                        accepted_input,
-                        ..
-                    } => request
-                        .origin_content(*accepted_input)
-                        .map_or(0, |content| content.parts().len()),
-                    _ => 0,
-                };
-                bytes
-                    .saturating_add(std::mem::size_of::<ModelConversationMessage>())
-                    .saturating_add(
-                        parts.saturating_mul(std::mem::size_of::<ModelUserContentPart>()),
-                    )
-            });
+        let container_bytes = projected_frontier_container_bytes(
+            projected_entries.iter().map(|(_, payload)| *payload),
+            |accepted_input| request.origin_content(accepted_input),
+        );
         let observed_bytes = observed_bytes.saturating_add(container_bytes);
         if observed_bytes > retained_frontier_content_limit {
             return Err(

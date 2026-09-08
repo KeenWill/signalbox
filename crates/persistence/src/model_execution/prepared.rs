@@ -366,35 +366,26 @@ pub(super) async fn load_tool_conversation_entries(
         |accepted| request.origin_content(accepted),
         std::iter::empty(),
     );
-    let resident_bytes = projected_entries.fold(non_tool_bytes, |bytes, entry| {
-        let parts = match entry.payload() {
-            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
-            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
-                request
-                    .origin_content(*accepted_input)
-                    .map_or(0, |content| content.parts().len())
-            }
-            _ => 0,
-        };
-        let tool_entry_bytes = match entry.payload() {
-            SemanticTranscriptEntryPayload::AssistantToolUse { .. }
-            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
-            | SemanticTranscriptEntryPayload::ToolDenied { .. }
-            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
-            | SemanticTranscriptEntryPayload::ToolClosed { .. } => {
-                std::mem::size_of::<ResolvedToolConversationEntry>()
-            }
-            _ => 0,
-        };
-        bytes
-            .saturating_add(tool_entry_bytes)
-            .saturating_add(std::mem::size_of::<
-                signalbox_application::ModelConversationMessage,
-            >())
-            .saturating_add(parts.saturating_mul(std::mem::size_of::<
-                signalbox_application::ModelUserContentPart,
-            >()))
-    });
+    let container_bytes = signalbox_application::projected_frontier_container_bytes(
+        projected_entries.clone().map(|entry| entry.payload()),
+        |accepted| request.origin_content(accepted),
+    );
+    let resident_bytes = projected_entries.fold(
+        non_tool_bytes.saturating_add(container_bytes),
+        |bytes, entry| {
+            let tool_entry_bytes = match entry.payload() {
+                SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
+                | SemanticTranscriptEntryPayload::ToolClosed { .. } => {
+                    std::mem::size_of::<ResolvedToolConversationEntry>()
+                }
+                _ => 0,
+            };
+            bytes.saturating_add(tool_entry_bytes)
+        },
+    );
     let limit_bytes = signalbox_application::MAX_RETAINED_FRONTIER_CONTENT_BYTES;
     if resident_bytes > limit_bytes {
         return Ok(None);

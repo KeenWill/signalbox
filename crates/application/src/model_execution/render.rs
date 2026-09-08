@@ -440,6 +440,52 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
     Ok(messages.into_boxed_slice())
 }
 
+/// Counts message and user-part containers emitted for projected payloads.
+/// Imported entries without attested user/assistant text and turn terminal
+/// markers emit no message and contribute no container bytes.
+pub fn projected_frontier_container_bytes<'a>(
+    entries: impl IntoIterator<Item = &'a SemanticTranscriptEntryPayload>,
+    mut origin_content: impl FnMut(AcceptedInputId) -> Option<&'a UserContent>,
+) -> usize {
+    entries.into_iter().fold(0_usize, |total, payload| {
+        let parts = match payload {
+            SemanticTranscriptEntryPayload::Imported {
+                source_speaker:
+                    ImportedSourceAttestation::Attested(
+                        ImportedSpeaker::User | ImportedSpeaker::Assistant,
+                    ),
+                content: ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(_)),
+                ..
+            } => 0,
+            SemanticTranscriptEntryPayload::Imported { .. }
+            | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. }
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => return total,
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+                origin_content(*accepted_input).map_or(0, |content| content.parts().len())
+            }
+            SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
+            | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+            | SemanticTranscriptEntryPayload::ContextSummary { .. }
+            | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::ProviderCompaction { .. }
+            | SemanticTranscriptEntryPayload::ProviderReasoning { .. }
+            | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { .. } => 0,
+        };
+        total
+            .saturating_add(std::mem::size_of::<ModelConversationMessage>())
+            .saturating_add(parts.saturating_mul(std::mem::size_of::<ModelUserContentPart>()))
+    })
+}
+
 /// Counts heap-backed user content without cloning its text or metadata.
 /// Attachment length uses the widest u64 spelling, reserving at most nineteen
 /// extra bytes per stub before catalog evidence is consulted by rendering.

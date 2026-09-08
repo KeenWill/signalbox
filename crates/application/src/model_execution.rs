@@ -74,7 +74,8 @@ mod render;
 use render::render_frontier_messages;
 use render::render_frontier_messages_with_placements;
 pub use render::{
-    ModelFrontierRenderingError, projected_frontier_content_bytes, render_model_user_content,
+    ModelFrontierRenderingError, projected_frontier_container_bytes,
+    projected_frontier_content_bytes, render_model_user_content,
 };
 
 mod prepared;

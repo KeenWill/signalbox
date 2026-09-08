@@ -9,8 +9,9 @@ use super::{
     ScriptedModelCallProvider, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId, ToolRequestId,
     TurnId, UnusedAuthorization, UnusedObservation, UserContent, counted_frontier_bytes,
-    credential_reference, identity, projected_frontier_content_bytes, ready_with_tool_evidence,
-    render_frontier_messages, rendered_content_bytes, tool_round_saturated_fixture,
+    credential_reference, identity, projected_frontier_container_bytes,
+    projected_frontier_content_bytes, ready_with_tool_evidence, render_frontier_messages,
+    rendered_content_bytes, tool_round_saturated_fixture,
     tool_round_saturated_fixture_with_assistant_text,
 };
 
@@ -246,6 +247,10 @@ fn projected_frontier_content_bytes_counts_every_payload_kind_the_render_clones(
         |accepted_input| origin_contents.get(&accepted_input),
         std::iter::empty(),
     );
+    let container_bytes = projected_frontier_container_bytes(
+        entries.iter().map(|(_, payload)| payload),
+        |accepted_input| origin_contents.get(&accepted_input),
+    );
     let messages = render_frontier_messages(
         entries.iter().map(|(source, payload)| (*source, payload)),
         |accepted_input| origin_contents.get(&accepted_input).cloned(),
@@ -253,6 +258,20 @@ fn projected_frontier_content_bytes_counts_every_payload_kind_the_render_clones(
         std::iter::empty(),
     )
     .expect("the payload fixture renders");
+    let rendered_container_bytes = std::mem::size_of_val(messages.as_ref())
+        + messages
+            .iter()
+            .map(|message| match message {
+                super::ModelConversationMessage::User { content, .. } => {
+                    std::mem::size_of_val(content.parts())
+                }
+                _ => 0,
+            })
+            .sum::<usize>();
+    assert_eq!(
+        container_bytes, rendered_container_bytes,
+        "non-rendering imports and terminal markers must not spend message container bytes"
+    );
 
     assert_eq!(
         counted,
