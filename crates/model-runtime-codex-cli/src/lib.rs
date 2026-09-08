@@ -6,9 +6,9 @@
 //! preparation performs no spawn, execution never respawns, and a process
 //! that ends without definitive Codex terminal evidence is never completion.
 //!
-//! Ambient and credential-home profiles use the CLI's login. OAuth profiles
-//! receive daemon-minted tokens in isolated homes, with exact-value and
-//! credential-shape redaction before output crosses the adapter boundary.
+//! Ambient and credential-home profiles use the CLI's login and pass output
+//! through unmodified. OAuth profiles receive daemon-minted tokens in isolated
+//! homes, with exact-value redaction before output crosses the adapter boundary.
 
 mod app_server;
 mod config;
