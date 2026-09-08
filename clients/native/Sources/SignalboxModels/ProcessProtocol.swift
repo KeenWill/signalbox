@@ -3934,7 +3934,7 @@ public struct SignalboxFollowedSessionEvent: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let event: SignalboxProcessSessionEvent
 
-  public init(cursor: SignalboxCanonicalUInt64, sessionID: SignalboxCanonicalUUID,
+  init(cursor: SignalboxCanonicalUInt64, sessionID: SignalboxCanonicalUUID,
     event: SignalboxProcessSessionEvent) {
     self.cursor = cursor
     self.sessionID = sessionID
