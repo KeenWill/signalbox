@@ -195,7 +195,7 @@ fn absent_index_publication_rejects_a_replacement_during_layout_validation() {
         })
         .expect_err("replacement during layout validation rejects publication");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(index_path).expect("actor index replacement reads"),
         actor_index
@@ -616,7 +616,7 @@ fn index_lock_preserves_a_directory_replacing_the_displaced_cleanup_path() {
         })
         .expect_err("cleanup-path directory rejects index cleanup");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(index_path).expect("prepared live index reads"),
         prepared_index
@@ -644,7 +644,7 @@ fn index_lock_preserves_a_file_replacing_the_displaced_cleanup_path() {
         })
         .expect_err("cleanup-path file replacement rejects index cleanup");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(index_path).expect("prepared live index reads"),
         prepared_index
@@ -675,7 +675,7 @@ fn index_final_verification_preserves_the_original_when_publication_changes() {
         })
         .expect_err("publication rewrite rejects final verification");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(index_path).expect("actor live index reads"),
         actor_index
