@@ -776,3 +776,6 @@ fn selection_display(selection: ModelSelection) -> String {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod reconnect_tests;

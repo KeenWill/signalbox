@@ -65,6 +65,8 @@ const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
 const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
+// The tool-loop contract caps each model-facing code-host collection at 100 members.
+const MAX_REVIEW_THREAD_COMMENTS: usize = 100;
 // GitHub lists at most 3,000 pull-request files, at 100 files per page.
 const MAX_CHANGED_FILE_PAGES: u16 = 30;
 
@@ -86,10 +88,24 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!) {
               body
               url
             }
-            pageInfo { hasNextPage }
+            pageInfo { hasNextPage endCursor }
           }
         }
-        pageInfo { hasNextPage }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"#;
+
+const THREAD_COMMENTS_QUERY: &str = r#"
+query ThreadComments($thread: ID!, $cursor: String!) {
+  node(id: $thread) {
+    ... on PullRequestReviewThread {
+      id
+      comments(first: 100, after: $cursor) {
+        nodes { id author { login __typename } authorAssociation body url }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -106,7 +122,7 @@ query ThreadInventory($owner: String!, $name: String!, $number: Int!, $cursor: S
           id isResolved isOutdated path line
           comments(first: 100) {
             nodes { author { login __typename } authorAssociation body }
-            pageInfo { hasNextPage }
+            pageInfo { hasNextPage endCursor }
           }
         }
         pageInfo { hasNextPage endCursor }
@@ -765,6 +781,18 @@ impl GitHubCodeHostTransport {
         arguments: super::ReviewThreadsArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        with_read_operation_timeout(
+            self.bounds.request_timeout(),
+            self.review_threads_transaction(arguments, credential),
+        )
+        .await
+    }
+
+    async fn review_threads_transaction(
+        &self,
+        arguments: super::ReviewThreadsArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         let body = serde_json::to_vec(&serde_json::json!({
             "query": REVIEW_THREADS_QUERY,
             "variables": {
@@ -792,10 +820,10 @@ impl GitHubCodeHostTransport {
             .get("nodes")
             .and_then(serde_json::Value::as_array)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let parsed = nodes
-            .iter()
-            .map(|value| parse_review_thread(self.bounds, value))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut parsed = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            parsed.push(parse_review_thread(self.bounds, node)?);
+        }
         let completeness = if nested_bool(threads, &["pageInfo", "hasNextPage"])? {
             CodeHostResultCompleteness::Truncated
         } else {
@@ -912,6 +940,45 @@ impl GitHubCodeHostTransport {
         Ok(result)
     }
 
+    async fn complete_thread_comments(
+        &self,
+        mut thread: serde_json::Value,
+        credential: &CredentialValue,
+    ) -> Result<serde_json::Value, CodeHostTransportFailure> {
+        let id = required_string(required_object(&thread)?, "id")?;
+        let mut cursors = HashSet::new();
+        while nested_bool(&thread, &["comments", "pageInfo", "hasNextPage"])? {
+            let cursor = required_string(
+                required_object(nested(&thread, &["comments", "pageInfo"])?)?,
+                "endCursor",
+            )?;
+            if !cursors.insert(cursor.clone()) {
+                return Err(CodeHostTransportFailure::InvalidResponse);
+            }
+            let value = self
+                .graphql_read(
+                    THREAD_COMMENTS_QUERY,
+                    serde_json::json!({"thread": id, "cursor": cursor}),
+                    credential,
+                )
+                .await?;
+            let node = required_object(nested(&value, &["data", "node"])?)?;
+            if required_string(node, "id")? != id {
+                return Err(CodeHostTransportFailure::InvalidResponse);
+            }
+            let page = required_object(required(node, "comments")?)?;
+            let comments = required(page, "nodes")?
+                .as_array()
+                .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+            thread["comments"]["nodes"]
+                .as_array_mut()
+                .ok_or(CodeHostTransportFailure::InvalidResponse)?
+                .extend(comments.iter().cloned());
+            thread["comments"]["pageInfo"] = required(page, "pageInfo")?.clone();
+        }
+        Ok(thread)
+    }
+
     async fn thread_inventory(
         &self,
         arguments: ThreadInventoryArguments,
@@ -928,6 +995,20 @@ impl GitHubCodeHostTransport {
     }
 
     async fn thread_inventory_for(
+        &self,
+        repository: &CodeHostRepository,
+        number: CodeHostChangeRequestNumber,
+        cursor: Option<&CodeHostCursor>,
+        credential: &CredentialValue,
+    ) -> Result<ThreadInventoryResult, CodeHostTransportFailure> {
+        with_read_operation_timeout(
+            self.bounds.request_timeout(),
+            self.thread_inventory_transaction(repository, number, cursor, credential),
+        )
+        .await
+    }
+
+    async fn thread_inventory_transaction(
         &self,
         repository: &CodeHostRepository,
         number: CodeHostChangeRequestNumber,
@@ -952,11 +1033,13 @@ impl GitHubCodeHostTransport {
         let nodes = required(connection, "nodes")?
             .as_array()
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-        let threads = nodes
-            .iter()
-            .map(|value| parse_slog_thread(self.bounds, value))
-            .map(|parsed| parsed.map(|thread| thread.inventory))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut threads = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let thread = self
+                .complete_thread_comments(node.clone(), credential)
+                .await?;
+            threads.push(parse_slog_thread(self.bounds, &thread)?.inventory);
+        }
         let (truncated, next_cursor) = next_page(connection)?;
         ThreadInventoryResult::try_new(self.bounds, head_revision, threads, truncated, next_cursor)
             .ok_or(CodeHostTransportFailure::InvalidResponse)
@@ -2325,8 +2408,13 @@ fn parse_review_thread(
     let comment_nodes = required(comments, "nodes")?
         .as_array()
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
+    let comment_limit = bounds
+        .result_items()
+        .unwrap_or(MAX_REVIEW_THREAD_COMMENTS)
+        .min(MAX_REVIEW_THREAD_COMMENTS);
     let comments = comment_nodes
         .iter()
+        .take(comment_limit)
         .map(|value| parse_review_thread_comment(bounds, value))
         .collect::<Result<Vec<_>, _>>()?;
     ReviewThread::try_new(
@@ -2338,10 +2426,8 @@ fn parse_review_thread(
             path: required_string(object, "path")?,
             line: optional_u64(object, "line")?,
             comments,
-            comments_truncated: nested_bool(
-                required(object, "comments")?,
-                &["pageInfo", "hasNextPage"],
-            )?,
+            comments_truncated: comment_nodes.len() > comment_limit
+                || nested_bool(required(object, "comments")?, &["pageInfo", "hasNextPage"])?,
         },
     )
     .ok_or(CodeHostTransportFailure::InvalidResponse)
@@ -5280,6 +5366,280 @@ mod tests {
             thread.inventory.disposition(),
             ReviewDispositionClass::Undispositioned
         );
+    }
+
+    fn paginated_thread_response(first_body: &str) -> Vec<u8> {
+        serde_json::json!({"data": {"repository": {"pullRequest": {
+            "headRefOid": REPOSITORY_REVISION,
+            "reviewThreads": {
+                "nodes": [{
+                    "id": "PRRT_fixture", "isResolved": true, "isOutdated": false,
+                    "path": "src/lib.rs", "line": 12,
+                    "comments": {
+                        "nodes": [{"id": "PRRC_first", "author": {"login": "review-bot", "__typename": "Bot"},
+                            "authorAssociation": "NONE", "body": first_body,
+                            "url": "https://github.com/owner/repository/pull/17#discussion_r1"}],
+                        "pageInfo": {"hasNextPage": true, "endCursor": "first-page"}
+                    }
+                }],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }
+        }}}}).to_string().into_bytes()
+    }
+
+    fn thread_comments_response() -> Vec<u8> {
+        serde_json::json!({"data": {"node": {
+            "id": "PRRT_fixture",
+            "comments": {
+                "nodes": [{"id": "PRRC_reply", "author": {"login": "owner", "__typename": "User"},
+                    "authorAssociation": "OWNER", "body": "Fixed in commit `0123456789abcdef`",
+                    "url": "https://github.com/owner/repository/pull/17#discussion_r2"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }
+        }}})
+        .to_string()
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn review_threads_returns_the_capped_first_page_without_a_continuation() {
+        let (mut transport, listener) = graphql_test_transport().await;
+        transport.bounds.result_items = None;
+        transport.bounds.result_text_bytes = None;
+        let mut response: serde_json::Value =
+            serde_json::from_slice(&paginated_thread_response("Finding title"))
+                .expect("fixture decodes");
+        let comments = &mut response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            [0]["comments"];
+        let first = comments["nodes"][0].clone();
+        // The initial query requests the complete 100-member model-facing ceiling.
+        comments["nodes"] = serde_json::Value::Array(
+            (0..100)
+                .map(|index| {
+                    let mut comment = first.clone();
+                    comment["id"] = serde_json::json!(format!("PRRC_{index}"));
+                    comment
+                })
+                .collect(),
+        );
+        let server = tokio::spawn(async move {
+            // Dropping the listener after this response makes any continuation fail.
+            serve_graphql_response(&listener, response.to_string().as_bytes()).await
+        });
+        let arguments = serde_json::from_value(
+            serde_json::json!({"repository": "owner/repository", "number": 17}),
+        )
+        .expect("review arguments decode");
+        let result = transport
+            .review_threads(arguments, &test_credential())
+            .await
+            .expect("first page completes the bounded read")
+            .into_json_value();
+        repository_server_result(server).await;
+        assert_eq!(
+            result["threads"][0]["comments"]
+                .as_array()
+                .expect("comments present")
+                .len(),
+            100
+        );
+        assert_eq!(result["threads"][0]["comments"][99]["id"], "PRRC_99");
+        assert_eq!(result["threads"][0]["comments_truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn review_threads_truncates_first_page_comments_to_the_configured_bound() {
+        let (mut transport, listener) = graphql_test_transport().await;
+        // One retained comment makes the two-comment first page exceed the configured bound.
+        transport.bounds.result_items = Some(1);
+        let mut response: serde_json::Value =
+            serde_json::from_slice(&paginated_thread_response("Finding title"))
+                .expect("fixture decodes");
+        let continuation: serde_json::Value =
+            serde_json::from_slice(&thread_comments_response()).expect("fixture decodes");
+        let comments = &mut response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            [0]["comments"];
+        comments["nodes"]
+            .as_array_mut()
+            .expect("comment nodes")
+            .push(continuation["data"]["node"]["comments"]["nodes"][0].clone());
+        comments["pageInfo"]["hasNextPage"] = serde_json::json!(false);
+        let server = tokio::spawn(async move {
+            serve_graphql_response(&listener, response.to_string().as_bytes()).await
+        });
+        let arguments = serde_json::from_value(
+            serde_json::json!({"repository": "owner/repository", "number": 17}),
+        )
+        .expect("review arguments decode");
+        let result = transport
+            .review_threads(arguments, &test_credential())
+            .await
+            .expect("over-bound comments produce a bounded result")
+            .into_json_value();
+        repository_server_result(server).await;
+        assert_eq!(
+            result["threads"][0]["comments"]
+                .as_array()
+                .expect("comments")
+                .len(),
+            1
+        );
+        assert_eq!(result["threads"][0]["comments"][0]["id"], "PRRC_first");
+        assert_eq!(result["threads"][0]["comments_truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn inventory_classifies_disposition_on_later_comment_page() {
+        let (mut transport, listener) = graphql_test_transport().await;
+        // Classification must still consume evidence beyond the model-facing comment bound.
+        transport.bounds.result_items = Some(1);
+        let server = tokio::spawn(async move {
+            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await;
+            serve_graphql_response(&listener, &thread_comments_response()).await
+        });
+        let arguments = serde_json::from_value(
+            serde_json::json!({"repository": "owner/repository", "number": 17}),
+        )
+        .expect("inventory arguments decode");
+        let result = transport
+            .thread_inventory(arguments, &test_credential())
+            .await
+            .expect("inventory reads all comment evidence")
+            .into_json_value();
+        repository_server_result(server).await;
+        assert_eq!(result["threads"][0]["disposition"], "fix_named");
+    }
+
+    #[tokio::test]
+    async fn thread_inventory_rejects_a_repeated_comment_cursor() {
+        let (transport, listener) = graphql_test_transport().await;
+        let mut continuation: serde_json::Value =
+            serde_json::from_slice(&thread_comments_response()).expect("fixture decodes");
+        continuation["data"]["node"]["comments"]["pageInfo"] =
+            serde_json::json!({"hasNextPage": true, "endCursor": "first-page"});
+        let server = tokio::spawn(async move {
+            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await;
+            serve_graphql_response(&listener, continuation.to_string().as_bytes()).await
+        });
+        let arguments = serde_json::from_value(
+            serde_json::json!({"repository": "owner/repository", "number": 17}),
+        )
+        .expect("arguments decode");
+        let result = transport
+            .thread_inventory(arguments, &test_credential())
+            .await;
+        repository_server_result(server).await;
+        assert_eq!(result, Err(CodeHostTransportFailure::InvalidResponse));
+    }
+
+    #[tokio::test]
+    async fn thread_inventory_rejects_a_continuation_for_another_thread() {
+        let (transport, listener) = graphql_test_transport().await;
+        let mut continuation: serde_json::Value =
+            serde_json::from_slice(&thread_comments_response()).expect("fixture decodes");
+        continuation["data"]["node"]["id"] = serde_json::json!("PRRT_another_thread");
+        let server = tokio::spawn(async move {
+            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await;
+            serve_graphql_response(&listener, continuation.to_string().as_bytes()).await
+        });
+        let arguments = serde_json::from_value(
+            serde_json::json!({"repository": "owner/repository", "number": 17}),
+        )
+        .expect("arguments decode");
+        let result = transport
+            .thread_inventory(arguments, &test_credential())
+            .await;
+        repository_server_result(server).await;
+        assert_eq!(result, Err(CodeHostTransportFailure::InvalidResponse));
+    }
+
+    #[test]
+    fn completed_review_comments_obey_the_hard_collection_cap() {
+        // tool-loop.md permits at most 100 members even when deployment bounds are absent or larger.
+        for configured in [None, Some(101)] {
+            let mut bounds = crate::code_host::test_numeric_bounds();
+            bounds.result_items = configured;
+            bounds.result_text_bytes = None;
+            let response: serde_json::Value =
+                serde_json::from_slice(&paginated_thread_response("Finding title"))
+                    .expect("fixture decodes");
+            let mut thread =
+                response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0].clone();
+            let first = thread["comments"]["nodes"][0].clone();
+            thread["comments"]["nodes"] = serde_json::Value::Array(
+                (0..101)
+                    .map(|index| {
+                        let mut comment = first.clone();
+                        comment["id"] = serde_json::json!(format!("PRRC_{index}"));
+                        comment
+                    })
+                    .collect(),
+            );
+            thread["comments"]["pageInfo"]["hasNextPage"] = serde_json::json!(false);
+            let parsed = parse_review_thread(bounds, &thread).expect("completed comments parse");
+            let result = CodeHostResult::ReviewThreads(
+                ReviewThreadsResult::try_new(
+                    bounds,
+                    vec![parsed],
+                    CodeHostResultCompleteness::Complete,
+                )
+                .expect("bounded result constructs"),
+            )
+            .into_json_value();
+            assert_eq!(
+                result["threads"][0]["comments"]
+                    .as_array()
+                    .expect("comments")
+                    .len(),
+                100,
+                "configured bound: {configured:?}"
+            );
+            assert_eq!(result["threads"][0]["comments_truncated"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn review_threads_obeys_the_operation_deadline() {
+        let (mut transport, listener) = graphql_test_transport().await;
+        // The initial response exceeds the configured 300 ms operation budget.
+        transport.bounds.request_timeout = Some(Duration::from_millis(300));
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await
+        });
+        let arguments = serde_json::from_value(
+            serde_json::json!({"repository": "owner/repository", "number": 17}),
+        )
+        .expect("arguments decode");
+        let result = transport
+            .review_threads(arguments, &test_credential())
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert_eq!(result, Err(CodeHostTransportFailure::DispatchUnknown));
+    }
+
+    #[tokio::test]
+    async fn thread_inventory_comment_pages_share_one_operation_deadline() {
+        let (mut transport, listener) = graphql_test_transport().await;
+        // Each page fits within 300 ms; the two 200 ms delays exceed one operation budget.
+        transport.bounds.request_timeout = Some(Duration::from_millis(300));
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            serve_graphql_response(&listener, &thread_comments_response()).await
+        });
+        let arguments = serde_json::from_value(
+            serde_json::json!({"repository": "owner/repository", "number": 17}),
+        )
+        .expect("arguments decode");
+        let result = transport
+            .thread_inventory(arguments, &test_credential())
+            .await;
+        server.abort();
+        let _ = server.await;
+        assert_eq!(result, Err(CodeHostTransportFailure::DispatchUnknown));
     }
 
     /// An over-bound comment history cannot be classified from a silently

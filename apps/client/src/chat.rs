@@ -543,7 +543,9 @@ where
     let mut interrupts = ChatInterrupts::listen()?;
     let mut turns = ChatTurns::default();
 
-    'resubscribe: loop {
+    let mut retry = crate::connection::FollowRetry::default();
+    loop {
+        let result: Result<(), ClientError> = async {
         let mut connection = match await_request(
             output,
             &mut interrupts,
@@ -650,10 +652,6 @@ where
                                 content.as_str(),
                             )?;
                         }
-                        ServerMessage::Error {
-                            code: ErrorCode::ResyncRequired,
-                            ..
-                        } => continue 'resubscribe,
                         ServerMessage::Error {
                             code,
                             message,
@@ -1047,6 +1045,32 @@ where
                             return Ok(());
                         }
                     }
+                }
+            }
+        }
+      }.await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(ClientError::Remote {
+                code: ErrorCode::ResyncRequired,
+                ..
+            }) => {}
+            Err(error) => {
+                let delay = retry.next_delay(error)?;
+                match await_request(
+                    output,
+                    &mut interrupts,
+                    turns.status(),
+                    RequestKind::ReadOnly,
+                    async {
+                        tokio::time::sleep(delay).await;
+                        Ok(())
+                    },
+                )
+                .await?
+                {
+                    RequestWait::Complete(result) => result?,
+                    RequestWait::Exit => return Ok(()),
                 }
             }
         }
