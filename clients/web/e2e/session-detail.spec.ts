@@ -10,7 +10,7 @@ import {
   toolResultItem,
 } from './session-detail-fixture'
 
-async function openDetails(page: Page, mismatch = false) {
+async function openDetails(page: Page, mismatch = false, override = false) {
   const reads: URL[] = []
   await page.addInitScript(
     ({ sessionId }) => {
@@ -66,7 +66,7 @@ async function openDetails(page: Page, mismatch = false) {
       reads.push(url)
       if (url.searchParams.get('first') !== url.searchParams.get('through'))
         return route.fulfill({ json: detailPage(detailItems.slice(0, 2), resultCursor) })
-      const selected = detailItems.find(
+      let selected = detailItems.find(
         (item) => item.address.event_sequence === url.searchParams.get('first'),
       )
       if (!selected)
@@ -74,6 +74,19 @@ async function openDetails(page: Page, mismatch = false) {
           status: 404,
           json: { error: { code: 'missing', message: 'Fixture detail missing' } },
         })
+      if (override && selected.body.type === 'tool_approval_decision') {
+        selected = {
+          ...selected,
+          body: {
+            ...selected.body,
+            actor: {
+              type: 'user_override',
+              command_id: '00000000-0000-0000-0000-000000000123',
+              denied_request_id: '00000000-0000-0000-0000-000000000124',
+            },
+          },
+        }
+      }
       const terminal = detailItems[4]
       if (mismatch && selected.kind === 'tool_batch_transition' && terminal)
         return route.fulfill({
@@ -148,6 +161,17 @@ test('opens approval and provider detail independently with the keyboard', async
   await page.getByRole('option').filter({ hasText: 'model call transition' }).press('Enter')
   await expect(page.getByRole('region', { name: 'Model response' })).toContainText('checks passed')
   await expect(page.getByRole('region', { name: 'Approval rationale' })).toBeVisible()
+})
+
+test('correlates an override approval with the denied request', async ({ page }) => {
+  await openDetails(page, false, true)
+  await page.getByRole('option').filter({ hasText: 'tool approval decided' }).press('Enter')
+  const detail = page.getByRole('article', {
+    name: 'tool approval decided detail',
+  })
+  await expect(detail).toContainText('user override')
+  await expect(detail).toContainText('Command00000000-0000-0000-0000-000000000123')
+  await expect(detail).toContainText('Denied request00000000-0000-0000-0000-000000000124')
 })
 
 test('captures sessions detail evidence', async ({ page, browserName }) => {

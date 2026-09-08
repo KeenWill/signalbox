@@ -437,10 +437,15 @@ const detailContent = (body: DetailBody): ReactNode => {
           ? []
           : body.actor.type === 'user'
             ? [['Command', body.actor.command_id]]
-            : [
-                ['Model selection', body.actor.model_selection_id],
-                ['Model call', body.actor.model_call_id],
-              ]
+            : body.actor.type === 'user_override'
+              ? [
+                  ['Command', body.actor.command_id],
+                  ['Denied request', body.actor.denied_request_id],
+                ]
+              : [
+                  ['Model selection', body.actor.model_selection_id],
+                  ['Model call', body.actor.model_call_id],
+                ]
       return (
         <>
           <Facts
@@ -449,7 +454,7 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Request', body.request_id],
               ['Turn', body.turn_id],
               ['Decision', body.decision.replaceAll('_', ' ')],
-              ['Source', body.actor.type],
+              ['Source', body.actor.type.replaceAll('_', ' ')],
               ['Judge escalated', body.approval_judge_escalated ? 'yes' : 'no'],
               ...actorFacts,
             ]}
