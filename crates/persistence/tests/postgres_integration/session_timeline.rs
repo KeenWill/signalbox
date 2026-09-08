@@ -372,6 +372,18 @@ async fn delegation_detail_projects_message_content_and_rejects_corrupt_shape()
     sqlx::query("ALTER TABLE delegation_update_outbox_event DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
+    let content = "é🚦".repeat(150);
+    sqlx::query(
+        "UPDATE delegation_update_outbox_event SET content_text = $1 WHERE event_sequence = $2",
+    )
+    .bind(&content)
+    .bind(sequence)
+    .execute(&pool)
+    .await?;
+    assert_eq!(
+        collect_detail_text(&repository, fixture.child, address, limits).await?,
+        content
+    );
     sqlx::query(
         "UPDATE delegation_update_outbox_event
             SET content_text = NULL
@@ -1684,4 +1696,87 @@ async fn remove_frozen_tool_members(pool: &PgPool, sequence: i64) -> Result<(), 
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_detail_continues_multibyte_text_at_scalar_boundaries() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let identity = session(0x995a00);
+    create_session(&pool, identity).await?;
+    commission_fixture_session_goal(&pool, identity, 0x995b00).await?;
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint FROM goal_changed_outbox_event WHERE session_id = $1 ORDER BY event_sequence LIMIT 1",
+    ).bind(identity.into_uuid()).fetch_one(&pool).await?;
+    let content = "é🚦".repeat(150);
+    sqlx::query("ALTER TABLE goal_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE goal_event SET statement = $1 WHERE session_id = $2 AND event_kind = 'commissioned'")
+        .bind(&content).bind(identity.into_uuid()).execute(&pool).await?;
+    sqlx::query("ALTER TABLE goal_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let address =
+        TimelineAddress::new(NonZeroU64::new(u64::try_from(sequence)?).expect("committed address"));
+    let repository = SessionTimelineRepository::new(pool.clone());
+    assert_eq!(
+        collect_detail_text(
+            &repository,
+            identity,
+            address,
+            TimelineDetailLimits::new(1, 256).expect("bounded detail")
+        )
+        .await?,
+        content
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn collect_detail_text(
+    repository: &SessionTimelineRepository,
+    session: SessionId,
+    address: TimelineAddress,
+    limits: TimelineDetailLimits,
+) -> Result<String, Box<dyn Error>> {
+    let mut collected = String::new();
+    let mut cursor = None;
+    loop {
+        let page = repository
+            .read_item_details(session, address, cursor, limits)
+            .await?
+            .expect("detail");
+        assert!(page.projected_body_bytes <= limits.max_projected_bytes());
+        let text = match &page.items[0].body {
+            SessionTimelineDetailBody::GoalEvent {
+                event: signalbox_application::TimelineGoalEvent::Commissioned { text, .. },
+                ..
+            } => text,
+            SessionTimelineDetailBody::Delegation(
+                signalbox_application::TimelineDelegationDetail::SessionMessage { content, .. },
+            ) => content,
+            _ => panic!("fixture text body"),
+        };
+        assert_eq!(text.offset_bytes, collected.len() as u64);
+        collected.push_str(&text.text);
+        match page.continuation {
+            Some(signalbox_application::TimelineDetailContinuation::MoreBody(next)) => {
+                assert!(next.offset_bytes > text.offset_bytes);
+                cursor = Some(signalbox_application::TimelineDetailCursor {
+                    address,
+                    field: Some(next.field),
+                    member_index: next.member_index,
+                    offset_bytes: next.offset_bytes,
+                });
+            }
+            None => {
+                assert_eq!(text.total_bytes, collected.len() as u64);
+                break;
+            }
+            _ => panic!("text continuation"),
+        }
+    }
+    Ok(collected)
 }

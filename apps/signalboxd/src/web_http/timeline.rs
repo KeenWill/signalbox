@@ -747,6 +747,13 @@ fn detail_body_dto(
                 TimelineApprovalActor::User { command_id } => WebTimelineApprovalActor::User {
                     command_id: web_uuid(command_id.into_uuid()),
                 },
+                TimelineApprovalActor::UserOverride {
+                    command_id,
+                    denied_request_id,
+                } => WebTimelineApprovalActor::UserOverride {
+                    command_id: web_uuid(command_id.into_uuid()),
+                    denied_request_id: web_uuid(denied_request_id.into_uuid()),
+                },
                 TimelineApprovalActor::Delegate {
                     model_selection_id,
                     model_call_id,

@@ -4409,6 +4409,27 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "command_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "denied_request_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "user_override",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "command_id",
+              "denied_request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
               "model_call_id": {
                 "$ref": "#/$defs/WebSessionId"
               },
@@ -7637,7 +7658,7 @@ function assertTimelineDetailPage(value) {
         if (item.kind !== "tool_approval_decided") {
           fail(`${path}.kind`, "tool_approval_decided for a tool_approval_decision body");
         }
-        if (item.body.approval_judge_escalated && item.body.actor.type !== "user") {
+        if (item.body.approval_judge_escalated && !["user", "user_override"].includes(item.body.actor.type)) {
           fail(
             `${path}.body.actor`,
             "a user actor when the approval judge escalated",

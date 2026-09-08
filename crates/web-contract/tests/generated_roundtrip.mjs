@@ -3120,3 +3120,21 @@ test("ownership detail rejects creation-only ownership transitions", () => {
     assert.throws(() => decodeWebSessionTimelineDetailPage(page));
   }
 });
+
+test("override approval retains the command and overridden denial", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "tool_approval_decided";
+  page.items[0].body = {
+    type: "tool_approval_decision", turn_id: page.session_id, request_id: page.session_id,
+    tool_name: "exec_command", decision: "approve",
+    actor: {
+      type: "user_override", command_id: "00000000-0000-0000-0000-000000000992",
+      denied_request_id: "00000000-0000-0000-0000-000000000993",
+    },
+    rationale: null, approval_judge_escalated: true,
+  };
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  delete page.items[0].body.actor.denied_request_id;
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+});

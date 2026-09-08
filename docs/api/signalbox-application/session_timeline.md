@@ -478,6 +478,10 @@ pub enum TimelineApprovalActor {
     User {
         command_id: signalbox_domain::DurableCommandId,
     },
+    UserOverride {
+        command_id: signalbox_domain::DurableCommandId,
+        denied_request_id: signalbox_domain::ToolRequestId,
+    },
     Delegate {
         model_selection_id: signalbox_domain::DirectModelSelection,
         model_call_id: signalbox_domain::ModelCallId,

@@ -2901,7 +2901,7 @@ async fn load_runner_state_transition(
     })
 }
 
-async fn load_delegation_update(
+pub(crate) async fn load_delegation_update(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     expected_sequence: u64,
     stored_session: Uuid,

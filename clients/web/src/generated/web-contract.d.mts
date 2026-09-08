@@ -456,6 +456,10 @@ export type WebTimelineApprovalActor = {
   readonly command_id: WebSessionId;
   readonly type: "user";
 } | {
+  readonly command_id: WebSessionId;
+  readonly denied_request_id: WebSessionId;
+  readonly type: "user_override";
+} | {
   readonly model_call_id: WebSessionId;
   readonly model_selection_id: WebSessionId;
   readonly type: "delegate";
