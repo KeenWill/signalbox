@@ -2234,11 +2234,20 @@ async fn automatic_compaction_advances_projected_coverage_and_rejects_summary_on
         )
         .await?;
 
+    let remaining_source = compaction_repository
+        .preview_automatic_range(fixture.session)
+        .await?
+        .expect("the predecessor retains its terminal suffix");
+    let through = remaining_source
+        .members()
+        .last()
+        .expect("a nonempty suffix")
+        .position();
     let PrepareContextCompactionOutcome::Prepared(successor) = compaction_repository
         .prepare(PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x38)),
             session: fixture.session,
-            requested_through_position: Some(2),
+            requested_through_position: Some(through),
             automatic_for_turn: Some(fixture.turn),
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
