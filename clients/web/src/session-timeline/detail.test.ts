@@ -132,31 +132,38 @@ describe('typed detail continuation', () => {
     )
   })
 
-  it('rejects a continued field that changes its immutable total length', () => {
-    const item = toolResultItem()
-    if (item.body.type !== 'tool_batch') throw new Error('tool result missing')
-    const tool = item.body.tools[0]
-    if (!tool || tool.evidence.type !== 'physical_attempt')
-      throw new Error('physical result missing')
-    const changed = {
-      ...item,
-      body: {
-        ...item.body,
-        tools: [
-          {
-            ...tool,
-            evidence: {
-              ...tool.evidence,
-              result: { ...detailExcerpt('changed'), total_bytes: '999' },
+  it.each([false, true])(
+    'rejects a changed total with earlier fields held: %s',
+    (holdArguments) => {
+      const item = toolResultItem()
+      if (item.body.type !== 'tool_batch') throw new Error('tool result missing')
+      const tool = item.body.tools[0]
+      if (!tool || tool.evidence.type !== 'physical_attempt')
+        throw new Error('physical result missing')
+      const changed = {
+        ...item,
+        body: {
+          ...item.body,
+          tools: [
+            {
+              ...tool,
+              evidence: {
+                ...tool.evidence,
+                result: { ...detailExcerpt('changed'), total_bytes: '999' },
+              },
             },
-          },
-        ],
-      },
-    }
-    expect(() =>
-      validateDetailContinuation(detailPage([changed]), resultCursor, detailPage([item])),
-    ).toThrow('total byte length')
-  })
+          ],
+        },
+      }
+      expect(() =>
+        validateDetailContinuation(
+          detailPage([changed]),
+          resultCursor,
+          detailPage(holdArguments ? [argumentsItem(), item] : [item]),
+        ),
+      ).toThrow('total byte length')
+    },
+  )
 
   it('starts fresh reads at the first member and arguments field', () => {
     expect(() => validateDetailContinuation(detailPage([toolResultItem()]), null)).toThrow(

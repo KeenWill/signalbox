@@ -823,7 +823,7 @@ export const validateDetailContinuation = (
   const excerpt = detailExcerptAt(initial.body, cursor)
   if (excerpt?.offset_bytes !== cursor.offset_bytes)
     throw new TypeError('Transcript detail does not match the requested body continuation')
-  const prior = previous?.items.find(
+  const prior = previous?.items.findLast(
     (item) => item.address.event_sequence === address.event_sequence,
   )
   if (prior) {

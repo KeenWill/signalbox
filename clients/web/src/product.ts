@@ -1170,7 +1170,7 @@ export async function readSessionTranscript(
     limits.max_timeline_detail_items < 1 ||
     limits.max_timeline_detail_items > 128 ||
     !Number.isSafeInteger(limits.max_timeline_detail_bytes) ||
-    limits.max_timeline_detail_bytes < 256 ||
+    limits.max_timeline_detail_bytes < limits.min_timeline_detail_bytes ||
     limits.max_timeline_detail_bytes > SESSION_TRANSCRIPT_MAX_BYTES
   )
     throw new TypeError('Invalid advertised timeline detail limits')
@@ -1233,6 +1233,7 @@ async function readSessionTextPage(
   continuation: WebTimelineDetailContinuation | null,
   limits: SessionTranscriptLimits,
   signal?: AbortSignal,
+  previous?: WebSessionTimelineDetailPage,
 ) {
   const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
   const maxScannedItems = Math.min(SESSION_WINDOW_ITEMS, limits.max_timeline_detail_items)
@@ -1242,7 +1243,6 @@ async function readSessionTextPage(
   let scannedItems = 0
   let scannedBytes = 0
   let cursor = continuation
-  let previous: WebSessionTimelineDetailPage | undefined
   do {
     const page = await readSessionTranscript(
       sessionId,
@@ -1328,6 +1328,12 @@ export async function readExtendedSessionTranscript(
           continuation,
           limits,
           signal,
+          continuation?.type === 'more_body' &&
+            held?.sessionId === window.sessionId &&
+            held.first === window.first &&
+            held.through === window.through
+            ? held.page
+            : undefined,
         )
   if (!append) return { ...window, page, continuation, omittedThrough: null }
   const items = [

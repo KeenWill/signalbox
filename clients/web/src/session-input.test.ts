@@ -532,7 +532,12 @@ it.each([
     const held = await readExtendedSessionTranscript(
       window,
       null,
-      { ...limits, max_timeline_detail_items: 8, max_timeline_detail_bytes: budget, min_timeline_detail_bytes: minimum },
+      {
+        ...limits,
+        max_timeline_detail_items: 8,
+        max_timeline_detail_bytes: budget,
+        min_timeline_detail_bytes: minimum,
+      },
       null,
     )
     expect(fetch).toHaveBeenCalledTimes(1)
@@ -631,9 +636,9 @@ it.each([
 ])('rejects invalid advertised detail limits before fetching %j', async (advertised) => {
   const fetch = vi.fn()
   vi.stubGlobal('fetch', fetch)
-  await expect(readTranscript(sessionId, '1', '1', null, advertised)).rejects.toThrow(
-    'advertised timeline detail limits',
-  )
+  await expect(
+    readTranscript(sessionId, '1', '1', null, { ...limits, ...advertised }),
+  ).rejects.toThrow('advertised timeline detail limits')
   expect(fetch).not.toHaveBeenCalled()
 })
 
@@ -711,3 +716,56 @@ it('stops a bookkeeping scan at the workspace record budget regardless of histor
   expect(result.page.items).toEqual([])
   expect(result.page.continuation).toEqual({ type: 'more_at', address: { event_sequence: '81' } })
 })
+
+it.each(['unchanged', 'body facts', 'byte total'] as const)(
+  'validates the held chunk at a manual body continuation: %s',
+  async (change) => {
+    const cursor = {
+      address: { event_sequence: '1' },
+      field: 'input_text' as const,
+      member_index: 0,
+      offset_bytes: '1',
+    }
+    const initial = inputPage(1)
+    const firstItem = initial.items[0]!
+    const firstPage = {
+      ...initial,
+      items: [
+        {
+          ...firstItem,
+          body: {
+            ...firstItem.body,
+            text: {
+              ...firstItem.body.text,
+              total_bytes: '2',
+              continuation: cursor,
+            },
+          },
+        },
+      ],
+      continuation: { type: 'more_body' as const, body: cursor },
+    }
+    const next = inputPage(1, change === 'byte total' ? 2 : 1)
+    const nextItem = next.items[0]!
+    nextItem.body.text.offset_bytes = '1'
+    nextItem.body.text.total_bytes = change === 'byte total' ? '3' : '2'
+    if (change === 'body facts') nextItem.body.turn_id = '00000000-0000-0000-0000-000000000992'
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(firstPage))
+      .mockResolvedValueOnce(Response.json(next))
+    vi.stubGlobal('fetch', fetch)
+    const window = { sessionId, first: '1', through: '1' }
+    const held = await readExtendedSessionTranscript(window, null, limits, null)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const result = readExtendedSessionTranscript(
+      window,
+      held.page.continuation ?? null,
+      limits,
+      held,
+    )
+    if (change === 'unchanged') await expect(result).resolves.toMatchObject({ page: next })
+    else await expect(result).rejects.toThrow('Continued detail changed')
+    expect(fetch).toHaveBeenCalledTimes(2)
+  },
+)
