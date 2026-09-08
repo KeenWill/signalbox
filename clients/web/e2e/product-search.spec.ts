@@ -2,6 +2,9 @@ import { BROWSER_PREFERENCES_KEY, createDefaultBrowserPreferences } from '../src
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, type Page, type TestInfo, test } from './fontTest'
 
+const platformModifier = (page: Page) =>
+  page.evaluate(() => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control'))
+
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const firstPage = {
   results: [
@@ -503,7 +506,7 @@ test('rejects overflowing drafts instead of submitting a valid prefix', async ({
   })
   await page.goto('/search')
   const search = page.getByRole('textbox', { name: 'Search text' })
-  const session = page.getByRole('textbox', { name: /Exact session/ })
+  const session = page.getByRole('textbox', { name: 'Session ID', exact: true })
   await search.fill('release')
   await session.fill(`urn:uuid:${sessionId}junk`)
   await search.press('Enter')
@@ -520,10 +523,8 @@ test('rejects overflowing drafts instead of submitting a valid prefix', async ({
 test('rejects repeated query text without showing an empty search', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search?q=first&q=second')
-  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
-  await expect(
-    page.getByRole('heading', { name: 'Search durable text without loading transcripts' }),
-  ).toBeHidden()
+  await expect(page.getByRole('alert')).toContainText('Invalid search parameters.')
+  await expect(page.getByRole('heading', { name: /^\d+ results?$/ })).toHaveCount(0)
 })
 
 test('clears a draft error when history restores a valid search', async ({ page }) => {
@@ -533,7 +534,7 @@ test('clears a draft error when history restores a valid search', async ({ page 
   await search.fill('different')
   await search.press('Enter')
   await expect(page).toHaveURL(/q=different/)
-  await page.getByRole('textbox', { name: /Exact session/ }).fill('bad')
+  await page.getByRole('textbox', { name: 'Session ID', exact: true }).fill('bad')
   await search.press('Enter')
   await expect(page.getByRole('alert')).toBeVisible()
   await page.goBack()
@@ -543,11 +544,11 @@ test('clears a draft error when history restores a valid search', async ({ page 
 test('withholds previous results after a failed refresh', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search?q=release')
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: resultsHeading(firstPage.results) })).toBeVisible()
   await page.route('**/api/search?**', (route) => route.abort())
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
   await expect(page.getByRole('heading', { name: 'Search could not be read' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeHidden()
+  await expect(page.getByRole('heading', { name: resultsHeading(firstPage.results) })).toBeHidden()
 })
 
 test('applies prepaint preferences while the application bundle is pending', async ({ page }) => {
@@ -579,14 +580,15 @@ test('applies prepaint preferences while the application bundle is pending', asy
   } finally {
     mainReady.resolve()
   }
-  await expect(page.getByRole('heading', { name: 'Operator preferences' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
 })
 
 test('focuses search through its command and releases editing with Escape', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search')
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeEnabled()
-  await page.keyboard.press('Control+Shift+f')
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+Shift+f`)
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('main')).toBeFocused()
@@ -611,16 +613,17 @@ test('keeps artifact inspector inputs in their editing context on Search', async
 test('returns palette focus to main when history removes its opener', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/settings')
-  await page.getByRole('link', { name: /^Search Global and session search/ }).click()
+  await page.getByRole('link', { name: 'Search', exact: true }).click()
   await page.getByRole('button', { name: 'Search', exact: true }).focus()
-  await page.keyboard.press('ControlOrMeta+k')
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+k`)
   const palette = page.getByRole('dialog', { name: 'Command palette' })
   await expect(palette).toBeVisible()
 
   await page.goBack()
   await expect(page).toHaveURL(/\/settings$/)
   await expect(
-    page.getByRole('heading', { name: 'Operator preferences', includeHidden: true }),
+    page.getByRole('heading', { name: 'Settings', level: 1, includeHidden: true }),
   ).toBeVisible()
   await expect(palette).toBeVisible()
   await page.keyboard.press('Escape')
@@ -632,7 +635,7 @@ test('returns palette focus to main when history removes its opener', async ({ p
 test('restores surviving product focus when history removes a search control', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/settings')
-  await page.getByRole('link', { name: /^Search Global and session search/ }).click()
+  await page.getByRole('link', { name: 'Search', exact: true }).click()
   await page.getByRole('textbox', { name: 'Search text' }).focus()
   await page.goBack()
   await expect(page.getByRole('main')).toBeFocused()

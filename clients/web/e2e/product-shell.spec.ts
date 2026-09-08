@@ -1216,14 +1216,10 @@ test('withholds Search focus after cached bootstrap refetch failure and restores
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.clock.fastForward(30_001)
-  await page
-    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
-    .fill('expired-admission')
+  await page.getByRole('textbox', { name: 'Source session', exact: true }).fill('expired-admission')
   await expect(page.getByText('Contract rejected')).toBeVisible()
-  await page.getByRole('link', { name: /^Search Global and session search/ }).click()
-  await expect(
-    page.getByRole('heading', { name: 'Search availability could not be checked' }),
-  ).toBeVisible()
+  await page.getByRole('link', { name: 'Search', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Search unavailable', exact: true })).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
@@ -1250,7 +1246,7 @@ test('withholds Search focus after cached bootstrap refetch failure and restores
   await expect(page.locator('body')).toHaveAttribute('data-search-focus-default-prevented', 'false')
 
   await useDeterministicBootstrap(page)
-  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeVisible()
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await page.getByRole('button', { name: /Focus lexical search/ }).click()
