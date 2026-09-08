@@ -191,6 +191,26 @@ async fn prepare_attachments(
     request: &PreparedModelCallRequest,
     digests: BTreeSet<BlobDigest>,
 ) -> Result<(), AttachmentPreparationFailure> {
+    within_attachment_deadline(prepare_attachments_within_deadline(
+        catalog, registry, request, digests,
+    ))
+    .await
+}
+
+async fn within_attachment_deadline(
+    preparation: impl Future<Output = Result<(), AttachmentPreparationFailure>>,
+) -> Result<(), AttachmentPreparationFailure> {
+    tokio::time::timeout(crate::blob_read_runtime::BLOB_READ_TIMEOUT, preparation)
+        .await
+        .unwrap_or(Err(AttachmentPreparationFailure::Unavailable))
+}
+
+async fn prepare_attachments_within_deadline(
+    catalog: &BlobCatalogRepository,
+    registry: Option<&BlobStoreRegistry>,
+    request: &PreparedModelCallRequest,
+    digests: BTreeSet<BlobDigest>,
+) -> Result<(), AttachmentPreparationFailure> {
     let Some(registry) = registry else {
         return Err(AttachmentPreparationFailure::Corrupt);
     };
@@ -329,6 +349,21 @@ mod tests {
     use signalbox_application::{AttachmentPreparationFailure, ModelCallInputTokenCount};
 
     use super::{StreamVerificationFailure, attachment_count_failure, verify_stream};
+
+    #[tokio::test(start_paused = true)]
+    async fn attachment_candidates_share_one_aggregate_deadline() {
+        let deadline = crate::blob_read_runtime::BLOB_READ_TIMEOUT;
+        let started = tokio::time::Instant::now();
+        let outcome = super::within_attachment_deadline(async {
+            tokio::time::sleep(deadline * 3 / 4).await;
+            tokio::time::sleep(deadline * 3 / 4).await;
+            Ok(())
+        })
+        .await;
+
+        assert_eq!(outcome, Err(AttachmentPreparationFailure::Unavailable));
+        assert_eq!(started.elapsed(), deadline);
+    }
 
     #[test]
     fn attachment_count_failures_preserve_transient_and_definitive_classes() {

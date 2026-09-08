@@ -58,9 +58,25 @@ impl VerifiedBlobSource for MemorySource {
     }
 }
 
+/// Metadata reads must consume the preceding inspection, without rereading bytes.
+struct MetadataOnlySource<'a>(&'a dyn VerifiedBlobSource);
+
+impl VerifiedBlobSource for MetadataOnlySource<'_> {
+    fn digest(&self) -> FileDigest {
+        self.0.digest()
+    }
+    fn byte_length(&self) -> NonZeroU64 {
+        self.0.byte_length()
+    }
+    fn read_range(&self, _offset: u64, _length: NonZeroU64) -> SourceReadFuture<'_> {
+        Box::pin(async { Err(SourceReadError::RangeOutOfBounds) })
+    }
+}
+
 #[derive(Clone, Debug)]
 enum ReadBehavior {
     Provider,
+    MissingMetadata,
     InjectedStructured(String),
 }
 
@@ -74,6 +90,13 @@ impl DirectProcessor {
         Self {
             provider: ImageFamilyProvider,
             read_behavior: ReadBehavior::Provider,
+        }
+    }
+
+    pub(crate) fn with_missing_metadata() -> Self {
+        Self {
+            provider: ImageFamilyProvider,
+            read_behavior: ReadBehavior::MissingMetadata,
         }
     }
 
@@ -123,14 +146,18 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
         match &self.read_behavior {
-            ReadBehavior::Provider => {
-                let future = self.provider.read(reader, request, source, cancellation);
-                Box::pin(async move {
-                    future
-                        .await
-                        .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
-                })
-            }
+            ReadBehavior::Provider | ReadBehavior::MissingMetadata => Box::pin(async move {
+                let mut request = request;
+                if matches!(self.read_behavior, ReadBehavior::MissingMetadata) {
+                    request.metadata = signalbox_file_media_runtime::BoundedMetadata::try_new("{}")
+                        .map_err(|_| ProcessorBoundaryFailure::from(ProcessorFailure::Failed))?;
+                }
+                let metadata_source = MetadataOnlySource(source);
+                self.provider
+                    .read(reader, request, &metadata_source, cancellation)
+                    .await
+                    .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+            }),
             ReadBehavior::InjectedStructured(body_json) => {
                 let body_json = body_json.clone();
                 Box::pin(async move {

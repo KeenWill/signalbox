@@ -1,5 +1,5 @@
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, type TestInfo, test } from './fontTest'
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const firstPage = {
@@ -485,13 +485,13 @@ test('captures desktop dark, desktop light, and responsive search evidence', asy
   await useSearchFixture(page)
   await page.goto('/search?q=release')
   await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
-  await expect(page).toHaveScreenshot('search-desktop-dark.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('search-desktop-dark.png', { animations: 'disabled' })
 
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await expect(page).toHaveScreenshot('search-desktop-light.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('search-desktop-light.png', { animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
-  await expect(page).toHaveScreenshot('search-mobile-light.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('search-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
