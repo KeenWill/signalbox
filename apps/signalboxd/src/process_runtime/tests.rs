@@ -778,7 +778,7 @@ mod tests {
             SessionMetadataUpdatedAt::from_unix_micros(METADATA_WRITE_UNIX_MICROS),
             actor,
         );
-        let projected = wire_metadata_last_writer(writer);
+        let projected = wire_metadata_last_writer(writer).expect("metadata actor is supported");
         assert_eq!(projected.actor(), expected_actor);
         assert_eq!(
             projected.updated_at_unix_micros().value(),

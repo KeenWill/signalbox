@@ -4088,3 +4088,75 @@ fn missing_attachment_reconstitution_requires_its_canonical_verified_prefix() {
         }
     }
 }
+
+#[test]
+fn program_submit_replay_compares_the_issuing_run_and_excludes_command_identity() {
+    use crate::{ProgramActor, ProgramRunId};
+    // These run values are arbitrary fixture identities.
+    let capability =
+        ProgramActor::from_recorded_run(ProgramRunId::from_uuid(uuid::Uuid::from_u128(1)));
+    let other = ProgramActor::from_recorded_run(ProgramRunId::from_uuid(uuid::Uuid::from_u128(2)));
+    let user = start_command(1, "program input", 1);
+    let program = |id, capability| {
+        SubmitInput::new_program(
+            command_id(id),
+            user.session(),
+            user.content().clone(),
+            user.delivery(),
+            capability,
+        )
+    };
+    assert_ne!(program(1, capability), user);
+    assert_ne!(program(1, capability), program(1, other));
+    assert_eq!(program(1, capability), program(2, capability));
+    assert_eq!(hash(&program(1, capability)), hash(&program(2, capability)));
+    assert_ne!(hash(&program(1, capability)), hash(&user));
+    assert_ne!(hash(&program(1, capability)), hash(&program(1, other)));
+}
+
+#[test]
+fn stored_non_core_agency_requires_a_consistent_receipt_and_cannot_stamp_core() {
+    let command = start_command(1, "recorded input", 1);
+    for stored_actor in [
+        Actor::Model { turn: turn_id(2) },
+        Actor::Tool {
+            request: tool_request_id(3),
+        },
+        Actor::Recovery,
+    ] {
+        let receipt = SubmitInputReconstitutionInput::rejected_session_not_found(
+            SubmitInputRejectedSessionNotFoundReconstitutionInput {
+                command: command.clone(),
+                stored_actor,
+                result_session: command.session(),
+            },
+        )
+        .reconstitute_recorded()
+        .expect("matching recorded facts reconstruct");
+        assert_eq!(receipt.command().actor(), stored_actor);
+        assert!(
+            SubmitInputReconstitutionInput::rejected_session_not_found(
+                SubmitInputRejectedSessionNotFoundReconstitutionInput {
+                    command: command.clone(),
+                    stored_actor,
+                    result_session: session_id(99)
+                }
+            )
+            .reconstitute_recorded()
+            .is_err()
+        );
+    }
+    assert_eq!(
+        SubmitInputReconstitutionInput::rejected_session_not_found(
+            SubmitInputRejectedSessionNotFoundReconstitutionInput {
+                command: command.clone(),
+                stored_actor: Actor::Core,
+                result_session: command.session()
+            }
+        )
+        .reconstitute_recorded()
+        .expect_err("stored spelling cannot stamp core")
+        .failure(),
+        SubmitInputReconstitutionFailure::StoredActorMismatch
+    );
+}

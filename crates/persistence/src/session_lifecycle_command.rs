@@ -156,7 +156,12 @@ impl SessionLifecycleCommandRepository {
             return Ok(outcome);
         }
 
-        let actor = principal.classify(None);
+        let actor =
+            principal
+                .classify(None)
+                .ok_or(SessionLifecycleCommandRepositoryError::Corruption(
+                    "command principal lifecycle classification",
+                ))?;
         sqlx::query("SAVEPOINT lifecycle_apply")
             .execute(&mut *transaction)
             .await?;
