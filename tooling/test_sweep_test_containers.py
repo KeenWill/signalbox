@@ -151,7 +151,9 @@ REFUSED_REMOVAL = "Error response from daemon: removal is denied by policy"
 
 HARMLESS_REMOVAL_NOTE = "WARNING: --volumes is deprecated in favour of -v"
 
-MARKED_START = ".with_labels(disposable_test_container_labels())"
+MARKED_START = re.compile(
+    r"\.with_labels\((?:[A-Za-z_][A-Za-z_0-9]*::)*disposable_test_container_labels\(\)\)"
+)
 
 # A chain longer than this is not a container start; the walk backwards stops
 # rather than reaching into whatever precedes an unrecognized statement.
@@ -224,7 +226,7 @@ def container_start_sites() -> tuple[list[str], list[str]]:
                 and not lines[head - 2].lstrip().startswith("let ")
             ):
                 head -= 1
-            if MARKED_START not in "\n".join(lines[head - 2 : number]):
+            if MARKED_START.search("\n".join(lines[head - 2 : number])) is None:
                 unmarked.append(f"{name}:{number}")
     return sites, unmarked
 
