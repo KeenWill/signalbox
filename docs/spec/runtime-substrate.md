@@ -119,7 +119,8 @@ the workspace build, so a boundary violation is a reviewable diff instead of a
 silent import.
 
 The runtime holds no durable state, makes no lifecycle decisions and performs no
-logging.
+logging. A rejected Codex completion envelope carries a closed rejection stage
+as boundary-loss evidence, including duplicate-member rejection.
 
 The `RuntimeModelCallProvider` bridge sets every operation it prepares to
 streamed delivery, and buffered delivery remains available to other direct

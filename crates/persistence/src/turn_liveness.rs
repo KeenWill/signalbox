@@ -372,7 +372,7 @@ impl PostgresTurnLivenessRepository {
         Ok(())
     }
 
-    /// Reads the current slot-held observation for one exact session.
+    /// Reads the exact running turn, including its between-operation state, for one session.
     pub async fn observed_slot_held_turn(
         &self,
         session: SessionId,
@@ -839,6 +839,8 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
       ORDER BY active.session_id
       LIMIT $3";
 
+/// Exact-session reads also retain the between-operation state for expiry recovery.
+///
 /// Outer watchdog inventory for a pass that still holds an active running
 /// turn after every component deadline should have ended. Approval and other
 /// durable waits are excluded by the phase predicate; live calls and tools are
@@ -892,7 +894,8 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
         AND tenure.end_variant IS NULL
         AND tenure.end_disposition IS NULL
         AND (
-            tenure.state_kind = 'stop_requested'
+            $1::uuid IS NOT NULL
+            OR tenure.state_kind = 'stop_requested'
             OR EXISTS (
                 SELECT 1
                   FROM model_call AS live
