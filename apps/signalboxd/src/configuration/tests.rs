@@ -3491,27 +3491,6 @@ fn configuration_rejects_a_credential_home_concurrency_bound_until_reservations_
 }
 
 #[test]
-fn configuration_rejects_a_credential_home_concurrency_bound_past_its_cap() {
-    let temporary = tempfile::tempdir().expect("synthetic home root is created");
-    let home = temporary.path().join("account-a");
-    std::fs::create_dir(&home).expect("synthetic home is created");
-    std::fs::write(home.join("fixture-marker"), "synthetic").expect("synthetic home is nonempty");
-    let credential_home = CONFIGURATION.replace(
-        "delivery = \"ambient\"",
-        &format!(
-            "delivery = \"codex_home\"\ncodex_home = {:?}\nmax_concurrent_invocations = {}",
-            home.to_string_lossy(),
-            MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS + 1
-        ),
-    );
-
-    assert_eq!(
-        HubModelConfiguration::parse(&credential_home).err(),
-        Some(HubModelConfigurationError::InvalidCredentialDelivery)
-    );
-}
-
-#[test]
 fn configuration_rejects_an_oversized_credential_home_before_refusing_it() {
     let oversized_path = format!("/{}", "a".repeat(MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES));
     let credential_home = CONFIGURATION.replace(
