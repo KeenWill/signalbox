@@ -201,7 +201,8 @@ SELECT EXISTS (
       AND h.pool_name = policy.definition->>'name'
       AND (SELECT count(*) FROM credential_pool_exhaustion_member WHERE terminal_attempt_id = attempt)
           = (SELECT count(*) FROM credential_pool_policy_member WHERE pool_policy_id = h.pool_policy_id)
-      AND EXISTS (SELECT 1 FROM credential_pool_exhaustion_member WHERE terminal_attempt_id = attempt)
+      AND (SELECT count(DISTINCT (observed_at, generation_ceiling))
+             FROM credential_pool_exhaustion_member WHERE terminal_attempt_id = attempt) = 1
       AND NOT EXISTS (
         SELECT 1 FROM credential_pool_exhaustion_member e
         LEFT JOIN credential_pool_policy_member m ON m.pool_policy_id = h.pool_policy_id AND m.ordinal = e.ordinal
