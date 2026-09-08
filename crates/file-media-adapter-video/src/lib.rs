@@ -536,6 +536,7 @@ struct Mp4TrackEvidence {
     video_handler: bool,
     sample_description_seen: bool,
     sample_description: bool,
+    non_video_sample_description: bool,
     sample_description_count: u32,
     encrypted_sample_description: bool,
 }
@@ -550,6 +551,7 @@ impl Mp4TrackEvidence {
         self.video_handler |= other.video_handler;
         self.sample_description_seen |= other.sample_description_seen;
         self.sample_description |= other.sample_description;
+        self.non_video_sample_description |= other.non_video_sample_description;
         self.sample_description_count = self
             .sample_description_count
             .max(other.sample_description_count);
@@ -559,7 +561,8 @@ impl Mp4TrackEvidence {
     const fn handler_sample_mismatch(self) -> bool {
         self.handler_seen
             && self.sample_description_seen
-            && self.video_handler != self.sample_description
+            && ((!self.video_handler && self.sample_description)
+                || (self.video_handler && self.non_video_sample_description))
     }
 
     const fn is_complete_track(self) -> bool {
@@ -886,6 +889,7 @@ fn parse_mp4_boxes(
                 track_evidence.sample_description_seen = true;
                 let description = parse_stsd(payload, state)?;
                 track_evidence.sample_description = description.video;
+                track_evidence.non_video_sample_description = description.non_video;
                 track_evidence.sample_description_count = description.count;
                 track_evidence.encrypted_sample_description = description.encrypted;
             }
@@ -1272,6 +1276,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, VideoIssue> {
 struct Mp4SampleDescription {
     count: u32,
     video: bool,
+    non_video: bool,
     encrypted: bool,
 }
 
@@ -1305,8 +1310,6 @@ fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<Mp4SampleDescripti
         } else if visual_sample_entry_configuration(box_type).is_some() {
             parse_visual_sample_entry(entry_payload, box_type, state)?;
             video_sample_entry_seen = true;
-        } else {
-            non_video_sample_entry_seen = true;
         }
         if video_sample_entry_seen && non_video_sample_entry_seen {
             return Err(VideoIssue::Malformed);
@@ -1319,6 +1322,7 @@ fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<Mp4SampleDescripti
     Ok(Mp4SampleDescription {
         count: entry_count_u32,
         video: video_sample_entry_seen,
+        non_video: non_video_sample_entry_seen,
         encrypted: encrypted_sample_entry_seen,
     })
 }

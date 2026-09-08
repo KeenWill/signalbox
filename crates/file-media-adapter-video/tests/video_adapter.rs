@@ -642,6 +642,16 @@ async fn duplicate_mp4_track_ids_are_malformed() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn unrecognized_visual_entry_does_not_conflict_with_supported_video()
+-> Result<(), Box<dyn Error>> {
+    let source =
+        VideoFixture::mp4_with_supported_and_unrecognized_visual_entries().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
 async fn duplicate_mp4_sample_descriptions_are_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_with_duplicate_sample_descriptions(),

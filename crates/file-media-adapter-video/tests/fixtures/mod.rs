@@ -739,6 +739,20 @@ impl VideoFixture {
         )
     }
 
+    pub fn mp4_with_supported_and_unrecognized_visual_entries() -> Self {
+        let mut entries = avc1_sample_entry();
+        let mut unrecognized = avc1_sample_entry();
+        unrecognized.truncate(86);
+        unrecognized[..4].copy_from_slice(&86_u32.to_be_bytes());
+        unrecognized[4..8].copy_from_slice(b"jpeg");
+        entries.extend_from_slice(&unrecognized);
+        let mut bytes = mp4_bytes_with_sample_entry(MP4_TIMESCALE, MP4_DURATION_UNITS, entries);
+        if let Some(offset) = bytes.windows(4).position(|window| window == b"stsd") {
+            bytes[offset + 8..offset + 12].copy_from_slice(&2_u32.to_be_bytes());
+        }
+        Self::new(FixtureKind::Mp4, bytes)
+    }
+
     pub fn mp4_with_duplicate_sample_descriptions() -> Self {
         let mut sample_description = vec![0_u8; 8];
         sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
