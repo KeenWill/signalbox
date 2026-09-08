@@ -1207,10 +1207,14 @@ fn charge_font_decoding(
             .get_deref(b"ToUnicode", document)
             .and_then(Object::as_stream)
         {
-            let Some(size) = decoded_content_stream_size(stream, *remaining)? else {
-                return Ok(false);
-            };
-            *remaining -= size;
+            match stream
+                .decompressed_content_with_limit(MAX_DECOMPRESSED_PAGE_BYTES.min(*remaining))
+            {
+                Ok(decoded) => *remaining -= decoded.len(),
+                Err(LopdfError::Unimplemented(_)) => {}
+                Err(LopdfError::Decompress(_)) => return Ok(false),
+                Err(_) => return Err(FileMediaProviderFailure::Failed),
+            }
         }
     }
     Ok(true)
@@ -5279,6 +5283,28 @@ endobj",
             read_text_with_decoding_budget(&document, &pages, &ActiveSignal, cmap_size - 1)
                 .expect("identity encoding decodes CMap"),
             ProcessorReadOutput::ExpansionLimitExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn unsupported_cmap_filter_does_not_fail_the_file_read() {
+        let (mut document, pages) =
+            repeated_content_pages(b"BT /F1 12 Tf (visible) Tj ET".to_vec(), 1);
+        let cmap = document.add_object(Stream::new(
+            dictionary! { "Filter" => "ASCIIHexDecode" },
+            b"20>".to_vec(),
+        ));
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H",
+            "ToUnicode" => cmap,
+        });
+        document.get_dictionary_mut(pages[0].1).expect("page").set(
+            "Resources",
+            dictionary! { "Font" => dictionary! { "F1" => font } },
+        );
+        assert!(matches!(
+            read_text(&document, &pages, &ActiveSignal).expect("unsupported CMap is not fatal"),
+            ProcessorReadOutput::Text { body, .. } if body.contains("visible")
         ));
     }
 
