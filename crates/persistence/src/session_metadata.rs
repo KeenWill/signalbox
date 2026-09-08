@@ -914,7 +914,7 @@ fn decode_command(
     )?;
     match command_actor {
         Actor::User | Actor::Tool { .. } => {}
-        Actor::Core | Actor::Model { .. } | Actor::Recovery => {
+        Actor::Core | Actor::Model { .. } | Actor::Recovery | Actor::Program { .. } => {
             return Err(SessionMetadataCorruption::Unsupported {
                 field: "command actor",
                 value: actor_kind,

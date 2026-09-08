@@ -188,11 +188,28 @@ fn submit_actor_reader_retains_each_stored_kind_in_both_supported_versions() {
             ("user", None, None, Actor::User),
             ("core", None, None, Actor::Core),
             ("recovery", None, None, Actor::Recovery),
-            ("model", Some(turn), None, Actor::Model { turn: TurnId::from_uuid(turn) }),
-            ("tool", None, Some(request), Actor::Tool { request: ToolRequestId::from_uuid(request) }),
+            (
+                "model",
+                Some(turn),
+                None,
+                Actor::Model {
+                    turn: TurnId::from_uuid(turn),
+                },
+            ),
+            (
+                "tool",
+                None,
+                Some(request),
+                Actor::Tool {
+                    request: ToolRequestId::from_uuid(request),
+                },
+            ),
         ] {
-            assert_eq!(decode_actor(kind.to_owned(), turn, request, None, None, version)
-                .expect("stored actor is supported"), expected);
+            assert_eq!(
+                decode_actor(kind.to_owned(), turn, request, None, None, version)
+                    .expect("stored actor is supported"),
+                expected
+            );
         }
     }
 }
@@ -204,7 +221,9 @@ fn program_actor_reader_requires_its_version_and_exact_retained_reference() {
     let other = Uuid::from_u128(2);
     let actor = decode_actor("program".to_owned(), None, None, Some(run), Some(run), 4)
         .expect("verified program actor is supported");
-    assert!(matches!(actor, Actor::Program { run: reference } if reference.run().as_uuid() == &run));
+    assert!(
+        matches!(actor, Actor::Program { run: reference } if reference.run().as_uuid() == &run)
+    );
     for (kind, turn, request, stored_run, verified_run, version) in [
         ("program", None, None, Some(run), Some(run), 3),
         ("program", None, None, Some(run), None, 4),
@@ -215,6 +234,16 @@ fn program_actor_reader_requires_its_version_and_exact_retained_reference() {
         ("user", None, None, Some(run), Some(run), 3),
         ("user", None, None, Some(run), Some(run), 4),
     ] {
-        assert!(decode_actor(kind.to_owned(), turn, request, stored_run, verified_run, version).is_err());
+        assert!(
+            decode_actor(
+                kind.to_owned(),
+                turn,
+                request,
+                stored_run,
+                verified_run,
+                version
+            )
+            .is_err()
+        );
     }
 }

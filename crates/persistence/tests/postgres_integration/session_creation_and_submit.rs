@@ -5273,3 +5273,90 @@ async fn creation_runner_placement_replay_compares_explicit_and_template_payload
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn program_submit_records_its_run_and_conflicts_with_user_replay()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{Actor, ProgramRunId, ProgramSessionCapability};
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    // These values are arbitrary, independent fixture identities.
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0x5701, 0x5702, direct(0x5703)))
+        .await?;
+    let run = ProgramRunId::from_uuid(next_test_submit_uuid());
+    signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone())
+        .create_stream(run)
+        .await?;
+    let capability = ProgramSessionCapability::reconstitute(run);
+    let user_command = start_input(
+        0x5704,
+        0x5702,
+        "program input",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let request = SubmitInputRequest::try_new_program(
+        user_command.command_id(),
+        user_command.session(),
+        user_command.content().clone(),
+        user_command.delivery(),
+        capability,
+    )?;
+    let repository = SubmitInputRepository::new(pool.clone());
+    let mut service = SubmitInputService::new(
+        signalbox_application::UuidV7SubmitInputIdGenerator,
+        repository.clone(),
+        AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    let first = service.execute(request.clone()).await?;
+    assert!(matches!(
+        first,
+        SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    assert_eq!(service.execute(request).await?, first);
+    let stored = repository
+        .load(user_command.command_id())
+        .await?
+        .expect("submit is retained");
+    assert!(
+        matches!(stored.command().actor(), Actor::Program { run: reference } if reference.run() == run)
+    );
+    let issuer: String =
+        sqlx::query_scalar("SELECT issuer_kind FROM durable_command WHERE command_id = $1")
+            .bind(user_command.command_id().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(issuer, "core");
+    let user_request = SubmitInputRequest::try_new(
+        user_command.command_id(),
+        user_command.session(),
+        user_command.content().clone(),
+        user_command.delivery(),
+    )?;
+    assert_eq!(
+        service.execute(user_request).await?,
+        SubmitInputOutcome::ConflictingReuse {
+            command_id: user_command.command_id(),
+        }
+    );
+    let mut earlier_version = pool.begin().await?;
+    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER USER")
+        .execute(&mut *earlier_version)
+        .await?;
+    let error =
+        sqlx::query("UPDATE submit_input_command SET storage_version = 3 WHERE command_id = $1")
+            .bind(user_command.command_id().into_uuid())
+            .execute(&mut *earlier_version)
+            .await
+            .expect_err("program actor cannot be stored in version 3");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("submit_input_command_actor_shape")
+    );
+    earlier_version.rollback().await?;
+    Ok(())
+}

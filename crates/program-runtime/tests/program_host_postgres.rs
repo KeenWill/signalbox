@@ -747,7 +747,12 @@ async fn session_capability_requires_a_retained_program_run() -> Result<(), Box<
     let run = ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID));
     assert!(host.session_capability(run).await?.is_none());
     journal.create_stream(run).await?;
-    let capability = host.session_capability(run).await?.expect("run is retained");
-    assert!(matches!(capability.actor(), signalbox_domain::Actor::Program { run: reference } if reference.run() == run));
+    let capability = host
+        .session_capability(run)
+        .await?
+        .expect("run is retained");
+    assert!(
+        matches!(capability.actor(), signalbox_domain::Actor::Program { run: reference } if reference.run() == run)
+    );
     Ok(())
 }
