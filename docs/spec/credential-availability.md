@@ -189,7 +189,9 @@ A due deadline makes a wait eligible through the scheduler's existing
 reconciliation sweep. A durable member-availability update or a successful
 operator clear grants eligibility to waits naming that member in the same
 transaction. Eligibility prepares no call and consumes no wait. Startup alone
-leaves exhausted waits unchanged; deadline-free waits have no timer.
+leaves exhausted waits unchanged; deadline-free waits have no timer. Pooled
+capacity observations and wait admission acquire the model-call order guard,
+profile action locks and invocation-capacity locks before updating waits.
 
 Contended-wait: no member is admitted and at least one otherwise-admissible
 member is skipped only for its configured invocation bound. Either exhaustion

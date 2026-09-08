@@ -874,6 +874,15 @@ pub(super) async fn retain_call_capacity_policy_observation(
     acquire_model_call_outbox_order_guard(connection).await?;
     if let Some(policy) = &policy {
         lock_credential_pool_action_heads(connection, policy).await?;
+        crate::credential_invocations::lock_profiles(
+            connection,
+            &policy
+                .members()
+                .iter()
+                .map(CredentialPoolRuntimeMember::credential_reference)
+                .collect::<Vec<_>>(),
+        )
+        .await?;
     }
     let retained = crate::credential_capacity::retain_call_rate_limits(
         connection,
