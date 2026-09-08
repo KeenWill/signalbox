@@ -27,6 +27,10 @@ destination is a remote the deployment configured, never one the caller chose. A
 minted destination is scoped to a durable workspace record, and its grant is
 keyed by the record's identity, not its path.
 
+A mutation reports ambiguous evidence when publication fails and rollback does
+not establish restoration of its reference, reflog, index, or worktree changes.
+Failures before publication retain their known-failure classification.
+
 ## Design decisions
 
 `git2` is trusted for typed Git semantics only after authority capture: parsing

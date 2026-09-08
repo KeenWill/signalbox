@@ -902,7 +902,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .map_err(|_| LocalGitFailure::Operation);
                     let cleanup =
                         restoration.and_then(|()| quarantine.remove_if_empty_and_current());
-                    return Err(cleanup.err().unwrap_or(failure));
+                    return Err(failure.after_rollback(cleanup));
                 }
                 Ok(QuarantinedCheckoutDirectory {
                     quarantine,
@@ -1060,7 +1060,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 first_failure.get_or_insert(failure);
             }
         }
-        first_failure.map_or(Ok(()), Err)
+        first_failure.map_or(Ok(()), |_| Err(LocalGitFailure::Ambiguous))
     }
 
     #[cfg(test)]
@@ -1558,7 +1558,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         );
         if let Err(failure) = target_publication {
             Self::preserve_changed_target_quarantines(&mut quarantined_directories);
-            rollback_checkout_atomically(
+            let worktree_restoration = rollback_checkout_atomically(
                 repository,
                 current_tree.as_ref(),
                 &target_tree,
@@ -1569,12 +1569,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     authority: &self.repository_authority,
                 },
                 Some(&updated_identities.borrow()),
-            )?;
-            self.restore_unmodified_quarantined_directories(
+            );
+            let quarantine_restoration = self.restore_unmodified_quarantined_directories(
                 &mut quarantined_directories,
                 &updated_paths.borrow(),
-            )?;
-            return Err(failure);
+            );
+            return Err(failure.after_rollback(worktree_restoration.and(quarantine_restoration)));
         }
         Self::cleanup_published_quarantines(&mut quarantined_directories);
         drop(quarantined_directories);
@@ -1662,7 +1662,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         }
         let published_index = match index_lock.commit() {
             Ok(published_index) => published_index,
-            Err(_) => {
+            Err(failure) => {
                 rollback_checkout_atomically(
                     repository,
                     current_tree.as_ref(),
@@ -1675,7 +1675,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     },
                     Some(&checkout_identities),
                 )?;
-                return Err(LocalGitFailure::Operation);
+                return Err(failure.operation_class());
             }
         };
         post_index_publish();
@@ -1751,8 +1751,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &original_index_bytes,
                 published_index.file_identity(),
             );
-            worktree_rollback?;
-            index_rollback?;
+            worktree_rollback.map_err(|_| LocalGitFailure::Ambiguous)?;
+            index_rollback.map_err(|_| LocalGitFailure::Ambiguous)?;
             return Err(failure);
         }
         Ok(BranchResult {
