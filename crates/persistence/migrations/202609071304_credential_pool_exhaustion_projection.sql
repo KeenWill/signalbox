@@ -29,13 +29,15 @@ CREATE TABLE credential_pool_exhaustion_member (
 );
 CREATE TRIGGER credential_pool_exhaustion_member_immutable BEFORE UPDATE OR DELETE ON credential_pool_exhaustion_member
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+CREATE TRIGGER credential_pool_exhaustion_member_cannot_be_truncated BEFORE TRUNCATE ON credential_pool_exhaustion_member
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
 
 CREATE FUNCTION capture_credential_pool_exhaustion_reset_sources() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    SELECT authorization.generation INTO NEW.oauth_home_generation
-      FROM oauth_credential_authorization authorization
-      WHERE authorization.profile = NEW.profile AND authorization.quarantined
-        AND authorization.quarantine_cause = 'credential_home';
+    SELECT oauth_auth.generation INTO NEW.oauth_home_generation
+      FROM oauth_credential_authorization oauth_auth
+      WHERE oauth_auth.profile = NEW.profile AND oauth_auth.quarantined
+        AND oauth_auth.quarantine_cause = 'credential_home';
     SELECT COALESCE(array_agg(x.record_generation ORDER BY x.record_generation), '{}'::bigint[])
       INTO NEW.cleared_record_generations
       FROM credential_exclusion x
