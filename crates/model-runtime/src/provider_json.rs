@@ -6,8 +6,8 @@ use std::fmt;
 
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
-/// Builds objects explicitly so serde_json's private number discriminator
-/// cannot reinterpret an ordinary object member as a numeric value.
+/// Builds objects explicitly so serde_json's private discriminators
+/// cannot reinterpret an ordinary object member as another value.
 pub(crate) fn parse_json_value(text: &str) -> Result<serde_json::Value, serde_json::Error> {
     validate_provider_json_nesting(text.as_bytes()).map_err(serde::de::Error::custom)?;
     parse_json_value_inner(text)
@@ -36,12 +36,14 @@ fn parse_json_value_inner(text: &str) -> Result<serde_json::Value, serde_json::E
     }
 }
 
-pub(crate) fn has_reserved_number_key(value: &serde_json::Value) -> bool {
+pub(crate) fn has_reserved_json_key(value: &serde_json::Value) -> bool {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         match value {
             serde_json::Value::Object(object) => {
-                if object.contains_key("$serde_json::private::Number") {
+                if object.contains_key("$serde_json::private::Number")
+                    || object.contains_key("$serde_json::private::RawValue")
+                {
                     return true;
                 }
                 pending.extend(object.values());
