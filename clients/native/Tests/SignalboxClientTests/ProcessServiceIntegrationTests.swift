@@ -661,6 +661,33 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(tool.toolName, ProcessProjectionFixture.proposedToolName)
   }
 
+  func testInadmissibleToolResultClosesItsProposedCard() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithInadmissibleTool()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let tool = try ProcessProjectionFixture.onlyTool(in: projection)
+
+    XCTAssertEqual(tool.toolRequestID.rawValue, ProcessProjectionFixture.proposedToolRequest)
+    XCTAssertEqual(tool.status, .closed)
+    XCTAssertNil(tool.toolAttemptID)
+    XCTAssertEqual(tool.output, ProcessProjectionFixture.inadmissibleOutput)
+  }
+
+  func testProjectedResultsIncludesAnInadmissibleTool() throws {
+    let seed = try ProcessProjectionFixture.snapshotWithProposedTool()
+    let snapshot = try ProcessProjectionFixture.snapshotWithInadmissibleTool()
+    let trigger = try ProcessProjectionFixture.projectedResultsTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(seed)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    let tool = try ProcessProjectionFixture.onlyTool(in: projection)
+
+    XCTAssertEqual(tool.status, .closed)
+    XCTAssertEqual(tool.output, ProcessProjectionFixture.inadmissibleOutput)
+  }
+
   func testProposedToolSideProjectionExcludesImportedSourceCollision() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithSourceQualifiedReusedToolRequest()
     let trigger = try ProcessProjectionFixture.proposedToolTrigger()
@@ -3769,6 +3796,54 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(error, ProcessDriverFixture.mismatchedSubmissionSessionError)
   }
 
+  func testStopReceiptRequiresItsRequestedDescendantScope() async throws {
+    let prepared = try ProcessSubmissionFixture.preparedStop(descendantScope: .parentAndDescendants)
+    let invalidReceipts: [String?] = [
+      nil,
+      #"{"descendant_scope":"parent_alone","descendant_count":"0"}"#,
+    ]
+    for termination in invalidReceipts {
+      let requester = StaticProcessRequester(frames: [
+        try ProcessDriverFixture.inputSubmitted(
+          validatedForSelectionID: ProcessDriverFixture.modelCall,
+          terminationJSON: termination)
+      ])
+      let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+      let error = await capturedServiceError { _ = try await service.stopTurn(prepared) }
+      XCTAssertEqual(error, SignalboxProcessServiceError.unexpectedMessage(
+        "The stop receipt omitted termination metadata or named a different descendant scope."))
+    }
+  }
+
+  func testStopReceiptPreservesTheMatchingRecordedCount() async throws {
+    let prepared = try ProcessSubmissionFixture.preparedStop(descendantScope: .parentAndDescendants)
+    let requester = StaticProcessRequester(frames: [
+      try ProcessDriverFixture.inputSubmitted(
+        validatedForSelectionID: ProcessDriverFixture.modelCall,
+        terminationJSON: #"{"descendant_scope":"parent_and_descendants","descendant_count":"18446744073709551615"}"#)
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let receipt = try await service.stopTurn(prepared)
+    XCTAssertEqual(receipt.termination?.descendantCount.rawValue, UInt64.max)
+  }
+
+  func testPresentTerminationMetadataCannotBeNull() throws {
+    XCTAssertThrowsError(try ProcessDriverFixture.inputSubmitted(terminationJSON: "null"))
+  }
+
+  func testOrdinarySubmissionRejectsTerminationMetadata() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requester = StaticProcessRequester(frames: [
+      try ProcessDriverFixture.inputSubmitted(
+        validatedForSelectionID: ProcessDriverFixture.modelCall,
+        terminationJSON: #"{"descendant_scope":"parent_alone","descendant_count":"0"}"#)
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let error = await capturedServiceError { _ = try await service.submit(submission) }
+    XCTAssertEqual(error, SignalboxProcessServiceError.unexpectedMessage(
+      "The input-submission receipt unexpectedly carried termination metadata."))
+  }
+
   func testStopReceiptRejectsSettingsForAnotherDirectModel() async throws {
     let expectedSelection = try SignalboxCanonicalUUID(
       validating: ProcessDriverFixture.modelCall
@@ -3786,7 +3861,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let requester = StaticProcessRequester(
       frames: [
         try ProcessDriverFixture.inputSubmitted(
-          validatedForSelectionID: ProcessDriverFixture.metadataSessionA
+          validatedForSelectionID: ProcessDriverFixture.metadataSessionA,
+          terminationJSON: #"{"descendant_scope":"parent_alone","descendant_count":"0"}"#
         )
       ]
     )
@@ -4451,6 +4527,23 @@ private enum ProcessSubmissionFixture {
     refreshed: SignalboxProcessSession
   ) -> [SignalboxCanonicalUInt64] {
     [session.defaultsVersion, refreshed.defaultsVersion]
+  }
+
+  /// Canonical stop fixture; the caller chooses its descendant scope.
+  static func preparedStop(
+    descendantScope: SignalboxDescendantTerminationScope
+  ) throws -> SignalboxPreparedTurnStop {
+    SignalboxPreparedTurnStop(
+      commandID: try SignalboxCommandID(validating: commandID),
+      sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
+      activeTurnID: try SignalboxCanonicalUUID(validating: acceptedTurnID),
+      content: content,
+      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      descendantScope: descendantScope,
+      modelSelection: .direct(
+        selectionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.modelCall)
+      )
+    )
   }
 
   static func preparedSubmission() throws -> SignalboxPreparedInputSubmission {
@@ -6158,13 +6251,16 @@ private enum ProcessDriverFixture {
 
   static func inputSubmitted(
     sessionID: String = session,
-    validatedForSelectionID: String? = nil
+    validatedForSelectionID: String? = nil,
+    terminationJSON: String? = nil
   ) throws -> SignalboxProcessServerFrame {
+    let terminationMember = terminationJSON.map { "\"termination\":\($0)," } ?? ""
     let validationIdentity = validatedForSelectionID.map { "\"\($0)\"" } ?? "null"
     return try frame(
       """
       {
         "type":"input_submitted",
+        \(terminationMember)
         "session_id":"\(sessionID)",
         "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
         "acceptance_position":"1",
@@ -7563,6 +7659,28 @@ private enum ProcessProjectionFixture {
     try snapshotWithProposedTool(turnEvidence: [], usageEvidence: [], approvalMember: "")
   }
 
+  static let inadmissibleOutput = "execution_failed: placement_lost"
+
+  static func snapshotWithInadmissibleTool() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithProposedTool(
+      turnEvidence: [], usageEvidence: [],
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"tool_inadmissible",
+            "tool_request_id":"\(proposedToolRequest)",
+            "content":"\(inadmissibleOutput)"
+          }
+        }
+        """
+      ])
+  }
+
   static func snapshotWithProposedTool(
     approvalMember: String
   ) throws -> SignalboxSynchronizationSnapshot {
@@ -7842,7 +7960,8 @@ private enum ProcessProjectionFixture {
   private static func snapshotWithProposedTool(
     turnEvidence: [String],
     usageEvidence: [String],
-    approvalMember: String = ""
+    approvalMember: String = "",
+    resultEntries: [String] = []
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -7899,13 +8018,14 @@ private enum ProcessProjectionFixture {
           }
         }
         """,
+      ] + resultEntries + [
         """
         {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
           "turn_count":"\(turnEvidence.count)",
-          "entry_count":"2"
+          "entry_count":"\(2 + resultEntries.count)"
         }
         """,
       ]

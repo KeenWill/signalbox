@@ -11,6 +11,10 @@ use crate::mapping::{
     durable_command_kind_from_str, durable_command_kind_to_str,
 };
 
+pub(crate) const CANCEL_PROGRAM_RUN_KIND: &str =
+    durable_command_kind_to_str(CommandKind::CancelProgramRun);
+pub(crate) const CLEAR_CREDENTIAL_EXCLUSION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ClearCredentialExclusion);
 pub(crate) const RELOAD_CONFIGURATION_KIND: &str =
     durable_command_kind_to_str(CommandKind::ReloadConfiguration);
 
@@ -86,7 +90,14 @@ pub(crate) const REPROVISION_OAUTH_CREDENTIAL_KIND: &str =
 pub(crate) const DELETE_OAUTH_CREDENTIAL_KIND: &str =
     durable_command_kind_to_str(CommandKind::DeleteOauthCredential);
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 23] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 25] = [
+    CommandKindDefinition {
+        kind: CommandKind::CancelProgramRun,
+        spelling: CANCEL_PROGRAM_RUN_KIND,
+        typed_table: "cancel_program_run_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
     CommandKindDefinition {
         kind: CommandKind::ReloadConfiguration,
         spelling: RELOAD_CONFIGURATION_KIND,
@@ -112,6 +123,13 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 23] = [
         kind: CommandKind::DeleteOauthCredential,
         spelling: DELETE_OAUTH_CREDENTIAL_KIND,
         typed_table: "delete_oauth_credential_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::ClearCredentialExclusion,
+        spelling: CLEAR_CREDENTIAL_EXCLUSION_KIND,
+        typed_table: "clear_credential_exclusion_command",
         minimum_version: 1,
         maximum_version: 1,
     },

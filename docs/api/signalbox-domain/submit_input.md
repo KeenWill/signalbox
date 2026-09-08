@@ -14,6 +14,12 @@ impl SubmitInput {
         content: UserContent,
         delivery: DeliveryRequest,
     ) -> Self;
+    pub const fn new_core_continuation(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        configuration: PerInputConfigurationChoices,
+    ) -> Self;
     pub const fn new_core_interrupt(
         command_id: DurableCommandId,
         session: SessionId,

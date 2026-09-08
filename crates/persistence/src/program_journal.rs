@@ -7,7 +7,7 @@ use signalbox_domain::{
     ProgramFault, ProgramJournal, ProgramJournalError, ProgramRunId, RequestFrame, RequestKind,
     RequestOrdinal, ScopeOrdinal, ScopeRequest,
 };
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 
 use crate::{
     commit_failure_is_ambiguous,
@@ -323,20 +323,56 @@ impl ProgramJournalRepository {
         &self,
         run: ProgramRunId,
     ) -> Result<Option<ProgramJournal>, ProgramJournalRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        Self::load_from_connection(&mut connection, run).await
+    }
+
+    pub(crate) async fn load_locked_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
+        run: ProgramRunId,
+    ) -> Result<Option<ProgramJournal>, ProgramJournalRepositoryError> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM program_run_journal_stream WHERE run_id = $1)",
+        )
+        .bind(run.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exists {
+            return Ok(None);
+        }
+        let sequence = lock_sequence(transaction, run).await?;
+        let journal = Self::load_from_connection(transaction, run)
+            .await?
+            .ok_or(ProgramJournalCorruption::MissingStream)?;
+        if journal
+            .entries()
+            .last()
+            .map_or(0, |entry| entry.position().as_u64())
+            != sequence.last_position
+        {
+            return Err(ProgramJournalCorruption::Inconsistent("journal tail and sequence").into());
+        }
+        Ok(Some(journal))
+    }
+
+    async fn load_from_connection(
+        connection: &mut PgConnection,
+        run: ProgramRunId,
+    ) -> Result<Option<ProgramJournal>, ProgramJournalRepositoryError> {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM program_run_journal_stream WHERE run_id = $1
              )",
         )
         .bind(run.into_uuid())
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *connection)
         .await?;
         if !exists {
             return Ok(None);
         }
         let rows = sqlx::query(LOAD_JOURNAL)
             .bind(run.into_uuid())
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *connection)
             .await?;
         let entries = rows
             .iter()

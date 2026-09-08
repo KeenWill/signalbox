@@ -70,7 +70,7 @@ async fn prepared_batch(pool: &PgPool) -> Result<UndispatchedBatch, Box<dyn Erro
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn placement_loss_retires_prepared_attempt_without_result_projection()
+async fn placement_loss_retires_prepared_attempt_before_startup_classification()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = prepared_batch(&pool).await?;
@@ -91,6 +91,19 @@ async fn placement_loss_retires_prepared_attempt_without_result_projection()
         .store
         .propagate_connection_loss_session(loss, fixture.session)
         .await?;
+    let startup = signalbox_persistence::startup::PostgresStartupScanRepository::new(pool.clone())
+        .recover(
+            fixture.session,
+            signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            &mut signalbox_application::UuidV7StartupScanIdGenerator,
+        )
+        .await?;
+    assert!(
+        matches!(startup, signalbox_application::StartupScanSessionOutcome::ResumableToolBatch { turn } if turn == fixture.turn)
+    );
     let repository = PostgresToolLoopRepository::new(pool.clone());
     let batch = repository
         .load_active_batch(fixture.session, fixture.turn)
@@ -262,8 +275,14 @@ fn model_repository(
     )
 }
 
+enum JudgeBatchShape {
+    SingleRequest,
+    RunnerSuffix,
+}
+
 async fn judge_observation_closes_lost_request(
     recommendation: signalbox_domain::DelegateApprovalRecommendation,
+    shape: JudgeBatchShape,
 ) -> Result<(), Box<dyn Error>> {
     use signalbox_application::ApprovalJudgeCompletionIdentities;
     use signalbox_persistence::approval_judge::{
@@ -271,6 +290,9 @@ async fn judge_observation_closes_lost_request(
     };
     let (_container, pool) = migrated_postgres().await?;
     let fixture = parked_batch(&pool).await?;
+    if matches!(shape, JudgeBatchShape::RunnerSuffix) {
+        append_pending_runner_suffix(&pool, &fixture).await?;
+    }
     sqlx::raw_sql("ALTER TABLE tool_request DISABLE TRIGGER ALL;")
         .execute(&pool)
         .await?;
@@ -299,6 +321,12 @@ async fn judge_observation_closes_lost_request(
         .load_active_batch(fixture.session, fixture.turn)
         .await?
         .expect("in-flight judge retains the wait");
+    if matches!(shape, JudgeBatchShape::RunnerSuffix) {
+        assert_eq!(
+            parked.requests()[1].inadmissible_reason(),
+            Some(signalbox_domain::ToolInadmissibleReason::PlacementLost)
+        );
+    }
     assert_eq!(
         parked.awaiting_approval().map(|waiting| waiting.request()),
         Some(fixture.request)
@@ -381,16 +409,22 @@ async fn judge_observation_closes_lost_request(
 #[ignore = "requires Docker"]
 async fn placement_loss_waits_for_judge_approval_and_retires_its_decision()
 -> Result<(), Box<dyn Error>> {
-    judge_observation_closes_lost_request(signalbox_domain::DelegateApprovalRecommendation::Approve)
-        .await
+    judge_observation_closes_lost_request(
+        signalbox_domain::DelegateApprovalRecommendation::Approve,
+        JudgeBatchShape::SingleRequest,
+    )
+    .await
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn placement_loss_waits_for_judge_denial_and_retires_its_decision()
 -> Result<(), Box<dyn Error>> {
-    judge_observation_closes_lost_request(signalbox_domain::DelegateApprovalRecommendation::Deny)
-        .await
+    judge_observation_closes_lost_request(
+        signalbox_domain::DelegateApprovalRecommendation::Deny,
+        JudgeBatchShape::SingleRequest,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -399,6 +433,7 @@ async fn placement_loss_waits_for_judge_escalation_and_retires_its_decision()
 -> Result<(), Box<dyn Error>> {
     judge_observation_closes_lost_request(
         signalbox_domain::DelegateApprovalRecommendation::EscalateToHuman,
+        JudgeBatchShape::SingleRequest,
     )
     .await
 }
@@ -408,6 +443,16 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
     let fixture = parked_batch(&pool).await?;
     lose_batch(&fixture).await?;
     let repository = if target_available {
+        sqlx::raw_sql("ALTER TABLE model_call DISABLE TRIGGER ALL;")
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE model_call SET usage_input_tokens = 1 WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql("ALTER TABLE model_call ENABLE TRIGGER ALL;")
+            .execute(&pool)
+            .await?;
         model_repository(&pool)
     } else {
         sqlx::raw_sql("ALTER TABLE model_call DISABLE TRIGGER ALL;")
@@ -438,6 +483,7 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
         .expect("batch is available for continuation");
     let continuation_call = ModelCallId::from_uuid(Uuid::now_v7());
     let result = SemanticTranscriptEntryId::from_uuid(Uuid::now_v7());
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::now_v7());
     let outcome = repository
         .tool_loop_repository()
         .prepare_continuation(
@@ -446,7 +492,7 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
             batch.producing_call(),
             signalbox_application::ToolContinuationIdentities::new(
                 vec![result],
-                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                result_frontier,
                 continuation_call,
                 signalbox_domain::FailedModelCallTurnIdentities::new(
                     SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
@@ -471,6 +517,65 @@ async fn continue_inadmissible_batch(target_available: bool) -> Result<(), Box<d
     let payload: String = sqlx::query_scalar("SELECT payload_kind FROM semantic_transcript_entry WHERE source_session_id = $1 AND semantic_entry_id = $2")
         .bind(fixture.session.into_uuid()).bind(result.into_uuid()).fetch_one(&pool).await?;
     assert_eq!(payload, "tool_inadmissible");
+    let target = signalbox_domain::ResolvedProviderTarget::naming(
+        signalbox_domain::ProviderModelIdentity::from_uuid(uuid(0xa159)),
+    );
+    let before_result = repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            signalbox_domain::FastMode::Disabled,
+            false,
+            batch.yielded_snapshot().frontier().snapshot(),
+        )
+        .await?
+        .expect("the producing call reported input usage");
+    let after_result = repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            signalbox_domain::FastMode::Disabled,
+            false,
+            result_frontier,
+        )
+        .await?
+        .expect("the committed result has a reported usage baseline");
+    let result_bytes = u64::try_from("placement_lost".len())?;
+    if target_available {
+        assert_eq!(
+            after_result.projected_unreported_content_bytes(),
+            before_result.projected_unreported_content_bytes() + result_bytes
+        );
+    } else {
+        assert!(after_result.projected_unreported_content_bytes() >= result_bytes);
+        assert_eq!(
+            after_result.projected_unreported_content_bytes(),
+            before_result.projected_unreported_content_bytes()
+        );
+    }
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let mut projected = Vec::new();
+    loop {
+        let outcome = dispatcher
+            .dispatch_next(|event| {
+                if event.session() == Some(fixture.session)
+                    && let DispatchedOutboxEventKind::ToolBatchTransition {
+                        producing_call,
+                        state: signalbox_persistence::outbox::DispatchedToolBatchState::ResultsProjected { .. },
+                        ..
+                    } = event.kind()
+                {
+                    projected.push(*producing_call);
+                }
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?;
+        if outcome == OutboxDispatchOutcome::Idle {
+            break;
+        }
+    }
+    assert_eq!(projected, [batch.producing_call()]);
     if target_available {
         let state: String =
             sqlx::query_scalar("SELECT state_kind FROM model_call WHERE model_call_id = $1")
@@ -661,5 +766,207 @@ async fn placement_loss_preserves_an_executor_dispatched_attempt() -> Result<(),
     );
     assert_eq!(attempt.attempt(), dispatched.correlation().attempt());
     assert_eq!(attempt.generation(), dispatched.correlation().generation());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn placement_loss_judge_replay_checks_continuation_identity_with_inadmissible_suffix()
+-> Result<(), Box<dyn Error>> {
+    judge_observation_closes_lost_request(
+        signalbox_domain::DelegateApprovalRecommendation::Approve,
+        JudgeBatchShape::RunnerSuffix,
+    )
+    .await
+}
+
+async fn append_pending_runner_suffix(
+    pool: &PgPool,
+    fixture: &UndispatchedBatch,
+) -> Result<(), Box<dyn Error>> {
+    let request = ToolRequestId::from_uuid(Uuid::now_v7());
+    let entry = Uuid::now_v7();
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql("ALTER TABLE tool_request DISABLE TRIGGER ALL; ALTER TABLE tool_round DISABLE TRIGGER ALL; ALTER TABLE context_frontier DISABLE TRIGGER ALL; ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL; ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;")
+        .execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO tool_request (request_id, session_id, turn_id, producing_model_call_id, request_ordinal, tool_name, arguments_kind, arguments_text, approval_posture) SELECT $1, session_id, turn_id, producing_model_call_id, 1, tool_name, 'json', '{}', 'human' FROM tool_request WHERE request_id = $2")
+        .bind(request.into_uuid()).bind(fixture.request.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO semantic_transcript_entry (source_session_id, semantic_entry_id, payload_kind, producing_model_call_id, assistant_tool_request_id, assistant_response_part_ordinal) SELECT session_id, $1, 'assistant_tool_use', producing_model_call_id, request_id, 1 FROM tool_request WHERE request_id = $2")
+        .bind(entry).bind(request.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO context_frontier_delta (owning_session_id, context_frontier_id, member_position, source_session_id, semantic_entry_id) SELECT round.session_id, boundary_frontier_id, frontier.member_count + 1, round.session_id, $1 FROM tool_round AS round JOIN context_frontier AS frontier ON frontier.owning_session_id = round.session_id AND frontier.context_frontier_id = round.boundary_frontier_id WHERE round.turn_id = $2")
+        .bind(entry).bind(fixture.turn.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query("UPDATE context_frontier AS frontier SET member_count = member_count + 1 FROM tool_round AS round WHERE round.turn_id = $1 AND frontier.owning_session_id = round.session_id AND frontier.context_frontier_id = round.boundary_frontier_id")
+        .bind(fixture.turn.into_uuid()).execute(&mut *transaction).await?;
+    sqlx::query(
+        "UPDATE tool_round SET response_part_count = 2, request_count = 2 WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE tool_request ENABLE TRIGGER ALL; ALTER TABLE tool_round ENABLE TRIGGER ALL; ALTER TABLE context_frontier ENABLE TRIGGER ALL; ALTER TABLE context_frontier_delta ENABLE TRIGGER ALL; ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL;")
+        .execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn placement_loss_closes_pre_pin_requests_from_the_lost_registration_after_reconnect()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = parked_batch(&pool).await?;
+    fixture
+        .store
+        .transition_connection(
+            enrollment().enrollment(),
+            fixture.connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = fixture
+        .store
+        .load_current_connection_loss(enrollment().enrollment())
+        .await?
+        .expect("the original connection loss is retained");
+    fixture
+        .store
+        .open_connection(enrollment().enrollment())
+        .await?;
+    let reconnected_enrollment = fixture
+        .store
+        .load_enrollment(enrollment().enrollment())
+        .await?
+        .expect("the reconnected enrollment retains its registration revision");
+    fixture
+        .store
+        .register(&reconnected_enrollment, narrowed_advertisement())
+        .await?;
+    let exposed_now: i64 = sqlx::query_scalar("SELECT count(*) FROM runner_current_registration AS current JOIN runner_registration_tool AS declared USING (enrollment_id, registration_revision) WHERE current.enrollment_id = $1 AND declared.tool_name = 'inspect'")
+        .bind(enrollment().enrollment().into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(exposed_now, 0);
+    fixture
+        .store
+        .propagate_connection_loss_session(loss, fixture.session)
+        .await?;
+    let batch = model_repository(&pool)
+        .tool_loop_repository()
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the lost batch remains evaluable");
+    assert!(batch.awaiting_approval().is_none());
+    assert_eq!(
+        batch.requests()[0].inadmissible_reason(),
+        Some(signalbox_domain::ToolInadmissibleReason::PlacementLost)
+    );
+    let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_connection_loss_epoch AS loss JOIN runner_registration_tool AS declared USING (enrollment_id, registration_revision) WHERE loss.enrollment_id = $1 AND loss.loss_epoch = $2 AND declared.tool_name = 'inspect')")
+        .bind(loss.enrollment().into_uuid()).bind(Decimal::from(loss.loss_epoch().get())).fetch_one(&pool).await?;
+    assert!(retained);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn placement_loss_accepts_preparation_failure_after_retiring_the_prepared_judge()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::approval_judge::{
+        FailedApprovalJudgeDisposition, PrepareApprovalJudgeOutcome,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = parked_batch(&pool).await?;
+    sqlx::raw_sql("ALTER TABLE tool_request DISABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE tool_request SET approval_posture = 'delegated' WHERE request_id = $1")
+        .bind(fixture.request.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql("ALTER TABLE tool_request ENABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
+    let repository = model_repository(&pool).approval_judge_repository();
+    let PrepareApprovalJudgeOutcome::Ready(prepared) = repository
+        .prepare(
+            fixture.session,
+            fixture.turn,
+            ModelCallId::from_uuid(Uuid::now_v7()),
+            None,
+        )
+        .await?
+    else {
+        panic!("the judge is prepared before model preparation finishes");
+    };
+    lose_batch(&fixture).await?;
+    repository
+        .fail(
+            &prepared,
+            FailedApprovalJudgeDisposition::KnownFailed,
+            signalbox_domain::ProviderReportedTokenUsage::unreported(),
+        )
+        .await?;
+    repository
+        .fail(
+            &prepared,
+            FailedApprovalJudgeDisposition::KnownFailed,
+            signalbox_domain::ProviderReportedTokenUsage::unreported(),
+        )
+        .await?;
+    let batch = model_repository(&pool)
+        .tool_loop_repository()
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("preparation failure leaves the reopened batch evaluable");
+    assert!(batch.awaiting_approval().is_none());
+    assert_eq!(
+        batch.requests()[0].inadmissible_reason(),
+        Some(signalbox_domain::ToolInadmissibleReason::PlacementLost)
+    );
+    let disposition: String = sqlx::query_scalar("SELECT terminal_disposition_kind FROM tool_approval_judge_model_call WHERE request_id = $1").bind(fixture.request.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(disposition, "cancelled");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn placement_loss_uses_current_registration_for_an_epoch_without_retained_revision()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = parked_batch(&pool).await?;
+    fixture
+        .store
+        .transition_connection(
+            enrollment().enrollment(),
+            fixture.connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = fixture
+        .store
+        .load_current_connection_loss(enrollment().enrollment())
+        .await?
+        .expect("the loss epoch exists");
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql("ALTER TABLE runner_connection_loss_epoch DISABLE TRIGGER ALL;")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE runner_connection_loss_epoch SET registration_revision = NULL WHERE enrollment_id = $1 AND loss_epoch = $2")
+        .bind(loss.enrollment().into_uuid()).bind(Decimal::from(loss.loss_epoch().get())).execute(&mut *transaction).await?;
+    sqlx::raw_sql("ALTER TABLE runner_connection_loss_epoch ENABLE TRIGGER ALL;")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    fixture
+        .store
+        .propagate_connection_loss_session(loss, fixture.session)
+        .await?;
+    let batch = model_repository(&pool)
+        .tool_loop_repository()
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the reopened batch is readable");
+    assert!(batch.awaiting_approval().is_none());
+    assert_eq!(
+        batch.requests()[0].inadmissible_reason(),
+        Some(signalbox_domain::ToolInadmissibleReason::PlacementLost)
+    );
     Ok(())
 }

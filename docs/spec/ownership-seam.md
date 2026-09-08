@@ -7,6 +7,9 @@ terminal, goal change, command settlement, injection settlement, and session
 ownership change. Every other core outbox event advances the module cursor
 without becoming module input.
 
+The lifecycle source also exposes whether a session has a durable terminal fact,
+independently of the module's cursor.
+
 The output boundary exposes checked wrappers for the existing typed
 create-session, submit-input, goal attach and resume, release-start, sticky
 stop, adopt, and ownership-release commands. Modules do not mint turn, input, or

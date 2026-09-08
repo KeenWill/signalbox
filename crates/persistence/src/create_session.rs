@@ -205,7 +205,9 @@ impl CreateSessionRepository {
                 | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential,
+                | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun,
             ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
@@ -267,7 +269,9 @@ impl CreateSessionRepository {
                     | CommandKind::PromotePendingRunner
                     | CommandKind::ProvisionOauthCredential
                     | CommandKind::ReprovisionOauthCredential
-                    | CommandKind::DeleteOauthCredential,
+                    | CommandKind::DeleteOauthCredential
+                    | CommandKind::ClearCredentialExclusion
+                    | CommandKind::CancelProgramRun,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(
@@ -333,7 +337,9 @@ impl CreateSessionRepository {
                 | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential,
+                | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }

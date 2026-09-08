@@ -190,7 +190,7 @@ pub(super) struct ValidatedTurnOrigin {
 fn goal_turn_source_references_turn(source: GoalTurnSource, turn: TurnId) -> bool {
     match source {
         GoalTurnSource::UserEvent(_) => false,
-        GoalTurnSource::SuccessfulTurn(predecessor) => predecessor == turn,
+        GoalTurnSource::PredecessorTurn(predecessor) => predecessor == turn,
     }
 }
 

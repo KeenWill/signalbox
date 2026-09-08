@@ -15,8 +15,10 @@ Bazel builds the workspace libraries and binaries on x86-64 Linux with all
 features enabled, including test-support surfaces and fixture binaries, matching
 Cargo's all-features CI build. These targets do not validate default-feature
 release artifacts. The ordinary suite covers workspace unit tests, integration
-binaries, and doctests. Cargo commands and CI cover the provisioned
-host-isolation gate. See [Build and test](spec/build-and-test.md).
+binaries, and doctests. A GitHub-hosted Bazel job runs the provisioned
+host-isolation gate. The required Rust `validate` job retains Cargo checks for
+the catalog workspace dependency boundary and Codex schema fixtures, including
+Rust lockfile-only updates. See [Build and test](spec/build-and-test.md).
 
 `crate_universe` reads the workspace Cargo manifests and `Cargo.lock` to
 generate third-party dependency targets. Change dependencies with Cargo as
@@ -116,7 +118,8 @@ PDF, SVG, video, and registry behavior. These fixture-based targets are included
 in `//:bazel_tests` and cache their results. The `//:host_integration_tests`
 targets cover the audio worker, process isolation, and real Bubblewrap checks
 with CI confinement requirements enabled. They need a delegated cgroup and the
-real sandbox; the provisioned Cargo workspace job retains that CI gate.
+real sandbox. The GitHub-hosted `bazel-host-integration` job provisions both and
+runs this group; the Rust workflow binds its result to `validate`.
 
 The importer conformance corpus runs in `//:rust_integration_tests`. Its JSONL
 inputs, golden files, and Cargo configuration are declared separately. Golden

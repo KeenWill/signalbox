@@ -317,7 +317,8 @@ impl PostgresModelCallRepository {
                                          (
                                              entry.payload_kind IN (
                                                  'tool_execution_result',
-                                                 'tool_denied'
+                                                 'tool_denied',
+                                                 'tool_inadmissible'
                                              )
                                              AND result_request.producing_model_call_id =
                                                  latest_call.model_call_id
@@ -372,6 +373,8 @@ impl PostgresModelCallRepository {
                                         + COALESCE(octet_length(attempt.error_detail), 0)
                                     WHEN 'tool_denied' THEN
                                         COALESCE(octet_length(decision.denial_reason), 0)
+                                    WHEN 'tool_inadmissible' THEN
+                                        COALESCE(octet_length(result_request.inadmissible_reason), 0)
                                     WHEN 'delegated_task' THEN
                                         COALESCE(octet_length(task.task_content), 0)
                                     WHEN 'delegation_message' THEN

@@ -100,6 +100,8 @@ where
             | CommandKind::ProvisionOauthCredential
             | CommandKind::ReprovisionOauthCredential
             | CommandKind::DeleteOauthCredential
+            | CommandKind::ClearCredentialExclusion
+            | CommandKind::CancelProgramRun
             | CommandKind::ReplaceLostRunner
             | CommandKind::AbandonLostRunner
             | CommandKind::PromotePendingRunner
@@ -155,6 +157,8 @@ where
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner
                 | CommandKind::PromotePendingRunner

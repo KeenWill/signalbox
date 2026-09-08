@@ -63,6 +63,10 @@ impl BulkIngestKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RejectionDetail {
+    /// A newer active generation exists at the target's exact scope.
+    StaleGeneration {},
+    /// No clearable retained record matches the exact target.
+    UnknownCredentialExclusion {},
     /// Another chunked bulk-ingest kind already owns this connection.
     BulkIngestAlreadyInProgress { active_kind: BulkIngestKind },
     /// An explicit reasoning value is unsupported by the selected model.
@@ -485,6 +489,8 @@ impl RejectionDetail {
             | Self::DelegationEventOrdinalExhausted { .. }
             | Self::DelegationDeliverySequenceExhausted { .. }
             | Self::DefaultsVersionMismatch { .. }
+            | Self::StaleGeneration {}
+            | Self::UnknownCredentialExclusion {}
             | Self::UnknownModelAlias { .. }
             | Self::AcceptancePositionExhausted { .. }
             | Self::DefaultsVersionExhausted { .. }
@@ -604,6 +610,8 @@ pub(crate) fn validate_rejection_detail(
         | RejectionDetail::DelegationMessageConflict { .. }
         | RejectionDetail::DelegationMessageIdentityCollision { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
+        | RejectionDetail::StaleGeneration {}
+        | RejectionDetail::UnknownCredentialExclusion {}
         | RejectionDetail::UnknownModelAlias { .. }
         | RejectionDetail::AcceptancePositionExhausted { .. }
         | RejectionDetail::DefaultsVersionExhausted { .. }
@@ -716,6 +724,8 @@ pub(crate) fn validate_conversation_import_detail(
         | RejectionDetail::DelegationEventOrdinalExhausted { .. }
         | RejectionDetail::DelegationDeliverySequenceExhausted { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
+        | RejectionDetail::StaleGeneration {}
+        | RejectionDetail::UnknownCredentialExclusion {}
         | RejectionDetail::UnknownModelAlias { .. }
         | RejectionDetail::AcceptancePositionExhausted { .. }
         | RejectionDetail::DefaultsVersionExhausted { .. }

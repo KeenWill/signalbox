@@ -4,6 +4,8 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| program | 3 | 0 | 0 | [program](program.md) |
+| credential_exclusions | 2 | 0 | 0 | [credential_exclusions](credential_exclusions.md) |
 | delegation | 11 | 0 | 0 | [delegation](delegation.md) |
 | error | 4 | 0 | 0 | [error](error.md) |
 | event | 1 | 0 | 0 | [event](event.md) |
@@ -11,7 +13,7 @@
 | goal | 16 | 0 | 0 | [goal](goal.md) |
 | operator_status | 5 | 0 | 0 | [operator_status](operator_status.md) |
 | request | 2 | 0 | 0 | [request](request.md) |
-| response | 5 | 0 | 1 | [response](response.md) |
+| response | 6 | 0 | 1 | [response](response.md) |
 | review | 32 | 0 | 0 | [review](review.md) |
 | runner | 15 | 0 | 0 | [runner](runner.md) |
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |

@@ -1,5 +1,7 @@
+mod credential_output;
 mod entry_output;
 mod event_output;
+mod program_output;
 mod session_output;
 mod snapshot_output;
 

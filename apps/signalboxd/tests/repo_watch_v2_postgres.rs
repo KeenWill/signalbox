@@ -53,11 +53,13 @@ use testcontainers_modules::{
 };
 use uuid::Uuid;
 
-// The configured merged-subject retention window is seven days.
-const MERGED_RETENTION: Duration = Duration::from_secs(604_800);
-
 #[path = "repo_watch_v2/checkout.rs"]
 mod checkout;
+#[path = "repo_watch_v2/retirement.rs"]
+mod retirement;
+
+// The configured merged-subject retention window is seven days.
+const MERGED_RETENTION: Duration = Duration::from_secs(604_800);
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 
@@ -2425,6 +2427,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
     };
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
+    let source = signalbox_ownership_seam::LifecycleEventSource::new(core_pool.clone());
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&core_pool)
         .await?;
@@ -2525,7 +2528,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         },
     );
     store
-        .react_to_lifecycle(&creation, &mut factory, &mut codec)
+        .react_to_lifecycle(&creation, &mut factory, &mut codec, &source)
         .await?;
     let goal = LifecycleEvent::for_test(
         2,
@@ -2538,10 +2541,10 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         }),
     );
     store
-        .react_to_lifecycle(&goal, &mut factory, &mut codec)
+        .react_to_lifecycle(&goal, &mut factory, &mut codec, &source)
         .await?;
     store
-        .react_to_lifecycle(&goal, &mut factory, &mut codec)
+        .react_to_lifecycle(&goal, &mut factory, &mut codec, &source)
         .await?;
     let reactions = store.recover_pending_commands(&mut codec).await?;
     assert_eq!(reactions.len(), 1, "a replay retains one reaction identity");
@@ -2555,7 +2558,12 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         calls: Vec::new(),
         now,
     };
-    assert!(store.submit_pending(&mut codec, &mut sink).await.is_err());
+    assert!(
+        store
+            .submit_pending(&mut codec, &mut sink, &source)
+            .await
+            .is_err()
+    );
     assert_eq!(
         store.recover_pending_commands(&mut codec).await?.len(),
         1,
@@ -2563,7 +2571,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
     );
     sink.fail = false;
     store
-        .submit_pending(&mut codec, &mut sink)
+        .submit_pending(&mut codec, &mut sink, &source)
         .await
         .expect("retry follow-up");
     assert_eq!(
@@ -2584,7 +2592,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         }),
     );
     store
-        .react_to_lifecycle(&terminal, &mut factory, &mut codec)
+        .react_to_lifecycle(&terminal, &mut factory, &mut codec, &source)
         .await?;
     let restarted = RepoWatchStore::new(pool.clone());
     assert!(
@@ -2635,7 +2643,7 @@ async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_co
         }),
     );
     restarted
-        .react_to_lifecycle(&stop, &mut factory, &mut codec)
+        .react_to_lifecycle(&stop, &mut factory, &mut codec, &source)
         .await?;
     assert!(restarted.recover_pending_commands(&mut codec).await?.iter().any(|p| matches!(p.command().clone().into_payload(),SessionCommandPayload::Lifecycle(command) if matches!(command.operation(),SessionLifecycleOperation::Stop { sticky:StopStickiness::Sticky, .. }))),"removed rules still retain their lifecycle reaction origin");
     pool.close().await;

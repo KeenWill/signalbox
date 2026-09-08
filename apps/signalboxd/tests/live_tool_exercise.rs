@@ -279,9 +279,14 @@ async fn run_live_smoke() -> SmokeResult {
             .join(UNUSED_WEB_SEARCH_CREDENTIAL_FILE),
         CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
     );
+    let (eligibility_nudge, _work_source) =
+        signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
     let tools = DaemonTools::try_new_production(
         SystemCurrentTimeClock,
         pool.clone(),
+        eligibility_nudge,
         MappedDaemonCredentialInputs {
             web_search: web_search_credentials,
             code_host: credentials.clone(),

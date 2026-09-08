@@ -1,5 +1,8 @@
 //! Append-only session-placement history and explicit update replay.
 
+mod spawn;
+pub(crate) use spawn::create_delegated_child;
+
 use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
@@ -111,7 +114,9 @@ impl SessionPlacementRepository {
                 | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential,
+                | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun,
             ) => {
                 transaction.rollback().await?;
                 return Ok(SessionPlacementRepositoryOutcome::ConflictingReuse { command_id });
@@ -172,7 +177,9 @@ impl SessionPlacementRepository {
                     | CommandKind::PromotePendingRunner
                     | CommandKind::ProvisionOauthCredential
                     | CommandKind::ReprovisionOauthCredential
-                    | CommandKind::DeleteOauthCredential,
+                    | CommandKind::DeleteOauthCredential
+                    | CommandKind::ClearCredentialExclusion
+                    | CommandKind::CancelProgramRun,
                 ) => SessionPlacementRepositoryOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(SessionPlacementRepositoryError::Corruption(
@@ -289,6 +296,13 @@ pub(crate) async fn load_current(
                 event.session_id AS event_session_id,
                 event.version, event.prior_version, event.event_kind,
                 event.placement_path, event.root_global_read_intent,
+                CASE WHEN event.provenance_command_id IS NULL AND spawn_parent.session_id IS NOT NULL
+                AND event.placement_path IS NOT DISTINCT FROM
+                    CASE WHEN spawn_parent.placement_path IS NULL THEN NULL
+                         WHEN position('.' in spawn_parent.placement_path) = 0 THEN spawn_parent.placement_path
+                         ELSE regexp_replace(spawn_parent.placement_path, '[^.]+$', '') || replace(event.session_id::text, '-', '') END
+                AND event.root_global_read_intent = spawn_parent.root_global_read_intent
+                THEN spawned.spawning_tool_request_id END AS delegated_creation_request_id,
                 native_registry.command_id AS native_creation_command_id,
                 imported_registry.command_id AS imported_creation_command_id,
                 placement_update_registry.command_id AS placement_update_command_id,
@@ -304,6 +318,12 @@ pub(crate) async fn load_current(
            LEFT JOIN session_placement_event AS event
              ON event.session_id = head.session_id
             AND event.version = head.current_version
+           LEFT JOIN session_delegation AS spawned
+             ON spawned.child_session_id = event.session_id
+            AND spawned.spawning_tool_request_id = event.provenance_tool_request_id
+           LEFT JOIN session_placement_event AS spawn_parent
+             ON spawn_parent.session_id = spawned.parent_session_id
+            AND spawn_parent.version = event.parent_placement_version
            LEFT JOIN create_session_command AS native_creation
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
@@ -404,6 +424,13 @@ pub(crate) async fn load_current_batch(
                 session_row.ancestry_kind,
                 event.version, event.prior_version, event.event_kind,
                 event.placement_path, event.root_global_read_intent,
+                CASE WHEN event.provenance_command_id IS NULL AND spawn_parent.session_id IS NOT NULL
+                AND event.placement_path IS NOT DISTINCT FROM
+                    CASE WHEN spawn_parent.placement_path IS NULL THEN NULL
+                         WHEN position('.' in spawn_parent.placement_path) = 0 THEN spawn_parent.placement_path
+                         ELSE regexp_replace(spawn_parent.placement_path, '[^.]+$', '') || replace(event.session_id::text, '-', '') END
+                AND event.root_global_read_intent = spawn_parent.root_global_read_intent
+                THEN spawned.spawning_tool_request_id END AS delegated_creation_request_id,
                 native_registry.command_id AS native_creation_command_id,
                 imported_registry.command_id AS imported_creation_command_id,
                 placement_update_registry.command_id AS placement_update_command_id
@@ -412,6 +439,12 @@ pub(crate) async fn load_current_batch(
              ON head.session_id = session_row.session_id
            LEFT JOIN session_placement_event AS event
              ON event.session_id = session_row.session_id
+           LEFT JOIN session_delegation AS spawned
+             ON spawned.child_session_id = event.session_id
+            AND spawned.spawning_tool_request_id = event.provenance_tool_request_id
+           LEFT JOIN session_placement_event AS spawn_parent
+             ON spawn_parent.session_id = spawned.parent_session_id
+            AND spawn_parent.version = event.parent_placement_version
            LEFT JOIN create_session_command AS native_creation
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
@@ -526,6 +559,9 @@ pub(crate) async fn load_current_batch(
             "session placement batch incomplete",
         ));
     }
+    for session in placements.keys() {
+        authenticate_spawn_placement_ancestors(connection, SessionId::from_uuid(*session)).await?;
+    }
     Ok(placements)
 }
 
@@ -568,6 +604,53 @@ pub(crate) async fn load_authenticated_version(
     session: SessionId,
     version: SessionPlacementVersion,
 ) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
+    let placement = load_direct_authenticated_version(connection, session, version).await?;
+    if placement.is_some() {
+        authenticate_spawn_placement_ancestors(connection, session).await?;
+    }
+    Ok(placement)
+}
+
+async fn authenticate_spawn_placement_ancestors(
+    connection: &mut PgConnection,
+    mut session: SessionId,
+) -> Result<(), SessionPlacementRepositoryError> {
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.insert(session.into_uuid()) {
+        let parent = sqlx::query_as::<_, (sqlx::types::Uuid, Decimal)>(
+            "SELECT relation.parent_session_id, event.parent_placement_version
+               FROM session_placement_event AS event
+               JOIN session_delegation AS relation
+                 ON relation.spawning_tool_request_id = event.provenance_tool_request_id
+                AND relation.child_session_id = event.session_id
+              WHERE event.session_id = $1 AND event.version = 1",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
+        let Some((parent, version)) = parent else {
+            return Ok(());
+        };
+        session = SessionId::from_uuid(parent);
+        if load_direct_authenticated_version(connection, session, decode_version(version)?)
+            .await?
+            .is_none()
+        {
+            return Err(SessionPlacementRepositoryError::Corruption(
+                "spawn parent placement history",
+            ));
+        }
+    }
+    Err(SessionPlacementRepositoryError::Corruption(
+        "cyclic spawn placement history",
+    ))
+}
+
+async fn load_direct_authenticated_version(
+    connection: &mut PgConnection,
+    session: SessionId,
+    version: SessionPlacementVersion,
+) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
     let mut authenticated: Option<VersionedSessionPlacement> = None;
     loop {
         let after_version = authenticated.as_ref().map_or(Decimal::ZERO, |placement| {
@@ -577,6 +660,13 @@ pub(crate) async fn load_authenticated_version(
             "SELECT session_row.ancestry_kind,
                 event.version, event.prior_version, event.event_kind,
                 event.placement_path, event.root_global_read_intent,
+                CASE WHEN event.provenance_command_id IS NULL AND spawn_parent.session_id IS NOT NULL
+                AND event.placement_path IS NOT DISTINCT FROM
+                    CASE WHEN spawn_parent.placement_path IS NULL THEN NULL
+                         WHEN position('.' in spawn_parent.placement_path) = 0 THEN spawn_parent.placement_path
+                         ELSE regexp_replace(spawn_parent.placement_path, '[^.]+$', '') || replace(event.session_id::text, '-', '') END
+                AND event.root_global_read_intent = spawn_parent.root_global_read_intent
+                THEN spawned.spawning_tool_request_id END AS delegated_creation_request_id,
                 native_registry.command_id AS native_creation_command_id,
                 imported_registry.command_id AS imported_creation_command_id,
                 placement_update_registry.command_id AS placement_update_command_id
@@ -584,6 +674,12 @@ pub(crate) async fn load_authenticated_version(
            JOIN session_placement_event AS event
              ON event.session_id = session_row.session_id
             AND event.version <= $2
+           LEFT JOIN session_delegation AS spawned
+             ON spawned.child_session_id = event.session_id
+            AND spawned.spawning_tool_request_id = event.provenance_tool_request_id
+           LEFT JOIN session_placement_event AS spawn_parent
+             ON spawn_parent.session_id = spawned.parent_session_id
+            AND spawn_parent.version = event.parent_placement_version
            LEFT JOIN create_session_command AS native_creation
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
@@ -775,6 +871,7 @@ fn decode_authenticated_placement(
             ));
         }
     };
+    let delegated: Option<sqlx::types::Uuid> = row.try_get("delegated_creation_request_id")?;
     let native_creation =
         decode_receipt_command_identity(row.try_get("native_creation_command_id")?)?;
     let imported_creation =
@@ -787,10 +884,13 @@ fn decode_authenticated_placement(
                 && update.is_none()
                 && match creation_family {
                     PlacementCreationFamily::Native => {
-                        native_creation.is_some() && imported_creation.is_none()
+                        (native_creation.is_some() ^ delegated.is_some())
+                            && imported_creation.is_none()
                     }
                     PlacementCreationFamily::ImportedConversation => {
-                        imported_creation.is_some() && native_creation.is_none()
+                        imported_creation.is_some()
+                            && native_creation.is_none()
+                            && delegated.is_none()
                     }
                 }
         }
@@ -799,6 +899,7 @@ fn decode_authenticated_placement(
                 && update.is_some()
                 && native_creation.is_none()
                 && imported_creation.is_none()
+                && delegated.is_none()
         }
     };
     if !receipt_is_valid {
