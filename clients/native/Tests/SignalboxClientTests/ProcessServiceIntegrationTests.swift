@@ -3,18 +3,54 @@ import XCTest
 @testable import SignalboxNative
 
 final class ProcessServiceIntegrationTests: XCTestCase {
+  @MainActor
+  func testConversationRefreshKeepsTheDisplayedPageCursor() async throws {
+    let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let viewModel = ProcessSessionListViewModel { service }
+    await viewModel.refresh()
+    let first = try XCTUnwrap(viewModel.conversations.first)
+    let cursor = try XCTUnwrap(viewModel.nextAfter)
+    XCTAssertEqual(viewModel.conversations.count, 1)
+
+    await viewModel.nextPage()
+    let second = try XCTUnwrap(viewModel.conversations.first)
+    XCTAssertNotEqual(first.id, second.id)
+    XCTAssertEqual(viewModel.pageAfter, cursor)
+    await viewModel.refresh()
+    XCTAssertEqual(viewModel.conversations.first?.id, second.id)
+    XCTAssertEqual(viewModel.pageAfter, cursor)
+    XCTAssertEqual(viewModel.conversations.count, 1)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  func testImportedInventoryDecodesOnlyTheSelectedEntryPage() async throws {
+    let service = makeService()
+    let conversations = try await service.listConversations(includeArchived: true).conversations
+    let imported = try fixtureConversation(MockProcessProtocolFixtures.importedConversationID, in: conversations)
+    let inventory = try await service.readImportedConversation(conversation: imported)
+    let firstPage = try inventory.entries(in: 0..<1)
+    let lastPage = try inventory.entries(in: (inventory.entryCount - 1)..<inventory.entryCount)
+    XCTAssertEqual(firstPage.count, 1)
+    XCTAssertEqual(firstPage.first?.sourceSpeakerLabel, "User")
+    XCTAssertEqual(lastPage.count, 1)
+    XCTAssertEqual(lastPage.first?.sourceSpeakerLabel, "Assistant")
+    XCTAssertNotEqual(firstPage.first?.importedEntryID, lastPage.first?.importedEntryID)
+    XCTAssertThrowsError(try inventory.entries(in: 0..<(inventory.entryCount + 1)))
+  }
+
   /// An imported transcript frontier creates an independent native session.
   func testImportedTranscriptCanContinueAsANativeSession() async throws {
     let service = makeService()
-    let conversations = try await service.listConversations(includeArchived: true)
+    let conversations = try await service.listConversations(includeArchived: true).conversations
     let imported = try fixtureConversation(
       MockProcessProtocolFixtures.importedConversationID,
       in: conversations
     )
-    let transcript = try await service.readImportedConversation(conversation: imported)
+    let inventory = try await service.readImportedConversation(conversation: imported)
+    let entries = try inventory.entries(in: 0..<inventory.entryCount)
     let aliases = try await service.listModelAliases()
     let alias = try XCTUnwrap(aliases.first)
-    let lastPosition = try XCTUnwrap(transcript.entries.last?.position)
+    let lastPosition = try XCTUnwrap(entries.last?.position)
     let prepared = try await service.prepareImportedSessionCreation(
       conversation: imported,
       throughPosition: lastPosition,
@@ -23,22 +59,22 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
 
     let sessionID = try await service.createSessionFromImportedFrontier(prepared)
-    let refreshed = try await service.listConversations(includeArchived: true)
+    let refreshed = try await service.listConversations(includeArchived: true).conversations
     let continued = try fixtureConversation(sessionID.rawValue, in: refreshed)
 
     XCTAssertEqual(
-      transcript.entries.count,
+      entries.count,
       MockProcessProtocolFixtures.importedEntryCount
     )
-    XCTAssertEqual(transcript.entries.first?.sourceSpeakerLabel, "User")
-    XCTAssertEqual(transcript.entries.last?.sourceSpeakerLabel, "Assistant")
+    XCTAssertEqual(entries.first?.sourceSpeakerLabel, "User")
+    XCTAssertEqual(entries.last?.sourceSpeakerLabel, "Assistant")
     XCTAssertEqual(sessionID.rawValue, MockProcessProtocolFixtures.continuedSessionID)
     XCTAssertEqual(continued.origin, .native)
   }
 
   /// Imported transcript inspection rejects a noncontiguous frontier inventory.
   func testImportedTranscriptRejectsANoncontiguousFirstPosition() async throws {
-    let conversations = try await makeService().listConversations(includeArchived: true)
+    let conversations = try await makeService().listConversations(includeArchived: true).conversations
     let imported = try fixtureConversation(
       MockProcessProtocolFixtures.importedConversationID,
       in: conversations
@@ -65,7 +101,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   func testImportedTranscriptCountsUnknownContentKindTowardCapacity() async throws {
-    let conversations = try await makeService().listConversations(includeArchived: true)
+    let conversations = try await makeService().listConversations(includeArchived: true).conversations
     let imported = try fixtureConversation(
       MockProcessProtocolFixtures.importedConversationID,
       in: conversations
@@ -96,7 +132,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   func testImportedTranscriptCountsUnknownAttestedSpeakerTowardCapacity() async throws {
-    let conversations = try await makeService().listConversations(includeArchived: true)
+    let conversations = try await makeService().listConversations(includeArchived: true).conversations
     let imported = try fixtureConversation(
       MockProcessProtocolFixtures.importedConversationID,
       in: conversations
@@ -137,7 +173,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       systemPrompt: ProcessSubmissionFixture.systemPrompt
     )
     let createdSessionID = try await service.createSession(prepared)
-    let conversations = try await service.listConversations(includeArchived: true)
+    let conversations = try await service.listConversations(includeArchived: true).conversations
     let createdConversation = try XCTUnwrap(
       conversations.first {
         $0.conversationID.rawValue == MockProcessProtocolFixtures.createdSessionID
@@ -177,7 +213,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
 
     let error = await capturedServiceError {
-      _ = try await service.listConversations(includeArchived: true)
+      _ = try await service.listConversations(includeArchived: true).conversations
     }
 
     XCTAssertEqual(error, ProcessDriverFixture.conversationListTextCapacityError)
@@ -2834,7 +2870,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
   @MainActor
   func testOlderSessionRefreshCannotReplaceNewerServiceResult() async throws {
-    let fixtures = try await makeService().listConversations(includeArchived: true)
+    let fixtures = try await makeService().listConversations(includeArchived: true).conversations
     let olderConversations = [
       try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
     ]
@@ -2863,7 +2899,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   @MainActor
   func testArchiveCommitWinsOverRacingStaleRefresh() async throws {
     let backingService = makeService()
-    let fixtures = try await backingService.listConversations(includeArchived: true)
+    let fixtures = try await backingService.listConversations(includeArchived: true).conversations
     let conversation = try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
     let archived = try await backingService.setConversationArchived(
       true,
@@ -2889,7 +2925,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   @MainActor
   func testReplacingListServiceClearsRowsAndInvalidatesOldArchive() async throws {
     let backingService = makeService()
-    let fixtures = try await backingService.listConversations(includeArchived: true)
+    let fixtures = try await backingService.listConversations(includeArchived: true).conversations
     let conversation = try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
     let archived = try await backingService.setConversationArchived(
       true,
@@ -4793,15 +4829,15 @@ private actor SuspendedSessionListProcessService: SignalboxProcessServiceProtoco
   func testConnection() async {}
 
   func listConversations(
-    includeArchived: Bool
-  ) async -> [SignalboxProcessConversation] {
+    includeArchived: Bool, after: SignalboxConversationCursor?
+  ) async -> SignalboxConversationListPage {
     listStarted = true
     listStartedWaiter?.resume()
     listStartedWaiter = nil
     await withCheckedContinuation { continuation in
       completionWaiter = continuation
     }
-    return conversations
+    return SignalboxConversationListPage(conversations: conversations, nextAfter: nil)
   }
 
   func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
@@ -4868,9 +4904,9 @@ private actor SuspendedArchiveProcessService: SignalboxProcessServiceProtocol {
   func testConnection() async {}
 
   func listConversations(
-    includeArchived: Bool
-  ) async -> [SignalboxProcessConversation] {
-    staleConversations
+    includeArchived: Bool, after: SignalboxConversationCursor?
+  ) async -> SignalboxConversationListPage {
+    SignalboxConversationListPage(conversations: staleConversations, nextAfter: nil)
   }
 
   func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {

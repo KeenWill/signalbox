@@ -11,8 +11,9 @@ REST, WebSocket, or OpenAI-compatible surfaces.
 
 ## Live macOS surface
 
-- List native and imported conversations through the unified conversation read;
-  open, archive, and unarchive native sessions.
+- Page native and imported conversations through the unified conversation read;
+  refresh the displayed page, open sessions by identity, and archive or unarchive
+  native sessions.
 - Follow a session through explicit connect, hello, history, replay, steady, and
   bounded-recovery states.
 - Project transcript snapshots into the existing timeline normalizer.
@@ -32,7 +33,7 @@ REST, WebSocket, or OpenAI-compatible surfaces.
   its required successor input.
 - Create a session by selecting a model alias read from the running daemon and
   optionally supplying a system prompt.
-- Inspect the bounded, read-only entry inventory for an imported conversation
+- Inspect imported entries in pages decoded from a validated temporary spool,
   and create a resume or fork session from a selected frontier and model alias.
 - Exercise the real encoder, decoder, request identity, and JSONL framing in
   deterministic mock UI flows.

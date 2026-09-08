@@ -238,6 +238,16 @@ extension SignalboxImportedConversationEntry: Identifiable {
   }
 }
 
+public struct SignalboxConversationListPage: Equatable, Sendable {
+  public let conversations: [SignalboxProcessConversation]
+  public let nextAfter: SignalboxConversationCursor?
+
+  public init(conversations: [SignalboxProcessConversation], nextAfter: SignalboxConversationCursor?) {
+    self.conversations = conversations
+    self.nextAfter = nextAfter
+  }
+}
+
 public struct SignalboxImportedConversationTranscript: Equatable, Sendable {
   public let importedConversationID: SignalboxCanonicalUUID
   public let entries: [SignalboxImportedConversationEntry]

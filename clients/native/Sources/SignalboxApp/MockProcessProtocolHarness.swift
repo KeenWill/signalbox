@@ -389,12 +389,23 @@ private actor MockProcessProtocolState {
         )
       }
       page.sort { $0.0 < $1.0 }
+      if let after = request["after"] as? [String: Any], let id = after["conversation_id"] as? String {
+        page = page.filter { $0.0 > id }
+      }
+      let pageSize = Int(request["page_size"] as? String ?? "100") ?? 100
+      let hasMore = page.count > pageSize
+      page = Array(page.prefix(pageSize))
       var messages: [[String: Any]] = [["type": "conversation_page_start"]]
       messages.append(contentsOf: page.map(\.1))
+      let next: Any
+      if hasMore, let last = page.last,
+        let summary = last.1["conversation"] as? [String: Any], let origin = summary["origin"] as? String {
+        next = ["origin": origin, "conversation_id": last.0]
+      } else { next = NSNull() }
       messages.append([
         "type": "conversation_page_end",
         "conversation_count": String(page.count),
-        "next_after": NSNull(),
+        "next_after": next,
       ])
       return try response(requestID: requestID, messages: messages)
     case "list_session_metadata":
