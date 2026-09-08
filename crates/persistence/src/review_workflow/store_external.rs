@@ -19,10 +19,10 @@ use super::{
 use signalbox_domain::{
     ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
     ReviewExternalLinkId, ReviewExternalLinkNoChangeResult, ReviewExternalLinkObservation,
-    ReviewExternalLinkTransitionFailure, ReviewFindingEvent, ReviewFindingEventKind,
-    ReviewFindingEventResultKind, ReviewFindingExternalLinkRef, ReviewFindingId,
-    ReviewFindingPendingExternalLinkRef, ReviewPassEvidence, ReviewPassId, ReviewPassResult,
-    ReviewRun, ReviewRunEvidence, ReviewRunId, ReviewRunReconstitutionInput,
+    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResultKind,
+    ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingPendingExternalLinkRef,
+    ReviewPassEvidence, ReviewPassId, ReviewPassResult, ReviewRun, ReviewRunEvidence, ReviewRunId,
+    ReviewRunReconstitutionInput,
 };
 use sqlx::types::Uuid;
 use sqlx::{PgConnection, Row};
@@ -243,23 +243,9 @@ impl ReviewWorkflowStore {
         link: ReviewExternalLinkId,
         observation: ReviewExternalLinkObservation,
     ) -> Result<Option<ReviewExternalLink>, ReviewWorkflowStoreError> {
-        let Some(current) = self.load_external_link(link).await? else {
+        let Some(_) = self.load_external_link(link).await? else {
             return Ok(None);
         };
-        match current.clone().observe(observation.clone()) {
-            Ok(_) => {}
-            Err(error)
-                if error.failure() == ReviewExternalLinkTransitionFailure::UnchangedObservation =>
-            {
-                // The database lock below decides whether this remains
-                // unchanged after any concurrent observation commits.
-            }
-            Err(error) => {
-                return Err(ReviewWorkflowStoreError::InvalidTransition(
-                    ReviewWorkflowTransitionError::ExternalLink(error),
-                ));
-            }
-        }
         let mut transaction = self.pool.begin().await?;
         sqlx::query(crate::lock_inventory::REVIEW_EXTERNAL_LINK_TRANSITION)
             .bind(link.into_uuid())
