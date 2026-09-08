@@ -207,6 +207,8 @@ reservation release.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
 wait attempt and closed cause. Transcript reads and initial follow snapshots
-retain the active turn and its slot without rejection detail. A released wait
-uses its retained effective serving target with its retained pool policy through
-call preparation and send authorization.
+retain the active turn and its slot without rejection detail. Release admission,
+call preparation, and send authorization use the wait's retained effective
+target with its retained policy; a missing current selection leaves the wait
+unconsumed. Parking retains the exclusions that selected the wait.
+
