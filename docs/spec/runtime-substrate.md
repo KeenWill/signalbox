@@ -27,6 +27,10 @@ request would carry.
 Anthropic Messages generation and input-count requests do not enable tool-result
 context editing; no durable model-call fact represents its applied edits.
 
+Anthropic generation and input-count requests mark nonempty system text and the
+last eligible text or tool block in the penultimate message for ephemeral prompt
+caching; thinking and opaque compaction blocks receive no explicit breakpoint.
+
 Caller identity crosses the boundary as an opaque correlation parameter carried
 by `ModelOperation`, every `Observation` and the final `TerminalReport`; the
 runtime imports no domain identifier. An operation names its target as two
