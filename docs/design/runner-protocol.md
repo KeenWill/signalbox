@@ -2,20 +2,18 @@
 
 This design is not built; it extends
 [runner protocol and placement](../spec/runner-protocol.md) with the lease and
-dispatch machine, successor enrollment and replacement, healthy-session
-relocation, workspaces, sandboxes, the egress broker, and forced Git
-configuration.
+dispatch machine, concurrent enrollment and active-turn replacement,
+healthy-session relocation, workspaces, sandboxes, the egress broker, and forced
+Git configuration.
 
 ## Goal
 
 A runner executes tools for the sessions pinned to it under one serial lease
 protocol whose every step is journaled on both sides, so a crash on either side
-resumes from durable state and never repeats a side effect unknowingly. A lost
-runner is replaced or promoted only by a user command, and a session whose
-runner stopped advertising a required capability recovers on that same runner.
-Each placement has exactly one writable root that the runner can re-identify
-after a restart; a manifest-backed root is released when the placement retires
-and reported as a leak when it cannot be released. Restricted tools run inside a
+resumes from durable state and never repeats a side effect unknowingly. Each
+placement has exactly one writable root that the runner can re-identify after a
+restart; a manifest-backed root is released when the placement retires and
+reported as a leak when it cannot be released. Restricted tools run inside a
 namespace with no host interface, reach the network only through a
 hostname-checked HTTPS broker, and run Git only under configuration the runner
 forces and a canonical-URL check the model cannot defeat.
@@ -63,8 +61,9 @@ acknowledged. A runner that cannot perform an admitted operation reports it with
 recorded resolves the corresponding provisioning, release, or lease authority as
 refused, and neither side waits on it further.
 
-The daemon retains runner-authored `operation_failed` detail verbatim and never
-parses or branches on it. Runner inspection returns the detail as bounded
+For operations other than replacement provisioning, the daemon retains
+runner-authored `operation_failed` detail verbatim and never parses or branches
+on it. Runner inspection returns the detail as bounded
 [diagnostic evidence](../spec/process-protocol.md), without host or credential
 paths.
 
@@ -72,12 +71,6 @@ paths.
 
 Several runners are enrolled with one daemon at once.
 
-For replacement behind an active call or tool batch, the workspace receipt
-remains retained until the replacement boundary selected by
-[turn lifecycle](turn-lifecycle-and-scheduling.md). Installation in that
-transaction rechecks the lost predecessor and connected candidate, consumes the
-exact receipt, promotes pending authority, and installs the placement, grant
-lineage, relocation entry, frontier, and terminal command result atomically.
 Pre-continuation takeover retains the pending relocation instead of appending
 the entry or advancing the frontier. Continuation or batch terminalization
 appends that entry exactly once after all batch results and before the next
@@ -294,12 +287,8 @@ crash, reconnect reconciliation reaches the same durable state as an
 uninterrupted exchange, and no lease is stranded or repeated.
 
 A second runner enrolls while the first stays active, and every runner-scoped
-fact stays per runner. A pending successor enrolls after durable loss, admits
-only heartbeat, leak reconciliation, and one command-bound workspace operation,
-and becomes active only through `promote_pending_runner` or
-`replace_lost_runner`. A pinned session lost to re-registration is replaced onto
-the same runner, without abandonment, once that runner advertises the required
-capability again.
+fact stays per runner. A pending successor reconciles leaks without becoming
+active.
 
 `move_healthy_session` relocates a healthy session or changes its working
 directory with a `RunnerPlacementChanged` entry and no loss.

@@ -13,8 +13,11 @@ queued turn that never activated. At most one turn per session is active, and it
 holds the session's progressing slot. An active turn is running or parked in a
 durable wait that retains the slot: on a tool approval, on a recovery decision
 after an ambiguous operation, on a lost runner, or on a foreground delegated
-child. Which credential a model call uses, and what happens to the turn when
-none is available, is owned by
+child, or on credential availability. A credential wait ends a call-free attempt
+WithoutStop(YieldedToDurableWait) and retains its latest frontier without a
+current attempt or transcript entry. The session projects Waiting with the
+external-recheck waker. Which credential a model call uses, and what happens to
+the turn when none is available, is owned by
 [credential-availability](credential-availability.md).
 
 A turn attempt is one exclusive physical orchestration tenure;
@@ -44,7 +47,8 @@ the execution ports owned by [model-call-execution](model-call-execution.md) and
 [tool-loop](tool-loop.md).
 
 Connection-loss propagation retains a post-commit eligibility hint when the
-nudge channel is full and retries when capacity becomes available.
+nudge channel is full and retries when capacity becomes available. A nudge that
+waits for capacity only coalesces with a hint already queued in the channel.
 
 Every component deadline covers one physical operation. A running turn with no
 model call, tool attempt, or durable wait outstanding is reached by none of them
@@ -281,14 +285,15 @@ awaiting a recovery decision. A stop-requested attempt with a
 cancellation-requested call ends both and terminalizes reconciliation-required
 with that call as its exact ambiguity set. A turn already parked in the
 model-call recovery wait is not reclassified; the transaction rolls back and
-reports the session as awaiting a recovery decision. An approval wait remains
-parked unchanged. A running tool attempt follows its stored effect class:
-prepared or effect-free work closes known-failed and fails the turn, and
-in-flight external-effect work closes ambiguous and parks. A running tool batch
-whose requests are all resolved with no current tool attempt is returned as
-resumable work for a scheduler pass. In the two failing branches only, one
-failure entry is appended, preceded in the tool branch by one correlated result
-entry per request in proposal order. Identity collisions are retried with fresh
+reports the session as awaiting a recovery decision. Approval and
+credential-availability waits remain parked unchanged, including delegated
+turns. A running tool attempt follows its stored effect class: prepared or
+effect-free work closes known-failed and fails the turn, and in-flight
+external-effect work closes ambiguous and parks. A running tool batch whose
+requests are all resolved with no current tool attempt is returned as resumable
+work for a scheduler pass. In the two failing branches only, one failure entry
+is appended, preceded in the tool branch by one correlated result entry per
+request in proposal order. Identity collisions are retried with fresh
 candidates; infrastructure failures and fail-closed corruption stop startup
 visibly. The scan is idempotent: a rerun inventories only work still active, and
 a stale observation rolls back.
@@ -434,17 +439,38 @@ occupancy bound and drains under that window: after its in-flight operation
 reaches a durable boundary, it checkpoints the active turn and returns without
 issuing another, and a successor resumes from that boundary.
 
+A runner replacement issued during a model call or tool batch remains staged.
+Replacement admission or installation for a turn parked in
+`awaiting_runner_recovery` rejects with `ExistingControlRequired`.
+After every request resolves, continuation appends all results, installs the
+replacement and appends one relocation boundary, then prepares the next call. An
+earlier boundary commit is rejected. Candidate recovery waits retain no
+transaction or pooled connection. Interrupt or crash-loss batch terminalization
+retires the staged command before ending the turn. A model observation,
+including failure, refusal, cancellation or ambiguity, permits installation and
+retains the turn state that observation produced. A retry or credential-rotation
+successor waits for the staged replacement to settle and retains its relocation
+at the predecessor's observation frontier before preparing its next call. A
+tool-round observation installs a ready staged replacement at its yielded
+frontier before classifying the new requests for placement loss; that round
+retains the relocation in its boundary. A delegated logical terminal retains any issued provider call as an
+observation barrier; its late correlated observation retires the physical call
+without changing the logical terminal. Pre-pin installation appends no boundary.
+
+A queued turn cannot activate while its placement is lost. Replacement and
+abandonment outbox events wake queued work, retaining hints when the eligibility
+channel is full. Committed turn and runner authority changes resume retained
+replacement commands without requiring a connected command client. Startup
+rechecks them after the generic scan and before client admission. Abandonment
+with an active turn records the existing-control result and creates no
+cancellation.
+
 ## Planned
 
-- Runner-loss recovery: replacement and abandonment of a lost runner, and the
-  runner-loss projection's effect on queued activation and runner execution;
-  design in
+- Pre-continuation runner takeover and retry supersession; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - Recovery-only startup: a runner reconciliation phase between migrations and
   the generic scan; design in
-  [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-- The credential-pool availability wait as a distinct active phase, with its
-  attempt yield, scheduler wake conditions, and release; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - The instruction-eligibility freeze in the activation transaction and the
   replacement command's lock order; design in

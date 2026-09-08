@@ -12,6 +12,14 @@ use crate::scalars::{
 use crate::user_input::UserInputContent;
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// Closed reason a call-free turn remains parked on credential admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialAvailabilityWaitCause {
+    /// Every pool member is excluded and at least one can become available again.
+    Exhausted,
+}
+
 /// Durable nonterminal model-call state carried by a transcript snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -192,6 +200,13 @@ impl<'de> Deserialize<'de> for FailedTerminalModelCall {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnState {
+    /// The turn retains its slot while credential admission waits.
+    ActiveAwaitingCredentialAvailability {
+        /// Call-free ended attempt that owns the wait.
+        wait_attempt_id: CanonicalUuid,
+        /// Closed admission-wait cause.
+        cause: CredentialAvailabilityWaitCause,
+    },
     /// Accepted work has not activated.
     Queued {
         /// Accepted input that created the queued turn.
@@ -284,6 +299,21 @@ pub enum TurnState {
         tool_attempt_id: Option<CanonicalUuid>,
     },
     /// The turn terminalized as failed.
+    /// The turn failed before a call because every pool member was excluded.
+    FailedCredentialPoolExhausted {
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+        /// Terminal physical attempt.
+        terminal_attempt_id: CanonicalUuid,
+        /// Semantic failure marker.
+        failure_entry_id: CanonicalUuid,
+        /// Frozen pool policy identity.
+        pool_policy_id: CanonicalUuid,
+        /// Complete policy inventory in configuration order.
+        policy_members: Vec<String>,
+        /// Exactly one evidence item per policy member.
+        members: Vec<crate::CredentialPoolMemberEvidence>,
+    },
     Failed {
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
@@ -343,6 +373,10 @@ pub enum TurnState {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum RawTurnState {
+    ActiveAwaitingCredentialAvailability {
+        wait_attempt_id: CanonicalUuid,
+        cause: CredentialAvailabilityWaitCause,
+    },
     Queued {
         accepted_input_id: CanonicalUuid,
         content: UserInputContent,
@@ -394,6 +428,20 @@ enum RawTurnState {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         tool_attempt_id: Option<CanonicalUuid>,
     },
+    FailedCredentialPoolExhausted {
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+        /// Terminal physical attempt.
+        terminal_attempt_id: CanonicalUuid,
+        /// Semantic failure marker.
+        failure_entry_id: CanonicalUuid,
+        /// Frozen pool policy identity.
+        pool_policy_id: CanonicalUuid,
+        /// Complete policy inventory in configuration order.
+        policy_members: Vec<String>,
+        /// Exactly one evidence item per policy member.
+        members: Vec<crate::CredentialPoolMemberEvidence>,
+    },
     Failed {
         terminal_frontier_id: CanonicalUuid,
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -435,6 +483,13 @@ impl<'de> Deserialize<'de> for TurnState {
         DeserializerT: Deserializer<'de>,
     {
         let state = match RawTurnState::deserialize(deserializer)? {
+            RawTurnState::ActiveAwaitingCredentialAvailability {
+                wait_attempt_id,
+                cause,
+            } => Self::ActiveAwaitingCredentialAvailability {
+                wait_attempt_id,
+                cause,
+            },
             RawTurnState::Queued {
                 accepted_input_id,
                 content,
@@ -547,6 +602,26 @@ impl<'de> Deserialize<'de> for TurnState {
                     })?,
                 tool_attempt_id,
             },
+            RawTurnState::FailedCredentialPoolExhausted {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                failure_entry_id,
+                pool_policy_id,
+                policy_members,
+                members,
+            } => {
+                if !crate::valid_credential_pool_evidence(&policy_members, &members) {
+                    return Err(serde::de::Error::custom("invalid pool exhaustion evidence"));
+                }
+                Self::FailedCredentialPoolExhausted {
+                    terminal_frontier_id,
+                    terminal_attempt_id,
+                    failure_entry_id,
+                    pool_policy_id,
+                    policy_members,
+                    members,
+                }
+            }
             RawTurnState::Failed {
                 terminal_frontier_id,
                 terminal_attempt_id,
@@ -615,6 +690,15 @@ impl<'de> Deserialize<'de> for TurnState {
 
 impl TurnState {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::FailedCredentialPoolExhausted {
+            policy_members,
+            members,
+            ..
+        } = self
+            && !crate::valid_credential_pool_evidence(policy_members, members)
+        {
+            return Err(FrameValidationError::TurnStateShape);
+        }
         if let Self::QueuedDelegationWake {
             first_delivery_sequence,
             through_delivery_sequence,
@@ -905,6 +989,8 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact provider-visible denial content.
         content: String,
+        /// Whether this denial already has its one permitted user override.
+        override_recorded: bool,
     },
     /// One logical tool request resolved before dispatch.
     ToolInadmissible {
@@ -919,6 +1005,8 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact provider-visible terminal-closure content.
         content: String,
+        /// Whether an approval was recorded before the request closed.
+        approved_before_close: bool,
     },
     /// Explicit completed-turn marker.
     TurnCompleted {

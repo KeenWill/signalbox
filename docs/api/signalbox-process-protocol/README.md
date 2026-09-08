@@ -5,6 +5,7 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | program | 3 | 0 | 0 | [program](program.md) |
+| credential_pool | 2 | 0 | 2 | [credential_pool](credential_pool.md) |
 | credential_exclusions | 2 | 0 | 0 | [credential_exclusions](credential_exclusions.md) |
 | delegation | 11 | 0 | 0 | [delegation](delegation.md) |
 | error | 4 | 0 | 0 | [error](error.md) |
@@ -20,5 +21,5 @@
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |
 | session | 14 | 0 | 0 | [session](session.md) |
 | settings | 17 | 0 | 0 | [settings](settings.md) |
-| transcript | 15 | 0 | 0 | [transcript](transcript.md) |
+| transcript | 16 | 0 | 0 | [transcript](transcript.md) |
 | user_input | 3 | 0 | 0 | [user_input](user_input.md) |

@@ -11,7 +11,10 @@ use signalbox_process_protocol::{
     encode_server_line,
 };
 
-use crate::{connection::Connection, error::ClientError};
+use crate::{
+    connection::{Connection, ProcessClient},
+    error::ClientError,
+};
 
 #[derive(Debug)]
 pub(crate) struct TranscriptSnapshot {
@@ -85,6 +88,7 @@ impl TranscriptSnapshot {
                         | TurnState::ActiveAwaitingToolApproval { .. }
                         | TurnState::ActiveAwaitingChild { .. }
                         | TurnState::ActiveAwaitingToolRecovery { .. }
+                        | TurnState::ActiveAwaitingCredentialAvailability { .. }
                         | TurnState::ActiveAwaitingRunnerRecovery { .. }
                 )
             {
@@ -217,6 +221,7 @@ impl Iterator for SnapshotReplay<'_> {
 }
 
 pub(crate) async fn read_snapshot(
+    client: &mut ProcessClient,
     connection: &mut Connection,
     expected_session: CanonicalUuid,
 ) -> Result<TranscriptSnapshot, ClientError> {
@@ -259,6 +264,7 @@ pub(crate) async fn read_snapshot(
             ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position,
+                state,
                 ..
             } if !model_calls_started && !entries_started => {
                 let position = acceptance_position.value();
@@ -269,6 +275,23 @@ pub(crate) async fn read_snapshot(
                     return Err(ClientError::Protocol(
                         "snapshot turns were not unique acceptance-order projections",
                     ));
+                }
+                if let TurnState::FailedCredentialPoolExhausted {
+                    pool_policy_id,
+                    policy_members,
+                    members,
+                    ..
+                } = &state
+                {
+                    crate::credential_pool::validate(
+                        client,
+                        expected_session,
+                        turn_id,
+                        *pool_policy_id,
+                        policy_members,
+                        members,
+                    )
+                    .await?;
                 }
                 prior_acceptance_position = Some(position);
                 model_call_order.push_turn(turn_id)?;

@@ -1555,6 +1555,45 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
     }
 }
 
+/// Measures each projected entry through the runtime renderer and an adapter serializer.
+///
+/// Each entry is rendered independently so its allowance includes a complete
+/// message envelope even where the final request combines adjacent entries.
+pub fn rendered_entry_bytes(
+    messages: &[ModelConversationMessage],
+    provenance: &[signalbox_application::ProviderReasoningProvenance],
+    models: &RuntimeModelCatalog,
+    mut measure: impl FnMut(&ConversationMessage) -> Option<usize>,
+) -> Option<std::collections::BTreeMap<signalbox_domain::SemanticTranscriptEntryRef, u64>> {
+    messages
+        .iter()
+        .map(|message| {
+            let source = match message {
+                ModelConversationMessage::RunnerPlacementChanged { source, .. }
+                | ModelConversationMessage::ModelIdentityChanged { source, .. }
+                | ModelConversationMessage::ContextSummary { source, .. }
+                | ModelConversationMessage::User { source, .. }
+                | ModelConversationMessage::DelegatedTask { source, .. }
+                | ModelConversationMessage::DelegationMessage { source, .. }
+                | ModelConversationMessage::BackgroundDelegationResult { source, .. }
+                | ModelConversationMessage::Assistant { source, .. }
+                | ModelConversationMessage::ProviderReasoning { source, .. }
+                | ModelConversationMessage::ProviderCompaction { source, .. }
+                | ModelConversationMessage::AssistantToolUse { source, .. }
+                | ModelConversationMessage::ToolResult { source, .. }
+                | ModelConversationMessage::ImportedUser { source, .. }
+                | ModelConversationMessage::ImportedAssistant { source, .. } => *source,
+            };
+            let rendered =
+                render_runtime_messages(std::slice::from_ref(message), provenance, models)?;
+            let bytes = rendered.iter().try_fold(0_u64, |total, message| {
+                Some(total.saturating_add(u64::try_from(measure(message)?).ok()?))
+            })?;
+            Some((source, bytes))
+        })
+        .collect()
+}
+
 fn render_runtime_messages(
     messages: &[ModelConversationMessage],
     provenance: &[signalbox_application::ProviderReasoningProvenance],
@@ -2469,10 +2508,9 @@ mod tests {
     }
 
     #[test]
-    fn capacity_bridge_retains_latest_snapshot_through_both_redacting_sinks() {
+    fn capacity_bridge_retains_latest_snapshot_through_exact_redaction() {
         use signalbox_model_runtime::{
             CredentialRedactingSink, CredentialValue, RateLimitSnapshot, RateLimitWindow,
-            RedactingSink,
         };
         use std::time::{Duration, SystemTime};
 
@@ -2493,8 +2531,7 @@ mod tests {
         let credential = CredentialValue::new(b"synthetic-capacity-test-secret".to_vec());
         {
             let mut exact = CredentialRedactingSink::new(&mut sink, &credential);
-            let mut shaped = RedactingSink::new(&mut exact);
-            shaped.observe_rate_limits(
+            exact.observe_rate_limits(
                 call(),
                 RateLimitSnapshot {
                     observed_at,
@@ -2517,9 +2554,7 @@ mod tests {
             correlation: call(),
             fact: ObservationFact::UsageReported(TokenUsage::unreported()),
         });
-        let retained = sink
-            .rate_limits
-            .expect("capacity survives both redacting sinks");
+        let retained = sink.rate_limits.expect("capacity survives exact redaction");
         assert_eq!(*retained.observed_at(), observed_at);
         assert_eq!(retained.windows().len(), 2);
         assert_eq!(*retained.windows()[0].remaining_percent(), 23);
@@ -3708,7 +3743,7 @@ mod tests {
         );
     }
 
-    /// A CLI-redacted argument object becomes an inert domain proposal so the
+    /// A suppressed argument object becomes an inert domain proposal so the
     /// application can record its runtime-safety denial and continue the turn.
     #[test]
     fn fully_suppressed_tool_arguments_cross_as_inert_proposal() {

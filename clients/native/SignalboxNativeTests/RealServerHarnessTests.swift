@@ -153,11 +153,14 @@ final class RealServerHarnessTests: XCTestCase {
     )
     await importExchange.close()
     let service = realServerService(socketPath: socketPath)
-    let conversations = try await service.listConversations(includeArchived: true)
+    let conversations = try await service.listConversations(includeArchived: true).conversations
     let conversation = try XCTUnwrap(
       conversations.first(where: { $0.conversationID == importedConversationID })
     )
-    let transcript = try await service.readImportedConversation(conversation: conversation)
+    let inventory = try await service.readImportedConversation(conversation: conversation)
+    let transcript = SignalboxImportedConversationTranscript(
+      importedConversationID: inventory.importedConversationID,
+      entries: try inventory.entries(in: 0..<inventory.entryCount))
     let aliases = try await service.listModelAliases()
     let alias = try XCTUnwrap(aliases.first)
     let creation = try await service.prepareImportedSessionCreation(
@@ -292,7 +295,8 @@ private func requireImportedConversationID(
   case .conversationImportInserted(let importedConversationID),
     .conversationImportAlreadyImported(let importedConversationID):
     return importedConversationID
-  case .sessionCreated, .inputSubmitted, .toolRequestDecided, .sessionDefaults,
+  case .sessionCreated, .inputSubmitted, .toolRequestDecided, .toolDenialOverridden, .sessionDefaults,
+    .credentialPoolPolicy,
     .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,
     .sessionMetadataSummary, .sessionMetadataPageEnd, .sessionMetadata,
     .sessionMetadataReplaced, .conversationPageStart, .conversationSummary,

@@ -6,4 +6,4 @@
 | --- | ---: | ---: | ---: | --- |
 | approval_judge | 5 | 1 | 1 | [approval_judge](approval_judge.md) |
 | context_compaction | 4 | 1 | 0 | [context_compaction](context_compaction.md) |
-| root | 15 | 1 | 3 | [root](root.md) |
+| root | 15 | 1 | 4 | [root](root.md) |
