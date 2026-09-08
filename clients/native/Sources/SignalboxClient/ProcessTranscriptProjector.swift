@@ -1956,8 +1956,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return .init(state: .recoveryRequired, label: "Recovery required")
       }
       return .init(state: .running, label: "Running")
-    case .activeAwaitingCredentialAvailability:
-      return .init(state: .running, label: "Awaiting credential availability")
+    case .activeAwaitingCredentialAvailability(_, let cause):
+      return .init(
+        state: .running,
+        label: cause == .contended ? "Awaiting credential capacity" : "Awaiting credential availability")
     case .activeAwaitingChild:
       return .init(state: .running, label: "Awaiting child")
     case .activeAwaitingToolApproval:

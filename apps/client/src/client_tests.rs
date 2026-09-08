@@ -5374,7 +5374,7 @@ async fn pool_projection_rejects_a_foreign_policy_read() -> Result<(), Box<dyn E
         profile: policy_members[0].clone(),
         reset_at_unix_ms: None,
         exclusion: CredentialPoolExclusion::ProfileQuarantine {
-            record_generation: None,
+            record_generation: signalbox_process_protocol::CanonicalU64::new(0),
         },
     }];
     for response in [

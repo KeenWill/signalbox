@@ -16,17 +16,17 @@ pub(super) fn wire_members(
             exclusion: match member.exclusion {
                 store::CredentialPoolExclusion::ProfileQuarantine { record_generation } => {
                     WireExclusion::ProfileQuarantine {
-                        record_generation: record_generation.map(CanonicalU64::new),
+                        record_generation: CanonicalU64::new(record_generation.unwrap_or(0)),
                     }
                 }
                 store::CredentialPoolExclusion::MembershipExclusion { record_generation } => {
                     WireExclusion::MembershipExclusion {
-                        record_generation: record_generation.map(CanonicalU64::new),
+                        record_generation: CanonicalU64::new(record_generation.unwrap_or(0)),
                     }
                 }
                 store::CredentialPoolExclusion::SessionDisplacement { record_generation } => {
                     WireExclusion::SessionDisplacement {
-                        record_generation: record_generation.map(CanonicalU64::new),
+                        record_generation: CanonicalU64::new(record_generation.unwrap_or(0)),
                     }
                 }
                 store::CredentialPoolExclusion::ChainExclusion {

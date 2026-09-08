@@ -29,9 +29,6 @@ A credential-wide transient exclusion reports
 `transient_exclusion { observation_model_call_id }` after `chain_exclusion` and
 before `headroom_reserve`.
 
-A null `record_generation` names an action row that predates the projection
-table and is not clearable by generation.
-
 Chain exclusions remain insert-only and turn-local and are neither listed nor
 clearable.
 
