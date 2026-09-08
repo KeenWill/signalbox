@@ -45,8 +45,10 @@ runs-on: ${{ github.event_name == 'pull_request'
   reopening or re-running a bot pull request would otherwise mask the bot and
   route its code to self-hosted hardware.
 
-`scripts/postgres_integration_suites.py` checks that PostgreSQL jobs consume the
-manifest matrix, use the Docker pool, and remain binding on `validate`.
+`scripts/postgres_integration_suites.py` generates the PostgreSQL matrix and
+executes each partition with manifest-derived Bazel arguments. Its workflow
+checks read the matrix binding, Docker pool, and `validate` dependency as YAML
+fields; they do not interpret shell commands.
 
 ## Jobs pinned to a self-hosted pool
 
