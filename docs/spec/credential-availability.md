@@ -205,7 +205,7 @@ registrations and retained reservations; restart alone grants no eligibility.
 The daemon rechecks retained invocation groups until their exit permits
 reservation release. Failed registration retains the observed group through
 cleanup so proven group exit releases capacity while the call retains its
-boundary-loss outcome.
+proven-unsent outcome when registration aborts before request delivery.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
 wait attempt and closed cause. Transcript reads and initial follow snapshots
