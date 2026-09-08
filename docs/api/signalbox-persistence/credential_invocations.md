@@ -32,6 +32,14 @@ pub async fn active_processes(
 >;
 ```
 
+## release_unregistered_terminal_calls
+
+```rust
+pub async fn release_unregistered_terminal_calls(
+    pool: &sqlx_postgres::PgPool,
+) -> result::Result<(), model_execution::ModelCallRepositoryError>;
+```
+
 ## release
 
 ```rust

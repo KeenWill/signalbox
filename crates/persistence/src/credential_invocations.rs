@@ -52,6 +52,15 @@ pub async fn active_processes(
         .collect())
 }
 
+/// Releases terminal calls whose request never passed process registration.
+pub async fn release_unregistered_terminal_calls(
+    pool: &PgPool,
+) -> Result<(), ModelCallRepositoryError> {
+    sqlx::query("SELECT release_credential_invocation(reservation.model_call_id) FROM credential_invocation_reservation AS reservation JOIN model_call AS call USING (model_call_id) WHERE reservation.released_at IS NULL AND reservation.process_group_id IS NULL AND call.state_kind = 'terminal'")
+        .execute(pool).await?;
+    Ok(())
+}
+
 /// Releases capacity after the caller proves that the invocation has ended.
 pub async fn release(pool: &PgPool, call: ModelCallId) -> Result<(), ModelCallRepositoryError> {
     sqlx::query("SELECT release_credential_invocation($1)")

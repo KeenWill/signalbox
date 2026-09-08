@@ -203,16 +203,20 @@ admission reruns the exhaustion policy and converts to exhausted-wait in place
 or terminalizes. Startup re-evaluates contended waits against current
 registrations and retained reservations; restart alone grants no eligibility.
 The daemon rechecks retained invocation groups until their exit permits
-reservation release. Failed registration retains the observed group through
-cleanup so proven group exit releases capacity while the call retains its
-proven-unsent outcome when registration aborts before request delivery.
+reservation release. Startup and periodic recovery release null-group
+reservations once the call is terminal; live calls retain their reservations.
+Failed registration retains the observed group through cleanup so proven group
+exit releases capacity while the call retains its proven-unsent outcome when
+registration aborts before request delivery.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
 wait attempt and closed cause. Transcript reads and initial follow snapshots
 retain the active turn and its slot without rejection detail. Release admission,
 call preparation, and send authorization use the wait's retained effective
 target with its retained policy; a missing current selection leaves the wait
-unconsumed. Parking retains the exclusions that selected the wait.
+unconsumed. Release pins a pre-call wait's retained target on its turn, and
+domain call preparation retains that pin across catalog reloads. Parking retains
+the exclusions that selected the wait.
 
 A terminal release after a predecessor call projects
 `failed_after_credential_wait` with the fresh terminal attempt and the
