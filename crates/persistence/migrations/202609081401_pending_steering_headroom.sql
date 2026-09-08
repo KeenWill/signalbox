@@ -1,5 +1,5 @@
 ALTER TABLE tool_continuation_context_headroom
-    ADD COLUMN pending_steering_content_bytes numeric(20, 0) NOT NULL
+    ADD COLUMN pending_steering_content_bytes numeric(20, 0) NOT NULL DEFAULT 0
         CHECK (pending_steering_content_bytes >= 0),
     DROP CONSTRAINT tool_continuation_context_headroom_requires_compaction;
 

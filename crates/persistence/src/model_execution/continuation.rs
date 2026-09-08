@@ -418,7 +418,9 @@ async fn load_tool_continuation_headroom_evidence(
 
                             UNION ALL
 
-                            SELECT octet_length(request.inadmissible_reason) AS content_bytes
+                            SELECT octet_length(jsonb_build_object('error', jsonb_build_object(
+                                        'kind', 'execution_failed',
+                                        'detail', request.inadmissible_reason))::text) AS content_bytes
                               FROM semantic_transcript_entry AS entry
                               JOIN tool_request AS request ON request.request_id = entry.tool_result_request_id
                                 AND request.session_id = entry.source_session_id

@@ -377,7 +377,9 @@ impl PostgresModelCallRepository {
                                         octet_length(jsonb_build_object('error', jsonb_build_object(
                                         'kind', 'denied', 'detail', decision.denial_reason))::text)
                                     WHEN 'tool_inadmissible' THEN
-                                        COALESCE(octet_length(result_request.inadmissible_reason), 0)
+                                        octet_length(jsonb_build_object('error', jsonb_build_object(
+                                            'kind', 'execution_failed',
+                                            'detail', result_request.inadmissible_reason))::text)
                                     WHEN 'delegated_task' THEN
                                         COALESCE(octet_length(task.task_content), 0)
                                     WHEN 'delegation_message' THEN
@@ -455,8 +457,10 @@ impl PostgresModelCallRepository {
         .bind(Decimal::from(uncommitted_content_bytes))
         .bind(replays_provider_compaction)
         .bind(effective_target.identity().into_uuid())
-        .bind(i64::try_from(signalbox_application::MAX_RENDERED_ATTACHMENT_STUB_BYTES)
-            .unwrap_or(i64::MAX))
+        .bind(
+            i64::try_from(signalbox_application::MAX_RENDERED_ATTACHMENT_STUB_BYTES)
+                .unwrap_or(i64::MAX),
+        )
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
