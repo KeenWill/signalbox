@@ -325,9 +325,7 @@ fn execution_from_activation(session: Session) -> ModelCallExecution {
     .expect("activation facts reconstruct live execution")
 }
 
-fn attachment_execution_input(
-    facts: Vec<AttachmentBlobFact>,
-) -> ModelCallExecutionReconstitutionInput {
+fn attachment_execution_input() -> (ModelCallExecutionReconstitutionInput, BlobDigest) {
     let execution = active_execution();
     let digest = BlobDigest::digest(b"attachment fixture bytes");
     let content = UserContent::try_parts(vec![UserContentPart::Attachment {
@@ -338,7 +336,7 @@ fn attachment_execution_input(
         display_filename: None,
     }])
     .expect("the attachment-only fixture is valid");
-    ModelCallExecutionReconstitutionInput::new(
+    let input = ModelCallExecutionReconstitutionInput::new(
         execution.active_turn,
         execution.targets,
         execution.starting_snapshot,
@@ -349,18 +347,19 @@ fn attachment_execution_input(
         )],
         None,
         Vec::new(),
-    )
-    .with_attachment_blob_facts(facts)
+    );
+    (input, digest)
 }
 
 /// model preparation admits immutable catalog facts when they exactly cover every referenced
 /// attachment digest.
 #[test]
 fn exact_attachment_catalog_facts_reach_preparation() {
-    let digest = BlobDigest::digest(b"attachment fixture bytes");
+    let (input, digest) = attachment_execution_input();
     let length = NonZeroU64::new(24).expect("the fixture length is positive");
 
-    let execution = attachment_execution_input(vec![AttachmentBlobFact::new(digest, length)])
+    let execution = input
+        .with_attachment_blob_facts(vec![AttachmentBlobFact::new(digest, length)])
         .reconstitute()
         .expect("the exact attachment catalog projection is complete");
     let request = execution
@@ -374,7 +373,8 @@ fn exact_attachment_catalog_facts_reach_preparation() {
 /// omits a referenced attachment digest.
 #[test]
 fn missing_attachment_catalog_fact_fails_preparation() {
-    let missing = attachment_execution_input(Vec::new())
+    let (input, _) = attachment_execution_input();
+    let missing = input
         .reconstitute()
         .expect_err("a missing attachment catalog fact fails closed");
 

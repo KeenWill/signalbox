@@ -924,7 +924,7 @@ fn utf8_byte_length(value: &str) -> u64 {
     u64::try_from(value.len()).unwrap_or(u64::MAX)
 }
 
-fn map_projected_membership_error(
+pub(crate) fn map_projected_membership_error(
     error: crate::context_compaction::ContextCompactionRepositoryError,
 ) -> ModelCallRepositoryError {
     use crate::context_compaction::ContextCompactionRepositoryError as ProjectionError;
