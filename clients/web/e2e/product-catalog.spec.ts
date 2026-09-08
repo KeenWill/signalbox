@@ -695,6 +695,37 @@ test('replaces catalog continuation history instead of accumulating visited page
   await expect(page).toHaveURL(/\/attention$/)
 })
 
+for (const entry of ['direct', 'reload'] as const) {
+  test(`focuses empty workspace entry after bootstrap on ${entry}`, async ({ page }) => {
+    await useCatalogFixture(page)
+    const input = page.getByRole('textbox', { name: 'Session ID', exact: true })
+    if (entry === 'reload') {
+      await page.goto('/sessions?workspace=true')
+      await expect(input).toBeVisible()
+    }
+    const bootstrapReady = Promise.withResolvers<void>()
+    await page.route('**/api/bootstrap', async (route) => {
+      await bootstrapReady.promise
+      await route.fulfill({ json: bootstrapFixture })
+    })
+    try {
+      if (entry === 'reload') await page.reload()
+      else await page.goto('/sessions?workspace=true')
+      await expect(page.getByRole('main')).toBeFocused()
+      await expect(input).toHaveCount(0)
+      bootstrapReady.resolve()
+      await expect(input).toBeVisible()
+      await expect(input).toBeFocused()
+      await page.keyboard.insertText(firstSessionId)
+      await page.keyboard.press('Enter')
+      await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+      await expect(page.getByRole('main')).toBeFocused()
+    } finally {
+      bootstrapReady.resolve()
+    }
+  })
+}
+
 test('keeps opened workspace identities in the URL and restores them on reload', async ({
   page,
 }) => {

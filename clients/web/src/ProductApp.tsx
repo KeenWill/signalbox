@@ -480,7 +480,6 @@ export function ProductApp({
   )
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
-  const sessionEntryRequested = useRef(false)
   const [catalogLifecycleFilter, setCatalogLifecycleFilter] = useState('all')
   const [catalogPageOrder, setCatalogPageOrder] = useState('activity')
   const catalogReturnSessionId = useRef<string | undefined>(undefined)
@@ -489,7 +488,6 @@ export function ProductApp({
   }, [])
   const updateSessionSearch = useCallback(
     (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
-      sessionEntryRequested.current = next.workspace === true && next.session === undefined
       if (mode === 'push' && next.workspace && next.session)
         catalogReturnSessionId.current = next.session
       if (mode === 'close') {
@@ -794,7 +792,7 @@ export function ProductApp({
         onSessionOpen={(session) =>
           updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
         }
-        focusEntry={sessionEntryRequested.current}
+        focusEntry={sessionState.session === undefined}
         onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
         onTimelineIds={updateTimelineIds}
