@@ -720,7 +720,7 @@ export type WebTimelineModelUsage = {
 
 export type WebTimelineOpenAiServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | "fast";
 
-export type WebTimelineOwnershipTransition = "created_owned" | "created_unmonitored" | "adopted" | "released";
+export type WebTimelineOwnershipTransition = "adopted" | "released";
 
 export type WebTimelineReasoningLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 

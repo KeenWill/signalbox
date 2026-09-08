@@ -5693,8 +5693,6 @@ const schemas = {
       "WebTimelineOwnershipTransition": {
         "description": "Closed timeline lifecycle classification.",
         "enum": [
-          "created_owned",
-          "created_unmonitored",
           "adopted",
           "released"
         ],

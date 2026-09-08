@@ -484,8 +484,6 @@ pub enum WebTimelineSessionOutcome {
 
 ```rust
 pub enum WebTimelineOwnershipTransition {
-    CreatedOwned,
-    CreatedUnmonitored,
     Adopted,
     Released,
 }

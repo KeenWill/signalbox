@@ -1064,8 +1064,6 @@ pub enum TimelineSessionOutcome {
 /// Closed timeline lifecycle classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimelineOwnershipTransition {
-    CreatedOwned,
-    CreatedUnmonitored,
     Adopted,
     Released,
 }

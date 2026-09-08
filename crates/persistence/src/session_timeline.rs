@@ -1283,11 +1283,12 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                 DispatchedOutboxEventKind::SessionOwnershipChanged(change) => {
                     require_no_body_cursor(cursor)?;
                     let transition = match change.transition {
-                        signalbox_domain::SessionOwnershipTransition::CreatedOwned => {
-                            TimelineOwnershipTransition::CreatedOwned
-                        }
-                        signalbox_domain::SessionOwnershipTransition::CreatedUnmonitored => {
-                            TimelineOwnershipTransition::CreatedUnmonitored
+                        signalbox_domain::SessionOwnershipTransition::CreatedOwned
+                        | signalbox_domain::SessionOwnershipTransition::CreatedUnmonitored => {
+                            return Err(SessionTimelineCorruption::InvalidStoredValue(
+                                "ownership transition",
+                            )
+                            .into());
                         }
                         signalbox_domain::SessionOwnershipTransition::Adopted => {
                             TimelineOwnershipTransition::Adopted
@@ -1522,6 +1523,86 @@ const fn goal_event_continuation(event: &TimelineGoalEvent) -> Option<TimelineBo
     }
 }
 
+// Transitions without satellite rows retain their original stored member references.
+const TOOL_DETAIL_MEMBERS_SQL: &str = "WITH transition AS (
+    SELECT session_id, producing_model_call_id
+      FROM tool_batch_transition_outbox_event WHERE event_sequence = $1
+), frozen AS NOT MATERIALIZED (
+    SELECT * FROM tool_batch_transition_detail_member WHERE event_sequence = $1
+), tool_members AS NOT MATERIALIZED (
+    SELECT member_index, request_id, attempt_id, approval_judge_escalated,
+           attempt_state_kind, attempt_terminal_disposition_kind,
+           attempt_error_kind, attempt_has_result, attempt_has_failure,
+           attempt_sandbox_posture, attempt_result_text, attempt_error_detail
+      FROM frozen WHERE member_kind = 'tool'
+    UNION ALL
+         SELECT row_number() OVER (
+                    ORDER BY request.request_ordinal,
+                             generation.generation NULLS FIRST,
+                             attempt.attempt_id NULLS FIRST
+                ) - 1,
+                request.request_id, attempt.attempt_id, EXISTS (
+                    SELECT 1
+                      FROM tool_approval_judge_model_call AS judge
+                     WHERE judge.request_id = request.request_id
+                       AND judge.recommendation_kind = 'escalate_to_human'
+                ),
+                attempt.state_kind, attempt.terminal_disposition_kind,
+                attempt.error_kind,
+                CASE WHEN attempt.attempt_id IS NULL THEN NULL
+                     ELSE attempt.result_text IS NOT NULL END,
+                CASE WHEN attempt.attempt_id IS NULL THEN NULL
+                     ELSE attempt.error_detail IS NOT NULL END,
+                (
+                    SELECT CASE placement.requested_sandbox_profile
+                        WHEN 'ambient' THEN 'unsandboxed'
+                        WHEN 'workspace_restricted' THEN 'sandboxed'
+                    END
+                      FROM runner_physical_attempt_lease_binding
+                           AS sandbox_binding
+                      JOIN runner_lease_generation AS sandbox_lease
+                        ON sandbox_lease.lease_id = sandbox_binding.lease_id
+                       AND sandbox_lease.attempt_id = sandbox_binding.attempt_id
+                      JOIN runner_session_placement_record AS placement
+                        ON placement.session_id = sandbox_lease.session_id
+                       AND placement.event_ordinal =
+                           sandbox_lease.placement_event_ordinal
+                     WHERE sandbox_binding.attempt_id = attempt.attempt_id
+                     ORDER BY sandbox_lease.generation DESC
+                     LIMIT 1
+                ),
+                attempt.result_text, attempt.error_detail
+           FROM tool_request AS request
+           LEFT JOIN tool_attempt AS attempt
+             ON attempt.request_id = request.request_id
+           LEFT JOIN LATERAL (
+                SELECT lease.generation
+                  FROM runner_physical_attempt_lease_binding AS binding
+                  JOIN runner_lease_generation AS lease
+                    ON lease.lease_id = binding.lease_id
+                   AND lease.attempt_id = binding.attempt_id
+                 WHERE binding.attempt_id = attempt.attempt_id
+                 ORDER BY lease.generation DESC
+                 LIMIT 1
+           ) AS generation ON TRUE
+          WHERE request.producing_model_call_id = (
+              SELECT producing_model_call_id FROM transition
+          ) AND NOT EXISTS (SELECT 1 FROM frozen)
+), goal_members AS (
+    SELECT member_index, session_id, goal_event_ordinal
+      FROM frozen WHERE member_kind = 'goal'
+    UNION ALL
+    SELECT row_number() OVER (ORDER BY request.request_ordinal, event.event_ordinal) - 1,
+           event.session_id, event.event_ordinal
+      FROM transition
+      JOIN tool_request AS request
+        ON request.producing_model_call_id = transition.producing_model_call_id
+      JOIN goal_event AS event
+        ON event.session_id = transition.session_id
+       AND event.model_tool_request_id = request.request_id
+     WHERE NOT EXISTS (SELECT 1 FROM frozen)
+)";
+
 async fn project_tool_batch(
     transaction: &mut Transaction<'_, Postgres>,
     address: TimelineAddress,
@@ -1577,24 +1658,25 @@ async fn project_tool_batch(
         TimelineBodyField::ToolFailure => "tool_failure",
         _ => return Err(SessionTimelineRepositoryError::InvalidDetailQuery),
     };
-    let row = sqlx::query(
-        "WITH selected_member AS (
+    let offset_bytes = cursor.map_or(0, |cursor| cursor.offset_bytes);
+    let mut query = sqlx::QueryBuilder::<Postgres>::new(TOOL_DETAIL_MEMBERS_SQL);
+    query.push(
+        ", selected_member AS (
             SELECT request_id, attempt_id, approval_judge_escalated,
                    attempt_state_kind, attempt_terminal_disposition_kind,
                    attempt_error_kind, attempt_has_result, attempt_has_failure,
                    attempt_sandbox_posture, attempt_result_text,
                    attempt_error_detail
-              FROM tool_batch_transition_detail_member
-             WHERE event_sequence = $1
-               AND member_kind = 'tool'
-               AND member_index = $2
+              FROM tool_members
+             WHERE member_index = $2
         )
         SELECT request.request_id, request.tool_name,
-                CASE $3::text
-                    WHEN 'tool_arguments' THEN request.arguments_text
-                    WHEN 'tool_result' THEN selected.attempt_result_text
-                    WHEN 'tool_failure' THEN selected.attempt_error_detail
-                END AS selected_body,
+                octet_length(body.content)::numeric AS total_bytes,
+                substring(
+                    convert_to(body.content, 'UTF8')
+                    FROM (least($4::numeric, octet_length(body.content)::numeric) + 1)::integer
+                    FOR $5::integer
+                ) AS selected_body,
                 request.approval_posture, selected.attempt_id,
                 attempt.effect_class,
                 selected.attempt_state_kind AS state_kind,
@@ -1605,15 +1687,11 @@ async fn project_tool_batch(
                 COALESCE(selected.attempt_has_failure, FALSE) AS has_failure,
                 EXISTS (
                     SELECT 1
-                      FROM tool_batch_transition_detail_member AS probe
-                     WHERE probe.event_sequence = $1
-                       AND probe.member_kind = 'tool'
-                       AND probe.member_index = $2 + 1
+                      FROM tool_members AS probe
+                     WHERE probe.member_index = $2 + 1
                 ) AS has_next,
                 EXISTS (
-                    SELECT 1 FROM tool_batch_transition_detail_member AS goal
-                     WHERE goal.event_sequence = $1
-                       AND goal.member_kind = 'goal'
+                    SELECT 1 FROM goal_members
                 ) AS has_goal_events,
                 selected.attempt_sandbox_posture AS sandbox_posture,
                 selected.approval_judge_escalated AS judge_escalated
@@ -1621,28 +1699,46 @@ async fn project_tool_batch(
            JOIN tool_request AS request
              ON request.request_id = selected.request_id
            LEFT JOIN tool_attempt AS attempt
-             ON attempt.attempt_id = selected.attempt_id",
-    )
-    .bind(Decimal::from(address.sequence().get()))
-    .bind(i64::from(member_index))
-    .bind(selected_field)
-    .fetch_optional(&mut **transaction)
-    .await?;
+             ON attempt.attempt_id = selected.attempt_id
+           CROSS JOIN LATERAL (
+               SELECT CASE $3::text
+                   WHEN 'tool_arguments' THEN request.arguments_text
+                   WHEN 'tool_result' THEN selected.attempt_result_text
+                   WHEN 'tool_failure' THEN selected.attempt_error_detail
+               END AS content
+           ) AS body",
+    );
+    let row = query
+        .build()
+        .bind(Decimal::from(address.sequence().get()))
+        .bind(i64::from(member_index))
+        .bind(selected_field)
+        .bind(Decimal::from(offset_bytes))
+        .bind(i64::from(*remaining) + i64::from(MAX_UTF8_SCALAR_BYTES) - 1)
+        .fetch_optional(&mut **transaction)
+        .await?;
     let mut tools = Vec::new();
     let mut continuation = None;
     if let Some(row) = row {
-        let selected_body: Option<String> = row.try_get("selected_body")?;
-        let selected = selected_body
-            .as_deref()
-            .ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
-        let excerpt = excerpt_text(
-            selected,
+        let selected_body: Option<Vec<u8>> = row.try_get("selected_body")?;
+        let selected = selected_body.ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
+        let total_bytes = nonnegative(row.try_get("total_bytes")?, "tool text byte length")?;
+        if offset_bytes > total_bytes {
+            return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
+        }
+        let mut excerpt = bounded_text_excerpt(
+            &ModelResponseSlice {
+                bytes: selected,
+                offset_bytes,
+                total_bytes,
+            },
             address,
             requested_field,
-            member_index,
-            cursor.map_or(0, |cursor| cursor.offset_bytes),
             remaining,
         )?;
+        if let Some(next) = &mut excerpt.continuation {
+            next.member_index = member_index;
+        }
         let has_result: bool = row.try_get("has_result")?;
         let has_failure: bool = row.try_get("has_failure")?;
         let has_next: bool = row.try_get("has_next")?;
@@ -1810,28 +1906,27 @@ async fn load_goal_event_row(
     address: TimelineAddress,
     member_index: u32,
 ) -> Result<Option<StoredGoalEvent>, SessionTimelineRepositoryError> {
-    let row = sqlx::query(
-        "SELECT event.generation, event.event_kind, event.blocked_reason, event.session_outcome_kind,
+    let mut query = sqlx::QueryBuilder::<Postgres>::new(TOOL_DETAIL_MEMBERS_SQL);
+    query.push(
+        " SELECT event.generation, event.event_kind, event.blocked_reason, event.session_outcome_kind,
                COALESCE(event.statement, event.need, event.guidance, event.report) AS body,
                EXISTS (
                    SELECT 1
-                     FROM tool_batch_transition_detail_member AS probe
-                    WHERE probe.event_sequence = $1
-                      AND probe.member_kind = 'goal'
-                      AND probe.member_index = $2 + 1
+                     FROM goal_members AS probe
+                    WHERE probe.member_index = $2 + 1
                ) AS has_next
-          FROM tool_batch_transition_detail_member AS selected
+          FROM goal_members AS selected
           JOIN goal_event AS event
             ON event.session_id = selected.session_id
            AND event.event_ordinal = selected.goal_event_ordinal
-         WHERE selected.event_sequence = $1
-           AND selected.member_kind = 'goal'
-           AND selected.member_index = $2",
-    )
-    .bind(Decimal::from(address.sequence().get()))
-    .bind(i64::from(member_index))
-    .fetch_optional(&mut **transaction)
-    .await?;
+         WHERE selected.member_index = $2",
+    );
+    let row = query
+        .build()
+        .bind(Decimal::from(address.sequence().get()))
+        .bind(i64::from(member_index))
+        .fetch_optional(&mut **transaction)
+        .await?;
     row.map(|row| {
         Ok(StoredGoalEvent {
             generation: nonnegative(row.try_get("generation")?, "goal generation")?,
@@ -1860,23 +1955,26 @@ fn project_tool_goal(
     ),
     SessionTimelineRepositoryError,
 > {
-    // A textless goal event (`user_stopped`, or `resumed` without guidance) is
-    // a legitimate stored shape, so a `goal_text` cursor naming it is a
-    // caller-supplied inapplicable query, not stored corruption.
-    let raw_text = row
+    if row.text.is_none() && cursor.offset_bytes != 0 {
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
+    }
+    let text = row
         .text
         .as_deref()
-        .ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
-    let text = excerpt_text(
-        raw_text,
-        address,
-        TimelineBodyField::GoalText,
-        cursor.member_index,
-        cursor.offset_bytes,
-        remaining,
-    )?;
+        .map(|text| {
+            excerpt_text(
+                text,
+                address,
+                TimelineBodyField::GoalText,
+                cursor.member_index,
+                cursor.offset_bytes,
+                remaining,
+            )
+        })
+        .transpose()?;
     let continuation = text
-        .continuation
+        .as_ref()
+        .and_then(|text| text.continuation)
         .map(TimelineDetailContinuation::MoreBody)
         .or_else(|| {
             row.has_next.then_some(TimelineDetailContinuation::MoreBody(
@@ -1900,7 +1998,7 @@ fn project_tool_goal(
                 &row.event_kind,
                 row.reason.as_deref(),
                 row.outcome.as_deref(),
-                Some(text),
+                text,
             )?],
         },
         continuation,

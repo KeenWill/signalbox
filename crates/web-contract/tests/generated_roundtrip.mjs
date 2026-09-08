@@ -3109,3 +3109,14 @@ test("policy denials decode with runtime-safety rationale or lifecycle closure",
     assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
   }
 });
+
+
+test("ownership detail rejects creation-only ownership transitions", () => {
+  for (const transition of ["created_owned", "created_unmonitored"]) {
+    const page = userInputDetailPage();
+    page.items[0].kind = "session_ownership_changed";
+    page.items[0].body = { type: "ownership", transition };
+    page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+  }
+});

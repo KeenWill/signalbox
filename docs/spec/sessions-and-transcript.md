@@ -526,8 +526,9 @@ session and turn lifecycle facts, model settings and provider responses, tool
 arguments and execution evidence, approval decisions, goals, compaction, runner
 placement, and delegation; a retired turn remains a closed event fact. Repeated
 tool and goal members continue by member index. Tool-transition members freeze
-attempt state and payloads when the transition commits. An unknown durable event
-or state is corruption, never a generic body or guessed prose.
+attempt state and payloads when the transition commits. Transitions without
+frozen members project the original stored tool and goal references. An unknown
+durable event or state is corruption, never a generic body or guessed prose.
 
 A search result's address is directly usable with the timeline around read even
 when the matching region is not loaded, and each returned source is correlated
