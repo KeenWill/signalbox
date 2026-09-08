@@ -199,10 +199,10 @@ SELECT exclusion.*,
                      AND newer.session_id IS NOT DISTINCT FROM exclusion.session_id
                      AND newer.record_generation > exclusion.record_generation)
        AND (exclusion.oauth_generation IS NULL OR EXISTS (
-           SELECT 1 FROM oauth_credential_authorization authorization
-             WHERE authorization.profile = exclusion.profile
-               AND authorization.generation = exclusion.oauth_generation
-               AND authorization.quarantined AND authorization.quarantine_cause = 'credential_home'))
+           SELECT 1 FROM oauth_credential_authorization oauth_auth
+             WHERE oauth_auth.profile = exclusion.profile
+               AND oauth_auth.generation = exclusion.oauth_generation
+               AND oauth_auth.quarantined AND oauth_auth.quarantine_cause = 'credential_home'))
        AND (exclusion.action_id IS NULL OR action.consumed_turn_id IS NULL)
        AND NOT EXISTS (SELECT 1 FROM clear_credential_exclusion_command AS command
                        WHERE command.outcome = 'cleared'
