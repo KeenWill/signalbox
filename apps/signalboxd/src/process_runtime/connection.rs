@@ -567,6 +567,9 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::OverrideDeniedToolRequest { .. }
         | ClientRequest::ReplaceLostRunner { .. }
         | ClientRequest::AbandonLostRunner { .. }
+        | ClientRequest::RegisterWorkspace { .. }
+        | ClientRequest::MintGitRemote { .. }
+        | ClientRequest::WithdrawGitRemote { .. }
         | ClientRequest::PromotePendingRunner { .. }
         | ClientRequest::ProvisionOauthCredential { .. }
         | ClientRequest::ReprovisionOauthCredential { .. }
@@ -781,7 +784,10 @@ impl SnapshotReaderAdmission {
             | ClientRequest::OverrideDeniedToolRequest { .. }
             | ClientRequest::ReplaceLostRunner { .. }
             | ClientRequest::AbandonLostRunner { .. }
-            | ClientRequest::PromotePendingRunner { .. }
+            | ClientRequest::RegisterWorkspace { .. }
+        | ClientRequest::MintGitRemote { .. }
+        | ClientRequest::WithdrawGitRemote { .. }
+        | ClientRequest::PromotePendingRunner { .. }
             | ClientRequest::ProvisionOauthCredential { .. }
         | ClientRequest::ReprovisionOauthCredential { .. }
         | ClientRequest::DeleteOauthCredential { .. } => Self::NotRequired,

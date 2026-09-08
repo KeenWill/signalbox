@@ -514,6 +514,13 @@ finishes. Successful re-provisioning replaces authorization and clears every
 OAuth delivery-origin quarantine and cached access; failed re-provisioning
 clears none.
 
+Workspace operator commands are `register_workspace`, `mint_git_remote`, and
+`withdraw_git_remote`. Each carries a command identifier and returns the
+corresponding immutable workspace, mint, or withdrawal identity. Registration
+resolves the supplied root once in the daemon filesystem before constructing the
+canonical payload. The client exposes them as `workspace register`,
+`workspace mint-remote`, and `workspace withdraw-remote`.
+
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
 carrying a user-global `command_id` and one closed `target` object. The target

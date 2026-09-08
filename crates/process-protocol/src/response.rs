@@ -173,6 +173,21 @@ pub enum ServerMessage {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         next_after: Option<crate::RunnerStatusCursor>,
     },
+    /// Immutable workspace registration receipt.
+    WorkspaceRegistered {
+        command_id: crate::CommandId,
+        workspace_id: CanonicalUuid,
+    },
+    /// Immutable configured Git remote receipt.
+    GitRemoteMinted {
+        command_id: crate::CommandId,
+        mint_id: CanonicalUuid,
+    },
+    /// Immutable Git remote withdrawal receipt.
+    GitRemoteWithdrawn {
+        command_id: crate::CommandId,
+        withdrawal_id: CanonicalUuid,
+    },
     /// The stored result of one program cancellation command.
     ProgramRunCancellationReceipt {
         command_id: crate::CommandId,

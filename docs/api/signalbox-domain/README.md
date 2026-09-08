@@ -45,5 +45,6 @@
 | turn_lifecycle | 11 | 0 | 0 | [turn_lifecycle](turn_lifecycle.md) |
 | user_content | 15 | 0 | 0 | [user_content](user_content.md) |
 | workspace | 4 | 0 | 0 | [workspace](workspace.md) |
+| workspace_command | 3 | 0 | 0 | [workspace_command](workspace_command.md) |
 | workspace_instruction | 18 | 0 | 0 | [workspace_instruction](workspace_instruction.md) |
 | root | 32 | 0 | 0 | [root](root.md) |

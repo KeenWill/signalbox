@@ -35,6 +35,7 @@ mod tool_loop_ports;
 mod turn_liveness;
 mod update_session_placement;
 mod usage;
+pub mod workspace;
 mod workspace_instructions;
 
 pub use approval_judge::{
