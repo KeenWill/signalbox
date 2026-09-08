@@ -1,3 +1,4 @@
+import { BROWSER_PREFERENCES_KEY, createDefaultBrowserPreferences } from '../src/preferences'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, type Page, type TestInfo, test } from './fontTest'
 
@@ -551,9 +552,42 @@ test('withholds previous results after a failed refresh', async ({ page }) => {
   await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeHidden()
 })
 
+test('applies prepaint preferences while the application bundle is pending', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.addInitScript(
+    ({ key, preferences }) => localStorage.setItem(key, JSON.stringify(preferences)),
+    {
+      key: BROWSER_PREFERENCES_KEY,
+      preferences: { ...createDefaultBrowserPreferences(), theme: 'light', density: 'comfortable' },
+    },
+  )
+  const mainReady = Promise.withResolvers<void>()
+  await page.route('**/assets/index-*.js', async (route) => {
+    await mainReady.promise
+    await route.continue()
+  })
+  try {
+    await page.goto('/settings', { waitUntil: 'commit' })
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+    await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+    await expect(page.locator('#root')).toBeEmpty()
+    const blockingScript = page.locator('script[blocking~="render"]')
+    await expect(blockingScript).toHaveCount(1)
+    await expect(blockingScript).toHaveAttribute('src', /\/assets\/prepaint-[^/]+\.js$/)
+    await expect(page.locator('script[src*="/assets/index-"]')).not.toHaveAttribute(
+      'blocking',
+      /render/,
+    )
+  } finally {
+    mainReady.resolve()
+  }
+  await expect(page.getByRole('heading', { name: 'Operator preferences' })).toBeVisible()
+})
+
 test('focuses search through its command and releases editing with Escape', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search')
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeEnabled()
   await page.keyboard.press('Control+Shift+f')
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
   await page.keyboard.press('Escape')
@@ -561,10 +595,6 @@ test('focuses search through its command and releases editing with Escape', asyn
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await page.getByRole('button', { name: /Focus lexical search/ }).click()
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
-  await expect(page.locator('script[type="module"][src]').first()).toHaveAttribute(
-    'blocking',
-    'render',
-  )
 })
 
 test('keeps artifact inspector inputs in their editing context on Search', async ({ page }) => {
