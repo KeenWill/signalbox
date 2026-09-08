@@ -166,12 +166,12 @@ pub enum ProspectiveModelInput<'a> {
     ///
     /// A preview's starting frontier and the entries it mints exist only in
     /// memory — its transaction is discarded before any caller can read them —
-    /// so the preview carries its own projected membership and the exact
-    /// content bytes of the entries no durable row can score.
+    /// so the preview carries its own projected membership and a conservative
+    /// byte allowance for the entries no durable row can score.
     Preview {
         /// Model-visible members in projected order.
         projected_members: &'a [SemanticTranscriptEntryRef],
-        /// UTF-8 content bytes of the members the preview minted.
+        /// UTF-8 text bytes and attachment-stub allowances for preview members.
         uncommitted_content_bytes: u64,
     },
 }
@@ -864,8 +864,8 @@ async fn finish_optional_commit<T>(
 /// its committed equivalent.
 ///
 /// Each arm mirrors the payload-kind term `latest_reported_usage` applies to a
-/// committed member: accepted input sums its text parts and leaves attachment
-/// stubs to their own accounting, and delegated material carries the exact
+/// committed member: accepted input includes text and attachment stubs,
+/// and delegated material carries the exact
 /// delivered content. Kinds a preview never mints contribute nothing.
 fn preview_entry_content_bytes(
     entry: &SemanticTranscriptEntry,
@@ -877,7 +877,7 @@ fn preview_entry_content_bytes(
             origin_contents
                 .iter()
                 .find(|origin| origin.accepted_input() == *accepted_input)
-                .map_or(0, |origin| accepted_input_text_bytes(origin.content()))
+                .map_or(0, |origin| accepted_input_content_bytes(origin.content()))
         }
         SemanticTranscriptEntryPayload::DelegatedTask { content, .. }
         | SemanticTranscriptEntryPayload::DelegationMessage { content, .. } => {
@@ -904,8 +904,8 @@ fn preview_entry_content_bytes(
     }
 }
 
-/// Sums the text parts of one accepted input, as `octet_length` does durably.
-fn accepted_input_text_bytes(content: &UserContent) -> u64 {
+/// Reserves text bytes and the bounded rendered stub for every attachment.
+fn accepted_input_content_bytes(content: &UserContent) -> u64 {
     content
         .parts()
         .iter()
@@ -913,7 +913,10 @@ fn accepted_input_text_bytes(content: &UserContent) -> u64 {
             signalbox_domain::UserContentPart::Text { value } => {
                 total.saturating_add(utf8_byte_length(value.as_str()))
             }
-            signalbox_domain::UserContentPart::Attachment { .. } => total,
+            signalbox_domain::UserContentPart::Attachment { .. } => total.saturating_add(
+                u64::try_from(signalbox_application::MAX_RENDERED_ATTACHMENT_STUB_BYTES)
+                    .unwrap_or(u64::MAX),
+            ),
         })
 }
 
@@ -993,3 +996,26 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod prospective_content_tests {
+    use super::*;
+
+    #[test]
+    fn prospective_attachment_reserves_its_stub_alongside_utf8_text() {
+        let content = UserContent::try_parts(vec![
+            signalbox_domain::UserContentPart::Text {
+                value: signalbox_domain::NonEmptyUnicodeText::try_new("界".to_owned()).unwrap(),
+            },
+            signalbox_domain::UserContentPart::Attachment {
+                digest: signalbox_domain::BlobDigest::digest(b"fixture"),
+                kind: signalbox_domain::AttachmentKind::File,
+                media_type: signalbox_domain::DeclaredMediaType::try_new("text/plain".to_owned())
+                    .unwrap(),
+                display_filename: None,
+            },
+        ])
+        .unwrap();
+        assert_eq!(accepted_input_content_bytes(&content), 2307);
+    }
+}
