@@ -1,6 +1,6 @@
 import { FileQuestion, Paperclip, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import type { CommandContext } from '../../commands'
+import { type CommandContext, invokeCommand } from '../../commands'
 import { ArtifactRenderer } from './ArtifactRenderer'
 import { attachmentScenario } from './artifactScenario'
 import type { ArtifactItem } from './artifactTypes'
@@ -144,8 +144,13 @@ export function AttachmentWorkbench({ commandContext }: { commandContext: Comman
             selectedId={selectedId}
             onSelect={(artifact) => setSelectedId(artifact.id)}
             onRemove={(artifact) => {
-              setComposerItems((items) => items.filter((item) => item.id !== artifact.id))
-              if (selectedId === artifact.id) setSelectedId(null)
+              invokeCommand('artifact.attachment.remove', {
+                ...commandContext,
+                removeAttachment: () => {
+                  setComposerItems((items) => items.filter((item) => item.id !== artifact.id))
+                  if (selectedId === artifact.id) setSelectedId(null)
+                },
+              })
             }}
           />
         </div>
