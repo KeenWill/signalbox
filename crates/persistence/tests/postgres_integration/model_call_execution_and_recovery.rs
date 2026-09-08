@@ -217,6 +217,17 @@ async fn oauth_quarantine_committing_during_selection_prevents_a_call_checkpoint
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Result<(), Box<dyn Error>>
 {
+    exercise_counted_attachment_pool_race(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_pool_counted_attachment_failure_preserves_a_selected_wait()
+-> Result<(), Box<dyn Error>> {
+    exercise_counted_attachment_pool_race(true).await
+}
+
+async fn exercise_counted_attachment_pool_race(park: bool) -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xcd50_0000_u128;
     let pool_name = "counted-attachment-race-pool";
@@ -230,6 +241,16 @@ async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Resul
         CredentialPoolRuntimeAction::Quarantine,
     )
     .await?;
+    let repository = if park {
+        repository.with_credential_pools(HashMap::from([(
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+                seed + 4,
+            ))),
+            credential_wait::park_policy(pool_name, &[member]),
+        )]))
+    } else {
+        repository
+    };
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 3));
     let target_session = SessionId::from_uuid(Uuid::from_u128(seed + 50));
     let target_turn = TurnId::from_uuid(Uuid::from_u128(seed + 51));
@@ -305,7 +326,11 @@ async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Resul
         .await?;
     assert_eq!(
         outcome,
-        CommitCountedAttachmentFailurePreviewOutcome::Failed(target_turn)
+        if park {
+            CommitCountedAttachmentFailurePreviewOutcome::CredentialWait(target_turn)
+        } else {
+            CommitCountedAttachmentFailurePreviewOutcome::Failed(target_turn)
+        }
     );
     let durable: (String, Option<String>, i64, i64) = sqlx::query_as(
         "SELECT lifecycle.state_kind, lifecycle.terminal_cause_kind,
@@ -322,12 +347,16 @@ async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Resul
     .await?;
     assert_eq!(
         durable,
-        (
-            String::from("terminal"),
-            Some(String::from("credential_pool_exhausted")),
-            0,
-            1,
-        )
+        if park {
+            (String::from("active"), None, 0, 0)
+        } else {
+            (
+                String::from("terminal"),
+                Some(String::from("credential_pool_exhausted")),
+                0,
+                1,
+            )
+        }
     );
 
     pool.close().await;
@@ -1473,7 +1502,7 @@ async fn excluded_failed_credential_with_stay_terminalizes_instead_of_retrying()
 /// durable action excludes its credential before preparation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_preparation()
+async fn quarantined_retry_with_an_eligible_fallback_keeps_the_generic_failure()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x1534_1000_u128;
@@ -1486,6 +1515,15 @@ async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_prepar
         CredentialPoolRuntimeAction::Quarantine,
     )
     .await?;
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4)));
+    let repository = repository.with_credential_pools(HashMap::from([(
+        target,
+        credential_wait::park_policy(
+            "retry-race-pool",
+            &["retry-member", "unauthorized-fallback"],
+        ),
+    )]));
     let mut repository = repository.with_same_credential_attempt_bound(
         std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
     );
@@ -1562,6 +1600,28 @@ async fn transient_retry_exhausts_if_its_credential_is_quarantined_before_prepar
     .fetch_one(&pool)
     .await?;
     assert_eq!(calls, 1);
+    let snapshot = signalbox_persistence::process_read::ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("failed session snapshot");
+    assert!(matches!(
+        snapshot.turns()[0].state(),
+        signalbox_persistence::process_read::ProcessTurnState::Failed {
+            terminal_model_call: None,
+            ..
+        }
+    ));
+    let exhaustion_records: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM credential_pool_terminal_exhaustion WHERE session_id = $1 AND turn_id = $2",
+    ).bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(exhaustion_records, 0);
+    let typed_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM credential_pool_exhaustion_outbox_event WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(typed_events, 0);
 
     pool.close().await;
     drop(container);
@@ -4875,6 +4935,9 @@ async fn target_unavailable_reclassifies_steering() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+#[path = "credential_pool_projection.rs"]
+mod credential_pool_projection;
+
 /// S04: the daemon stopping with a claimed reconciliation leaves one durable
 /// in-flight attempt. On restart that attempt is classified once, the next
 /// ordinal applies once, and the transition is never double-applied.
@@ -4997,6 +5060,8 @@ async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
     Ok(())
 }
 
+#[path = "credential_wait.rs"]
+mod credential_wait;
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn exhausted_page_settles_attempt_outside_abandoned_page() -> Result<(), Box<dyn Error>> {

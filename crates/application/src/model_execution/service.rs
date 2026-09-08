@@ -369,11 +369,21 @@ where
                 })
                 .await
             {
-                Ok(PrepareModelCallOutcome::NoWork) => {
+                Ok(
+                    PrepareModelCallOutcome::NoWork | PrepareModelCallOutcome::CredentialWait(_),
+                ) => {
                     return Ok(ModelCallExecutionOutcome::NoWork);
                 }
                 Ok(PrepareModelCallOutcome::RetryBackoff(delay)) => {
                     return Ok(ModelCallExecutionOutcome::RetryBackoff(delay));
+                }
+                Ok(PrepareModelCallOutcome::WaitFailed(failed)) => {
+                    report_turn_terminalization(
+                        failed.session(),
+                        failed.turn(),
+                        TurnTerminalOutcome::Failed,
+                    );
+                    return Ok(ModelCallExecutionOutcome::WaitFailed(failed));
                 }
                 Ok(PrepareModelCallOutcome::PoolExhausted(exhausted)) => {
                     report_turn_terminalization(
@@ -767,6 +777,9 @@ where
                 .commit_observation(session, observation.clone(), identities, next_turn)
                 .await
             {
+                Ok(Some(ModelCallObservationCommitOutcome::CredentialWait(_))) => {
+                    return Ok(ModelCallExecutionOutcome::NoWork);
+                }
                 Ok(Some(ModelCallObservationCommitOutcome::Terminal(outcome))) => {
                     report_model_call_terminalization(&outcome);
                     return Ok(ModelCallExecutionOutcome::ObservationCommitted(outcome));

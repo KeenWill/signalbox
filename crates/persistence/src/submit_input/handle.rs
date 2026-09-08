@@ -49,7 +49,7 @@ pub(super) async fn handle_in_transaction<
 >(
     connection: &mut PgConnection,
     command: SubmitInput,
-    principal: CommandPrincipal,
+    principal: Option<CommandPrincipal>,
     cascade_root_kind: ParentTerminationKind,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
@@ -73,6 +73,13 @@ where
     NextClosureDecision: FnMut() -> DurableCommandId + Send,
     NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
 {
+    let issuer = match (command.actor(), principal) {
+        (signalbox_domain::Actor::Program { .. }, None) => ("program", None),
+        (signalbox_domain::Actor::Program { .. }, Some(_)) | (_, None) => {
+            return Err(SubmitInputCorruption::Inconsistent("actor and envelope principal").into());
+        }
+        (_, Some(principal)) => crate::command_registry::issuer_columns(principal),
+    };
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
         Some(CommandKind::SubmitInput) => {
@@ -114,7 +121,18 @@ where
         None => {}
     }
 
-    let issuer = crate::command_registry::issuer_columns(principal);
+    if matches!(
+        command.actor(),
+        signalbox_domain::Actor::Model { .. }
+            | signalbox_domain::Actor::Tool { .. }
+            | signalbox_domain::Actor::Recovery
+    ) {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "recorded actor has no fresh admission path",
+        )
+        .into());
+    }
+
     let claimed = sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at,
@@ -425,7 +443,10 @@ where
                     | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. }
                     | signalbox_domain::ActiveTurnPhase::AwaitingChild { .. }
                     | signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-                    | signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. } => None,
+                    | signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+                    | signalbox_domain::ActiveTurnPhase::AwaitingCredentialAvailability {
+                        ..
+                    } => None,
                 });
             if let Some(IssuedOperationRef::ToolAttempt(recovery_attempt)) = recovery_operation {
                 let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
@@ -958,6 +979,8 @@ where
                 .await?;
                 Some(outcome)
             } else {
+                crate::model_execution::credential_wait::release_for_stop(connection, interrupt)
+                    .await?;
                 let execution =
                     require_live_execution_for_restart(connection, interrupt.session()).await?;
                 let identities = attach_interrupt_reclassification_candidates(

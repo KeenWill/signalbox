@@ -76,7 +76,7 @@ pub(crate) async fn insert_fresh_initial_input(
     let outcome = handle_in_transaction(
         connection,
         command,
-        principal,
+        Some(principal),
         ParentTerminationKind::Cancelled,
         accepted_input,
         Some(turn),
@@ -175,7 +175,8 @@ pub(crate) async fn require_recorded_batch(
             related_turn_origin,
             non_accepted_predecessor,
             existing_interrupt,
-        )?;
+        )
+        .await?;
         if recorded.insert(command_id, reconstructed).is_some() {
             return Err(
                 SubmitInputCorruption::Inconsistent("duplicate batched command row").into(),
@@ -205,7 +206,7 @@ pub(super) fn existing_outcome(
 pub(super) async fn prepare_against_locked_state<NextClosureDecision, NextClosureAttempt>(
     connection: &mut PgConnection,
     command: SubmitInput,
-    principal: CommandPrincipal,
+    principal: Option<CommandPrincipal>,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
     next_closure_decision: &mut NextClosureDecision,
@@ -499,9 +500,11 @@ where
 async fn settles_committed_closure(
     connection: &mut PgConnection,
     command: &SubmitInput,
-    principal: CommandPrincipal,
+    principal: Option<CommandPrincipal>,
 ) -> Result<bool, SubmitInputRepositoryError> {
-    if principal != CommandPrincipal::Core {
+    if principal != Some(CommandPrincipal::Core)
+        || matches!(command.actor(), signalbox_domain::Actor::Program { .. })
+    {
         return Ok(false);
     }
     let DeliveryRequest::Interrupt {

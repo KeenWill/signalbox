@@ -102,12 +102,12 @@ pub enum LifecycleActor {
 }
 
 impl LifecycleActor {
-    /// Classifies one domain actor.
+    /// Classifies one domain actor; program lifecycle agency is not represented.
     ///
     /// `User` reads as `operator`, the recovery scan as `watchdog`, and model-
     /// and tool-initiated agency as `core` with the acting identity retained.
-    pub const fn classify(actor: Actor) -> Self {
-        match actor {
+    pub const fn classify(actor: Actor) -> Option<Self> {
+        Some(match actor {
             Actor::User => Self::Operator,
             Actor::Core => Self::Core {
                 agency: CoreAgency::Daemon,
@@ -119,7 +119,8 @@ impl LifecycleActor {
             Actor::Tool { request } => Self::Core {
                 agency: CoreAgency::Tool { request },
             },
-        }
+            Actor::Program { .. } => return None,
+        })
     }
 }
 
@@ -1050,11 +1051,11 @@ mod tests {
     #[test]
     fn the_user_classifies_as_operator_and_the_recovery_scan_as_watchdog() {
         assert_eq!(
-            LifecycleActor::classify(Actor::User),
+            LifecycleActor::classify(Actor::User).expect("user classification exists"),
             LifecycleActor::Operator
         );
         assert_eq!(
-            LifecycleActor::classify(Actor::Recovery),
+            LifecycleActor::classify(Actor::Recovery).expect("recovery classification exists"),
             LifecycleActor::Watchdog
         );
     }
@@ -1062,7 +1063,8 @@ mod tests {
     #[test]
     fn model_and_tool_agency_classify_as_core_keeping_their_identity() {
         assert_eq!(
-            LifecycleActor::classify(Actor::Model { turn: turn_id(4) }),
+            LifecycleActor::classify(Actor::Model { turn: turn_id(4) })
+                .expect("model classification exists"),
             LifecycleActor::Core {
                 agency: CoreAgency::Model { turn: turn_id(4) },
             }
@@ -1070,7 +1072,8 @@ mod tests {
         assert_eq!(
             LifecycleActor::classify(Actor::Tool {
                 request: tool_request_id(5),
-            }),
+            })
+            .expect("tool classification exists"),
             LifecycleActor::Core {
                 agency: CoreAgency::Tool {
                     request: tool_request_id(5),

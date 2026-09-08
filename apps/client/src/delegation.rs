@@ -191,6 +191,7 @@ pub(crate) fn delegation_rejection_matches(
         | RejectionDetail::BlobUploadDigestMismatch { .. }
         | RejectionDetail::BlobReadLengthOutOfRange { .. }
         | RejectionDetail::StaleGeneration {}
+        | RejectionDetail::UnknownPoolPolicy { .. }
         | RejectionDetail::UnknownCredentialExclusion {}
         | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     }
@@ -346,6 +347,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::GitRemoteMinted { .. }
         | ServerMessage::GitRemoteWithdrawn { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::CredentialPoolPolicy { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }

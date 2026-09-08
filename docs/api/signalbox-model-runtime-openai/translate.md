@@ -2,6 +2,14 @@
 
 # translate
 
+## serialized_message_bytes
+
+```rust
+pub fn serialized_message_bytes(
+    message: &signalbox_model_runtime::ConversationMessage,
+) -> option::Option<usize>;
+```
+
 ## validate_model_settings
 
 ```rust

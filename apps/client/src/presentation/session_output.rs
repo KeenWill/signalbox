@@ -810,6 +810,17 @@ impl<'a> Output<'a> {
         self.stdout.write_all(b"\n")
     }
 
+    pub(crate) fn tool_denial_overridden(
+        &mut self,
+        tool_request_id: CanonicalUuid,
+    ) -> io::Result<()> {
+        writeln!(self.stdout, "tool_request={tool_request_id} override=armed")?;
+        writeln!(
+            self.stderr,
+            "One-shot override armed; it applies to a later matching proposal after one extra model round."
+        )
+    }
+
     pub(crate) fn tool_request_decided(
         &mut self,
         tool_request_id: CanonicalUuid,

@@ -537,6 +537,7 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::ReadCredentialPoolPolicy { .. }
         | ClientRequest::ReadRunnerStatus { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
@@ -728,9 +729,7 @@ pub(super) async fn acquire_review_command_permit_while_buffered(
 /// class instead of inheriting one by omission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SnapshotReaderAdmission {
-    /// The request holds no pooled connection across statements: it either
-    /// touches no database or completes in one statement on a pooled
-    /// connection it returns immediately.
+    /// The request requires no snapshot-reader admission.
     NotRequired,
     /// The request holds one pooled connection across its database phase — a
     /// multi-statement read, a `REPEATABLE READ` transaction, or a spool.
@@ -766,6 +765,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
             | ClientRequest::ListCredentialExclusions { .. }
+            | ClientRequest::ReadCredentialPoolPolicy { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReloadConfiguration { .. }

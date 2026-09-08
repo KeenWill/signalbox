@@ -6,11 +6,11 @@ when the work lands.
 
 ## Goal
 
-Nine capabilities extend the session and transcript subsystem. Instruction-aware
-defaults replacement keeps a session's model selection compatible with its
-admitted workspace instructions. Program creation causes let registered programs
-create sessions under the [program substrate](../spec/program-substrate.md). The
-browser follow route is used only by the open workspace. The timeline reports
+Eight capabilities extend the session and transcript subsystem.
+Instruction-aware defaults replacement keeps a session's model selection
+compatible with its admitted workspace instructions. Program creation causes let
+registered programs create sessions under the
+[program substrate](../spec/program-substrate.md). The timeline reports
 referenced blob facts from a durable relation. Search producers publish
 attachment and derived-text classes through the projection-writer port. A
 relocation boundary entry records every session move in the transcript.
@@ -44,9 +44,6 @@ program run, and the eval variant also names the trial identity the
 by the program substrate's host-side session capability and join the stored
 closed-discriminator convention beside the three present spellings.
 
-Follow route. Only the open workspace subscribes to a session's follow stream;
-no other browser surface holds a follow subscription for the selected workspace.
-
 Timeline blob relation. A durable timeline-to-blob relation supplies the
 referenced blob count and byte length reported by the session summary read. The
 two remain separate facts, and a nonzero byte length describes a reference, not
@@ -58,12 +55,9 @@ through the typed projection-writer port, so a read returns them with a reveal
 address like every other class. A producer adopting the port publishes only text
 its durable contract explicitly supplies, and only after its own source exists.
 
-Active relocation boundary. A replacement staged behind an authorized model call
-appends its placement boundary only after that call's observation commits.
-Active continuation extends the exact boundary after all batch results and
-before the next call. In [runner design's](runner-protocol.md) pre-continuation
-takeover, successor tool execution uses the installed placement fence while the
-entry remains deferred until every batch result is appended. Healthy-session and
+In [runner design's](runner-protocol.md) pre-continuation takeover, successor
+tool execution uses the installed placement fence while the entry remains
+deferred until every batch result is appended. Healthy-session and
 working-directory moves use the same reference-only boundary and
 placement-frontier pointer.
 
@@ -105,13 +99,13 @@ replacement path added now must be able to run inside the serialization the
 admitted set will use. The session summary read keeps referenced blob count and
 byte length as separate fields, both zero. No present producer calls the
 projection-writer port; a producer adopting it publishes only text its durable
-contract supplies. No present writer emits a relocation entry, a
-placement-frontier pointer, or an entry for a queued turn; the semantic payload
-set stays closed until a migration widens it. No present surface exposes
-terminal-result reconstitution, and no new delegation path may seal a result
-from raw identities. The static eligible-failure and wait-transition failure
-paths have no producer, and every present failed-turn producer keeps emitting
-the turn-failed event atomically with the marker.
+contract supplies. No present writer emits an active-turn relocation entry or an
+entry for a queued turn; the semantic payload set stays closed until a migration
+widens it. No present surface exposes terminal-result reconstitution, and no new
+delegation path may seal a result from raw identities. The static
+eligible-failure and wait-transition failure paths have no producer, and every
+present failed-turn producer keeps emitting the turn-failed event atomically
+with the marker.
 
 ## Acceptance criteria
 
@@ -121,23 +115,20 @@ defaults and admitted set unchanged, a compatible selection succeeds, and a
 concurrent admission is ordered wholly before or after the replacement. A
 program-created session stores a workflow or eval cause naming its program run
 and, for eval, its trial; the three present spellings decode unchanged, and no
-surface outside the host-side capability can construct the new causes. A browser
-with no open workspace holds no follow subscription, and exactly one while a
-workspace is open. The session summary read reports referenced blob count and
-byte length equal to the relation's totals, nonzero for a session whose timeline
-references blobs, and no detail read fetches blob bytes. Attachment filename,
-media metadata, and derived-text classes appear in search results with reveal
-addresses only after their source committed. Every pinned replacement and every
-user-directed move appends exactly one relocation entry, the next model call
-reads a frontier containing it, each fail-closed case is rejected, and the entry
-carries no runner, workspace, credential, or tool content. Replacing a runner
-lost before the session pinned it appends no entry and returns the placement to
-unpinned at the successor revision. Delegation result sealing reads one sealed
-projection and has no raw-identity path. A turn that fails at eligibility
-carries its origin entries, one for an accepted input, every coalesced delivery
-in sequence for a delegation wake, and the checked delegated-task entry for a
-delegated child's first turn, and one failed marker committed together with a
-turn-failed event and no attempt row. A turn released from a wait with an
-exhausted pool and an already-issued predecessor call carries one failed marker
-committed with a fresh call-free ended attempt, a turn-failed event, and no
-terminal model call.
+surface outside the host-side capability can construct the new causes. The
+session summary read reports referenced blob count and byte length equal to the
+relation's totals, nonzero for a session whose timeline references blobs, and no
+detail read fetches blob bytes. Attachment filename, media metadata, and
+derived-text classes appear in search results with reveal addresses only after
+their source committed. Every pinned replacement and every user-directed move
+appends exactly one relocation entry, the next model call reads a frontier
+containing it, each fail-closed case is rejected, and the entry carries no
+runner, workspace, credential, or tool content. Delegation result sealing reads
+one sealed projection and has no raw-identity path. A turn that fails at
+eligibility carries its origin entries, one for an accepted input, every
+coalesced delivery in sequence for a delegation wake, and the checked
+delegated-task entry for a delegated child's first turn, and one failed marker
+committed together with a turn-failed event and no attempt row. A turn released
+from a wait with an exhausted pool and an already-issued predecessor call
+carries one failed marker committed with a fresh call-free ended attempt, a
+turn-failed event, and no terminal model call.

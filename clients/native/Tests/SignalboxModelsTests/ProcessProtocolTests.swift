@@ -73,6 +73,84 @@ final class ProcessProtocolTests: XCTestCase {
     }
   }
 
+  func testOverrideRequestEncodesTheExactMutationShape() throws {
+    let request = SignalboxProcessClientRequest.overrideDeniedToolRequest(
+      commandID: try SignalboxCommandID(validating: turnID),
+      sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+      toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID)
+    )
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(request)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      #"{"command_id":"\#(turnID)","session_id":"\#(sessionID)","tool_request_id":"\#(toolRequestID)","type":"override_denied_tool_request"}"#
+    )
+  }
+
+  func testOverrideReceiptDecodesItsExactToolRequest() throws {
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: Data(#"{"type":"tool_denial_overridden","tool_request_id":"\#(toolRequestID)"}"#.utf8)
+    )
+
+    XCTAssertEqual(message, .toolDenialOverridden(
+      toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID)
+    ))
+  }
+
+  func testToolClosureDecodesApprovedAndUndecidedEvidence() throws {
+    for approvedBeforeClose in [true, false] {
+      let entry = try SignalboxJSONCoding.decoder().decode(
+        SignalboxTranscriptEntry.self,
+        from: Data(
+          #"{"type":"tool_closed","tool_request_id":"\#(toolRequestID)","content":"closed before execution","approved_before_close":\#(approvedBeforeClose)}"#.utf8)
+      )
+      XCTAssertEqual(entry, .toolClosed(
+        toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID),
+        content: "closed before execution", approvedBeforeClose: approvedBeforeClose
+      ))
+    }
+  }
+
+  func testToolClosureWithoutApprovalEvidenceIsNotProjectedAsAClosure() throws {
+    let entry = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptEntry.self,
+      from: Data(
+        #"{"type":"tool_closed","tool_request_id":"\#(toolRequestID)","content":"closed before execution"}"#.utf8)
+    )
+    guard case .unknown(_, _, let diagnostic) = entry else {
+      return XCTFail("A closure requires evidence distinguishing approval from no decision.")
+    }
+    XCTAssertNotNil(diagnostic)
+  }
+
+  func testToolDenialDecodesRecordedOverrideEvidence() throws {
+    for overrideRecorded in [true, false] {
+      let entry = try SignalboxJSONCoding.decoder().decode(
+        SignalboxTranscriptEntry.self,
+        from: Data(
+          #"{"type":"tool_denied","tool_request_id":"\#(toolRequestID)","content":"denied","override_recorded":\#(overrideRecorded)}"#.utf8)
+      )
+      XCTAssertEqual(entry, .toolDenied(
+        toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID),
+        content: "denied", overrideRecorded: overrideRecorded
+      ))
+    }
+  }
+
+  func testToolDenialRequiresRecordedOverrideEvidence() throws {
+    let entry = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptEntry.self,
+      from: Data(
+        #"{"type":"tool_denied","tool_request_id":"\#(toolRequestID)","content":"denied"}"#.utf8)
+    )
+    guard case .unknown(_, _, let diagnostic) = entry else {
+      return XCTFail("A denial requires evidence of its recorded override.")
+    }
+    XCTAssertNotNil(diagnostic)
+  }
+
   func testToolInadmissibleDecodesItsRequestAndResult() throws {
     let content = "execution_failed: placement_lost"
     let entry = try SignalboxJSONCoding.decoder().decode(
@@ -3834,4 +3912,80 @@ private enum ProcessProtocolFixtureError: Error {
   case missingModelCallsEnd
   case missingProviderFailureCause
   case missingUnknownDiagnostic
+}
+
+extension ProcessProtocolTests {
+  func testPoolExhaustionDecodesUnprojectedActionEvidence() throws {
+    let state = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptTurnState.self,
+      from: poolExhaustionStateJSON(
+        members: #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#
+      )
+    )
+    guard case .failedCredentialPoolExhausted(let evidence) = state else {
+      return XCTFail("Expected typed exhaustion.")
+    }
+    XCTAssertEqual(evidence.policyMembers, ["only"])
+    XCTAssertEqual(evidence.members.count, 1)
+    XCTAssertEqual(evidence.members[0].exclusion, .profileQuarantine(recordGeneration: nil))
+    XCTAssertNil(evidence.members[0].resetAtUnixMS)
+  }
+
+  func testPoolExhaustionDecodesResetPresenceForEachExclusion() throws {
+    // Arbitrary reset timestamp: only its presence is under test.
+    let cases: [(String, Int64?)] = [
+      (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#, nil),
+      (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"membership_exclusion","record_generation":"4"}}]"#, nil),
+      (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"session_displacement","record_generation":null}}]"#, nil),
+      (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"chain_exclusion","predecessor_model_call_id":"55555555-5555-4555-8555-555555555555"}}]"#, nil),
+      (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"transient_exclusion","observation_model_call_id":"66666666-6666-4666-8666-666666666666"}}]"#, 1_000),
+      (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}}]"#, 1_000),
+      (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":0,"reserve_percent":0}}]"#, 1_000),
+      (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":99,"reserve_percent":99}}]"#, 1_000),
+    ]
+    for (members, reset) in cases {
+      let state = try SignalboxJSONCoding.decoder().decode(
+        SignalboxTranscriptTurnState.self, from: poolExhaustionStateJSON(members: members)
+      )
+      guard case .failedCredentialPoolExhausted(let evidence) = state else {
+        XCTFail("Valid evidence did not decode: \(members)")
+        continue
+      }
+      XCTAssertEqual(evidence.members[0].resetAtUnixMS, reset, members)
+    }
+  }
+
+  func testPoolExhaustionInvalidEvidenceProducesADiagnostic() throws {
+    for members in [
+      #"[]"#,
+      #"[{"profile":"foreign","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine"}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":"0"}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"unknown"}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"membership_exclusion","record_generation":"4"}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"session_displacement","record_generation":null}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"chain_exclusion","predecessor_model_call_id":"55555555-5555-4555-8555-555555555555"}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"transient_exclusion","observation_model_call_id":"66666666-6666-4666-8666-666666666666"}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":99,"reserve_percent":100}}]"#,
+    ] {
+      let state = try SignalboxJSONCoding.decoder().decode(
+        SignalboxTranscriptTurnState.self, from: poolExhaustionStateJSON(members: members)
+      )
+      guard case .unknown(let kind, _, let diagnostic) = state else {
+        XCTFail("Malformed evidence became a terminal state: \(members)")
+        continue
+      }
+      XCTAssertEqual(kind, "failed_credential_pool_exhausted")
+      XCTAssertNotNil(diagnostic)
+    }
+  }
+
+  /// Arbitrary distinct correlations; the evidence shape is the test input.
+  private func poolExhaustionStateJSON(members: String) -> Data {
+    Data(
+      #"{"type":"failed_credential_pool_exhausted","terminal_frontier_id":"11111111-1111-4111-8111-111111111111","terminal_attempt_id":"22222222-2222-4222-8222-222222222222","failure_entry_id":"33333333-3333-4333-8333-333333333333","pool_policy_id":"44444444-4444-4444-8444-444444444444","policy_members":["only"],"members":\#(members)}"#.utf8
+    )
+  }
 }

@@ -206,6 +206,28 @@ public struct SignalboxPreparedImportedSessionCreation: Equatable, Sendable {
   }
 }
 
+public struct SignalboxPreparedToolDenialOverride: Equatable, Sendable {
+  public let commandID: SignalboxCommandID
+  public let sessionID: SignalboxCanonicalUUID
+  public let toolRequestID: SignalboxCanonicalUUID
+
+  public init(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  ) {
+    self.commandID = commandID
+    self.sessionID = sessionID
+    self.toolRequestID = toolRequestID
+  }
+
+  fileprivate var request: SignalboxProcessClientRequest {
+    .overrideDeniedToolRequest(
+      commandID: commandID, sessionID: sessionID, toolRequestID: toolRequestID
+    )
+  }
+}
+
 public struct SignalboxPreparedToolRequestDecision: Equatable, Sendable {
   public let commandID: SignalboxCommandID
   public let sessionID: SignalboxCanonicalUUID
@@ -337,15 +359,16 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   ) async throws -> SignalboxPreparedDefaultsReplacement
   func replaceDefaults(_ prepared: SignalboxPreparedDefaultsReplacement) async throws
     -> SignalboxSessionDefaultsRead
-  func listConversations(includeArchived: Bool) async throws -> [SignalboxProcessConversation]
+  func listConversations(includeArchived: Bool, after: SignalboxConversationCursor?) async throws -> SignalboxConversationListPage
   func listModelAliases() async throws -> [SignalboxModelAliasSummary]
   func listSessions(includeArchived: Bool) async throws -> [SignalboxProcessSession]
+  func readSession(sessionID: SignalboxCanonicalUUID) async throws -> SignalboxProcessSession
   func readSession(
     conversation: SignalboxProcessConversation
   ) async throws -> SignalboxProcessSession
   func readImportedConversation(
     conversation: SignalboxProcessConversation
-  ) async throws -> SignalboxImportedConversationTranscript
+  ) async throws -> SignalboxImportedConversationInventory
   func setConversationArchived(
     _ archived: Bool,
     conversation: SignalboxProcessConversation
@@ -377,6 +400,13 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   ) async throws -> SignalboxPreparedImportedSessionCreation
   func createSessionFromImportedFrontier(
     _ creation: SignalboxPreparedImportedSessionCreation
+  ) async throws -> SignalboxCanonicalUUID
+  func prepareToolDenialOverride(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  ) async throws -> SignalboxPreparedToolDenialOverride
+  func overrideToolDenial(
+    _ prepared: SignalboxPreparedToolDenialOverride
   ) async throws -> SignalboxCanonicalUUID
   func prepareToolRequestDecision(
     sessionID: SignalboxCanonicalUUID,
@@ -430,9 +460,17 @@ extension SignalboxProcessServiceProtocol {
     throw SignalboxProcessServiceError.unexpectedMessage("The service does not implement defaults replacement.")
   }
 
+  public func readSession(sessionID: SignalboxCanonicalUUID) async throws -> SignalboxProcessSession {
+    throw SignalboxProcessServiceError.unexpectedMessage("This process service does not implement session reads.")
+  }
+
+  public func listConversations(includeArchived: Bool) async throws -> SignalboxConversationListPage {
+    try await listConversations(includeArchived: includeArchived, after: nil)
+  }
+
   public func listConversations(
-    includeArchived _: Bool
-  ) async throws -> [SignalboxProcessConversation] {
+    includeArchived _: Bool, after _: SignalboxConversationCursor?
+  ) async throws -> SignalboxConversationListPage {
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement unified conversation listing."
     )
@@ -454,7 +492,7 @@ extension SignalboxProcessServiceProtocol {
 
   public func readImportedConversation(
     conversation _: SignalboxProcessConversation
-  ) async throws -> SignalboxImportedConversationTranscript {
+  ) async throws -> SignalboxImportedConversationInventory {
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement imported-conversation reads."
     )
@@ -506,6 +544,23 @@ extension SignalboxProcessServiceProtocol {
     _ = creation
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement imported-conversation continuation."
+    )
+  }
+
+  public func prepareToolDenialOverride(
+    sessionID _: SignalboxCanonicalUUID,
+    toolRequestID _: SignalboxCanonicalUUID
+  ) async throws -> SignalboxPreparedToolDenialOverride {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement tool denial overrides."
+    )
+  }
+
+  public func overrideToolDenial(
+    _ prepared: SignalboxPreparedToolDenialOverride
+  ) async throws -> SignalboxCanonicalUUID {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement tool denial overrides."
     )
   }
 
@@ -603,38 +658,12 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   }
 
   public func listConversations(
-    includeArchived: Bool
-  ) async throws -> [SignalboxProcessConversation] {
-    var conversations: [SignalboxProcessConversation] = []
-    var cursor: SignalboxConversationCursor?
-    var pageCount: UInt = 0
-    var retainedUTF8Bytes: UInt = 0
-    while true {
-      guard pageCount < policy.maximumMetadataPages else {
-        throw SignalboxProcessServiceError.invalidPage(
-          "The native conversation-list page cap was reached."
-        )
-      }
-      let page = try await conversationPage(
-        includeArchived: includeArchived,
-        after: cursor,
-        pageSize: policy.metadataPageSize,
-        maximumRetainedUTF8Bytes:
-          policy.maximumMetadataListUTF8Bytes - retainedUTF8Bytes
-      )
-      retainedUTF8Bytes += page.retainedUTF8Bytes
-      conversations.append(contentsOf: page.conversations)
-      pageCount += 1
-      guard let next = page.nextAfter else {
-        return conversations
-      }
-      guard cursor.map({ conversationCursorPrecedes($0, next) }) ?? true else {
-        throw SignalboxProcessServiceError.invalidPage(
-          "The conversation page cursor did not advance."
-        )
-      }
-      cursor = next
-    }
+    includeArchived: Bool, after: SignalboxConversationCursor?
+  ) async throws -> SignalboxConversationListPage {
+    try await conversationPage(
+      includeArchived: includeArchived, after: after,
+      pageSize: policy.metadataPageSize,
+      maximumRetainedUTF8Bytes: policy.maximumMetadataListUTF8Bytes)
   }
 
   public func listModelCapabilities() async throws -> [SignalboxModelCapabilityItem] {
@@ -796,19 +825,23 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         "Imported conversations do not have live session defaults."
       )
     }
-    async let metadata = readMetadata(sessionID: native.sessionID)
-    async let defaults = readDefaults(sessionID: native.sessionID)
+    return try await readSession(sessionID: native.sessionID)
+  }
+
+  public func readSession(sessionID: SignalboxCanonicalUUID) async throws -> SignalboxProcessSession {
+    async let metadata = readMetadata(sessionID: sessionID)
+    async let defaults = readDefaults(sessionID: sessionID)
     let currentMetadata = try await metadata
     let currentDefaults = try await defaults
-    guard currentMetadata.sessionID == native.sessionID,
-      currentDefaults.sessionID == native.sessionID
+    guard currentMetadata.sessionID == sessionID,
+      currentDefaults.sessionID == sessionID
     else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The session read named a different session."
       )
     }
     return SignalboxProcessSession(
-      id: native.sessionID,
+      id: sessionID,
       defaults: currentDefaults,
       metadata: currentMetadata.metadata
     )
@@ -816,7 +849,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
 
   public func readImportedConversation(
     conversation: SignalboxProcessConversation
-  ) async throws -> SignalboxImportedConversationTranscript {
+  ) async throws -> SignalboxImportedConversationInventory {
     guard case .imported(let imported) = conversation.record else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "Native sessions do not have imported transcript entries."
@@ -832,7 +865,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         importedConversationID: imported.importedConversationID
       )
     ) { exchange in
-      var entries: [SignalboxImportedConversationEntry] = []
+      let spool = try SignalboxImportedEntrySpool()
       var entryIDs: Set<SignalboxCanonicalUUID> = []
       var retainedPreviewBytes: UInt = 0
       var started = false
@@ -846,12 +879,12 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
           }
           started = true
         case .importedConversationEntry(let entry) where started:
-          guard entries.count < policy.maximumImportedEntries else {
+          guard spool.count < policy.maximumImportedEntries else {
             throw SignalboxProcessServiceError.invalidPage(
               "The imported transcript exceeded the native entry-retention cap."
             )
           }
-          guard entry.position.rawValue == UInt64(entries.count) + 1 else {
+          guard entry.position.rawValue == UInt64(spool.count) + 1 else {
             throw SignalboxProcessServiceError.invalidPage(
               "Imported transcript positions were not contiguous and one-based."
             )
@@ -871,24 +904,21 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
             )
           }
           retainedPreviewBytes = nextBytes
-          entries.append(entry)
+          try spool.append(entry)
         case .importedConversationEnd(let end) where started:
           guard end.importedConversationID == imported.importedConversationID else {
             throw SignalboxProcessServiceError.invalidPage(
               "The imported transcript end named a different conversation."
             )
           }
-          guard end.entryCount.rawValue == UInt64(entries.count),
+          guard end.entryCount.rawValue == UInt64(spool.count),
             end.entryCount == imported.entryCount
           else {
             throw SignalboxProcessServiceError.invalidPage(
               "The imported transcript count did not match its sequence and summary."
             )
           }
-          return SignalboxImportedConversationTranscript(
-            importedConversationID: imported.importedConversationID,
-            entries: entries
-          )
+          return try spool.finish(importedConversationID: imported.importedConversationID)
         case .protocolError(let error):
           throw remote(error)
         case .unknown(let kind, _, let diagnostic):
@@ -896,7 +926,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
             diagnostic?.message
               ?? "The imported transcript contained an unrecognized \(kind) message."
           )
-        case .sessionCreated, .inputSubmitted, .toolRequestDecided, .sessionDefaults,
+        case .sessionCreated, .inputSubmitted, .toolRequestDecided, .toolDenialOverridden, .sessionDefaults,
           .sessionDefaultsReplaced, .modelCapabilitiesStart, .modelCapabilityItem, .modelCapabilitiesEnd,
           .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,
           .sessionMetadataSummary, .sessionMetadataPageEnd, .sessionMetadata,
@@ -904,7 +934,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
           .conversationImportAlreadyImported, .conversationPageStart,
           .conversationSummary, .conversationPageEnd, .importedConversationStart,
           .importedConversationEntry, .importedConversationEnd, .modelAliasesStart,
-          .modelAliasSummary, .modelAliasesEnd, .transcriptSnapshotStart,
+          .modelAliasSummary, .modelAliasesEnd, .credentialPoolPolicy, .transcriptSnapshotStart,
           .transcriptTurn, .transcriptModelCallUsage, .transcriptModelCallsEnd,
           .transcriptEntry, .transcriptUserEntry, .transcriptTextEntry, .transcriptContent,
           .transcriptSnapshotEnd, .sessionEvent, .providerTextDelta:
@@ -924,17 +954,10 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     conversation: SignalboxProcessConversation
   ) async throws -> SignalboxProcessConversation {
     let session = try await readSession(conversation: conversation)
-    _ = try await setArchived(archived, session: session)
-    guard
-      let refreshed = try await listConversations(includeArchived: true).first(where: {
-        $0.id == conversation.id
-      })
-    else {
-      throw SignalboxProcessServiceError.unexpectedMessage(
-        "The archived conversation was absent from the refreshed unified list."
-      )
-    }
-    return refreshed
+    let updated = try await setArchived(archived, session: session)
+    return SignalboxProcessConversation(summary: .native(.init(
+      sessionID: updated.id, title: updated.title, archived: updated.archived,
+      defaultsVersion: updated.defaultsVersion)))
   }
 
   public func setArchived(
@@ -977,16 +1000,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         "The metadata replacement receipt violated the metadata contract."
       )
     }
-    guard
-      let refreshed = try await listSessions(includeArchived: true).first(where: {
-        $0.id == session.id
-      })
-    else {
-      throw SignalboxProcessServiceError.unexpectedMessage(
-        "The archived session was absent from the refreshed metadata list."
-      )
-    }
-    return refreshed
+    return try await readSession(sessionID: session.id)
   }
 
   public func prepareInputSubmission(
@@ -1104,6 +1118,35 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         return sessionID
       }
     )
+  }
+
+  public func prepareToolDenialOverride(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  ) async throws -> SignalboxPreparedToolDenialOverride {
+    SignalboxPreparedToolDenialOverride(
+      commandID: try commandID(), sessionID: sessionID, toolRequestID: toolRequestID
+    )
+  }
+
+  public func overrideToolDenial(
+    _ prepared: SignalboxPreparedToolDenialOverride
+  ) async throws -> SignalboxCanonicalUUID {
+    let overridden: SignalboxCanonicalUUID = try await mutation(
+      prepared.request,
+      success: { message in
+        guard case .toolDenialOverridden(let toolRequestID) = message else {
+          return nil
+        }
+        return toolRequestID
+      }
+    )
+    guard overridden == prepared.toolRequestID else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The override receipt did not echo the requested tool denial."
+      )
+    }
+    return overridden
   }
 
   public func prepareToolRequestDecision(
@@ -1258,18 +1301,12 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     let nextAfterSessionID: SignalboxCanonicalUUID?
   }
 
-  private struct ConversationPage {
-    let conversations: [SignalboxProcessConversation]
-    let nextAfter: SignalboxConversationCursor?
-    let retainedUTF8Bytes: UInt
-  }
-
   private func conversationPage(
     includeArchived: Bool,
     after cursor: SignalboxConversationCursor?,
     pageSize: SignalboxCanonicalUInt64,
     maximumRetainedUTF8Bytes: UInt
-  ) async throws -> ConversationPage {
+  ) async throws -> SignalboxConversationListPage {
     try await withExchange(
       request: .listConversations(
         titleContains: nil,
@@ -1337,10 +1374,9 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
             // A full terminal page is valid: the server proved no later match
             // existed in the same repeatable-read snapshot.
           }
-          return ConversationPage(
+          return SignalboxConversationListPage(
             conversations: conversations,
-            nextAfter: end.nextAfter,
-            retainedUTF8Bytes: retainedUTF8Bytes
+            nextAfter: end.nextAfter
           )
         case .protocolError(let error):
           throw remote(error)

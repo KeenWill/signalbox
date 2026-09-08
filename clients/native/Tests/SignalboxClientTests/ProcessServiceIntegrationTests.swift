@@ -4,6 +4,339 @@ import XCTest
 
 final class ProcessServiceIntegrationTests: XCTestCase {
   @MainActor
+  func testOlderSessionRevealCannotReplaceTheNewerSelectionCache() async throws {
+    let olderID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let newerID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.archivedSessionID)
+    let olderRead = ControlledProcessExchange()
+    let service = SignalboxProcessService(
+      requester: ControlledSessionRevealRequester(sessionID: olderID, exchange: olderRead),
+      policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    let older = Task { await viewModel.revealSession(olderID) }
+    await olderRead.waitForNextCallCount(1)
+    await viewModel.revealSession(newerID)
+    let selected = try XCTUnwrap(viewModel.nativeConversation(sessionID: newerID))
+
+    await olderRead.send(try ProcessDriverFixture.metadataRead())
+    await older.value
+
+    XCTAssertEqual(viewModel.conversation(id: selected.id), selected)
+    XCTAssertNil(viewModel.nativeConversation(sessionID: olderID))
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
+  func testOlderSessionRevealFailureCannotPublishOverTheNewerSelection() async throws {
+    let olderID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let newerID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.archivedSessionID)
+    let olderRead = ControlledProcessExchange()
+    let service = SignalboxProcessService(
+      requester: ControlledSessionRevealRequester(sessionID: olderID, exchange: olderRead),
+      policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    let older = Task { await viewModel.revealSession(olderID) }
+    await olderRead.waitForNextCallCount(1)
+    await viewModel.revealSession(newerID)
+    let selected = try XCTUnwrap(viewModel.nativeConversation(sessionID: newerID))
+
+    await olderRead.close()
+    await older.value
+
+    XCTAssertEqual(viewModel.conversation(id: selected.id), selected)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  func testMockUnifiedCursorKeepsImportedIdentityAfterItsNativePosition() async throws {
+    let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let identity = try SignalboxCanonicalUUID(validating: MockProcessProtocolFixtures.importedConversationID)
+    let afterNative = try await service.listConversations(includeArchived: true,
+      after: .init(origin: .nativeSession, conversationID: identity))
+
+    XCTAssertEqual(afterNative.conversations.first?.conversationID, identity)
+    XCTAssertEqual(afterNative.conversations.first?.origin, .imported)
+    let afterImported = try await service.listConversations(includeArchived: true,
+      after: .init(origin: .importedConversation, conversationID: identity))
+    XCTAssertFalse(afterImported.conversations.contains { $0.conversationID == identity })
+  }
+
+  @MainActor
+  func testRequestedNativeSessionDoesNotSelectAnImportedUUIDCollision() async throws {
+    let sessionID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let summary = try SignalboxProcessServerFrame.decode(from: Data(
+      #"{"version":1,"request_id":"1","message":{"type":"conversation_summary","conversation":{"origin":"imported_conversation","imported_conversation_id":"\#(sessionID.rawValue)","title":null,"entry_count":"1","source_format":"claude_code_session_jsonl_v1"}}}"#.utf8))
+    let requester = ImportedCollisionRequester(frames: [
+      try ProcessDriverFixture.conversationPageStart(), summary,
+      try ProcessDriverFixture.conversationPageEnd(),
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    await viewModel.refresh()
+    let imported = try XCTUnwrap(viewModel.conversations.first)
+    XCTAssertEqual(imported.conversationID, sessionID)
+    XCTAssertNil(viewModel.nativeConversation(sessionID: sessionID))
+
+    await viewModel.revealSession(sessionID)
+
+    let native = try XCTUnwrap(viewModel.nativeConversation(sessionID: sessionID))
+    XCTAssertEqual(native.origin, .native)
+    XCTAssertEqual(native.conversationID, sessionID)
+    XCTAssertNotEqual(native.id, imported.id)
+    XCTAssertEqual(viewModel.conversation(id: imported.id), imported)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
+  func testConversationRefreshKeepsTheDisplayedPageCursor() async throws {
+    let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let viewModel = ProcessSessionListViewModel { service }
+    await viewModel.refresh()
+    let first = try XCTUnwrap(viewModel.conversations.first)
+    let cursor = try XCTUnwrap(viewModel.nextAfter)
+    XCTAssertEqual(viewModel.conversations.count, 1)
+
+    await viewModel.nextPage()
+    let second = try XCTUnwrap(viewModel.conversations.first)
+    XCTAssertNotEqual(first.id, second.id)
+    XCTAssertEqual(viewModel.pageAfter, cursor)
+    await viewModel.refresh()
+    XCTAssertEqual(viewModel.conversations.first?.id, second.id)
+    XCTAssertEqual(viewModel.pageAfter, cursor)
+    XCTAssertEqual(viewModel.conversations.count, 1)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
+  func testArchiveActionsWaitForThePreviousRowToPublish() async throws {
+    let requester = FirstArchiveSuspendedRequester()
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    await viewModel.refresh()
+    let firstID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let secondID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.approvalSessionID)
+    let first = try XCTUnwrap(viewModel.nativeConversation(sessionID: firstID))
+    let second = try XCTUnwrap(viewModel.nativeConversation(sessionID: secondID))
+
+    let archive = Task { await viewModel.toggleArchive(first) }
+    await requester.firstArchive.waitUntilPaused()
+    XCTAssertTrue(viewModel.isUpdatingArchive)
+    await viewModel.toggleArchive(second)
+    await requester.firstArchive.resume()
+    await archive.value
+
+    XCTAssertEqual(viewModel.nativeConversation(sessionID: firstID)?.archived, true)
+    XCTAssertEqual(viewModel.nativeConversation(sessionID: secondID)?.archived, false)
+    XCTAssertFalse(viewModel.isUpdatingArchive)
+    XCTAssertNil(viewModel.errorMessage)
+
+    await viewModel.toggleArchive(second)
+
+    XCTAssertEqual(viewModel.nativeConversation(sessionID: firstID)?.archived, true)
+    XCTAssertEqual(viewModel.nativeConversation(sessionID: secondID)?.archived, true)
+    XCTAssertFalse(viewModel.isUpdatingArchive)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
+  func testArchiveCompletionPreservesTheNewerPageRefresh() async throws {
+    let requester = SuspendedArchivePaginationRequester()
+    let service = SignalboxProcessService(
+      requester: requester, policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let viewModel = ProcessSessionListViewModel { service }
+    await viewModel.refresh()
+    let first = try XCTUnwrap(viewModel.conversations.first)
+    let next = try XCTUnwrap(viewModel.nextAfter)
+
+    let archive = Task { await viewModel.toggleArchive(first) }
+    await requester.archive.waitUntilPaused()
+    let page = Task { await viewModel.nextPage() }
+    await requester.page.waitUntilPaused()
+    XCTAssertEqual(viewModel.pageAfter, next)
+
+    await requester.archive.resume()
+    await archive.value
+    XCTAssertTrue(viewModel.isLoading)
+    await requester.page.resume()
+    await page.value
+
+    XCTAssertEqual(viewModel.pageAfter, next)
+    XCTAssertEqual(viewModel.conversations.first?.conversationID.rawValue,
+      MockSignalboxFixtures.approvalSessionID)
+    XCTAssertNotEqual(viewModel.conversations.first?.id, first.id)
+    XCTAssertFalse(viewModel.isLoading)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
+  func testArchivedScanStopsAtItsPageBudgetAndCanContinue() async throws {
+    let policy = ProcessDriverFixture.singlePageMetadataPolicy
+    let service = makeService(policy: policy)
+    let viewModel = ProcessSessionListViewModel(policy: policy) { service }
+    viewModel.showArchived = true
+    await viewModel.refresh()
+    XCTAssertTrue(viewModel.visibleConversations.isEmpty)
+    XCTAssertNotNil(viewModel.nextAfter)
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertFalse(viewModel.isLoading)
+
+    while viewModel.visibleConversations.isEmpty, let cursor = viewModel.nextAfter {
+      await viewModel.nextPage()
+      XCTAssertEqual(viewModel.pageAfter, cursor)
+      XCTAssertNil(viewModel.errorMessage)
+    }
+    XCTAssertFalse(viewModel.visibleConversations.isEmpty)
+    XCTAssertTrue(viewModel.visibleConversations.allSatisfy(\.archived))
+  }
+
+  @MainActor
+  func testArchivedPaginationDistinguishesAnExhaustedTail() async throws {
+    let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let viewModel = ProcessSessionListViewModel { service }
+    viewModel.showArchived = true
+    await viewModel.refresh()
+    XCTAssertFalse(viewModel.conversations.isEmpty)
+    XCTAssertNotNil(viewModel.nextAfter)
+
+    await viewModel.nextPage()
+
+    XCTAssertTrue(viewModel.conversations.isEmpty)
+    XCTAssertNil(viewModel.nextAfter)
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertEqual(viewModel.emptyState.title, "No more archived sessions")
+    XCTAssertEqual(viewModel.emptyState.message, "Choose Start over to return to earlier conversations.")
+
+    await viewModel.firstPage()
+    XCTAssertFalse(viewModel.conversations.isEmpty)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
+  func testArchivedFirstScanWithoutMatchesReportsAnEmptyInventory() async throws {
+    let requester = StaticProcessRequester(frames: [
+      try ProcessDriverFixture.conversationPageStart(),
+      try ProcessDriverFixture.importedConversationSummary(
+        sourceFormat: ProcessDriverFixture.unknownImportedSourceFormat),
+      try ProcessDriverFixture.conversationPageEnd(),
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    viewModel.showArchived = true
+
+    await viewModel.refresh()
+
+    XCTAssertTrue(viewModel.conversations.isEmpty)
+    XCTAssertNil(viewModel.nextAfter)
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertEqual(viewModel.emptyState.title, "No archived sessions")
+  }
+
+  @MainActor
+  func testArchiveSelectionFindsMatchingRowsAcrossPages() async throws {
+    let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let viewModel = ProcessSessionListViewModel { service }
+    viewModel.showArchived = true
+    await viewModel.refresh()
+    XCTAssertFalse(viewModel.visibleConversations.isEmpty)
+    XCTAssertTrue(viewModel.visibleConversations.allSatisfy(\.archived))
+    XCTAssertNil(viewModel.errorMessage)
+
+    viewModel.showArchived = false
+    XCTAssertNil(viewModel.pageAfter)
+    await viewModel.refresh()
+    XCTAssertFalse(viewModel.visibleConversations.isEmpty)
+    XCTAssertTrue(viewModel.visibleConversations.allSatisfy { !$0.archived })
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
+  func testImportedDefaultContinuationIncludesEntriesBeyondTheFirstDisplayPage() async throws {
+    let pageSize = SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize.rawValue
+    let total = pageSize + 1
+    let (service, conversation) = try importedPaginationService(aliasesFail: false)
+    let viewModel = ProcessImportedConversationViewModel { service }
+    await viewModel.load(conversation: conversation)
+
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertEqual(viewModel.transcript?.entries.last?.position.rawValue, pageSize)
+    XCTAssertEqual(viewModel.defaultContinuationPosition?.rawValue, total)
+    viewModel.nextEntryPage()
+    XCTAssertEqual(viewModel.transcript?.entries.last?.position.rawValue, total)
+    viewModel.previousEntryPage()
+    XCTAssertEqual(viewModel.defaultContinuationPosition?.rawValue, total)
+    viewModel.replaceServiceProvider { nil }
+    XCTAssertNil(viewModel.defaultContinuationPosition)
+  }
+
+  @MainActor
+  func testImportedEntryNavigationPreservesAliasCatalogFailure() async throws {
+    let (service, conversation) = try importedPaginationService(aliasesFail: true)
+    let viewModel = ProcessImportedConversationViewModel { service }
+    await viewModel.load(conversation: conversation)
+    let aliasError = try XCTUnwrap(viewModel.errorMessage)
+    XCTAssertTrue(aliasError.contains("Alias catalog unavailable."))
+    XCTAssertTrue(viewModel.hasNextPage)
+
+    viewModel.showEntryPage(offset: -1)
+    XCTAssertNotNil(viewModel.entryPageErrorMessage)
+    XCTAssertEqual(viewModel.errorMessage, aliasError)
+    viewModel.nextEntryPage()
+    XCTAssertNil(viewModel.entryPageErrorMessage)
+    XCTAssertEqual(viewModel.errorMessage, aliasError)
+    viewModel.previousEntryPage()
+    XCTAssertEqual(viewModel.errorMessage, aliasError)
+    viewModel.replaceServiceProvider { nil }
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertNil(viewModel.entryPageErrorMessage)
+  }
+
+  private func importedPaginationService(aliasesFail: Bool) throws
+    -> (SignalboxProcessService, SignalboxProcessConversation)
+  {
+    let pageSize = SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize.rawValue
+    let total = pageSize + 1
+    let conversationID = MockProcessProtocolFixtures.importedConversationID
+    let summary = try SignalboxJSONCoding.decoder().decode(SignalboxConversationSummary.self,
+      from: Data(#"{"origin":"imported_conversation","imported_conversation_id":"\#(conversationID)","title":null,"entry_count":"\#(total)","source_format":"claude_code_session_jsonl_v1"}"#.utf8))
+    let conversation = SignalboxProcessConversation(summary: summary)
+    func frame(_ message: String) throws -> SignalboxProcessServerFrame {
+      try SignalboxProcessServerFrame.decode(from: Data(
+        #"{"version":1,"request_id":"1","message":\#(message)}"#.utf8))
+    }
+    var frames = [try ProcessDriverFixture.importedConversationStart(
+      conversationID: conversation.conversationID)]
+    for position in 1...total {
+      // Distinct deterministic identities for the contiguous imported positions.
+      let entryID = String(format: "11111111-1111-4111-8111-%012llx", position)
+      frames.append(try ProcessDriverFixture.importedConversationEntry(
+        position: .init(rawValue: position), entryID: entryID))
+    }
+    frames.append(try frame(
+      #"{"type":"imported_conversation_end","imported_conversation_id":"\#(conversationID)","entry_count":"\#(total)"}"#))
+    let requester = SequencedProcessRequester(pages: [frames, [
+      try frame(#"{"type":"model_aliases_start"}"#),
+      try frame(aliasesFail
+        ? #"{"type":"error","code":"unavailable","message":"Alias catalog unavailable.","detail":null}"#
+        : #"{"type":"model_aliases_end","alias_count":"0"}"#),
+    ]])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    return (service, conversation)
+  }
+
+  func testImportedInventoryDecodesOnlyTheSelectedEntryPage() async throws {
+    let service = makeService()
+    let conversations = try await service.listConversations(includeArchived: true).conversations
+    let imported = try fixtureConversation(MockProcessProtocolFixtures.importedConversationID, in: conversations)
+    let inventory = try await service.readImportedConversation(conversation: imported)
+    let firstPage = try inventory.entries(in: 0..<1)
+    let lastPage = try inventory.entries(in: (inventory.entryCount - 1)..<inventory.entryCount)
+    XCTAssertEqual(firstPage.count, 1)
+    XCTAssertEqual(firstPage.first?.sourceSpeakerLabel, "User")
+    XCTAssertEqual(lastPage.count, 1)
+    XCTAssertEqual(lastPage.first?.sourceSpeakerLabel, "Assistant")
+    XCTAssertNotEqual(firstPage.first?.importedEntryID, lastPage.first?.importedEntryID)
+    XCTAssertThrowsError(try inventory.entries(in: 0..<(inventory.entryCount + 1)))
+  }
+
+  @MainActor
   func testLiveDelegationPublishesItsBoundedPresentation() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -19,15 +352,16 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   /// An imported transcript frontier creates an independent native session.
   func testImportedTranscriptCanContinueAsANativeSession() async throws {
     let service = makeService()
-    let conversations = try await service.listConversations(includeArchived: true)
+    let conversations = try await service.listConversations(includeArchived: true).conversations
     let imported = try fixtureConversation(
       MockProcessProtocolFixtures.importedConversationID,
       in: conversations
     )
-    let transcript = try await service.readImportedConversation(conversation: imported)
+    let inventory = try await service.readImportedConversation(conversation: imported)
+    let entries = try inventory.entries(in: 0..<inventory.entryCount)
     let aliases = try await service.listModelAliases()
     let alias = try XCTUnwrap(aliases.first)
-    let lastPosition = try XCTUnwrap(transcript.entries.last?.position)
+    let lastPosition = try XCTUnwrap(entries.last?.position)
     let prepared = try await service.prepareImportedSessionCreation(
       conversation: imported,
       throughPosition: lastPosition,
@@ -36,22 +370,22 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
 
     let sessionID = try await service.createSessionFromImportedFrontier(prepared)
-    let refreshed = try await service.listConversations(includeArchived: true)
+    let refreshed = try await service.listConversations(includeArchived: true).conversations
     let continued = try fixtureConversation(sessionID.rawValue, in: refreshed)
 
     XCTAssertEqual(
-      transcript.entries.count,
+      entries.count,
       MockProcessProtocolFixtures.importedEntryCount
     )
-    XCTAssertEqual(transcript.entries.first?.sourceSpeakerLabel, "User")
-    XCTAssertEqual(transcript.entries.last?.sourceSpeakerLabel, "Assistant")
+    XCTAssertEqual(entries.first?.sourceSpeakerLabel, "User")
+    XCTAssertEqual(entries.last?.sourceSpeakerLabel, "Assistant")
     XCTAssertEqual(sessionID.rawValue, MockProcessProtocolFixtures.continuedSessionID)
     XCTAssertEqual(continued.origin, .native)
   }
 
   /// Imported transcript inspection rejects a noncontiguous frontier inventory.
   func testImportedTranscriptRejectsANoncontiguousFirstPosition() async throws {
-    let conversations = try await makeService().listConversations(includeArchived: true)
+    let conversations = try await makeService().listConversations(includeArchived: true).conversations
     let imported = try fixtureConversation(
       MockProcessProtocolFixtures.importedConversationID,
       in: conversations
@@ -78,7 +412,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   func testImportedTranscriptCountsUnknownContentKindTowardCapacity() async throws {
-    let conversations = try await makeService().listConversations(includeArchived: true)
+    let conversations = try await makeService().listConversations(includeArchived: true).conversations
     let imported = try fixtureConversation(
       MockProcessProtocolFixtures.importedConversationID,
       in: conversations
@@ -109,7 +443,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   func testImportedTranscriptCountsUnknownAttestedSpeakerTowardCapacity() async throws {
-    let conversations = try await makeService().listConversations(includeArchived: true)
+    let conversations = try await makeService().listConversations(includeArchived: true).conversations
     let imported = try fixtureConversation(
       MockProcessProtocolFixtures.importedConversationID,
       in: conversations
@@ -150,7 +484,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       systemPrompt: ProcessSubmissionFixture.systemPrompt
     )
     let createdSessionID = try await service.createSession(prepared)
-    let conversations = try await service.listConversations(includeArchived: true)
+    let conversations = try await service.listConversations(includeArchived: true).conversations
     let createdConversation = try XCTUnwrap(
       conversations.first {
         $0.conversationID.rawValue == MockProcessProtocolFixtures.createdSessionID
@@ -190,10 +524,39 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
 
     let error = await capturedServiceError {
-      _ = try await service.listConversations(includeArchived: true)
+      _ = try await service.listConversations(includeArchived: true).conversations
     }
 
     XCTAssertEqual(error, ProcessDriverFixture.conversationListTextCapacityError)
+  }
+
+  @MainActor
+  func testArchivePublishesWhenTheInventoryExceedsThePageBudget() async throws {
+    let policy = ProcessDriverFixture.singlePageMetadataPolicy
+    let service = makeService(policy: policy)
+    let viewModel = ProcessSessionListViewModel(policy: policy) { service }
+    await viewModel.refresh()
+    let subject = try XCTUnwrap(viewModel.conversations.first)
+    XCTAssertNotNil(viewModel.nextAfter)
+
+    await viewModel.toggleArchive(subject)
+
+    XCTAssertEqual(viewModel.conversations.first?.id, subject.id)
+    XCTAssertEqual(viewModel.conversations.first?.archived, true)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  func testArchiveReadbackDoesNotConsumeTheInventoryByteBudget() async throws {
+    let service = makeService(policy: ProcessDriverFixture.zeroConversationScalarCapacityPolicy)
+    let sessionID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let subject = try await service.readSession(sessionID: sessionID)
+
+    let updated = try await service.setArchived(true, session: subject)
+
+    XCTAssertEqual(updated.id, subject.id)
+    XCTAssertTrue(updated.archived)
+    XCTAssertEqual(updated.title, subject.title)
+    XCTAssertEqual(updated.tags, subject.tags)
   }
 
   func testArchiveUsesCompleteMetadataReplace() async throws {
@@ -2847,7 +3210,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
   @MainActor
   func testOlderSessionRefreshCannotReplaceNewerServiceResult() async throws {
-    let fixtures = try await makeService().listConversations(includeArchived: true)
+    let fixtures = try await makeService().listConversations(includeArchived: true).conversations
     let olderConversations = [
       try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
     ]
@@ -2876,7 +3239,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   @MainActor
   func testArchiveCommitWinsOverRacingStaleRefresh() async throws {
     let backingService = makeService()
-    let fixtures = try await backingService.listConversations(includeArchived: true)
+    let fixtures = try await backingService.listConversations(includeArchived: true).conversations
     let conversation = try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
     let archived = try await backingService.setConversationArchived(
       true,
@@ -2902,7 +3265,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   @MainActor
   func testReplacingListServiceClearsRowsAndInvalidatesOldArchive() async throws {
     let backingService = makeService()
-    let fixtures = try await backingService.listConversations(includeArchived: true)
+    let fixtures = try await backingService.listConversations(includeArchived: true).conversations
     let conversation = try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
     let archived = try await backingService.setConversationArchived(
       true,
@@ -3103,6 +3466,407 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       submittedActiveTurnIDs,
       [ProcessDriverFixture.turn, ProcessDriverFixture.turn]
     )
+  }
+
+  @MainActor
+  func testOverrideWaitsForTerminalDenialWhileAnotherBatchRequestIsUnresolved() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithLaterUserApproval(
+        modelCallID: ProcessDriverFixture.modelCall, approvalMember: ""
+      )
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    XCTAssertFalse(viewModel.isTerminalDelegateDenied(invocationID))
+
+    await viewModel.overrideToolDenial(invocationID)
+
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testInheritedDelegateDenialCannotBeOverriddenInTheCurrentSession() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(
+        overrideRecorded: false,
+        sourceSessionID: ProcessProjectionFixture.reusedToolSourceSession
+      )
+    ))
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: viewModel.timeline)
+    XCTAssertEqual(tool.status, .denied)
+    XCTAssertEqual(tool.approvalDecider, ProcessProjectionFixture.delegateDenialLabel)
+    XCTAssertFalse(viewModel.isTerminalDelegateDenied(tool.invocationID))
+
+    await viewModel.overrideToolDenial(tool.invocationID)
+
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(tool.invocationID.rawValue))
+  }
+
+  @MainActor
+  func testAmbiguousOverrideRetryReusesPreparedCommandIdentity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithProposedTool()))
+    viewModel.apply(.event(try ProcessProjectionFixture.delegateDenialEvent()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+
+    XCTAssertTrue(viewModel.isTerminalDelegateDenied(invocationID))
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submittedCommandIDs = await service.submittedCommandIDs
+
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testReopenedViewRestoresRecordedOverrideWithoutResubmitting() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: true)
+    ))
+
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertFalse(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
+  func testServiceReplacementRestoresRecordedOverrideFromItsSnapshot() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let original = AmbiguousThenAcceptingToolDecisionProcessService()
+    let replacement = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { original }
+    await viewModel.connect()
+    let snapshot = try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: true)
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+    viewModel.replaceServiceProvider { replacement }
+    await viewModel.connect(replacingService: true)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submitted = await replacement.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
+  func testReopenedViewRestoresConsumedOverrideAsRetired() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithConsumedOverride(overrideRecorded: true)
+    ))
+
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
+  func testRecordedOverrideSnapshotDoesNotRearmAConsumedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    let snapshot = try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: true)
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+    viewModel.apply(.event(try ProcessProjectionFixture.overrideConsumptionEvent()))
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
+  func testOverrideConsumptionEventRetiresArmedMarker() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.event(try ProcessProjectionFixture.overrideConsumptionEvent()))
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+  }
+
+  @MainActor
+  func testOverrideConsumptionSnapshotRetiresArmedMarker() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithConsumedOverride()))
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testOverrideReceiptAfterConsumptionDoesNotRestoreArmedMarker() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    viewModel.apply(.event(try ProcessProjectionFixture.overrideConsumptionEvent()))
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs.count, 1)
+  }
+
+  @MainActor
+  func testLaterUserApprovalRetiresArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval()
+      )
+    )
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+  }
+
+  @MainActor
+  func testLaterClosedAutomaticApprovalRetiresArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithLaterUserApproval(
+      approvalMember: "",
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessProjectionFixture.reconciliationClosedEntry)",
+          "entry":{
+            "type":"tool_closed",
+            "approved_before_close":true,
+            "tool_request_id":"\(ProcessProjectionFixture.closedToolID)",
+            "content":"Closed before execution"
+          }
+        }
+        """
+      ]
+    )))
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testLaterUndecidedClosurePreservesArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithLaterUserApproval(
+      approvalMember: "",
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessProjectionFixture.reconciliationClosedEntry)",
+          "entry":{
+            "type":"tool_closed",
+            "approved_before_close":false,
+            "tool_request_id":"\(ProcessProjectionFixture.closedToolID)",
+            "content":"Closed before execution"
+          }
+        }
+        """
+      ]
+    )))
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertFalse(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testSameRoundApprovalDoesNotRetireArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval(modelCallID: ProcessDriverFixture.modelCall)
+      )
+    )
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testDifferentCommandApprovalDoesNotRetireArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval(toolName: "different_tool")
+      )
+    )
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testDifferentArgumentsApprovalDoesNotRetireArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval(arguments: "{\"different\":true}")
+      )
+    )
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testLaterApprovalEventRetiresArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithLaterUserApproval(approvalMember: "")
+      )
+    )
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.event(try ProcessProjectionFixture.laterUserApprovalEvent()))
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
   }
 
   @MainActor
@@ -3787,6 +4551,46 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
 
     XCTAssertEqual(error, ProcessDriverFixture.incompleteMetadataPageError)
+  }
+
+  func testOverrideReceiptLossRetriesTheSameDurableCommand() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requestID = try SignalboxCanonicalUUID(validating: ProcessProjectionFixture.proposedToolRequest)
+    let prepared = SignalboxPreparedToolDenialOverride(
+      commandID: submission.commandID, sessionID: submission.sessionID, toolRequestID: requestID
+    )
+    let frame = try SignalboxProcessServerFrame.decode(from: Data(
+      #"{"version":1,"request_id":"1","message":{"type":"tool_denial_overridden","tool_request_id":"\#(requestID.rawValue)"}}"#.utf8
+    ))
+    let requester = SequencedProcessRequester(pages: [[], [frame]])
+    let service = SignalboxProcessService(
+      requester: requester, policy: ProcessDriverFixture.oneImmediateMutationRetryPolicy
+    )
+
+    let receipt = try await service.overrideToolDenial(prepared)
+    let openedRequests = await requester.openedRequests
+    let expected = SignalboxProcessClientRequest.overrideDeniedToolRequest(
+      commandID: prepared.commandID, sessionID: prepared.sessionID, toolRequestID: requestID
+    )
+
+    XCTAssertEqual(receipt, requestID)
+    XCTAssertEqual(openedRequests, [expected, expected])
+  }
+
+  func testOverrideRejectsAReceiptForAnotherRequest() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requestID = try SignalboxCanonicalUUID(validating: ProcessProjectionFixture.proposedToolRequest)
+    let prepared = SignalboxPreparedToolDenialOverride(
+      commandID: submission.commandID, sessionID: submission.sessionID, toolRequestID: requestID
+    )
+    let requester = StaticProcessRequester(frames: [try SignalboxProcessServerFrame.decode(from: Data(
+      #"{"version":1,"request_id":"1","message":{"type":"tool_denial_overridden","tool_request_id":"\#(submission.sessionID.rawValue)"}}"#.utf8
+    ))])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+
+    let error = await capturedServiceError { _ = try await service.overrideToolDenial(prepared) }
+
+    XCTAssertEqual(error, .unexpectedMessage("The override receipt did not echo the requested tool denial."))
   }
 
   func testMutationReceiptLossRetriesTheSameDurableCommand() async throws {
@@ -5011,15 +5815,15 @@ private actor SuspendedSessionListProcessService: SignalboxProcessServiceProtoco
   func testConnection() async {}
 
   func listConversations(
-    includeArchived: Bool
-  ) async -> [SignalboxProcessConversation] {
+    includeArchived: Bool, after: SignalboxConversationCursor?
+  ) async -> SignalboxConversationListPage {
     listStarted = true
     listStartedWaiter?.resume()
     listStartedWaiter = nil
     await withCheckedContinuation { continuation in
       completionWaiter = continuation
     }
-    return conversations
+    return SignalboxConversationListPage(conversations: conversations, nextAfter: nil)
   }
 
   func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
@@ -5087,9 +5891,9 @@ private actor SuspendedArchiveProcessService: SignalboxProcessServiceProtocol {
   func testConnection() async {}
 
   func listConversations(
-    includeArchived: Bool
-  ) async -> [SignalboxProcessConversation] {
-    staleConversations
+    includeArchived: Bool, after: SignalboxConversationCursor?
+  ) async -> SignalboxConversationListPage {
+    SignalboxConversationListPage(conversations: staleConversations, nextAfter: nil)
   }
 
   func listSessions(includeArchived: Bool) async -> [SignalboxProcessSession] {
@@ -5397,6 +6201,29 @@ private actor AmbiguousThenAcceptingToolDecisionProcessService:
     _ submission: SignalboxPreparedInputSubmission
   ) async throws -> SignalboxInputSubmitted {
     try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func prepareToolDenialOverride(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  ) async throws -> SignalboxPreparedToolDenialOverride {
+    prepareCallCount += 1
+    let commandID = prepareCallCount == 1
+      ? ProcessSubmissionFixture.commandID : ProcessSubmissionFixture.replacementCommandID
+    return SignalboxPreparedToolDenialOverride(
+      commandID: try SignalboxCommandID(validating: commandID),
+      sessionID: sessionID, toolRequestID: toolRequestID
+    )
+  }
+
+  func overrideToolDenial(
+    _ prepared: SignalboxPreparedToolDenialOverride
+  ) async throws -> SignalboxCanonicalUUID {
+    submittedCommandIDs.append(prepared.commandID.rawValue.rawValue)
+    guard submittedCommandIDs.count > 1 else {
+      throw ProcessSubmissionFixture.ambiguousMutationError
+    }
+    return prepared.toolRequestID
   }
 
   func prepareToolRequestDecision(
@@ -5945,6 +6772,101 @@ private actor OrderedProcessDriverUpdateRecorder {
   }
 }
 
+private actor ProcessRequestSuspension {
+  private var completion: CheckedContinuation<Void, Never>?
+  private var started: CheckedContinuation<Void, Never>?
+
+  func pause() async {
+    await withCheckedContinuation { continuation in
+      completion = continuation
+      started?.resume()
+      started = nil
+    }
+  }
+
+  func waitUntilPaused() async {
+    guard completion == nil else { return }
+    await withCheckedContinuation { continuation in
+      started = continuation
+    }
+  }
+
+  func resume() {
+    completion?.resume()
+    completion = nil
+  }
+}
+
+private actor FirstArchiveSuspendedRequester: SignalboxProcessRequesting {
+  let firstArchive = ProcessRequestSuspension()
+  private var archiveCount = 0
+  private let fallback = SignalboxProcessClient(
+    connectionFactory: MockProcessProtocolConnectionFactory())
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    if case .replaceSessionMetadata = request {
+      archiveCount += 1
+      if archiveCount == 1 {
+        await firstArchive.pause()
+      }
+    }
+    return try await fallback.open(request)
+  }
+}
+
+private struct SuspendedArchivePaginationRequester: SignalboxProcessRequesting {
+  let archive = ProcessRequestSuspension()
+  let page = ProcessRequestSuspension()
+  private let fallback = SignalboxProcessClient(
+    connectionFactory: MockProcessProtocolConnectionFactory())
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    switch request {
+    case .replaceSessionMetadata:
+      await archive.pause()
+    case .listConversations(_, _, _, _, .some):
+      await page.pause()
+    default:
+      break
+    }
+    return try await fallback.open(request)
+  }
+}
+
+private struct ControlledSessionRevealRequester: SignalboxProcessRequesting {
+  let sessionID: SignalboxCanonicalUUID
+  let exchange: ControlledProcessExchange
+  private let fallback = SignalboxProcessClient(
+    connectionFactory: MockProcessProtocolConnectionFactory())
+
+  init(sessionID: SignalboxCanonicalUUID, exchange: ControlledProcessExchange) {
+    self.sessionID = sessionID
+    self.exchange = exchange
+  }
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    if case .readSessionMetadata(let requestedID) = request, requestedID == sessionID {
+      return exchange
+    }
+    return try await fallback.open(request)
+  }
+}
+
+private struct ImportedCollisionRequester: SignalboxProcessRequesting {
+  let frames: [SignalboxProcessServerFrame]
+  private let fallback = SignalboxProcessClient(
+    connectionFactory: MockProcessProtocolConnectionFactory())
+
+  init(frames: [SignalboxProcessServerFrame]) { self.frames = frames }
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    if case .listConversations = request {
+      return StaticProcessExchange(frames: frames)
+    }
+    return try await fallback.open(request)
+  }
+}
+
 private struct StaticProcessRequester: SignalboxProcessRequesting {
   let frames: [SignalboxProcessServerFrame]
 
@@ -6278,6 +7200,14 @@ private enum ProcessDriverFixture {
       """
     )
   }
+  // One page per refresh exposes the continuation boundary between fixture rows.
+  static let singlePageMetadataPolicy = SignalboxProcessApplicationPolicy(
+    metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
+    maximumMetadataPages: 1,
+    ambiguousMutationRetryDelays:
+      SignalboxProcessApplicationPolicy.nativeDefault.ambiguousMutationRetryDelays,
+    synchronization: SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+  )
   static let oneRowMetadataPolicy = SignalboxProcessApplicationPolicy(
     metadataPageSize: SignalboxCanonicalUInt64(rawValue: 1),
     maximumMetadataPages: SignalboxProcessApplicationPolicy.nativeDefault.maximumMetadataPages,
@@ -8301,7 +9231,8 @@ private enum ProcessProjectionFixture {
     turnEvidence: [String],
     usageEvidence: [String],
     approvalMember: String = "",
-    resultEntries: [String] = []
+    resultEntries: [String] = [],
+    sourceSessionID: String = ProcessDriverFixture.session
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -8324,7 +9255,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_text_entry",
           "entry_index":"0",
-          "source_session_id":"\(ProcessDriverFixture.session)",
+          "source_session_id":"\(sourceSessionID)",
           "entry_id":"\(proposedAssistantEntry)",
           "entry":{
             "type":"assistant",
@@ -8346,7 +9277,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_entry",
           "entry_index":"1",
-          "source_session_id":"\(ProcessDriverFixture.session)",
+          "source_session_id":"\(sourceSessionID)",
           "entry_id":"\(proposedToolEntry)",
           "entry":{
             "type":"assistant_tool_use",
@@ -8372,8 +9303,54 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithDelegateDenial() throws -> SignalboxSynchronizationSnapshot {
+  static func snapshotWithConsumedOverride(overrideRecorded: Bool? = nil) throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithProposedTool(
+      turnEvidence: [], usageEvidence: [],
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(closedToolID)",
+            "tool_name":"\(proposedToolName)",
+            "arguments":"{}",
+            "approval":{
+              "decision":{"type":"approve"},
+              "decider":{
+                "type":"user_override",
+                "command_id":"\(ProcessSubmissionFixture.commandID)",
+                "overridden_tool_request_id":"\(proposedToolRequest)"
+              },
+              "rationale":null
+            }
+          }
+        }
+        """
+      ] + (overrideRecorded.map { recorded in
+        [toolDeniedMessage(
+          index: 3, entryID: reconciliationClosedEntry, requestID: proposedToolRequest,
+          overrideRecorded: recorded
+        )]
+      } ?? [])
+    )
+  }
+
+  static func snapshotWithLaterUserApproval(
+    modelCallID: String = laterTurnModelCall,
+    toolName: String = proposedToolName,
+    arguments: String = "{}",
+    approvalMember: String = laterUserApprovalMember,
+    resultEntries: [String] = []
+  ) throws -> SignalboxSynchronizationSnapshot {
+    let encodedArguments = String(decoding: try JSONEncoder().encode(arguments), as: UTF8.self)
+    return try snapshotWithProposedTool(
+      turnEvidence: [], usageEvidence: [],
       approvalMember:
         """
         ,"approval":{
@@ -8385,7 +9362,76 @@ private enum ProcessProjectionFixture {
           },
           "rationale":"\(delegateRationale)"
         }
+        """,
+      resultEntries: [
         """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(modelCallID)",
+            "tool_request_id":"\(closedToolID)",
+            "tool_name":"\(toolName)",
+            "arguments":\(encodedArguments)\(approvalMember)
+          }
+        }
+        """
+      ] + resultEntries
+    )
+  }
+
+  static let laterUserApprovalMember = """
+    ,"approval":{
+      "decision":{"type":"approve"},
+      "decider":{"type":"user","command_id":"\(ProcessSubmissionFixture.commandID)"},
+      "rationale":null
+    }
+    """
+
+  static func laterUserApprovalEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_approval_decided",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "tool_request_id":"\(closedToolID)",
+        "decision":{"type":"approve"},
+        "decider":{"type":"user","command_id":"\(ProcessSubmissionFixture.commandID)"},
+        "rationale":null
+      }
+      """
+    )
+  }
+
+  static func snapshotWithDelegateDenial(
+    overrideRecorded: Bool? = nil,
+    sourceSessionID: String = ProcessDriverFixture.session
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithProposedTool(
+      turnEvidence: [], usageEvidence: [],
+      approvalMember:
+        """
+        ,"approval":{
+          "decision":{"type":"deny","reason":null},
+          "decider":{
+            "type":"delegate",
+            "model_selection_id":"\(delegateModelSelection)",
+            "model_call_id":"\(delegateModelCall)"
+          },
+          "rationale":"\(delegateRationale)"
+        }
+        """,
+      resultEntries: overrideRecorded.map { recorded in
+        [toolDeniedMessage(
+          index: 2, entryID: reconciliationClosedEntry, requestID: proposedToolRequest,
+          overrideRecorded: recorded, sourceSessionID: sourceSessionID
+        )]
+      } ?? [],
+      sourceSessionID: sourceSessionID
     )
   }
 
@@ -10228,6 +11274,7 @@ private enum ProcessProjectionFixture {
                 try! SignalboxCanonicalUUID(validating: $0.key),
                 SignalboxProcessToolRequestPosition(
                   turnID: try! SignalboxCanonicalUUID(validating: $0.value.turnID),
+                  modelCallID: try! SignalboxCanonicalUUID(validating: ProcessDriverFixture.modelCall),
                   entryIndex: SignalboxCanonicalUInt64(rawValue: $0.value.entryIndex),
                   toolName: $0.value.toolName,
                   toolAttemptID: $0.value.toolAttemptID.map {
@@ -10648,6 +11695,7 @@ private enum ProcessProjectionFixture {
           "entry_id":"\(reconciliationClosedEntry)",
           "entry":{
             "type":"tool_closed",
+            "approved_before_close":true,
             "tool_request_id":"\(proposedToolRequest)",
             "content":"\(reconciliationClosedOutput)"
           }
@@ -10761,6 +11809,7 @@ private enum ProcessProjectionFixture {
           "entry_id":"\(reconciliationSuffixResultEntry)",
           "entry":{
             "type":"tool_closed",
+            "approved_before_close":true,
             "tool_request_id":"\(reconciliationSuffixToolRequest)",
             "content":"\(reconciliationClosedOutput)"
           }
@@ -10773,16 +11822,19 @@ private enum ProcessProjectionFixture {
   private static func toolDeniedMessage(
     index: UInt64,
     entryID: String,
-    requestID: String
+    requestID: String,
+    overrideRecorded: Bool = false,
+    sourceSessionID: String = ProcessDriverFixture.session
   ) -> String {
     """
     {
       "type":"transcript_entry",
       "entry_index":"\(index)",
-      "source_session_id":"\(ProcessDriverFixture.session)",
+      "source_session_id":"\(sourceSessionID)",
       "entry_id":"\(entryID)",
       "entry":{
         "type":"tool_denied",
+        "override_recorded":\(overrideRecorded),
         "tool_request_id":"\(requestID)",
         "content":"\(reconciliationDeniedOutput)"
       }
@@ -10847,6 +11899,7 @@ private enum ProcessProjectionFixture {
           "entry_id":"\(reconciliationClosedEntry)",
           "entry":{
             "type":"tool_closed",
+            "approved_before_close":true,
             "tool_request_id":"\(proposedToolRequest)",
             "content":"\(reconciliationClosedOutput)"
           }
@@ -12075,6 +13128,7 @@ extension ProcessServiceIntegrationTests {
 
     let tool = try ProcessProjectionFixture.onlyToolCard(in: viewModel.timeline)
     XCTAssertEqual(tool.status, .denied)
+    XCTAssertFalse(viewModel.isTerminalDelegateDenied(tool.invocationID))
     XCTAssertEqual(tool.decisionReason, nil)
     XCTAssertEqual(tool.approvalDecider, ProcessProjectionFixture.delegateDenialLabel)
     XCTAssertEqual(tool.approvalRationale, ProcessProjectionFixture.delegateRationale)
@@ -12715,6 +13769,25 @@ extension ProcessProjectionFixture {
     )
   }
 
+  static func overrideConsumptionEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_approval_decided",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "tool_request_id":"\(closedToolID)",
+        "decision":{"type":"approve"},
+        "decider":{
+          "type":"user_override",
+          "command_id":"\(ProcessSubmissionFixture.commandID)",
+          "overridden_tool_request_id":"\(proposedToolRequest)"
+        },
+        "rationale":null
+      }
+      """
+    )
+  }
+
   static func delegateDenialEvent() throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
@@ -12874,4 +13947,112 @@ private enum ProcessTimelineFixtureKind: Equatable {
   case processEvidence
   case turnFailure
   case unknown
+}
+
+extension ProcessServiceIntegrationTests {
+  func testPoolEventPublishesOnlyAfterExactTranscriptEvidenceMatches() async throws {
+    let fields = PoolEventValidationFixture.fields
+    for (name, eventFields, expectedEvents) in [
+      ("matching", fields, 1),
+      ("members", fields.replacingOccurrences(of: #""record_generation":"7""#, with: #""record_generation":"8""#), 0),
+      ("attempt", fields.replacingOccurrences(of: ProcessDriverFixture.attempt, with: ProcessDriverFixture.modelCall), 0),
+      ("frontier", fields.replacingOccurrences(of: ProcessDriverFixture.frontier, with: ProcessDriverFixture.modelCall), 0),
+      ("failure entry", fields.replacingOccurrences(of: ProcessDriverFixture.completionEntry, with: ProcessDriverFixture.modelCall), 0),
+    ] {
+      let requester = try PoolEventValidationRequester(eventFields: eventFields)
+      let recorder = PoolEventValidationRecorder()
+      let defaults = SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+      let driver = SignalboxSessionSynchronizationDriver(
+        requester: requester,
+        sessionID: try ProcessDriverFixture.sessionID(),
+        policy: .init(
+          deadlines: defaults.deadlines, retry: .init(delays: []),
+          snapshotCapacity: defaults.snapshotCapacity, eventBufferCapacity: defaults.eventBufferCapacity
+        )
+      ) { await recorder.append($0) }
+      await driver.start()
+      let published = try await recorder.eventsAfterTransportEnds()
+      await driver.stop()
+      XCTAssertEqual(published, expectedEvents, name)
+    }
+  }
+}
+
+private enum PoolEventValidationFixture {
+  // Arbitrary distinct correlations; each mismatch changes one retained terminal fact.
+  static let fields = """
+    "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+    "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+    "failure_entry_id":"\(ProcessDriverFixture.completionEntry)",
+    "pool_policy_id":"77777777-7777-4777-8777-777777777777",
+    "policy_members":["only"],
+    "members":[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":"7"}}]
+    """
+
+  static func frame(_ message: String) throws -> SignalboxProcessServerFrame {
+    try SignalboxProcessServerFrame.decode(
+      from: Data("{\"version\":1,\"request_id\":\"1\",\"message\":\(message)}".utf8)
+    )
+  }
+}
+
+private struct PoolEventValidationRequester: SignalboxProcessRequesting {
+  let follow: [SignalboxProcessServerFrame]
+  let transcript: [SignalboxProcessServerFrame]
+  let policy: SignalboxProcessServerFrame
+
+  init(eventFields: String) throws {
+    follow = [
+      try ProcessDriverFixture.snapshotStart(cursor: 0),
+      try ProcessDriverFixture.modelCallsEnd(),
+      try ProcessDriverFixture.snapshotEnd(cursor: 0),
+      try PoolEventValidationFixture.frame("""
+        {"type":"session_event","session_id":"\(ProcessDriverFixture.session)","cursor":"1",
+         "event":{"type":"turn_credential_pool_exhausted","turn_id":"\(ProcessDriverFixture.turn)",\(eventFields)}}
+        """),
+    ]
+    transcript = [
+      try ProcessDriverFixture.snapshotStart(cursor: 1),
+      try PoolEventValidationFixture.frame("""
+        {"type":"transcript_turn","turn_id":"\(ProcessDriverFixture.turn)","acceptance_position":"1",
+         "state":{"type":"failed_credential_pool_exhausted",\(PoolEventValidationFixture.fields)}}
+        """),
+      try ProcessDriverFixture.modelCallsEnd(),
+      try PoolEventValidationFixture.frame("""
+        {"type":"transcript_snapshot_end","session_id":"\(ProcessDriverFixture.session)",
+         "cursor":"1","turn_count":"1","entry_count":"0"}
+        """),
+    ]
+    policy = try PoolEventValidationFixture.frame(#"{"type":"credential_pool_policy","pool_policy_id":"77777777-7777-4777-8777-777777777777","policy_members":["only"]}"#)
+  }
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    switch request {
+    case .followSession: return StaticProcessExchange(frames: follow)
+    case .readTranscript: return StaticProcessExchange(frames: transcript)
+    case .readCredentialPoolPolicy: return StaticProcessExchange(frames: [policy])
+    default: throw ProcessDriverUpdateRecorderError.unexpectedRequest
+    }
+  }
+}
+
+private actor PoolEventValidationRecorder {
+  private var events = 0
+  private var ended = false
+
+  func append(_ update: SignalboxSessionSynchronizationDriverUpdate) {
+    switch update {
+    case .event: events += 1
+    case .retryLimitReached, .terminalFailure: ended = true
+    default: break
+    }
+  }
+
+  func eventsAfterTransportEnds() async throws -> Int {
+    for _ in 0..<100 {
+      if ended { return events }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    throw ProcessDriverUpdateRecorderError.eventTimeout
+  }
 }
