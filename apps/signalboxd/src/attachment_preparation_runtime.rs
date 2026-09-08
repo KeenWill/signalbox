@@ -83,7 +83,7 @@ where
         }
 
         let mut cancellation = Box::pin(cancellation);
-        let prepared = {
+        let prepared = signalbox_application::with_released_scheduler_admission(async {
             let preparation = prepare_attachments(
                 &self.catalog,
                 self.registry.as_deref(),
@@ -93,11 +93,13 @@ where
             tokio::pin!(preparation);
             tokio::select! {
                 biased;
-                () = &mut cancellation => {
-                    return Ok(ModelCallCapabilityPreparation::Cancelled);
-                }
-                prepared = &mut preparation => prepared,
+                () = &mut cancellation => None,
+                prepared = &mut preparation => Some(prepared),
             }
+        })
+        .await;
+        let Some(prepared) = prepared else {
+            return Ok(ModelCallCapabilityPreparation::Cancelled);
         };
         if let Err(failure) = prepared {
             return Ok(ModelCallCapabilityPreparation::AttachmentFailure(failure));
@@ -149,7 +151,7 @@ where
         }
 
         let mut cancellation = Box::pin(cancellation);
-        let prepared = {
+        let prepared = signalbox_application::with_released_scheduler_admission(async {
             let preparation = prepare_attachments(
                 &self.catalog,
                 self.registry.as_deref(),
@@ -159,11 +161,13 @@ where
             tokio::pin!(preparation);
             tokio::select! {
                 biased;
-                () = &mut cancellation => {
-                    return Ok(ModelCallInputTokenCount::Cancelled);
-                }
-                prepared = &mut preparation => prepared,
+                () = &mut cancellation => None,
+                prepared = &mut preparation => Some(prepared),
             }
+        })
+        .await;
+        let Some(prepared) = prepared else {
+            return Ok(ModelCallInputTokenCount::Cancelled);
         };
         if let Err(failure) = prepared {
             return Ok(attachment_count_failure(failure));
