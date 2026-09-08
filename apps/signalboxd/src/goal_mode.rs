@@ -2767,14 +2767,19 @@ context_window_tokens = 200000
         sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
             .execute(&pool)
             .await?;
+        let need = AutomaticResumption::Scheduled {
+            delay: Some(Duration::ZERO),
+        }
+        .need()?;
         sqlx::query(
             "INSERT INTO goal_event
                 (session_id, event_ordinal, generation, event_kind,
                  blocked_reason, need, scheduler_turn_id)
-             VALUES ($1, 2, 1, 'blocked', 'execution_failure', 'retry the failed turn', $2)",
+             VALUES ($1, 2, 1, 'blocked', 'execution_failure', $3, $2)",
         )
         .bind(session.into_uuid())
         .bind(failed_turn.into_uuid())
+        .bind(need.as_str())
         .execute(&pool)
         .await?;
         let lifecycle =
@@ -2795,8 +2800,12 @@ context_window_tokens = 200000
         let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
             signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
         );
-        let runtime =
-            PostgresGoalPassDisposition::new(pool.clone(), models, nudge, example_numeric_bounds());
+        let runtime = PostgresGoalPassDisposition::new(
+            pool.clone(),
+            models,
+            nudge,
+            GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
+        );
         let blocked = repository
             .load_goal(session)
             .await?
@@ -2805,6 +2814,31 @@ context_window_tokens = 200000
             .last()
             .expect("fixture block exists")
             .ordinal();
+        assert_eq!(
+            repository
+                .pending_owned_execution_failure_with_need(session, &need)
+                .await?,
+            Some(blocked),
+        );
+        let pending = repository
+            .pending_execution_failures_with_need(&need)
+            .await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].session(), session);
+        assert_eq!(pending[0].blocked(), blocked);
+        let resuming = runtime.clone();
+        let mut resume = tokio::spawn(async move {
+            resuming
+                .resume_owned_execution_failure(session, &need)
+                .await;
+        });
+        const PARKED_RESUME_OBSERVATION: Duration = Duration::from_millis(50);
+        const RESUME_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+        assert!(
+            tokio::time::timeout(PARKED_RESUME_OBSERVATION, &mut resume)
+                .await
+                .is_err()
+        );
         assert_eq!(
             runtime.attempt_automatic_resume(session, blocked).await,
             ResumeAttempt::OwnershipDeferred
@@ -2837,10 +2871,7 @@ context_window_tokens = 200000
         .bind(session.into_uuid())
         .execute(&pool)
         .await?;
-        assert_eq!(
-            runtime.attempt_automatic_resume(session, blocked).await,
-            ResumeAttempt::Settled
-        );
+        tokio::time::timeout(RESUME_TEST_TIMEOUT, &mut resume).await??;
         assert!(matches!(
             repository
                 .load_goal(session)
