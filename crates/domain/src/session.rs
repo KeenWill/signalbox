@@ -290,12 +290,27 @@ pub struct CreateSession {
     provenance: SessionCreationProvenance,
     creation_defaults: SessionCreationDefaults,
     placement: SessionPlacement,
+    runner_placement: Option<Box<crate::SessionRunnerPlacementRequest>>,
     start_gate: crate::StartGate,
     ownership: crate::SessionOwnership,
     finish_condition: Option<crate::FinishCondition>,
 }
 
 impl CreateSession {
+    /// Sets the caller's optional runner placement request.
+    pub fn with_runner_placement(
+        mut self,
+        placement: Option<crate::SessionRunnerPlacementRequest>,
+    ) -> Self {
+        self.runner_placement = placement.map(Box::new);
+        self
+    }
+
+    /// Borrows the runner placement retained by this creation command.
+    pub fn runner_placement(&self) -> Option<&crate::SessionRunnerPlacementRequest> {
+        self.runner_placement.as_deref()
+    }
+
     /// Creates the complete payload from its command identity, provenance
     /// facts, and unversioned initial defaults value.
     pub const fn new(
@@ -308,6 +323,7 @@ impl CreateSession {
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
             placement: SessionPlacement::pathless(),
+            runner_placement: None,
             start_gate: crate::StartGate::Open,
             ownership: provenance.cause().default_ownership(),
             finish_condition: provenance.cause().default_finish_condition(),
@@ -326,6 +342,7 @@ impl CreateSession {
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
             placement,
+            runner_placement: None,
             start_gate: crate::StartGate::Open,
             ownership: provenance.cause().default_ownership(),
             finish_condition: provenance.cause().default_finish_condition(),
@@ -348,6 +365,7 @@ impl CreateSession {
                 resolved: resolved_configuration_defaults,
             },
             placement: SessionPlacement::pathless(),
+            runner_placement: None,
             start_gate: crate::StartGate::Open,
             ownership: provenance.cause().default_ownership(),
             finish_condition: provenance.cause().default_finish_condition(),
@@ -370,6 +388,7 @@ impl CreateSession {
                 resolved: resolved_configuration_defaults,
             },
             placement,
+            runner_placement: None,
             start_gate: crate::StartGate::Open,
             ownership: provenance.cause().default_ownership(),
             finish_condition: provenance.cause().default_finish_condition(),
@@ -478,6 +497,7 @@ impl CreateSession {
 impl PartialEq for CreateSession {
     fn eq(&self, other: &Self) -> bool {
         self.provenance == other.provenance
+            && self.runner_placement == other.runner_placement
             && self.placement == other.placement
             && self.start_gate == other.start_gate
             && self.ownership == other.ownership
@@ -505,6 +525,7 @@ impl Eq for CreateSession {}
 impl std::hash::Hash for CreateSession {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.provenance.hash(state);
+        self.runner_placement.hash(state);
         self.placement.hash(state);
         self.start_gate.hash(state);
         self.ownership.hash(state);
@@ -534,9 +555,24 @@ pub struct CreateSessionFromImportedFrontier {
     imported_frontier: ImportedTranscriptFrontier,
     relationship: ImportedSessionRelationship,
     initial_configuration_defaults: SessionConfigurationDefaults,
+    runner_placement: Option<Box<crate::SessionRunnerPlacementRequest>>,
 }
 
 impl CreateSessionFromImportedFrontier {
+    /// Sets the caller's optional runner placement request.
+    pub fn with_runner_placement(
+        mut self,
+        placement: Option<crate::SessionRunnerPlacementRequest>,
+    ) -> Self {
+        self.runner_placement = placement.map(Box::new);
+        self
+    }
+
+    /// Borrows the runner placement retained by this creation command.
+    pub fn runner_placement(&self) -> Option<&crate::SessionRunnerPlacementRequest> {
+        self.runner_placement.as_deref()
+    }
+
     /// Creates the complete canonical caller payload.
     pub const fn new(
         command_id: DurableCommandId,
@@ -549,6 +585,7 @@ impl CreateSessionFromImportedFrontier {
             imported_frontier,
             relationship,
             initial_configuration_defaults,
+            runner_placement: None,
         }
     }
 
@@ -589,6 +626,7 @@ impl CreateSessionFromImportedFrontier {
 impl PartialEq for CreateSessionFromImportedFrontier {
     fn eq(&self, other: &Self) -> bool {
         self.imported_frontier == other.imported_frontier
+            && self.runner_placement == other.runner_placement
             && self.relationship == other.relationship
             && self.initial_configuration_defaults == other.initial_configuration_defaults
     }
@@ -599,6 +637,7 @@ impl Eq for CreateSessionFromImportedFrontier {}
 impl std::hash::Hash for CreateSessionFromImportedFrontier {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.imported_frontier.hash(state);
+        self.runner_placement.hash(state);
         self.relationship.hash(state);
         self.initial_configuration_defaults.hash(state);
     }
