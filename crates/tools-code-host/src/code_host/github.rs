@@ -5,14 +5,15 @@ use std::{collections::HashSet, future::Future, time::Duration};
 use futures_util::StreamExt;
 use reqwest::{
     Client, Method, Response, StatusCode, Url,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, LOCATION, USER_AGENT},
-    redirect::Policy,
+    header::{ACCEPT, LOCATION, USER_AGENT},
+};
+use signalbox_github_transport::{
+    DEFAULT_ACCEPT, GRAPHQL_URL, REST_BASE_URL, ResponseExtent, StatusClass, authenticated_request,
+    authorization, classify_status, has_next_page,
 };
 use signalbox_model_runtime::CredentialValue;
 
-use signalbox_egress_transport::{
-    PublicDestinationClientError, has_more_response_bytes, public_destination_client,
-};
+use signalbox_egress_transport::{PublicDestinationClientError, public_destination_client};
 
 use super::arguments::{MAX_FILE_PATH_BYTES, valid_revision};
 use super::repository_result::{
@@ -35,10 +36,7 @@ use super::{
     ThreadReplyResult, ThreadResolveResult,
 };
 
-const REST_BASE_URL: &str = "https://api.github.com/";
-const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const USER_AGENT_VALUE: &str = "signalboxd";
-const API_VERSION: &str = "2026-03-10";
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 // JSON can encode one source byte as a six-byte Unicode escape.
 const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
@@ -57,7 +55,6 @@ const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_EN
         + MAX_REPOSITORY_SYMLINK_TARGET_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
         + MAX_REPOSITORY_SUBMODULE_URL_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
         + MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES);
-const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const COMMIT_SHA_ACCEPT: &str = "application/vnd.github.sha";
 // A GitHub commit SHA has 40 characters, followed by at most one newline.
 const MAX_COMMIT_SHA_RESPONSE_BYTES: usize = 41;
@@ -237,21 +234,7 @@ impl GitHubCodeHostTransport {
         if bounds.stack_comparisons_in_flight() == Some(0) {
             return Err(GitHubCodeHostConstructionError);
         }
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut client = Client::builder()
-            .tls_backend_rustls()
-            .tls_version_min(reqwest::tls::Version::TLS_1_2)
-            .tls_danger_accept_invalid_certs(false)
-            .tls_danger_accept_invalid_hostnames(false)
-            .no_proxy()
-            .redirect(Policy::none())
-            .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0);
-        if let Some(timeout) = bounds.request_timeout() {
-            client = client.timeout(timeout);
-        }
-        let client = client
-            .build()
+        let client = signalbox_github_transport::client(bounds.request_timeout())
             .map_err(|_| GitHubCodeHostConstructionError)?;
         let rest_base = Url::parse(REST_BASE_URL).map_err(|_| GitHubCodeHostConstructionError)?;
         let graphql_url = Url::parse(GRAPHQL_URL).map_err(|_| GitHubCodeHostConstructionError)?;
@@ -1554,22 +1537,10 @@ impl GitHubCodeHostTransport {
         accept: &'static str,
         credential: &CredentialValue,
     ) -> Result<Response, CodeHostTransportFailure> {
-        let mut authentication = Vec::with_capacity(7 + credential.expose_bytes().len());
-        authentication.extend_from_slice(b"Bearer ");
-        authentication.extend_from_slice(credential.expose_bytes());
-        let mut authentication = HeaderValue::from_bytes(&authentication)
+        let authentication = authorization(credential.expose_bytes())
             .map_err(|_| CodeHostTransportFailure::InvalidCredential)?;
-        authentication.set_sensitive(true);
-        let mut request = self
-            .client
-            .request(method, url)
-            .header(AUTHORIZATION, authentication)
-            .header(ACCEPT, accept)
-            .header("X-GitHub-Api-Version", API_VERSION)
-            .header(USER_AGENT, USER_AGENT_VALUE);
-        if let Some(body) = body {
-            request = request.header(CONTENT_TYPE, "application/json").body(body);
-        }
+        let request = authenticated_request(&self.client, method, url, authentication, body)
+            .header(ACCEPT, accept);
         request
             .send()
             .await
@@ -1616,12 +1587,7 @@ impl GitHubCodeHostTransport {
         expected: StatusCode,
     ) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
         ensure_expected_status(response.status(), expected)?;
-        let completeness = if response
-            .headers()
-            .get(reqwest::header::LINK)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.split(',').any(|link| link.contains("rel=\"next\"")))
-        {
+        let completeness = if has_next_page(response.headers()) {
             CodeHostResultCompleteness::Truncated
         } else {
             CodeHostResultCompleteness::Complete
@@ -1810,12 +1776,7 @@ async fn bounded_json_page(
     limit: usize,
 ) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
     ensure_expected_status(response.status(), expected)?;
-    let completeness = if response
-        .headers()
-        .get(reqwest::header::LINK)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|link| link.contains("rel=\"next\"")))
-    {
+    let completeness = if has_next_page(response.headers()) {
         CodeHostResultCompleteness::Truncated
     } else {
         CodeHostResultCompleteness::Complete
@@ -2143,36 +2104,21 @@ fn omitted_optional_u64(
 pub struct GitHubCodeHostConstructionError;
 
 async fn read_bounded<S, B, E>(
-    mut stream: S,
+    stream: S,
     limit: usize,
 ) -> Result<(Vec<u8>, CodeHostResultCompleteness), CodeHostTransportFailure>
 where
     S: futures_util::Stream<Item = Result<B, E>> + Unpin,
     B: AsRef<[u8]>,
 {
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
-        let chunk = chunk.as_ref();
-        let remaining = limit.saturating_sub(body.len());
-        if chunk.len() > remaining {
-            body.extend_from_slice(&chunk[..remaining]);
-            return Ok((body, CodeHostResultCompleteness::Truncated));
-        }
-        body.extend_from_slice(chunk);
-        if body.len() == limit {
-            let completeness = if has_more_response_bytes(&mut stream)
-                .await
-                .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
-            {
-                CodeHostResultCompleteness::Truncated
-            } else {
-                CodeHostResultCompleteness::Complete
-            };
-            return Ok((body, completeness));
-        }
-    }
-    Ok((body, CodeHostResultCompleteness::Complete))
+    let (body, extent) = signalbox_github_transport::read_bounded(stream, limit)
+        .await
+        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
+    let completeness = match extent {
+        ResponseExtent::Complete => CodeHostResultCompleteness::Complete,
+        ResponseExtent::Truncated => CodeHostResultCompleteness::Truncated,
+    };
+    Ok((body, completeness))
 }
 
 async fn read_optionally_bounded<S, B, E>(
@@ -2203,7 +2149,7 @@ fn ensure_expected_status(
 ) -> Result<(), CodeHostTransportFailure> {
     if status == expected {
         Ok(())
-    } else if status.is_client_error() {
+    } else if classify_status(status.as_u16()) == StatusClass::ClientError {
         Err(CodeHostTransportFailure::Rejected)
     } else {
         Err(CodeHostTransportFailure::DispatchUnknown)
