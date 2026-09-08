@@ -28,9 +28,26 @@ pub struct CreateSessionFromImportedFrontierRequest {
     imported_frontier: ImportedTranscriptFrontier,
     relationship: ImportedSessionRelationship,
     initial_configuration_defaults: SessionConfigurationDefaults,
+    runner_placement: Option<signalbox_domain::SessionRunnerPlacementRequest>,
 }
 
 impl CreateSessionFromImportedFrontierRequest {
+    /// Sets the caller's optional runner placement request.
+    pub fn with_runner_placement(
+        mut self,
+        placement: Option<signalbox_domain::SessionRunnerPlacementRequest>,
+    ) -> Self {
+        self.runner_placement = placement;
+        self
+    }
+
+    /// Borrows the runner placement retained by this creation command.
+    pub const fn runner_placement(
+        &self,
+    ) -> Option<&signalbox_domain::SessionRunnerPlacementRequest> {
+        self.runner_placement.as_ref()
+    }
+
     /// Validates the user-global command identity before any effect.
     pub fn try_new(
         command_id: DurableCommandId,
@@ -50,6 +67,7 @@ impl CreateSessionFromImportedFrontierRequest {
             imported_frontier,
             relationship,
             initial_configuration_defaults,
+            runner_placement: None,
         })
     }
 
@@ -197,7 +215,8 @@ where
             request.imported_frontier,
             request.relationship,
             request.initial_configuration_defaults,
-        );
+        )
+        .with_runner_placement(request.runner_placement);
         let session = self.ids.next_session_id();
         let seed_frontier = self.ids.next_context_frontier_id();
         let ids = &mut self.ids;
