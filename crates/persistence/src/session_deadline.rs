@@ -35,6 +35,8 @@ pub enum SessionDeadlinePassOutcome {
     Idle,
     /// One supported deadline materialized its configured expiry.
     Armed { session: SessionId },
+    /// Admission expired after turn activity, so its deadline was cleared.
+    Superseded { session: SessionId },
     /// Admission expired and the session retired.
     Retired { session: SessionId },
     /// A waiting deadline expired and the live turn was suspended in place.
@@ -186,20 +188,43 @@ impl PostgresSessionDeadlineRepository {
                     .fetch_one(&mut *transaction)
                     .await
                     .map_err(database_failure("lock_admission_scheduler"))?;
-                retire_queued_turns(&mut transaction, session)
-                    .await
-                    .map_err(database_failure("retire_queued_turns"))?;
-                session_lifecycle::close_in_transaction(
-                    &mut transaction,
-                    session,
-                    SessionTerminalOutcome::Retired {
-                        cause: SessionRetirementCause::AdmissionDeadlineExpired,
-                    },
-                    LifecycleActor::Watchdog,
+                // Activation records lineage; retiring queued work does not.
+                let has_activity: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM turn_lifecycle
+                         WHERE session_id = $1 AND start_lineage_kind IS NOT NULL
+                    )",
                 )
+                .bind(candidate)
+                .fetch_one(&mut *transaction)
                 .await
-                .map_err(lifecycle_failure("close_expired_admission"))?;
-                SessionDeadlinePassOutcome::Retired { session }
+                .map_err(database_failure("read_admission_activity"))?;
+                if has_activity {
+                    sqlx::query(
+                        "DELETE FROM session_deadline
+                          WHERE session_id = $1 AND deadline_kind = 'admission'",
+                    )
+                    .bind(candidate)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(database_failure("clear_superseded_admission_deadline"))?;
+                    SessionDeadlinePassOutcome::Superseded { session }
+                } else {
+                    retire_queued_turns(&mut transaction, session)
+                        .await
+                        .map_err(database_failure("retire_queued_turns"))?;
+                    session_lifecycle::close_in_transaction(
+                        &mut transaction,
+                        session,
+                        SessionTerminalOutcome::Retired {
+                            cause: SessionRetirementCause::AdmissionDeadlineExpired,
+                        },
+                        LifecycleActor::Watchdog,
+                    )
+                    .await
+                    .map_err(lifecycle_failure("close_expired_admission"))?;
+                    SessionDeadlinePassOutcome::Retired { session }
+                }
             }
             ("waiting", SessionLifecycleState::Waiting { .. }) => {
                 session_lifecycle::park_in_transaction(
