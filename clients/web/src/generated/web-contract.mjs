@@ -7666,10 +7666,14 @@ function assertTimelineDetailPage(value) {
         if (item.kind !== "tool_approval_decided") {
           fail(`${path}.kind`, "tool_approval_decided for a tool_approval_decision body");
         }
-        if (item.body.approval_judge_escalated && !["user", "user_override"].includes(item.body.actor.type)) {
+        if (
+          item.body.approval_judge_escalated &&
+          !["user", "user_override"].includes(item.body.actor.type) &&
+          !(item.body.actor.type === "policy" && item.body.decision === "deny")
+        ) {
           fail(
             `${path}.body.actor`,
-            "a user actor when the approval judge escalated",
+            "a user actor or policy denial when the approval judge escalated",
           );
         }
         if (
