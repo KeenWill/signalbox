@@ -232,6 +232,8 @@ struct ProcessSettingsOverlayFields: View {
         ForEach(SignalboxFastMode.allCases, id: \.self) { value in
           Text(value.rawValue).tag(SignalboxFastModeOverlay.value(value))
         }
+      } else if overlay.fastMode == .value(.disabled) {
+        Text(SignalboxFastMode.disabled.rawValue).tag(SignalboxFastModeOverlay.value(.disabled))
       }
     }
     Picker("Service tier", selection: $overlay.serviceTier) {
