@@ -90,6 +90,13 @@ def check_core_source(path: Path) -> list[str]:
     return []
 
 
+def check_tool_source(path: Path) -> list[str]:
+    source = path.read_text(encoding="utf-8")
+    if re.search(r"\bPgPool\b", source):
+        return [f"{path}: forbidden tool persistence type PgPool"]
+    return []
+
+
 def main() -> int:
     failures: list[str] = []
     if MODULE_ROOT.is_dir():
@@ -108,6 +115,9 @@ def main() -> int:
                 continue
             if source.suffix in {".rs", ".sql"}:
                 failures.extend(check_core_source(source))
+
+    for source in sorted(ROOT.glob("crates/tools-*/src/**/*.rs")):
+        failures.extend(check_tool_source(source))
 
     if failures:
         print("ownership-seam check failed:", file=sys.stderr)

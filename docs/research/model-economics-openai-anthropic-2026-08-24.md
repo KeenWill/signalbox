@@ -30,6 +30,10 @@ Archived numeric combinations that rely on a launch date plus a later retained
 provider multiplier are marked medium-confidence and carry the limitation on the
 rate record.
 
+Community sources are admitted only for the exact posts whose staff authorship
+is recorded in the source ledger; a provider-owned forum host does not attest
+its users. The o3 and o4-mini launch price tables remain a provenance gap.
+
 Each source has a stable ID, retrieval date, and a short statement of the fact
 for which it was used. Rate and mapping records cite those IDs. The generated
 [source ledger](../../crates/model-reference-catalog/projections/sources.md)
