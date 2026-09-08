@@ -63,8 +63,6 @@ const MAX_CREATE_RESPONSE_BYTES: usize = 65_536;
 const MAX_COMPLETE_RESPONSE_BYTES: usize = 65_536;
 const MAX_UPLOAD_ID_BYTES: usize = 1_024;
 const MAX_ETAG_BYTES: usize = 256;
-// XML-escaped part tags must fit the completion bound even at the part-count ceiling.
-const MAX_MULTIPART_ETAG_BYTES: usize = 40;
 const MAX_COMPLETE_BODY_BYTES: usize = 3 * 1024 * 1024;
 const PUBLICATION_LOCK_STRIPES: usize = 64;
 const NAMESPACE_MARKER_KEY: &str = ".signalbox-blob-namespace-v1";
@@ -471,6 +469,8 @@ impl S3BlobStore {
             pending: None,
         }));
         let mut producer = Some(tokio::spawn(produce_source(source, expected, sender)));
+        let part_count = expected.byte_length().div_ceil(part_bytes) as usize;
+        let mut completion_budget = MultipartCompletionBudget::new(&self.bucket, part_count);
         let mut etags = Vec::new();
         let mut offset = 0_u64;
         let mut part_number = 1_u16;
@@ -503,8 +503,11 @@ impl S3BlobStore {
                 .headers()
                 .get(reqwest::header::ETAG)
                 .and_then(|value| value.to_str().ok())
-                .filter(|value| !value.is_empty() && value.len() <= MAX_MULTIPART_ETAG_BYTES)
+                .filter(|value| !value.is_empty() && value.len() <= MAX_ETAG_BYTES)
                 .ok_or_else(|| BlobStoreError::unavailable("read S3 multipart ETag"))?;
+            if !completion_budget.admit(&self.bucket, etag) {
+                return Err(BlobStoreError::unavailable("bound S3 multipart completion"));
+            }
             etags.push(String::from(etag));
             offset += length;
             part_number = part_number
@@ -979,6 +982,39 @@ async fn require_success(
     } else {
         Err(BlobStoreError::unavailable(operation))
     }
+}
+
+struct MultipartCompletionBudget {
+    single_empty_bytes: usize,
+    total_bytes: usize,
+}
+
+impl MultipartCompletionBudget {
+    fn new(bucket: &Bucket, part_count: usize) -> Self {
+        Self {
+            single_empty_bytes: completion_document_bytes(bucket, std::iter::once("")),
+            total_bytes: completion_document_bytes(bucket, std::iter::repeat_n("", part_count)),
+        }
+    }
+
+    fn admit(&mut self, bucket: &Bucket, etag: &str) -> bool {
+        // The baseline already carries every part number and XML element.
+        // Replacing one empty tag adds exactly the serializer's escaped text.
+        let extra = completion_document_bytes(bucket, std::iter::once(etag))
+            .saturating_sub(self.single_empty_bytes);
+        self.total_bytes = self.total_bytes.saturating_add(extra);
+        self.total_bytes <= MAX_COMPLETE_BODY_BYTES
+    }
+}
+
+fn completion_document_bytes<'a>(
+    bucket: &'a Bucket,
+    etags: impl Iterator<Item = &'a str>,
+) -> usize {
+    bucket
+        .complete_multipart_upload(None, "", "", etags)
+        .body()
+        .len()
 }
 
 async fn send_with_upload_idle_timeout(
@@ -1897,20 +1933,50 @@ mod tests {
     }
 
     #[test]
-    fn maximally_escaped_part_etags_fit_the_complete_document() -> Result<(), Box<dyn Error>> {
+    fn a_long_opaque_etag_fits_a_small_completion() -> Result<(), Box<dyn Error>> {
         let store = S3BlobStore::try_new(
             Url::parse(ENDPOINT)?,
             "fixture-region",
             BUCKET,
             PathBuf::from("/fixture/credentials"),
         )?;
-        let etag = "\"".repeat(super::MAX_MULTIPART_ETAG_BYTES);
-        let etags = std::iter::repeat_n(etag.as_str(), MAX_MULTIPART_PARTS as usize);
-        let complete =
-            store
-                .bucket
-                .complete_multipart_upload(None, "fixture-key", "fixture-upload", etags);
-        assert!(complete.body().len() <= super::MAX_COMPLETE_BODY_BYTES);
+        let etag = "\"".repeat(super::MAX_ETAG_BYTES);
+        let mut budget = super::MultipartCompletionBudget::new(&store.bucket, 1);
+        assert!(budget.admit(&store.bucket, &etag));
+        assert_eq!(
+            budget.total_bytes,
+            super::completion_document_bytes(&store.bucket, std::iter::once(etag.as_str()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_completion_is_refused_before_all_parts_transfer() -> Result<(), Box<dyn Error>> {
+        let store = S3BlobStore::try_new(
+            Url::parse(ENDPOINT)?,
+            "fixture-region",
+            BUCKET,
+            PathBuf::from("/fixture/credentials"),
+        )?;
+        let etag = "\"".repeat(super::MAX_ETAG_BYTES);
+        let part_count = MAX_MULTIPART_PARTS as usize;
+        let mut budget = super::MultipartCompletionBudget::new(&store.bucket, part_count);
+        let admitted = (0..part_count)
+            .take_while(|_| budget.admit(&store.bucket, &etag))
+            .count();
+        assert!(admitted > 0 && admitted < part_count);
+        let accepted_document = std::iter::repeat_n(etag.as_str(), admitted)
+            .chain(std::iter::repeat_n("", part_count - admitted));
+        assert!(
+            super::completion_document_bytes(&store.bucket, accepted_document)
+                <= super::MAX_COMPLETE_BODY_BYTES
+        );
+        let rejected_document = std::iter::repeat_n(etag.as_str(), admitted + 1)
+            .chain(std::iter::repeat_n("", part_count - admitted - 1));
+        assert!(
+            super::completion_document_bytes(&store.bucket, rejected_document)
+                > super::MAX_COMPLETE_BODY_BYTES
+        );
         Ok(())
     }
 
