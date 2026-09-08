@@ -171,8 +171,11 @@ async fn registration_replacement_serializes_later_lease_admission() -> Result<(
         lease_result: Result<Result<(), RunnerProtocolStoreError>, tokio::time::error::Elapsed>,
     }
 
-    let (_container, pool) = migrated_postgres().await?;
-    let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
+    let deadline = tokio::time::Instant::now() + SERIALIZATION_TEST_TIMEOUT;
+    let (_container, pool) = tokio::time::timeout_at(deadline, migrated_postgres())
+        .await
+        .expect("registration replacement fixture setup must finish within its deadline")?;
+    let serialization = tokio::time::timeout_at(deadline, async {
         let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
         let mut blocker = pool.begin().await?;
         sqlx::query(
