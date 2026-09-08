@@ -45,6 +45,48 @@ final class ModelSettingsTests: XCTestCase {
     XCTAssertEqual(fields["dangerous_tool_auto_approval"], .bool(true))
   }
 
+  @MainActor
+  func testDefaultsVersionConflictRefreshesTheNextSaveAndResetsChangedModelChoices() async throws {
+    for refreshedSelection in [SettingsFixture.selectionID, SettingsFixture.otherSelectionID] {
+      let requester = try SettingsRequester(reading: .value(.high))
+      let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+      let viewModel = ProcessModelSettingsViewModel(session: try SettingsFixture.session())
+      await viewModel.load(using: service)
+      viewModel.sessionOverlay.reasoningLevel = .providerDefault
+      let modelChanged = refreshedSelection != SettingsFixture.selectionID
+      let nextReasoning: SignalboxSettingOverlay<SignalboxReasoningLevel> = modelChanged ? .inherit : .providerDefault
+      await requester.append(pages: [
+        [try SettingsFixture.frame(["type": "error", "code": "rejected", "message": "Defaults changed.",
+          "detail": ["type": "defaults_version_mismatch", "session_id": SettingsFixture.sessionID.rawValue,
+            "expected": "1", "current": "2"]])],
+        [try SettingsFixture.defaults(reasoning: .value(.low), version: "2", selectionID: refreshedSelection)],
+        [try SettingsFixture.defaults(reasoning: nextReasoning, version: "3",
+          type: "session_defaults_replaced", selectionID: refreshedSelection)],
+      ])
+
+      let rejected = await viewModel.save(using: service)
+
+      XCTAssertNil(rejected)
+      XCTAssertNotNil(viewModel.errorMessage)
+      XCTAssertEqual(viewModel.defaults?.defaultsVersion.rawValue, 2)
+      XCTAssertEqual(viewModel.selection, .direct(selectionID: refreshedSelection))
+      XCTAssertEqual(viewModel.sessionOverlay.reasoningLevel, nextReasoning)
+      XCTAssertFalse(viewModel.isSaving)
+
+      let installed = await viewModel.save(using: service)
+
+      XCTAssertNil(viewModel.errorMessage)
+      XCTAssertEqual(installed?.defaultsVersion.rawValue, 3)
+      let requests = await requester.openedRequests()
+      let replacements = requests.compactMap { request -> (SignalboxCommandID, UInt64)? in
+        guard case .replaceSessionDefaults(let commandID, let defaults, _, _) = request else { return nil }
+        return (commandID, defaults.defaultsVersion.rawValue)
+      }
+      XCTAssertEqual(replacements.map { $0.1 }, [1, 2])
+      XCTAssertNotEqual(replacements.first?.0, replacements.last?.0)
+    }
+  }
+
   func testCapabilityCatalogRejectsAnIncompleteSequence() async throws {
     let requester = SettingsRequester(pages: [[try SettingsFixture.frame(["type": "model_capabilities_start"]) ]])
     let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
@@ -134,6 +176,7 @@ final class ModelSettingsTests: XCTestCase {
 private enum SettingsFixture {
   static let sessionID = try! SignalboxCanonicalUUID(validating: "11111111-1111-4111-8111-111111111111")
   static let selectionID = try! SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
+  static let otherSelectionID = try! SignalboxCanonicalUUID(validating: "44444444-4444-4444-8444-444444444444")
   static let turnID = try! SignalboxCanonicalUUID(validating: "33333333-3333-4333-8333-333333333333")
   static let systemPrompt = "Preserve this session prompt."
   static let input = "Continue with these settings."
@@ -145,7 +188,7 @@ private enum SettingsFixture {
   }
 
   static func defaults(reasoning: SignalboxSettingOverlay<SignalboxReasoningLevel>, version: String,
-    type: String = "session_defaults") throws -> SignalboxProcessServerFrame {
+    type: String = "session_defaults", selectionID: SignalboxCanonicalUUID = SettingsFixture.selectionID) throws -> SignalboxProcessServerFrame {
     let inherit: [String: Any] = ["kind": "inherit"]
     let inheritedLayer: [String: Any] = ["reasoning_level": inherit, "fast_mode": inherit, "service_tier": inherit]
     let sessionLayer = try JSONSerialization.jsonObject(with: SignalboxJSONCoding.encoder().encode(
@@ -210,6 +253,7 @@ private actor SettingsRequester: SignalboxProcessRequesting {
   }
   func lastRequest() -> SignalboxProcessClientRequest? { requests.last }
   func openedRequests() -> [SignalboxProcessClientRequest] { requests }
+  func append(pages: [[SignalboxProcessServerFrame]]) { self.pages += pages }
 }
 
 private actor SettingsExchange: SignalboxProcessExchange {

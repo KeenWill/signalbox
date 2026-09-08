@@ -75,6 +75,19 @@ final class ProcessModelSettingsViewModel: ObservableObject {
         unresolvedReplacement = nil
       }
       errorMessage = error.localizedDescription
+      if let serviceError = error as? SignalboxProcessServiceError,
+        case .remote(code: .rejected, message: _,
+          detail: .some(.defaultsVersionMismatch(let rejectedSessionID, expected: _, current: _))) = serviceError,
+        rejectedSessionID == sessionID {
+        do {
+          let refreshed = try await service.readDefaults(sessionID: sessionID)
+          if refreshed.modelSelection != defaults.modelSelection {
+            selection = refreshed.modelSelection
+            sessionOverlay = .inheritAll
+          }
+          self.defaults = refreshed
+        } catch { errorMessage = error.localizedDescription }
+      }
       return nil
     }
   }
@@ -117,9 +130,8 @@ struct ProcessModelSettingsScreen: View {
               capabilities: viewModel.capabilities)
             Button("Save session settings") {
               Task {
-                if let defaults = await viewModel.save(using: service) {
-                  installed(defaults)
-                }
+                _ = await viewModel.save(using: service)
+                if let defaults = viewModel.defaults { installed(defaults) }
               }
             }
             .disabled(viewModel.isSaving)
