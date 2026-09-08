@@ -1386,17 +1386,61 @@ fn find_ascii_case_insensitive(text: &str, needle: &str) -> Option<usize> {
         .position(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+fn is_aws_prefix(prefix: &str) -> bool {
+    matches!(prefix, "AKIA" | "ASIA")
+}
+
+fn aws_key_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+// AWS access-key IDs have a four-byte prefix and 16 uppercase alphanumeric bytes.
+fn possible_aws_key_suffix(text: &str, start: usize) -> bool {
+    let suffix = &text[start..];
+    suffix.len() <= 20
+        && !text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(aws_key_word_character)
+        && suffix
+            .bytes()
+            .skip(4)
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+fn complete_aws_key_at(text: &str, start: usize) -> bool {
+    let end = start + 20;
+    text.get(..end)
+        .is_some_and(|prefix| possible_aws_key_suffix(prefix, start))
+        && !text[end..]
+            .chars()
+            .next()
+            .is_some_and(aws_key_word_character)
+}
+
 fn redact_prefixed_token(text: &str, prefix: &str) -> String {
     let mut remaining = text;
     let mut output = String::with_capacity(text.len());
     while let Some(index) = remaining.find(prefix) {
+        if is_aws_prefix(prefix) && !complete_aws_key_at(text, text.len() - remaining.len() + index)
+        {
+            let next = index + prefix.len();
+            output.push_str(&remaining[..next]);
+            remaining = &remaining[next..];
+            continue;
+        }
         output.push_str(&remaining[..index]);
         output.push_str(REDACTED);
-        let token_end = remaining[index..]
-            .find(|character: char| {
-                character.is_whitespace() || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
-            })
-            .map_or(remaining.len(), |length| index + length);
+        let token_end = if is_aws_prefix(prefix) {
+            index + 20
+        } else {
+            remaining[index..]
+                .find(|character: char| {
+                    character.is_whitespace()
+                        || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
+                })
+                .map_or(remaining.len(), |length| index + length)
+        };
         remaining = &remaining[token_end..];
     }
     output.push_str(remaining);
@@ -2173,7 +2217,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.dropped_context_rescan_bytes = 0;
             self.dropped_context_continues_candidate = false;
             self.dropped_context_next_rescan_len = 0;
-            if chained {
+            let suffix = &pending.text[pending.candidate_start..];
+            let incomplete_aws_key = suffix.len() < 20
+                && ["AKIA", "ASIA"]
+                    .iter()
+                    .any(|prefix| prefix.starts_with(suffix) || suffix.starts_with(prefix))
+                && possible_aws_key_suffix(suffix, 0);
+            if !chained && incomplete_aws_key {
+                self.emit_original(pending.fragments);
+            } else if chained {
                 self.emit_redacted(pending.fragments);
             } else if candidate {
                 self.emit_candidate_from_stored_origin(pending);
@@ -2290,7 +2342,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             } else if candidate && (dirty || unfinished_url_password) {
                 self.emit_candidate_from_stored_origin(pending);
             } else {
-                self.emit_original(pending.fragments);
+                self.emit_clean(pending.fragments);
             }
             self.emitted_context.clear();
             self.dropped_context.clear();
@@ -2308,6 +2360,17 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         let (safe, redacted) = split_stream_fragments(pending.fragments, pending.candidate_start);
         self.emit_original(safe);
         self.emit_redacted(redacted);
+    }
+
+    fn emit_clean(&mut self, fragments: Vec<StreamFragment<C>>) {
+        for fragment in fragments {
+            self.emit(
+                fragment.field,
+                fragment.index,
+                fragment.correlation,
+                fragment.text,
+            );
+        }
     }
 
     fn emit_original(&mut self, fragments: Vec<StreamFragment<C>>) {
@@ -2575,7 +2638,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 self.emit_redacted(pending.fragments);
                 self.suppress_remaining();
             }
-            (false, None) => self.emit_original(pending.fragments),
+            (false, None) => self.emit_clean(pending.fragments),
         }
     }
 
@@ -2818,8 +2881,9 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
                         && text.as_bytes()[..marker.len()].eq_ignore_ascii_case(marker.as_bytes()))
             })
         || TOKEN_PREFIXES.iter().any(|prefix| {
-            (text.len() <= prefix.len() && prefix.as_bytes()[..text.len()] == *text.as_bytes())
-                || text.starts_with(prefix)
+            ((text.len() <= prefix.len() && prefix.as_bytes()[..text.len()] == *text.as_bytes())
+                || text.starts_with(prefix))
+                && (!is_aws_prefix(prefix) || possible_aws_key_suffix(text, 0))
         })
         || json_credential_value_at_start(text).is_some()
         || unterminated_json_key_start(text) == Some(0)
@@ -3108,7 +3172,9 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
     }
     for marker in TOKEN_PREFIXES {
         let length = trailing_marker_prefix(text, marker, false);
-        if length > 0 {
+        if length > 0
+            && (!is_aws_prefix(marker) || possible_aws_key_suffix(text, text.len() - length))
+        {
             earliest = Some(earliest.map_or(text.len() - length, |current: usize| {
                 current.min(text.len() - length)
             }));
@@ -3127,10 +3193,15 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
             });
     }
     for prefix in TOKEN_PREFIXES {
-        earliest = unterminated_marker_start(text, prefix, ValueTermination::Token)
-            .map_or(earliest, |start| {
-                Some(earliest.map_or(start, |current| current.min(start)))
-            });
+        let start = if is_aws_prefix(prefix) {
+            text.match_indices(prefix)
+                .find_map(|(start, _)| possible_aws_key_suffix(text, start).then_some(start))
+        } else {
+            unterminated_marker_start(text, prefix, ValueTermination::Token)
+        };
+        earliest = start.map_or(earliest, |start| {
+            Some(earliest.map_or(start, |current| current.min(start)))
+        });
     }
     if let Some(start) = unterminated_json_credential_start(text) {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
@@ -4453,6 +4524,58 @@ mod tests {
                 REDACTED,
                 "unmarked vendor value: {value}"
             );
+        }
+    }
+
+    #[test]
+    fn aws_access_keys_require_a_complete_bounded_token() {
+        for text in [
+            "ASIA Pacific",
+            "EURASIA",
+            "ASIA",
+            "AKIA123",
+            "ASIA1234567890abcdef",
+            "XASIA1234567890ABCDEF",
+            "ASIA1234567890ABCDEFX",
+        ] {
+            assert_eq!(redact_text(text), text);
+        }
+        assert_eq!(redact_text("(ASIA1234567890ABCDEF)."), "([redacted]).");
+        assert_two_delta_split_is_byte_exact("ASIA", " Pacific");
+        assert_two_delta_split_is_byte_exact("EUR", "ASIA");
+        assert_two_delta_split_is_byte_exact("AS", "IA");
+        assert_two_delta_split_is_byte_exact("ASIA1234567890ABCDEF", "X");
+    }
+
+    #[test]
+    fn aws_access_keys_are_redacted_at_every_stream_split() {
+        for value in ["ASIA1234567890ABCDEF", "AKIA1234567890ABCDEF"] {
+            for split in 0..=value.len() {
+                let mut observed = Vec::new();
+                {
+                    let mut sink = RedactingSink::new(&mut observed);
+                    for text in [&value[..split], &value[split..]] {
+                        sink.observe(Observation {
+                            correlation: 7_u8,
+                            fact: ObservationFact::TextDelta {
+                                index: 0,
+                                text: text.to_owned(),
+                            },
+                        });
+                    }
+                    sink.finish();
+                }
+                let emitted = observed
+                    .into_iter()
+                    .map(observation_text)
+                    .collect::<String>();
+                assert!(!emitted.is_empty());
+                assert_eq!(
+                    emitted.replace(REDACTED, ""),
+                    "",
+                    "{value} split at {split}"
+                );
+            }
         }
     }
 
