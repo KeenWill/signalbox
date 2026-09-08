@@ -2747,41 +2747,22 @@ context_window_tokens = 200000
                 |_| None,
             )
             .await?;
-        // Install the execution-failure boundary without running a model provider.
-        sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
-            .execute(&pool)
-            .await?;
-        sqlx::query(
-            "UPDATE turn_lifecycle
-                SET state_kind = 'terminal', start_lineage_kind = 'first_in_session',
-                    immediate_predecessor_turn_id = NULL, starting_frontier_id = $2,
-                    terminal_frontier_id = $3, terminal_disposition_kind = 'failed',
-                    terminal_cause_kind = 'unclassified_failure'
-              WHERE session_id = $1",
-        )
-        .bind(session.into_uuid())
-        .bind(Uuid::now_v7())
-        .bind(Uuid::now_v7())
-        .execute(&pool)
-        .await?;
-        sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
-            .execute(&pool)
+        signalbox_persistence::test_support::seed_failed_goal_turn(&pool, session, failed_turn)
             .await?;
         let need = AutomaticResumption::Scheduled {
             delay: Some(Duration::ZERO),
         }
         .need()?;
-        sqlx::query(
-            "INSERT INTO goal_event
-                (session_id, event_ordinal, generation, event_kind,
-                 blocked_reason, need, scheduler_turn_id)
-             VALUES ($1, 2, 1, 'blocked', 'execution_failure', $3, $2)",
-        )
-        .bind(session.into_uuid())
-        .bind(failed_turn.into_uuid())
-        .bind(need.as_str())
-        .execute(&pool)
-        .await?;
+        assert!(matches!(
+            repository
+                .block_execution_failure(
+                    session,
+                    need.clone(),
+                    signalbox_domain::GoalSchedulerProvenance::new(failed_turn),
+                )
+                .await?,
+            signalbox_persistence::goal::GoalTransitionOutcome::Applied(_)
+        ));
         let lifecycle =
             signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(pool.clone());
         lifecycle
@@ -2855,22 +2836,20 @@ context_window_tokens = 200000
                 .state()
                 .is_parked()
         );
-        let commands: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
-                .bind(automatic_resume_command(session, blocked).into_uuid())
-                .fetch_one(&pool)
-                .await?;
-        assert_eq!(commands, 0);
-        // A module release restores the projection while retaining the blocked goal.
-        sqlx::query(
-            "UPDATE session_lifecycle SET state_kind = 'blocked',
-                blocked_reason = 'execution_failure', blocked_cycle = 1,
-                parked_cause = NULL, parked_responder = NULL, parked_since = NULL
-             WHERE session_id = $1",
-        )
-        .bind(session.into_uuid())
-        .execute(&pool)
-        .await?;
+        assert!(
+            repository
+                .load_command(automatic_resume_command(session, blocked))
+                .await?
+                .is_none()
+        );
+        assert!(
+            signalbox_persistence::test_support::restore_module_park(
+                &pool,
+                session,
+                signalbox_domain::DispatchingModule::RepositoryWatch,
+            )
+            .await?
+        );
         tokio::time::timeout(RESUME_TEST_TIMEOUT, &mut resume).await??;
         assert!(matches!(
             repository
