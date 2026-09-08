@@ -44,7 +44,10 @@ impl RecordingPushTransport {
 }
 
 impl GitPushTransport for RecordingPushTransport {
-    fn push(&mut self, request: GitPushRequest) -> Result<GitPushReceipt, GitPushTransportFailure> {
+    async fn push(
+        &mut self,
+        request: GitPushRequest,
+    ) -> Result<GitPushReceipt, GitPushTransportFailure> {
         let receipt = GitPushReceipt::try_new(request.commit().to_owned())
             .expect("resolved commit forms a receipt");
         *self
@@ -112,8 +115,8 @@ fn push_contract_rejects_a_model_supplied_destination() {
     assert!(decode_push(&injected_destination).is_err());
 }
 
-#[test]
-fn push_resolves_a_real_branch_for_only_the_configured_transport() {
+#[tokio::test]
+async fn push_resolves_a_real_branch_for_only_the_configured_transport() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let initial = repository
@@ -137,6 +140,7 @@ fn push_resolves_a_real_branch_for_only_the_configured_transport() {
 
     let encoded = executor
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
         .expect("synthetic push succeeds");
     let result: serde_json::Value = serde_json::from_str(&encoded).expect("push result is JSON");
     let request = transport.request();
@@ -161,8 +165,8 @@ fn push_resolves_a_real_branch_for_only_the_configured_transport() {
     assert_eq!(result["commit"], fixture.initial.to_string());
 }
 
-#[test]
-fn push_rejects_a_replaced_workspace_before_transport_dispatch() {
+#[tokio::test]
+async fn push_rejects_a_replaced_workspace_before_transport_dispatch() {
     let fixture = Fixture::new();
     let remote = ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL)
         .expect("configured remote is admitted");
@@ -182,6 +186,7 @@ fn push_rejects_a_replaced_workspace_before_transport_dispatch() {
 
     let failure = executor
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
         .expect_err("replacement workspace rejects before dispatch");
 
     assert_eq!(failure, GitPushFailure::Repository);

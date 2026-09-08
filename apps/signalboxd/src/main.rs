@@ -1779,6 +1779,14 @@ async fn run_hub(
         };
         blob_executor = Some(executor);
     }
+    tool_catalog = tool_catalog
+        .with_repository_push(model_configuration.repository_watch())
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Tools(&error),
+            )
+        })?;
     tool_catalog =
         match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
             Ok(catalog) => catalog,
@@ -1964,7 +1972,9 @@ async fn run_hub(
             }
         }
     };
-    tool_executor = tool_executor.with_blob_executor(blob_executor);
+    tool_executor = tool_executor
+        .with_blob_executor(blob_executor)
+        .with_repository_watch(repository_watch_runtime.clone());
     let configuration_reload = signalboxd::configuration_reload::ConfigurationReload::new(
         scheduler_pool.clone(),
         model_configuration.clone(),

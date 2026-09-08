@@ -729,7 +729,10 @@ rerun failed jobs. Neither adapter pushes Git changes. The repository-watch
 credential needs read access for polling and checkout provisioning; it does not
 need push or workflow-write authority. Classic `repo` is broader than read-only
 access, so a fine-grained read credential limits that role to the watched
-repositories.
+repositories. An optional absolute `push_credential_file` on
+`[[repository_watch.repositories]]` supplies a deployment-owned token with push
+authority; each push rereads it through `FileCredentialAccess` and passes
+authorization only in the child environment.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to

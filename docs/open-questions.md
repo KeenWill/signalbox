@@ -364,15 +364,6 @@ questions below remain open.
   remains the owner of placement, sandbox, approval, workspace, credential, and
   generic dispatch behavior; this question cannot redefine those constraints.
   Blocks runner-side tool registry and executor implementation.
-- **Daemon Git push transport.** `git_push_configured` is implemented as a
-  declaration and executor over an injected transport, but no production
-  `GitPushTransport` exists. Remote authority and destination policy are decided
-  and stated under
-  [remote destination authority](spec/git-authority-threat-model.md):
-  destinations are durable records an operator mints, scoped by workspace
-  identity, and `https` only. The credential policy for a push and the
-  production transport itself remain undecided; until they are decided the tool
-  stays absent from the daemon registry. Blocks daemon-side Git push.
 - **Workspace portability between runners.** Moving a session that owns a
   workspace to another runner requires that workspace to exist, or to be
   reconstructible, on the destination. Version one never carries a workspace

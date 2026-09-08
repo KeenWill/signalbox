@@ -5883,3 +5883,28 @@ fn disabling_reconciliation_requires_lossless_nudge_handoff() {
     );
     assert!(HubModelConfiguration::parse(&lossless).is_ok());
 }
+
+#[test]
+fn repository_git_push_requires_an_absolute_file_reference_without_exposing_it() {
+    let push_path = "/unused/push-only-token";
+    let configured = configuration_with_repository_watch().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        &format!(
+            "credential_file = \"{WATCH_CREDENTIAL_FILE}\"\npush_credential_file = \"{push_path}\""
+        ),
+    );
+    let parsed = HubModelConfiguration::parse(&configured).expect("optional push credential");
+    let repositories = parsed.repository_watch().expect("watch").repositories();
+    assert_eq!(
+        repositories[0].push_credential_file(),
+        Some(std::path::Path::new(push_path))
+    );
+    assert_eq!(repositories[1].push_credential_file(), None);
+    assert!(!format!("{:?}", repositories[0]).contains(push_path));
+    assert!(
+        HubModelConfiguration::parse(&configured.replace(push_path, "relative-token")).is_err()
+    );
+    assert!(
+        HubModelConfiguration::parse(&configured.replace(push_path, "/unused/../token")).is_err()
+    );
+}

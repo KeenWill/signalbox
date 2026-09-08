@@ -55,7 +55,7 @@ pub use names::{
     GIT_LOG_NAME, GIT_PUSH_CONFIGURED_NAME, GIT_STAGE_NAME, GIT_STATUS_NAME, LOCAL_GIT_TOOL_NAMES,
 };
 pub use push_arguments::GitPushArguments;
-pub use push_catalog::{GitPushTools, GitPushToolsConstructionError};
+pub use push_catalog::{GitPushTools, GitPushToolsConstructionError, git_push_catalog};
 pub use push_executor::{GitPushExecutor, GitPushExecutorError};
 pub use push_transport::{
     ConfiguredGitRemote, GitPushReceipt, GitPushRequest, GitPushTransport, GitPushTransportFailure,
