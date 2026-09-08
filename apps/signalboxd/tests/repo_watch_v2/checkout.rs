@@ -822,6 +822,7 @@ async fn assert_checkout_keeps_composed_runner(
     let tools = DaemonTools::try_new_production(
         || std::time::SystemTime::UNIX_EPOCH,
         fixture.core.clone(),
+        fixture.sink.eligibility_nudge.clone(),
         MappedDaemonCredentialInputs {
             web_search: credentials.clone(),
             code_host: credentials.clone(),
@@ -1284,9 +1285,14 @@ async fn removal_migration_settles_existing_checkouts_without_inventing_location
         ..sqlx::migrate::Migrator::DEFAULT
     };
     let mut fixture = CheckoutFixture::with_migrator("checkout/project", &parent).await?;
+    let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(fixture.core.clone());
     fixture
         .store
-        .submit_pending(&mut RepositoryWatchCommandCodec, &mut fixture.sink)
+        .submit_pending(
+            &mut RepositoryWatchCommandCodec,
+            &mut fixture.sink,
+            &lifecycle,
+        )
         .await
         .expect("parent command submission");
     fixture
