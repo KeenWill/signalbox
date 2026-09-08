@@ -243,6 +243,9 @@ async fn await_and_report_turn(
         TurnTerminal::Failed => {
             let mut snapshot = transcript_command(client, session_id).await?;
             match snapshot.turn_state(turn_id)? {
+                Some(TurnState::FailedCredentialPoolExhausted { .. }) => {
+                    Err(ClientError::TurnFailed(None))
+                }
                 Some(TurnState::Failed {
                     terminal_model_call,
                     ..
