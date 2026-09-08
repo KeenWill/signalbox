@@ -1132,6 +1132,7 @@ async fn s_goal_goal_owned_input_activates_without_a_user_command() -> Result<()
         dispatched_kind_names(&dispatched),
         [
             "session_created",
+            "session_state_changed",
             "goal_changed",
             "session_ownership_changed",
             "turn_model_settings_resolved",
@@ -1139,12 +1140,12 @@ async fn s_goal_goal_owned_input_activates_without_a_user_command() -> Result<()
         ]
     );
     assert_eq!(dispatched[0].session(), Some(session(SESSION)));
-    let settings = &dispatched[3];
+    let settings = &dispatched[4];
     assert_eq!(settings.session(), Some(session(SESSION)));
     let settings = turn_model_settings_event(settings);
     assert_eq!(settings.accepted_input(), candidates.accepted_input());
     assert_eq!(settings.turn(), candidates.turn());
-    let accepted = &dispatched[4];
+    let accepted = &dispatched[5];
     assert_eq!(accepted.session(), Some(session(SESSION)));
     assert_eq!(
         accepted.kind(),
