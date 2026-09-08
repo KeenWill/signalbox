@@ -1336,6 +1336,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   @Published private(set) var runnerTransition: ProcessRunnerTransition?
   @Published private(set) var isSubmitting = false
   @Published private(set) var isDecidingTool = false
+  @Published private(set) var armedToolDenials: Set<String> = []
   @Published var composerText = ""
   @Published var errorMessage: String?
 
@@ -1347,6 +1348,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var serviceGeneration: UInt64 = 0
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var unresolvedToolDecision: SignalboxPreparedToolRequestDecision?
+  private var unresolvedToolOverride: SignalboxPreparedToolDenialOverride?
   private var unresolvedTurnStop: SignalboxPreparedTurnStop?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var terminalTurnIDs: Set<SignalboxCanonicalUUID> = []
@@ -1552,6 +1554,84 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         unresolvedSubmission = preparedForAttempt
       } else {
         unresolvedSubmission = nil
+      }
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  func isDelegateDenied(_ invocationID: SignalboxToolInvocationID) -> Bool {
+    guard let approval = toolApprovalDecisionsByRequestID[invocationID.rawValue],
+      case .deny = approval.decision,
+      case .delegate = approval.decider
+    else {
+      return false
+    }
+    return true
+  }
+
+  func overrideToolDenial(_ invocationID: SignalboxToolInvocationID) async {
+    guard
+      !isDecidingTool,
+      isDelegateDenied(invocationID),
+      !armedToolDenials.contains(invocationID.rawValue),
+      mutationBlocksByTurnID.isEmpty,
+      let service = connectedService
+    else {
+      return
+    }
+    let generation = serviceGeneration
+    isDecidingTool = true
+    defer {
+      if serviceGeneration == generation {
+        isDecidingTool = false
+      }
+    }
+    var preparedForAttempt: SignalboxPreparedToolDenialOverride?
+    var reusedUnresolvedOverride = false
+    do {
+      let requestID = try SignalboxCanonicalUUID(validating: invocationID.rawValue)
+      let prepared: SignalboxPreparedToolDenialOverride
+      if let unresolvedToolOverride,
+        unresolvedToolOverride.sessionID == session.id,
+        unresolvedToolOverride.toolRequestID == requestID
+      {
+        prepared = unresolvedToolOverride
+        reusedUnresolvedOverride = true
+      } else {
+        unresolvedToolOverride = nil
+        prepared = try await service.prepareToolDenialOverride(
+          sessionID: session.id,
+          toolRequestID: requestID
+        )
+      }
+      preparedForAttempt = prepared
+      guard serviceGeneration == generation else {
+        return
+      }
+      _ = try await service.overrideToolDenial(prepared)
+      guard serviceGeneration == generation else {
+        return
+      }
+      unresolvedToolOverride = nil
+      armedToolDenials.insert(invocationID.rawValue)
+      errorMessage = nil
+    } catch {
+      guard serviceGeneration == generation else {
+        return
+      }
+      if error is CancellationError {
+        unresolvedToolOverride = preparedForAttempt
+      } else if let serviceError = error as? SignalboxProcessServiceError,
+        serviceError.retainsPreparedMutationIdentity
+      {
+        unresolvedToolOverride = preparedForAttempt
+      } else if let openError = error as? SignalboxProcessRequestOpenError,
+        case .definitelyUnsent = openError,
+        reusedUnresolvedOverride
+      {
+        unresolvedToolOverride = preparedForAttempt
+      } else {
+        unresolvedToolOverride = nil
       }
       errorMessage = error.localizedDescription
     }
@@ -2015,6 +2095,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     errorMessage = nil
     unresolvedSubmission = nil
     unresolvedToolDecision = nil
+    unresolvedToolOverride = nil
+    armedToolDenials = []
     streamedText = nil
     materializedAcceptedInputIDs = []
     terminalTurnIDs = []
@@ -2849,18 +2931,35 @@ struct ProcessSessionDetailScreen: View {
     case .message(let message):
       MessageBubble(message: message)
     case .tool(let tool):
-      ToolInvocationCard(
-        tool: tool,
-        decisionAvailable: tool.decisionAvailable && viewModel.canDecideToolRequest,
-        onApprove: {
-          Task {
-            await viewModel.decideToolRequest(tool.invocationID, decision: .approve)
+      VStack(alignment: .leading, spacing: 8) {
+        ToolInvocationCard(
+          tool: tool,
+          decisionAvailable: tool.decisionAvailable && viewModel.canDecideToolRequest,
+          onApprove: {
+            Task {
+              await viewModel.decideToolRequest(tool.invocationID, decision: .approve)
+            }
+          },
+          onDeny: {
+            deniedToolRequest = tool.invocationID
           }
-        },
-        onDeny: {
-          deniedToolRequest = tool.invocationID
+        )
+        if tool.status == .denied && viewModel.isDelegateDenied(tool.invocationID) {
+          if viewModel.armedToolDenials.contains(tool.invocationID.rawValue) {
+            Text("One-shot override armed")
+          } else {
+            Button("Arm one-shot override") {
+              Task { await viewModel.overrideToolDenial(tool.invocationID) }
+            }
+            .buttonStyle(.bordered)
+            .disabled(!viewModel.canDecideToolRequest)
+            .accessibilityIdentifier("override-tool-denial-button")
+          }
+          Text("Applies to a later matching proposal after one extra model round.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
-      )
+      }
     case .processEvidence(let notice):
       ProcessNoticeCard(notice: notice)
     case .turnFailure(let failure):

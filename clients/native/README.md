@@ -28,8 +28,9 @@ REST, WebSocket, or OpenAI-compatible surfaces.
     after an edit.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
-- Approve or deny pending tool requests, and stop an active turn while sending
-  its required successor input.
+- Approve or deny pending tool requests, arm a one-shot override of a delegate
+  denial, and stop an active turn while sending its required successor input. An
+  override applies to a later matching proposal after one extra model round.
 - Create a session by selecting a model alias read from the running daemon and
   optionally supplying a system prompt.
 - Inspect the bounded, read-only entry inventory for an imported conversation

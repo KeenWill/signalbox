@@ -595,6 +595,11 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
     descendantScope: SignalboxDescendantTerminationScope
   )
+  case overrideDeniedToolRequest(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  )
   case decideToolRequest(
     commandID: SignalboxCommandID,
     sessionID: SignalboxCanonicalUUID,
@@ -690,6 +695,11 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
       try container.encode(descendantScope, forKey: "descendant_scope")
       try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+    case .overrideDeniedToolRequest(let commandID, let sessionID, let toolRequestID):
+      try container.encode("override_denied_tool_request", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(toolRequestID, forKey: "tool_request_id")
     case .decideToolRequest(let commandID, let sessionID, let toolRequestID, let decision):
       try container.encode("decide_tool_request", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
@@ -1001,6 +1011,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   )
   case inputSubmitted(SignalboxInputSubmitted)
   case toolRequestDecided(SignalboxToolRequestDecided)
+  case toolDenialOverridden(toolRequestID: SignalboxCanonicalUUID)
   case sessionDefaults(SignalboxSessionDefaultsRead)
   case sessionsStart
   case sessionSummary(SignalboxProcessSessionSummary)
@@ -1084,6 +1095,9 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         )
       case "input_submitted":
         self = .inputSubmitted(try SignalboxInputSubmitted(from: decoder))
+      case "tool_denial_overridden":
+        try tagged.rejectUnadmittedFields(["type", "tool_request_id"], decoder: decoder)
+        self = .toolDenialOverridden(toolRequestID: try decoder.decode("tool_request_id"))
       case "tool_request_decided":
         self = .toolRequestDecided(try SignalboxToolRequestDecided(from: decoder))
       case "session_defaults":

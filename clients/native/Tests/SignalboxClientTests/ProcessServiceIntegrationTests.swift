@@ -2985,6 +2985,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testAmbiguousOverrideRetryReusesPreparedCommandIdentity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithProposedTool()))
+    viewModel.apply(.event(try ProcessProjectionFixture.delegateDenialEvent()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submittedCommandIDs = await service.submittedCommandIDs
+
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
   func testAmbiguousToolDecisionRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -3618,6 +3638,46 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
 
     XCTAssertEqual(error, ProcessDriverFixture.incompleteMetadataPageError)
+  }
+
+  func testOverrideReceiptLossRetriesTheSameDurableCommand() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requestID = try SignalboxCanonicalUUID(validating: ProcessProjectionFixture.proposedToolRequest)
+    let prepared = SignalboxPreparedToolDenialOverride(
+      commandID: submission.commandID, sessionID: submission.sessionID, toolRequestID: requestID
+    )
+    let frame = try SignalboxProcessServerFrame.decode(from: Data(
+      #"{"version":1,"request_id":"1","message":{"type":"tool_denial_overridden","tool_request_id":"\#(requestID.rawValue)"}}"#.utf8
+    ))
+    let requester = SequencedProcessRequester(pages: [[], [frame]])
+    let service = SignalboxProcessService(
+      requester: requester, policy: ProcessDriverFixture.oneImmediateMutationRetryPolicy
+    )
+
+    let receipt = try await service.overrideToolDenial(prepared)
+    let openedRequests = await requester.openedRequests
+    let expected = SignalboxProcessClientRequest.overrideDeniedToolRequest(
+      commandID: prepared.commandID, sessionID: prepared.sessionID, toolRequestID: requestID
+    )
+
+    XCTAssertEqual(receipt, requestID)
+    XCTAssertEqual(openedRequests, [expected, expected])
+  }
+
+  func testOverrideRejectsAReceiptForAnotherRequest() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requestID = try SignalboxCanonicalUUID(validating: ProcessProjectionFixture.proposedToolRequest)
+    let prepared = SignalboxPreparedToolDenialOverride(
+      commandID: submission.commandID, sessionID: submission.sessionID, toolRequestID: requestID
+    )
+    let requester = StaticProcessRequester(frames: [try SignalboxProcessServerFrame.decode(from: Data(
+      #"{"version":1,"request_id":"1","message":{"type":"tool_denial_overridden","tool_request_id":"\#(submission.sessionID.rawValue)"}}"#.utf8
+    ))])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+
+    let error = await capturedServiceError { _ = try await service.overrideToolDenial(prepared) }
+
+    XCTAssertEqual(error, .unexpectedMessage("The override receipt did not echo the requested tool denial."))
   }
 
   func testMutationReceiptLossRetriesTheSameDurableCommand() async throws {
@@ -5101,6 +5161,29 @@ private actor AmbiguousThenAcceptingToolDecisionProcessService:
     _ submission: SignalboxPreparedInputSubmission
   ) async throws -> SignalboxInputSubmitted {
     try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func prepareToolDenialOverride(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  ) async throws -> SignalboxPreparedToolDenialOverride {
+    prepareCallCount += 1
+    let commandID = prepareCallCount == 1
+      ? ProcessSubmissionFixture.commandID : ProcessSubmissionFixture.replacementCommandID
+    return SignalboxPreparedToolDenialOverride(
+      commandID: try SignalboxCommandID(validating: commandID),
+      sessionID: sessionID, toolRequestID: toolRequestID
+    )
+  }
+
+  func overrideToolDenial(
+    _ prepared: SignalboxPreparedToolDenialOverride
+  ) async throws -> SignalboxCanonicalUUID {
+    submittedCommandIDs.append(prepared.commandID.rawValue.rawValue)
+    guard submittedCommandIDs.count > 1 else {
+      throw ProcessSubmissionFixture.ambiguousMutationError
+    }
+    return prepared.toolRequestID
   }
 
   func prepareToolRequestDecision(

@@ -202,6 +202,28 @@ public struct SignalboxPreparedImportedSessionCreation: Equatable, Sendable {
   }
 }
 
+public struct SignalboxPreparedToolDenialOverride: Equatable, Sendable {
+  public let commandID: SignalboxCommandID
+  public let sessionID: SignalboxCanonicalUUID
+  public let toolRequestID: SignalboxCanonicalUUID
+
+  public init(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  ) {
+    self.commandID = commandID
+    self.sessionID = sessionID
+    self.toolRequestID = toolRequestID
+  }
+
+  fileprivate var request: SignalboxProcessClientRequest {
+    .overrideDeniedToolRequest(
+      commandID: commandID, sessionID: sessionID, toolRequestID: toolRequestID
+    )
+  }
+}
+
 public struct SignalboxPreparedToolRequestDecision: Equatable, Sendable {
   public let commandID: SignalboxCommandID
   public let sessionID: SignalboxCanonicalUUID
@@ -311,6 +333,13 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   func createSessionFromImportedFrontier(
     _ creation: SignalboxPreparedImportedSessionCreation
   ) async throws -> SignalboxCanonicalUUID
+  func prepareToolDenialOverride(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  ) async throws -> SignalboxPreparedToolDenialOverride
+  func overrideToolDenial(
+    _ prepared: SignalboxPreparedToolDenialOverride
+  ) async throws -> SignalboxCanonicalUUID
   func prepareToolRequestDecision(
     sessionID: SignalboxCanonicalUUID,
     toolRequestID: SignalboxCanonicalUUID,
@@ -410,6 +439,23 @@ extension SignalboxProcessServiceProtocol {
     _ = creation
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement imported-conversation continuation."
+    )
+  }
+
+  public func prepareToolDenialOverride(
+    sessionID _: SignalboxCanonicalUUID,
+    toolRequestID _: SignalboxCanonicalUUID
+  ) async throws -> SignalboxPreparedToolDenialOverride {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement tool denial overrides."
+    )
+  }
+
+  public func overrideToolDenial(
+    _ prepared: SignalboxPreparedToolDenialOverride
+  ) async throws -> SignalboxCanonicalUUID {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement tool denial overrides."
     )
   }
 
@@ -722,7 +768,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
             diagnostic?.message
               ?? "The imported transcript contained an unrecognized \(kind) message."
           )
-        case .sessionCreated, .inputSubmitted, .toolRequestDecided, .sessionDefaults,
+        case .sessionCreated, .inputSubmitted, .toolRequestDecided, .toolDenialOverridden, .sessionDefaults,
           .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,
           .sessionMetadataSummary, .sessionMetadataPageEnd, .sessionMetadata,
           .sessionMetadataReplaced, .conversationImportInserted,
@@ -925,6 +971,35 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         return sessionID
       }
     )
+  }
+
+  public func prepareToolDenialOverride(
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  ) async throws -> SignalboxPreparedToolDenialOverride {
+    SignalboxPreparedToolDenialOverride(
+      commandID: try commandID(), sessionID: sessionID, toolRequestID: toolRequestID
+    )
+  }
+
+  public func overrideToolDenial(
+    _ prepared: SignalboxPreparedToolDenialOverride
+  ) async throws -> SignalboxCanonicalUUID {
+    let overridden: SignalboxCanonicalUUID = try await mutation(
+      prepared.request,
+      success: { message in
+        guard case .toolDenialOverridden(let toolRequestID) = message else {
+          return nil
+        }
+        return toolRequestID
+      }
+    )
+    guard overridden == prepared.toolRequestID else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The override receipt did not echo the requested tool denial."
+      )
+    }
+    return overridden
   }
 
   public func prepareToolRequestDecision(

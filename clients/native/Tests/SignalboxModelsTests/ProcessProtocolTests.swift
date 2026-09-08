@@ -9,6 +9,32 @@ final class ProcessProtocolTests: XCTestCase {
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"
   private let blobDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+  func testOverrideRequestEncodesTheExactMutationShape() throws {
+    let request = SignalboxProcessClientRequest.overrideDeniedToolRequest(
+      commandID: try SignalboxCommandID(validating: turnID),
+      sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+      toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID)
+    )
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(request)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      #"{"command_id":"\#(turnID)","session_id":"\#(sessionID)","tool_request_id":"\#(toolRequestID)","type":"override_denied_tool_request"}"#
+    )
+  }
+
+  func testOverrideReceiptDecodesItsExactToolRequest() throws {
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: Data(#"{"type":"tool_denial_overridden","tool_request_id":"\#(toolRequestID)"}"#.utf8)
+    )
+
+    XCTAssertEqual(message, .toolDenialOverridden(
+      toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID)
+    ))
+  }
+
   func testToolInadmissibleDecodesItsRequestAndResult() throws {
     let content = "execution_failed: placement_lost"
     let entry = try SignalboxJSONCoding.decoder().decode(
