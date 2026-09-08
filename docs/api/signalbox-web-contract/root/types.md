@@ -1181,8 +1181,8 @@ pub enum WebTimelineCreationCause {
     Interactive {},
     RepositoryWatch { dispatch_id: WebSessionId },
     Commissioned { dispatch_id: WebSessionId },
+    Workflow { program_run_id: WebSessionId },
     Delegated { spawning_request_id: WebSessionId },
-    Workflow { run_id: WebSessionId },
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

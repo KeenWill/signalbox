@@ -4760,6 +4760,23 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "program_run_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "workflow",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "program_run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
               "spawning_request_id": {
                 "$ref": "#/$defs/WebSessionId"
               },
@@ -4771,23 +4788,6 @@ const schemas = {
             "required": [
               "type",
               "spawning_request_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "run_id": {
-                "$ref": "#/$defs/WebSessionId"
-              },
-              "type": {
-                "const": "workflow",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "run_id"
             ],
             "type": "object"
           }

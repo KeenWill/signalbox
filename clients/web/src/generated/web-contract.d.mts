@@ -499,11 +499,11 @@ export type WebTimelineCreationCause = {
   readonly dispatch_id: WebSessionId;
   readonly type: "commissioned";
 } | {
+  readonly program_run_id: WebSessionId;
+  readonly type: "workflow";
+} | {
   readonly spawning_request_id: WebSessionId;
   readonly type: "delegated";
-} | {
-  readonly run_id: WebSessionId;
-  readonly type: "workflow";
 };
 
 export type WebTimelineDelegationDetail = {

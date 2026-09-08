@@ -664,14 +664,14 @@ fn detail_body_dto(
                         }
                     }
                 }
+                signalbox_domain::SessionCreationCause::Workflow { run } => {
+                    signalbox_web_contract::WebTimelineCreationCause::Workflow {
+                        program_run_id: web_uuid(run.run().into_uuid()),
+                    }
+                }
                 signalbox_domain::SessionCreationCause::Delegated { spawning_request } => {
                     signalbox_web_contract::WebTimelineCreationCause::Delegated {
                         spawning_request_id: web_uuid(spawning_request.into_uuid()),
-                    }
-                }
-                signalbox_domain::SessionCreationCause::Workflow { run } => {
-                    signalbox_web_contract::WebTimelineCreationCause::Workflow {
-                        run_id: web_uuid(run.run().into_uuid()),
                     }
                 }
             },

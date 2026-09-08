@@ -301,7 +301,7 @@ const detailContent = (body: DetailBody): ReactNode => {
             ...(body.cause.type === 'delegated'
               ? ([['Spawning request', body.cause.spawning_request_id]] as const)
               : body.cause.type === 'workflow'
-                ? ([['Run', body.cause.run_id]] as const)
+                ? ([['Program run', body.cause.program_run_id]] as const)
                 : body.cause.type === 'interactive'
                   ? []
                   : ([['Dispatch', body.cause.dispatch_id]] as const)),
