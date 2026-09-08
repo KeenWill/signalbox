@@ -6,7 +6,7 @@
 //! method holds a database transaction across provider work.
 
 mod continuation;
-mod credential_pool;
+pub(crate) mod credential_pool;
 #[path = "credential_pool_evidence.rs"]
 mod credential_pool_evidence;
 #[path = "credential_pool_records.rs"]

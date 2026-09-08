@@ -2755,6 +2755,14 @@ fn split_stream_fragments<C: Clone>(
 }
 
 impl<C: Clone> ObservationSink<C> for RedactingSink<'_, C> {
+    fn register_process(
+        &mut self,
+        correlation: C,
+        process_group: u32,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        self.inner.register_process(correlation, process_group)
+    }
+
     fn observe_rate_limits(&mut self, correlation: C, snapshot: crate::RateLimitSnapshot) {
         self.inner.observe_rate_limits(correlation, snapshot);
     }

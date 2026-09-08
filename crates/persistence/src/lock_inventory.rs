@@ -56,6 +56,10 @@
 //!   - `search::SearchRepository::publish`: source kind and artifact identity joined with
 //!     `chr(31)`, before identity checks/write.
 //!
+//! - `credential_invocations::lock_profiles`: capacity rows `FOR UPDATE` in profile byte order,
+//!   after credential action heads. `release_credential_invocation` and
+//!   `guard_credential_invocation_reservation`: the selected profile capacity row `FOR UPDATE`.
+//!
 //! SQL lock sites below name functions in migration files, grouped by family.
 //! Arrows describe acquisition within a function; row sets name their SQL sort
 //! order. Advisory locks are exclusive transaction locks with
@@ -1060,3 +1064,6 @@ pub(crate) const SEARCH_ARTIFACT_IDENTITY: &str = "SELECT pg_advisory_xact_lock(
                      0
                  )
              )";
+
+/// Capacity rows follow all credential action heads in profile byte order.
+pub(crate) const CREDENTIAL_INVOCATION_CAPACITY_LOCK: &str = "SELECT profile FROM credential_invocation_capacity WHERE profile = ANY($1) ORDER BY profile COLLATE \"C\" FOR UPDATE";

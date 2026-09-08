@@ -56,6 +56,7 @@ mod configuration;
 mod context_guard;
 mod convergence_sweep_runtime;
 mod conversation_introspection;
+pub mod credential_invocations;
 mod credential_pools;
 mod daemon_tools;
 mod fenced_database;

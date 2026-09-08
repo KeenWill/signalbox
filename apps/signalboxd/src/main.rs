@@ -1622,9 +1622,32 @@ async fn run_hub(
     };
     let scan_runner_service = runner_service.clone();
     let migration_oauth_registrations = model_configuration.oauth_registrations();
+    let invocation_registrations = model_configuration.credential_invocation_registrations();
     let scan_pool = pool.clone();
     let startup = migrate_scan_then_schedule(
-        install_oauth_registrations(&pool, &migration_oauth_registrations),
+        async {
+            install_oauth_registrations(&pool, &migration_oauth_registrations).await?;
+            let processes = signalboxd::credential_invocations::CredentialInvocationProcesses::new(
+                pool.clone(),
+            );
+            processes.recover().await.map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("credential_invocation_recovery_failed"),
+                )
+            })?;
+            signalbox_persistence::credential_invocations::replace_registrations(
+                &pool,
+                &invocation_registrations,
+            )
+            .await
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("credential_capacity_registration_failed"),
+                )
+            })
+        },
         async move {
             scan_runner_service
                 .mark_orphaned_connections_lost()
@@ -2032,7 +2055,12 @@ async fn run_hub(
             runtime_models.clone(),
             diagnostic_model_identity_limit,
         )
-        .with_text_delta_sink(text_deltas.clone());
+        .with_text_delta_sink(text_deltas.clone())
+        .with_invocation_process_observer(
+            signalboxd::credential_invocations::CredentialInvocationProcesses::new(
+                pass_pool.clone(),
+            ),
+        );
         let counter = AttachmentPreparingModelCallProvider::for_counting(
             provider.clone(),
             pass_pool.clone(),

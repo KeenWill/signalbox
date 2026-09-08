@@ -599,6 +599,15 @@ Member-availability updates and successful exclusion clears grant named waits
 eligibility in their committing transactions; replayed or ineffective clears
 grant none. The scheduler rechecks due deadlines and eligible waits.
 
+A contended wait additionally retains the complete bounded-member set and each
+member's invocation reservations. Admission locks capacity rows in profile byte
+order after every credential action head and retains them through counting,
+selection, wait insertion or rewrite, and commit. Reservation release holds the
+member's capacity row through its wait-eligibility update. A reservation records
+the process group before request delivery; completion and startup release it
+only after proving that group absent, or without a process when dispatch is
+proven unsent.
+
 Runner replacement and abandonment commit the placement move, terminal command
 result, and one runner-state-transition event per affected session atomically.
 Pinned replacement also appends its reference-only placement entry and checked
@@ -640,7 +649,7 @@ retaining registration and history.
   [persistence-protocol design](../design/persistence-protocol.md).
 - Instruction admitted-set storage and its locks:
   [persistence-protocol design](../design/persistence-protocol.md).
-- Credential-pool state, capacity reservations, and availability-wait storage:
+- Credential-pool action-head and cursor storage:
   [persistence-protocol design](../design/persistence-protocol.md).
 - A producer for the session-state-changed outbox event:
   [persistence-protocol design](../design/persistence-protocol.md).

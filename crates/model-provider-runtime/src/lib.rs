@@ -901,15 +901,33 @@ impl ClassifyOperatorFailure for RuntimeModelCallProviderError {
     }
 }
 
+/// Retains invocation process identity and releases its durable capacity.
+pub trait InvocationProcessObserver: Send + Sync {
+    /// Persists a process group before the child receives its request.
+    fn register(
+        &self,
+        call: ModelCallId,
+        process_group: u32,
+    ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + '_>>;
+    /// Reconciles capacity after runtime execution has completed cleanup.
+    fn finished(
+        &self,
+        call: ModelCallId,
+        proven_unsent: bool,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
 /// Application-port adapter over one provider-neutral model runtime.
 pub struct RuntimeModelCallProvider<R> {
     runtime: Arc<R>,
     models: RuntimeModelCatalog,
     text_deltas: Arc<dyn ProviderTextDeltaSink>,
     diagnostic_model_identity_limit: Option<usize>,
+    invocation_processes: Option<Arc<dyn InvocationProcessObserver>>,
 }
 
 struct AcceptanceObservations<AcceptancePossible, Correlation> {
+    invocation_processes: Option<Arc<dyn InvocationProcessObserver>>,
     expected_correlation: Correlation,
     correlation_mismatch: bool,
     acceptance_possible: Option<AcceptancePossible>,
@@ -932,6 +950,25 @@ where
     AcceptancePossible: FnOnce(),
     Correlation: PartialEq,
 {
+    fn register_process(
+        &mut self,
+        correlation: Correlation,
+        process_group: u32,
+    ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+        if correlation != self.expected_correlation {
+            self.correlation_mismatch = true;
+            return Box::pin(async { false });
+        }
+        let observer = self.invocation_processes.clone();
+        let call = self.telemetry.call;
+        Box::pin(async move {
+            match observer {
+                Some(observer) => observer.register(call, process_group).await,
+                None => true,
+            }
+        })
+    }
+
     fn observe_rate_limits(
         &mut self,
         correlation: Correlation,
@@ -995,8 +1032,18 @@ impl<R> RuntimeModelCallProvider<R> {
             runtime: Arc::new(runtime),
             models,
             text_deltas: Arc::new(DiscardProviderTextDeltas),
+            invocation_processes: None,
             diagnostic_model_identity_limit,
         }
+    }
+
+    /// Connects spawned invocations to their durable capacity reservations.
+    pub fn with_invocation_process_observer(
+        mut self,
+        observer: impl InvocationProcessObserver + 'static,
+    ) -> Self {
+        self.invocation_processes = Some(Arc::new(observer));
+        self
     }
 
     /// Delivers already-redacted provider text observations to an ephemeral
@@ -1016,6 +1063,7 @@ impl<R> Clone for RuntimeModelCallProvider<R> {
             runtime: Arc::clone(&self.runtime),
             models: self.models.clone(),
             text_deltas: Arc::clone(&self.text_deltas),
+            invocation_processes: self.invocation_processes.clone(),
             diagnostic_model_identity_limit: self.diagnostic_model_identity_limit,
         }
     }
@@ -1348,6 +1396,7 @@ where
             ));
         }
         let mut observations = AcceptanceObservations {
+            invocation_processes: self.invocation_processes.clone(),
             expected_correlation: correlation,
             correlation_mismatch: false,
             acceptance_possible: Some(acceptance_possible),
@@ -1369,6 +1418,14 @@ where
                 CancellationSignal::when(cancellation),
             )
             .await;
+        if let Some(observer) = &self.invocation_processes {
+            observer
+                .finished(
+                    correlation,
+                    matches!(report.evidence, TerminalEvidence::ProvenUnsent(_)),
+                )
+                .await;
+        }
         require_correlation(telemetry, report.correlation)?;
         if observations.correlation_mismatch {
             return Err(fail_closed(
@@ -2429,6 +2486,7 @@ mod tests {
 
     fn capacity_sink() -> AcceptanceObservations<fn(), ModelCallId> {
         AcceptanceObservations {
+            invocation_processes: None,
             expected_correlation: call(),
             correlation_mismatch: false,
             acceptance_possible: None,
@@ -2948,6 +3006,7 @@ mod tests {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
+            invocation_processes: None,
             expected_correlation: call(),
             correlation_mismatch: false,
             acceptance_possible: Some(move || {
@@ -2985,6 +3044,7 @@ mod tests {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
+            invocation_processes: None,
             expected_correlation: call(),
             correlation_mismatch: false,
             acceptance_possible: Some(move || {
@@ -3030,6 +3090,7 @@ mod tests {
         let expected_text = String::from("already [redacted]");
         let recorded = RecordedTextDeltas::default();
         let mut sink = AcceptanceObservations {
+            invocation_processes: None,
             expected_correlation: expected_call,
             correlation_mismatch: false,
             acceptance_possible: Some(|| {}),

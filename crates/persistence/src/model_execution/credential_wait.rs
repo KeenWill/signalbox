@@ -12,6 +12,24 @@ use sqlx::types::time::OffsetDateTime;
 pub(super) struct WaitSnapshot {
     pub(super) members: Vec<Vec<Candidate>>,
     pub(super) target: ResolvedProviderTarget,
+    pub(super) bounded: Vec<crate::credential_invocations::BoundedMember>,
+}
+
+impl WaitSnapshot {
+    fn cause(&self) -> CredentialAvailabilityWaitCause {
+        if self.bounded.is_empty() {
+            CredentialAvailabilityWaitCause::Exhausted
+        } else {
+            CredentialAvailabilityWaitCause::Contended
+        }
+    }
+    fn cause_name(&self) -> &'static str {
+        if self.bounded.is_empty() {
+            "exhausted"
+        } else {
+            "contended"
+        }
+    }
 }
 
 fn member_deadline(exclusions: &[Candidate]) -> Option<i64> {
@@ -37,15 +55,16 @@ fn selects_wait(members: &[Vec<Candidate>]) -> bool {
         })
 }
 
-pub(super) async fn exhaustion_snapshot(
+pub(super) async fn admission_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
     policy: &CredentialPoolRuntimePolicy,
     target: ResolvedProviderTarget,
     excluded: &super::credential_pool::DurablePoolExclusions,
+    bounded: Vec<crate::credential_invocations::BoundedMember>,
 ) -> Result<Option<WaitSnapshot>, ModelCallRepositoryError> {
-    if policy.on_pool_exhausted != CredentialPoolRuntimeExhaustion::Park {
+    if bounded.is_empty() && policy.on_pool_exhausted != CredentialPoolRuntimeExhaustion::Park {
         return Ok(None);
     }
     let members = credential_pool_evidence::snapshot(
@@ -57,7 +76,13 @@ pub(super) async fn exhaustion_snapshot(
         &excluded.headroom,
     )
     .await?;
-    Ok(selects_wait(&members).then_some(WaitSnapshot { members, target }))
+    Ok(
+        (!bounded.is_empty() || selects_wait(&members)).then_some(WaitSnapshot {
+            members,
+            target,
+            bounded,
+        }),
+    )
 }
 
 pub(super) async fn park_initial(
@@ -77,7 +102,7 @@ pub(super) async fn park_initial(
     let wait = CredentialAvailabilityWait::new(
         ended.id(),
         execution.admission_snapshot().frontier().snapshot(),
-        CredentialAvailabilityWaitCause::Exhausted,
+        snapshot.cause(),
     );
     let predecessor: Option<(Uuid, bool)> = sqlx::query_as("SELECT predecessor_model_call_id, non_acceptance_proven FROM credential_pool_availability_successor WHERE successor_turn_attempt_id = $1")
         .bind(ended.id().into_uuid()).fetch_optional(&mut *connection).await?;
@@ -90,18 +115,23 @@ pub(super) async fn park_initial(
         .map(|millis| OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000))
         .transpose()
         .map_err(|_| ModelCallCorruption::Inconsistent("credential wait deadline"))?;
-    sqlx::query("INSERT INTO credential_availability_wait (wait_attempt_id, session_id, turn_id, frontier_id, pool_policy_id, effective_target_id, cause, deadline, predecessor_model_call_id, predecessor_non_acceptance_proven) VALUES ($1,$2,$3,$4,$5,$6,'exhausted',$7,$8,$9)")
+    sqlx::query("INSERT INTO credential_availability_wait (wait_attempt_id, session_id, turn_id, frontier_id, pool_policy_id, effective_target_id, cause, deadline, predecessor_model_call_id, predecessor_non_acceptance_proven) VALUES ($1,$2,$3,$4,$5,$6,$10,$7,$8,$9)")
         .bind(ended.id().into_uuid()).bind(execution.session().into_uuid()).bind(execution.turn().into_uuid())
-        .bind(wait.frontier().into_uuid()).bind(policy_id).bind(snapshot.target.identity().into_uuid()).bind(deadline).bind(predecessor.map(|(call, _)| call)).bind(predecessor.map(|(_, proof)| proof))
+        .bind(wait.frontier().into_uuid()).bind(policy_id).bind(snapshot.target.identity().into_uuid()).bind(deadline).bind(predecessor.map(|(call, _)| call)).bind(predecessor.map(|(_, proof)| proof)).bind(snapshot.cause_name())
         .execute(&mut *connection).await?;
     for (ordinal, (member, exclusions)) in
         policy.members().iter().zip(&snapshot.members).enumerate()
     {
         let ordinal = i32::try_from(ordinal)
             .map_err(|_| ModelCallCorruption::Inconsistent("credential wait ordinal"))?;
-        sqlx::query("INSERT INTO credential_availability_wait_member (wait_attempt_id, pool_policy_id, ordinal, profile, exclusions) VALUES ($1,$2,$3,$4,$5)")
+        let bounded = snapshot
+            .bounded
+            .iter()
+            .find(|bounded| bounded.profile == member.credential_reference());
+        sqlx::query("INSERT INTO credential_availability_wait_member (wait_attempt_id, pool_policy_id, ordinal, profile, exclusions, capacity_bound, reservation_ids) VALUES ($1,$2,$3,$4,$5,$6,$7)")
             .bind(ended.id().into_uuid()).bind(policy_id).bind(ordinal).bind(member.credential_reference())
             .bind(serde_json::to_value(exclusions).map_err(|_| ModelCallCorruption::Inconsistent("credential wait exclusions"))?)
+            .bind(bounded.map(|bounded| bounded.bound)).bind(bounded.map_or(&[][..], |bounded| bounded.reservations.as_slice()))
             .execute(&mut *connection).await?;
     }
     super::persist_disposition::persist_ended_attempt(
@@ -182,6 +212,15 @@ pub(super) async fn prepare_release(
         credential_pool_records::load_policy(connection, waiting.try_get("pool_policy_id")?)
             .await?;
     super::credential_pool::lock_credential_pool_action_heads(connection, &policy).await?;
+    crate::credential_invocations::lock_profiles(
+        connection,
+        &policy
+            .members()
+            .iter()
+            .map(CredentialPoolRuntimeMember::credential_reference)
+            .collect::<Vec<_>>(),
+    )
+    .await?;
     sqlx::query("SAVEPOINT credential_wait_admission")
         .execute(&mut *connection)
         .await?;
@@ -242,23 +281,28 @@ pub(super) async fn prepare_release(
             .map(|millis| OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000))
             .transpose()
             .map_err(|_| ModelCallCorruption::Inconsistent("credential wait deadline"))?;
-        sqlx::query("UPDATE credential_availability_wait SET eligible = false, cause = 'exhausted', deadline = $2 WHERE wait_attempt_id = $1")
-            .bind(wait.attempt().into_uuid()).bind(deadline).execute(&mut *connection).await?;
+        sqlx::query("UPDATE credential_availability_wait SET eligible = false, cause = $3, deadline = $2 WHERE wait_attempt_id = $1")
+            .bind(wait.attempt().into_uuid()).bind(deadline).bind(snapshot.cause_name()).execute(&mut *connection).await?;
         for (ordinal, (member, exclusions)) in
-            policy.members().iter().zip(snapshot.members).enumerate()
+            policy.members().iter().zip(&snapshot.members).enumerate()
         {
             let ordinal = i32::try_from(ordinal)
                 .map_err(|_| ModelCallCorruption::Inconsistent("credential wait ordinal"))?;
-            let rows = sqlx::query("UPDATE credential_availability_wait_member SET exclusions = $4 WHERE wait_attempt_id = $1 AND ordinal = $2 AND profile = $3")
+            let bounded = snapshot
+                .bounded
+                .iter()
+                .find(|bounded| bounded.profile == member.credential_reference());
+            let rows = sqlx::query("UPDATE credential_availability_wait_member SET exclusions = $4, capacity_bound = $5, reservation_ids = $6 WHERE wait_attempt_id = $1 AND ordinal = $2 AND profile = $3")
                 .bind(wait.attempt().into_uuid()).bind(ordinal).bind(member.credential_reference())
                 .bind(serde_json::to_value(exclusions).map_err(|_| ModelCallCorruption::Inconsistent("credential wait exclusions"))?)
+            .bind(bounded.map(|bounded| bounded.bound)).bind(bounded.map_or(&[][..], |bounded| bounded.reservations.as_slice()))
                 .execute(&mut *connection).await?.rows_affected();
             require_single(rows, "credential wait evidence rewrite")?;
         }
         return Ok(Some(CredentialAvailabilityWait::new(
             wait.attempt(),
             wait.frontier(),
-            CredentialAvailabilityWaitCause::Exhausted,
+            snapshot.cause(),
         )));
     }
     consume_wait(connection, session_id, turn, wait, successor).await?;
@@ -293,9 +337,6 @@ pub(super) async fn park_failed(
     cause: ProviderModelCallFailureCause,
     targets: &ModelTargetCatalog,
 ) -> Result<Option<CredentialAvailabilityWait>, ModelCallRepositoryError> {
-    if policy.on_pool_exhausted != CredentialPoolRuntimeExhaustion::Park {
-        return Ok(None);
-    }
     let target = execution
         .current_call()
         .ok_or(ModelCallCorruption::Missing("credential wait predecessor"))?
@@ -303,13 +344,21 @@ pub(super) async fn park_failed(
     let excluded =
         load_durable_pool_exclusions(connection, execution.session(), execution.turn(), policy)
             .await?;
-    let Some(mut snapshot) = exhaustion_snapshot(
+    let profiles = policy
+        .members()
+        .iter()
+        .map(CredentialPoolRuntimeMember::credential_reference)
+        .collect::<Vec<_>>();
+    let mut bounded = crate::credential_invocations::bounded_members(connection, &profiles).await?;
+    bounded.retain(|member| !excluded.excluded.contains(&member.profile));
+    let Some(mut snapshot) = admission_snapshot(
         connection,
         execution.session(),
         execution.turn(),
         policy,
         target,
         &excluded,
+        bounded,
     )
     .await?
     else {

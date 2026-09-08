@@ -155,10 +155,11 @@ proof except for credential-rejection rotation, non-transient cause without
 successor.
 
 Exhausted-wait: no member is admissible and the frozen policy selects a wait.
-`fail` never selects a wait; `park` selects one only when some member's every
-active exclusion can be cleared by a wake. A chain exclusion never qualifies.
-The attempt ends call-free WithoutStop(YieldedToDurableWait), the active turn
-keeps its session slot, and the transaction appends no transcript entry.
+Exhaustion under `fail` never selects a wait; `park` selects one only when some
+member's every active exclusion can be cleared by a wake. A chain exclusion
+never qualifies. The attempt ends call-free WithoutStop(YieldedToDurableWait),
+the active turn keeps its session slot, and the transaction appends no
+transcript entry.
 
 The wait retains its policy identity, latest frontier, complete member exclusion
 snapshot and optional deadline. A member contributes a deadline only when every
@@ -188,7 +189,19 @@ operator clear grants eligibility to waits naming that member in the same
 transaction. Eligibility prepares no call and consumes no wait. Startup alone
 leaves exhausted waits unchanged; deadline-free waits have no timer.
 
+Contended-wait: no member is admitted and at least one otherwise-admissible
+member is skipped only for its configured invocation bound. Either exhaustion
+policy enters the same call-free wait with cause contended, retaining every
+bounded member and its reservation identities alongside excluded members.
+Preparation reserves only its selected `codex_home` member; invocation
+completion releases that reservation and grants eligibility to contended waits
+naming that bounded member in one transaction. Competing releases admit only the
+waiter that acquires capacity. Re-parking recomputes all exclusions, reservation
+identities and the deadline. When every bounded member becomes excluded,
+admission reruns the exhaustion policy and converts to exhausted-wait in place
+or terminalizes. Startup re-evaluates contended waits against current
+registrations and retained reservations; restart alone grants no eligibility.
+
 ## Planned
 
-- Contention and capacity reservations, their startup re-evaluation, and the
-  typed wait projection ([design](../design/credential-availability.md)).
+- The typed wait projection ([design](../design/credential-availability.md)).
