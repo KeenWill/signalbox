@@ -16,7 +16,7 @@ use std::{
 };
 
 use rustix::fs::{
-    AtFlags, FileType, Mode, OFlags, RenameFlags, fchmod, fstat, openat, renameat, renameat_with,
+    AtFlags, FileType, Mode, OFlags, RenameFlags, fchmod, fstat, openat, renameat_with, statat,
     unlinkat,
 };
 
@@ -1083,6 +1083,7 @@ struct StagedMutation {
     backup_created: bool,
     target_installed: bool,
     writes_target: bool,
+    installed_file: Option<File>,
 }
 
 fn stage_mutation(
@@ -1096,14 +1097,14 @@ fn stage_mutation(
         .content(&path)
         .is_some_and(|content| content.is_some());
     let backup = had_original.then(|| transaction_name("backup"));
-    let (stage, writes_target) = match mutation {
+    let (stage, installed_file) = match mutation {
         WorkspaceFileMutation::Write { content, .. } => {
             let name = transaction_name("stage");
             let mode = expected.mode(&path).copied().flatten().unwrap_or(0o600);
-            write_staged_file(&parent, &name, content, mode, &path)?;
-            (Some(name), true)
+            let file = write_staged_file(&parent, &name, content, mode, &path)?;
+            (Some(name), Some(file))
         }
-        WorkspaceFileMutation::Delete { .. } => (None, false),
+        WorkspaceFileMutation::Delete { .. } => (None, None),
     };
     Ok(StagedMutation {
         parent,
@@ -1113,7 +1114,8 @@ fn stage_mutation(
         backup,
         backup_created: false,
         target_installed: false,
-        writes_target,
+        writes_target: installed_file.is_some(),
+        installed_file,
     })
 }
 
@@ -1160,7 +1162,7 @@ fn write_staged_file(
     content: &str,
     mode: u32,
     path: &WorkspaceMutationPath,
-) -> Result<(), WorkspaceMutationCommitError> {
+) -> Result<File, WorkspaceMutationCommitError> {
     let descriptor = openat(
         parent,
         name,
@@ -1176,10 +1178,10 @@ fn write_staged_file(
                 .map_err(std::io::Error::from)
         })
         .and_then(|()| file.sync_all());
-    drop(file);
     if result.is_ok() {
-        return Ok(());
+        return Ok(file);
     }
+    drop(file);
     unlinkat(parent, name, AtFlags::empty())
         .map_err(|_| WorkspaceMutationCommitError::Ambiguous)?;
     Err(WorkspaceMutationCommitError::Filesystem)
@@ -1236,29 +1238,61 @@ fn rollback_result(
 fn rollback_staged(staged: &mut [StagedMutation]) -> Result<(), ()> {
     let mut failed = false;
     for file in staged.iter_mut().rev() {
-        if file.backup_created {
+        let can_restore = if file.target_installed && file.writes_target {
+            remove_installed_target(file).is_ok()
+        } else {
+            true
+        };
+        failed |= !can_restore;
+        if can_restore && file.backup_created {
             if let Some(backup) = &file.backup {
-                failed |= if file.target_installed {
-                    renameat(&file.parent, backup, &file.parent, &file.target).is_err()
-                } else {
-                    renameat_with(
-                        &file.parent,
-                        backup,
-                        &file.parent,
-                        &file.target,
-                        RenameFlags::NOREPLACE,
-                    )
-                    .is_err()
-                };
+                failed |= renameat_with(
+                    &file.parent,
+                    backup,
+                    &file.parent,
+                    &file.target,
+                    RenameFlags::NOREPLACE,
+                )
+                .is_err();
             }
-        } else if file.target_installed && file.writes_target {
-            failed |= unlinkat(&file.parent, &file.target, AtFlags::empty()).is_err();
         }
         if let Some(stage) = file.stage.take() {
             failed |= unlinkat(&file.parent, stage, AtFlags::empty()).is_err();
         }
     }
     if failed { Err(()) } else { Ok(()) }
+}
+
+fn remove_installed_target(file: &StagedMutation) -> Result<(), ()> {
+    let installed = file.installed_file.as_ref().ok_or(())?;
+    let displaced = transaction_name("rollback");
+    renameat_with(
+        &file.parent,
+        &file.target,
+        &file.parent,
+        &displaced,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| ())?;
+    let owned = fstat(installed)
+        .and_then(|expected| {
+            statat(&file.parent, &displaced, AtFlags::SYMLINK_NOFOLLOW).map(|current| {
+                current.st_dev == expected.st_dev && current.st_ino == expected.st_ino
+            })
+        })
+        .unwrap_or(false);
+    if !owned {
+        // Never replace a new destination; both displaced and backup files survive on failure.
+        let _ = renameat_with(
+            &file.parent,
+            &displaced,
+            &file.parent,
+            &file.target,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(());
+    }
+    unlinkat(&file.parent, &displaced, AtFlags::empty()).map_err(|_| ())
 }
 
 fn cleanup_staged(staged: &mut [StagedMutation]) -> Result<(), ()> {
@@ -1595,6 +1629,99 @@ mod tests {
             & 0o7777;
 
         assert_eq!(mode, EXPECTED_MODE);
+    }
+
+    #[test]
+    fn rollback_preserves_a_concurrent_replacement_of_an_installed_target() {
+        let workspace = tempfile::tempdir().expect("workspace constructs");
+        let target = workspace.path().join("file.txt");
+        std::fs::write(&target, "original").expect("original writes");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root = WorkspaceMutationFileSystem::open_root(&filesystem, workspace.path())
+            .expect("root opens");
+        let path = WorkspaceMutationPath::try_new("file.txt").expect("path validates");
+        let expected = filesystem
+            .snapshot(
+                &root,
+                std::slice::from_ref(&path),
+                MAX_WORKSPACE_MUTATION_FILE_BYTES,
+            )
+            .expect("snapshot reads");
+        let mut staged = stage_mutation(
+            &root,
+            &expected,
+            &WorkspaceFileMutation::Write {
+                path,
+                content: String::from("tool replacement"),
+            },
+        )
+        .expect("mutation stages");
+        let verified = verify_precondition(&expected, &staged).expect("original verifies");
+        install_staged(&mut staged, &expected, verified.as_ref()).expect("tool installs");
+        let backup = workspace
+            .path()
+            .join(staged.backup.as_ref().expect("backup retained"));
+        let concurrent = workspace.path().join("concurrent.txt");
+        std::fs::write(&concurrent, "concurrent writer").expect("concurrent file writes");
+        std::fs::rename(concurrent, &target).expect("concurrent writer replaces installed target");
+
+        assert_eq!(
+            rollback_result(
+                std::slice::from_mut(&mut staged),
+                WorkspaceMutationCommitError::Conflict
+            ),
+            WorkspaceMutationCommitError::Ambiguous
+        );
+        assert_eq!(
+            std::fs::read_to_string(target).expect("target reads"),
+            "concurrent writer"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup).expect("backup retained"),
+            "original"
+        );
+    }
+
+    #[test]
+    fn rollback_preserves_a_concurrent_replacement_of_a_created_target() {
+        let workspace = tempfile::tempdir().expect("workspace constructs");
+        let target = workspace.path().join("file.txt");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root = WorkspaceMutationFileSystem::open_root(&filesystem, workspace.path())
+            .expect("root opens");
+        let path = WorkspaceMutationPath::try_new("file.txt").expect("path validates");
+        let expected = filesystem
+            .snapshot(
+                &root,
+                std::slice::from_ref(&path),
+                MAX_WORKSPACE_MUTATION_FILE_BYTES,
+            )
+            .expect("snapshot reads");
+        let mut staged = stage_mutation(
+            &root,
+            &expected,
+            &WorkspaceFileMutation::Write {
+                path,
+                content: String::from("tool creation"),
+            },
+        )
+        .expect("mutation stages");
+        install_staged(&mut staged, &expected, None).expect("tool creates target");
+        let concurrent = workspace.path().join("concurrent.txt");
+        std::fs::write(&concurrent, "concurrent writer").expect("concurrent file writes");
+        std::fs::rename(concurrent, &target).expect("concurrent writer replaces created target");
+
+        assert_eq!(
+            rollback_result(
+                std::slice::from_mut(&mut staged),
+                WorkspaceMutationCommitError::Conflict
+            ),
+            WorkspaceMutationCommitError::Ambiguous
+        );
+        assert_eq!(
+            std::fs::read_to_string(target).expect("target reads"),
+            "concurrent writer"
+        );
     }
 
     #[test]
