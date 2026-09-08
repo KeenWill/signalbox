@@ -1357,3 +1357,77 @@ async fn workspace_registration_replays_after_its_original_symlink_disappears()
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn workspace_registration_without_request_path_replays_only_at_its_original_version()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::WorkspaceCommandResult;
+    use signalbox_persistence::workspace::{WorkspaceError, WorkspaceOutcome, WorkspaceRepository};
+    let (_container, pool) = migrated_postgres().await?;
+    let mut tx = pool.begin().await?;
+    insert_command(&mut tx, command_id(1), "register_workspace").await?;
+    sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1)")
+        .bind(workspace_id(1).into_uuid()).bind(WORKSPACE_ROOT).bind(command_id(1).into_uuid())
+        .execute(&mut *tx).await?;
+    tx.commit().await?;
+    let repository = WorkspaceRepository::new(pool.clone());
+    assert_eq!(
+        repository
+            .registration_replay(command_id(1), WORKSPACE_ROOT)
+            .await?,
+        Some(WorkspaceOutcome::Applied(
+            WorkspaceCommandResult::Registered(workspace_id(1))
+        ))
+    );
+    assert_eq!(
+        repository
+            .registration_replay(command_id(1), OTHER_WORKSPACE_ROOT)
+            .await?,
+        None
+    );
+
+    // Bypass immutable-row triggers and the shape constraint to exercise a corrupt record reader.
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE workspace DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    let error = sqlx::query("UPDATE workspace SET storage_version = 2")
+        .execute(&mut *tx)
+        .await
+        .expect_err("new registration version requires the request path");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("workspace_registration_request_required")
+    );
+    tx.rollback().await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE workspace DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER USER")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE workspace DROP CONSTRAINT workspace_registration_request_required")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE workspace SET storage_version = 2")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE durable_command SET storage_version = 2")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert!(matches!(
+        repository
+            .registration_replay(command_id(1), WORKSPACE_ROOT)
+            .await,
+        Err(WorkspaceError::Corruption("registration request root"))
+    ));
+    Ok(())
+}

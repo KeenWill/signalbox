@@ -222,7 +222,7 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 25] = [
         spelling: REGISTER_WORKSPACE_KIND,
         typed_table: "workspace",
         minimum_version: 1,
-        maximum_version: 1,
+        maximum_version: 2,
     },
     CommandKindDefinition {
         kind: CommandKind::MintGitRemote,

@@ -73,7 +73,7 @@ impl WorkspaceRepository {
     ) -> Result<Option<WorkspaceOutcome>, WorkspaceError> {
         let mut connection = self.pool.acquire().await?;
         let Some(row) = sqlx::query(
-            "SELECT root_path, registration_request_root FROM workspace WHERE command_id = $1",
+            "SELECT root_path, storage_version, registration_request_root FROM workspace WHERE command_id = $1",
         )
         .bind(command_id.into_uuid())
         .fetch_optional(&mut *connection)
@@ -81,8 +81,7 @@ impl WorkspaceRepository {
         else {
             return Ok(None);
         };
-        let original: Option<String> = row.try_get("registration_request_root")?;
-        let original = original.ok_or(WorkspaceError::Corruption("registration request root"))?;
+        let original = registration_request_root(&row)?;
         if original != requested_root {
             return Ok(None);
         }
@@ -132,8 +131,13 @@ impl WorkspaceRepository {
             return Ok(outcome);
         }
         let kind = kind(command.operation());
-        let claimed = sqlx::query("INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind) VALUES ($1, $2, 1, transaction_timestamp(), 'operator') ON CONFLICT DO NOTHING")
-            .bind(command.command_id().into_uuid()).bind(crate::mapping::durable_command_kind_to_str(kind))
+        let storage_version: i16 = if kind == CommandKind::RegisterWorkspace {
+            2
+        } else {
+            1
+        };
+        let claimed = sqlx::query("INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind) VALUES ($1, $2, $3, transaction_timestamp(), 'operator') ON CONFLICT DO NOTHING")
+            .bind(command.command_id().into_uuid()).bind(crate::mapping::durable_command_kind_to_str(kind)).bind(storage_version)
             .execute(&mut *tx).await?.rows_affected() == 1;
         if !claimed {
             return replay(&mut tx, &command)
@@ -147,7 +151,7 @@ impl WorkspaceRepository {
                     root.clone(),
                     WorkspaceOrigin::OperatorRegistered,
                 );
-                sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version, registration_request_root) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1, $4)")
+                sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version, registration_request_root) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 2, $4)")
                     .bind(record.id().into_uuid()).bind(record.root().as_str()).bind(command.command_id().into_uuid()).bind(registration_request_root.unwrap_or(root.as_str())).execute(&mut *tx).await?;
                 WorkspaceCommandResult::Registered(record.id())
             }
@@ -227,10 +231,11 @@ async fn replay(
     let (operation, result) = match command.operation() {
         WorkspaceOperation::Register { .. } => {
             let row =
-                sqlx::query("SELECT workspace_id, root_path FROM workspace WHERE command_id = $1")
+                sqlx::query("SELECT workspace_id, root_path, storage_version, registration_request_root FROM workspace WHERE command_id = $1")
                     .bind(id)
                     .fetch_one(&mut *connection)
                     .await?;
+            registration_request_root(&row)?;
             let root = WorkspaceRootPath::try_new(row.try_get::<String, _>("root_path")?)
                 .map_err(|_| WorkspaceError::Corruption("workspace root"))?;
             (
@@ -274,4 +279,14 @@ async fn replay(
             WorkspaceOutcome::ConflictingReuse
         },
     ))
+}
+
+fn registration_request_root(row: &sqlx::postgres::PgRow) -> Result<String, WorkspaceError> {
+    let original: Option<String> = row.try_get("registration_request_root")?;
+    match (row.try_get::<i16, _>("storage_version")?, original) {
+        (1, None) => Ok(row.try_get("root_path")?),
+        (1 | 2, Some(original)) => Ok(original),
+        (2, None) => Err(WorkspaceError::Corruption("registration request root")),
+        _ => Err(WorkspaceError::Corruption("registration storage version")),
+    }
 }
