@@ -332,6 +332,11 @@ pub(crate) fn test_reconciliation_marker(
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ActiveTurnPhase {
+    /// Credential admission retains its call-free attempt and transcript frontier.
+    AwaitingCredentialAvailability {
+        /// The checked durable credential wait.
+        wait: crate::CredentialAvailabilityWait,
+    },
     /// Physical orchestration has one exact current attempt.
     Running {
         /// The sole nonterminal attempt owned by this phase.

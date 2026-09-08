@@ -212,6 +212,11 @@ where
     } else {
         None
     };
+    if let Some(wait) =
+        super::credential_wait::park_initial(connection, &execution, selected.as_ref()).await?
+    {
+        return Ok(PrepareToolContinuationOutcome::CredentialWait(wait));
+    }
     if let Some(SelectedRuntimePoolCredential {
         reference: None,
         policy: Some(policy),

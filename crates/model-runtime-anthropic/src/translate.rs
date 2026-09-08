@@ -14,6 +14,36 @@ use crate::wire::{
     parse_response_block,
 };
 
+/// Measures one history message with array framing and possible cache-prefix growth.
+///
+/// Returns `None` for a message the adapter cannot render. Independent message
+/// envelopes conservatively retain framing that adjacent messages may share.
+/// `replay_provider_compaction` is the effective target capability.
+pub fn serialized_message_bytes(
+    message: &ConversationMessage,
+    replay_provider_compaction: bool,
+) -> Option<usize> {
+    let rendered = wire_message(message, replay_provider_compaction).ok()?;
+    if rendered.content.is_empty() {
+        return Some(0);
+    }
+    // An appended message can add a cache member to an already reported prefix.
+    // Its size comes from the same block serializer that emits that member.
+    let block_bytes = |cache_control| {
+        serde_json::to_vec(&WireKnownRequestBlock::Text {
+            text: String::new(),
+            cache_control,
+        })
+        .ok()
+        .map(|bytes| bytes.len())
+    };
+    let cache_growth =
+        block_bytes(Some(CacheControl::Ephemeral))?.checked_sub(block_bytes(None)?)?;
+    serde_json::to_vec(&[rendered])
+        .ok()
+        .map(|bytes| bytes.len().saturating_add(cache_growth))
+}
+
 /// Builds the wire request for one operation.
 ///
 /// Pure translation: any failure is a trustworthy [`PreparationFailure`]
@@ -636,6 +666,40 @@ mod tests {
         let mut value = serde_json::to_value(&request).expect("wire request serializes");
         value.sort_all_objects();
         format!("{value:#}")
+    }
+
+    #[test]
+    fn measured_growth_covers_array_framing_and_cache_prefix_changes() {
+        let mut operation = operation("measured-cache-prefix");
+        let baseline = serde_json::to_vec(&build_request(&operation).expect("baseline renders"))
+            .expect("baseline serializes")
+            .len();
+        let appended = [
+            // This message cannot carry the cache marker that the append adds
+            // to the baseline user message.
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::Thinking {
+                    text: "thinking".to_owned(),
+                    signature: Some("signature".to_owned()),
+                }],
+            },
+            ConversationMessage::user_text("continue"),
+        ];
+        let mut allowance = 0;
+        for message in appended {
+            allowance +=
+                super::serialized_message_bytes(&message, false).expect("appended message renders");
+            operation.messages.push(message);
+            let growth = serde_json::to_vec(&build_request(&operation).expect("history renders"))
+                .expect("history serializes")
+                .len()
+                - baseline;
+            assert!(
+                allowance >= growth,
+                "allowance {allowance} must cover request growth {growth}"
+            );
+        }
     }
 
     #[test]

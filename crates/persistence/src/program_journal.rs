@@ -1002,3 +1002,13 @@ fn scope_ordinal(
     )
     .ok_or(ProgramJournalCorruption::InvalidOrdinal(field))
 }
+
+pub use signalbox_application::program_session::{ProgramSessionCapability, ProgramSessionHost};
+
+impl signalbox_application::program_session::ProgramRunVerifier for ProgramJournalRepository {
+    type Error = ProgramJournalRepositoryError;
+
+    async fn verify_run(&self, run: signalbox_domain::ProgramRunId) -> Result<bool, Self::Error> {
+        Ok(self.load(run).await?.is_some())
+    }
+}

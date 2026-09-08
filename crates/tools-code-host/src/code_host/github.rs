@@ -19,7 +19,7 @@ use super::arguments::{MAX_FILE_PATH_BYTES, valid_revision};
 use super::repository_result::{
     MAX_OBSERVED_DIRECTORY_ENTRIES, MAX_REPOSITORY_FILE_SCAN_BYTES, is_immediate_repository_child,
 };
-use super::result::{MAX_ENCODED_RESULT_BYTES, absolute_https_url};
+use super::result::{MAX_COLLECTION_MEMBERS, MAX_ENCODED_RESULT_BYTES, absolute_https_url};
 use super::review_slog::{author_class, disposition_class, finding_title};
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
@@ -68,17 +68,17 @@ const MAX_REVIEW_THREAD_COMMENTS: usize = 100;
 const MAX_CHANGED_FILE_PAGES: u16 = 30;
 
 const REVIEW_THREADS_QUERY: &str = r#"
-query ReviewThreads($owner: String!, $name: String!, $number: Int!) {
+query ReviewThreads($owner: String!, $name: String!, $number: Int!, $pageSize: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: $pageSize) {
         nodes {
           id
           isResolved
           isOutdated
           path
           line
-          comments(first: 100) {
+          comments(first: $pageSize) {
             nodes {
               id
               author { login }
@@ -110,14 +110,14 @@ query ThreadComments($thread: ID!, $cursor: String!) {
 "#;
 
 const THREAD_INVENTORY_QUERY: &str = r#"
-query ThreadInventory($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+query ThreadInventory($owner: String!, $name: String!, $number: Int!, $cursor: String, $pageSize: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       headRefOid
-      reviewThreads(first: 100, after: $cursor) {
+      reviewThreads(first: $pageSize, after: $cursor) {
         nodes {
           id isResolved isOutdated path line
-          comments(first: 100) {
+          comments(first: $pageSize) {
             nodes { author { login __typename } authorAssociation body }
             pageInfo { hasNextPage endCursor }
           }
@@ -151,9 +151,10 @@ query StackChildren(
   $name: String!
   $baseRef: String!
   $cursor: String
+  $pageSize: Int!
 ) {
   repository(owner: $owner, name: $name) {
-    pullRequests(first: 100, after: $cursor, states: OPEN, baseRefName: $baseRef) {
+    pullRequests(first: $pageSize, after: $cursor, states: OPEN, baseRefName: $baseRef) {
       nodes { number baseRefName baseRefOid headRefName headRefOid }
       pageInfo { hasNextPage endCursor }
     }
@@ -233,12 +234,22 @@ impl GitHubCodeHostTransport {
     pub fn try_new(
         configured_bounds: CodeHostNumericBounds,
     ) -> Result<Self, GitHubCodeHostConstructionError> {
+        let empty_log = CiJobLogResult::try_new(
+            configured_bounds,
+            u64::MAX,
+            String::new(),
+            CodeHostResultCompleteness::Complete,
+        )
+        .ok_or(GitHubCodeHostConstructionError)?;
+        let log_overhead =
+            serde_json::to_vec(&CodeHostResult::CiJobLog(empty_log).into_json_value())
+                .map_err(|_| GitHubCodeHostConstructionError)?
+                .len();
+        let log_text_limit =
+            (MAX_ENCODED_RESULT_BYTES - log_overhead) / MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE;
         let bounds = CodeHostNumericBounds::new(
             configured_bounds.request_timeout(),
-            minimum_optional_limit(
-                configured_bounds.job_log_bytes(),
-                Some(MAX_ENCODED_RESULT_BYTES),
-            ),
+            minimum_optional_limit(configured_bounds.job_log_bytes(), Some(log_text_limit)),
             configured_bounds.stack_comparisons_in_flight(),
             configured_bounds.result_text_bytes(),
             configured_bounds.result_items(),
@@ -247,7 +258,7 @@ impl GitHubCodeHostTransport {
                 Some(MAX_ENCODED_RESULT_BYTES / MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE),
             ),
         );
-        if bounds.stack_comparisons_in_flight() == Some(0) {
+        if bounds.stack_comparisons_in_flight() == Some(0) || bounds.result_items() == Some(0) {
             return Err(GitHubCodeHostConstructionError);
         }
         let client = signalbox_github_transport::client(bounds.request_timeout())
@@ -320,10 +331,15 @@ impl GitHubCodeHostTransport {
         arguments: super::ChangedFilesArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let page_size = self
+            .bounds
+            .result_items()
+            .unwrap_or(MAX_COLLECTION_MEMBERS)
+            .to_string();
         let url = self.repository_url(
             arguments.repository(),
             &["pulls", &arguments.number().get().to_string(), "files"],
-            Some(&[("per_page", PAGE_SIZE), ("page", "1")]),
+            Some(&[("per_page", page_size.as_str()), ("page", "1")]),
         )?;
         let response = self
             .send_authenticated(Method::GET, url, None, credential)
@@ -712,10 +728,15 @@ impl GitHubCodeHostTransport {
         arguments: super::ChecksStatusArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let page_size = self
+            .bounds
+            .result_items()
+            .unwrap_or(MAX_COLLECTION_MEMBERS)
+            .to_string();
         let url = self.repository_url(
             arguments.repository(),
             &["commits", arguments.revision().as_str(), "check-runs"],
-            Some(&[("per_page", PAGE_SIZE), ("page", "1")]),
+            Some(&[("per_page", page_size.as_str()), ("page", "1")]),
         )?;
         let response = self
             .send_authenticated(Method::GET, url, None, credential)
@@ -792,6 +813,7 @@ impl GitHubCodeHostTransport {
                 "name": arguments.repository().name(),
                 "number": arguments.number().get(),
                 "owner": arguments.repository().owner(),
+                "pageSize": self.bounds.result_items().unwrap_or(MAX_COLLECTION_MEMBERS),
             }
         }))
         .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
@@ -1012,6 +1034,7 @@ impl GitHubCodeHostTransport {
             .graphql_read(
                 THREAD_INVENTORY_QUERY,
                 serde_json::json!({
+                    "pageSize": self.bounds.result_items().unwrap_or(MAX_COLLECTION_MEMBERS),
                     "cursor": cursor.map(CodeHostCursor::as_str),
                     "name": repository.name(),
                     "number": number.get(),
@@ -1244,6 +1267,7 @@ impl GitHubCodeHostTransport {
             .graphql_read(
                 STACK_CHILDREN_QUERY,
                 serde_json::json!({
+                    "pageSize": self.bounds.result_items().unwrap_or(MAX_COLLECTION_MEMBERS),
                     "baseRef": base_ref,
                     "cursor": cursor.map(CodeHostCursor::as_str),
                     "name": name,
@@ -3358,10 +3382,9 @@ mod tests {
         let transport = GitHubCodeHostTransport::try_new(crate::code_host::test_numeric_bounds())
             .expect("fixed transport constructs");
 
-        assert_eq!(
-            transport.bounds.job_log_bytes(),
-            Some(MAX_ENCODED_RESULT_BYTES)
-        );
+        assert!(transport.bounds.job_log_bytes().is_some_and(
+            |limit| limit < MAX_ENCODED_RESULT_BYTES / MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
+        ));
         assert_eq!(
             transport.bounds.repository_file_content_bytes(),
             Some(MAX_ENCODED_RESULT_BYTES / MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE)
@@ -5648,7 +5671,9 @@ mod tests {
             .await
             .expect("first page completes the bounded read")
             .into_json_value();
-        repository_server_result(server).await;
+        let request: serde_json::Value =
+            serde_json::from_str(&repository_server_result(server).await).expect("GraphQL request");
+        assert_eq!(request["variables"]["pageSize"], 100);
         assert_eq!(
             result["threads"][0]["comments"]
                 .as_array()
@@ -5689,7 +5714,9 @@ mod tests {
             .await
             .expect("over-bound comments produce a bounded result")
             .into_json_value();
-        repository_server_result(server).await;
+        let request: serde_json::Value =
+            serde_json::from_str(&repository_server_result(server).await).expect("GraphQL request");
+        assert_eq!(request["variables"]["pageSize"], 1);
         assert_eq!(
             result["threads"][0]["comments"]
                 .as_array()
@@ -6397,6 +6424,100 @@ mod tests {
         assert_eq!(
             ownership_evidence_failure(CodeHostTransportFailure::MutationNotDispatched),
             CodeHostTransportFailure::MutationNotDispatched
+        );
+    }
+    #[test]
+    fn zero_item_policy_is_rejected_before_provider_requests() {
+        let bounds = CodeHostNumericBounds::new(None, None, None, None, Some(0), None);
+        assert!(GitHubCodeHostTransport::try_new(bounds).is_err());
+    }
+
+    #[tokio::test]
+    async fn lowered_item_policy_sizes_changed_file_requests_and_preserves_truncation() {
+        let (mut transport, listener) = repository_test_transport().await;
+        transport.bounds.result_items = Some(2);
+        let server = tokio::spawn(async move {
+            let body = serde_json::json!([
+                changed_file_value("first.rs".into()),
+                changed_file_value("second.rs".into())
+            ])
+            .to_string();
+            serve_json_response(&listener, &body, Some("<https://api.github.com/repos/owner/repository/pulls/17/files?page=2>; rel=\"next\"")).await
+        });
+        let arguments = serde_json::from_value(
+            serde_json::json!({"repository":"owner/repository","number":17}),
+        )
+        .unwrap();
+        let value = transport
+            .changed_files(arguments, &test_credential())
+            .await
+            .unwrap()
+            .into_json_value();
+        assert_eq!(value["files"].as_array().unwrap().len(), 2);
+        assert_eq!(value["truncated"], true);
+        assert_eq!(
+            repository_server_result(server).await,
+            "GET /repos/owner/repository/pulls/17/files?per_page=2&page=1 HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn lowered_item_policy_sizes_graphql_inventory_pages() {
+        let (mut transport, listener) = graphql_test_transport().await;
+        transport.bounds.result_items = Some(2);
+        let server = tokio::spawn(async move {
+            let response = serde_json::json!({"data":{"repository":{"pullRequest":{"headRefOid":FILE_PATCH_HEAD_REVISION,"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"next-page"}}}}}}).to_string();
+            serve_graphql_response(&listener, response.as_bytes()).await
+        });
+        let result = transport
+            .thread_inventory_for(
+                &repository(),
+                change_request_number(),
+                None,
+                &test_credential(),
+            )
+            .await
+            .unwrap();
+        let value = CodeHostResult::ThreadInventory(result).into_json_value();
+        let request: serde_json::Value =
+            serde_json::from_str(&repository_server_result(server).await).unwrap();
+        assert_eq!(request["variables"]["pageSize"], 2);
+        assert_eq!(value["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn escape_heavy_job_log_retains_a_serializable_truncated_prefix() {
+        let transport =
+            GitHubCodeHostTransport::try_new(crate::code_host::test_numeric_bounds()).unwrap();
+        let retained = transport.bounds.job_log_bytes();
+        let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(vec![
+                1_u8;
+                MAX_ENCODED_RESULT_BYTES
+            ])]);
+        let (bytes, completeness) = read_optionally_bounded(stream, retained).await.unwrap();
+        let (text, completeness) = bounded_lossy_text(&bytes, completeness, retained);
+        let log = CiJobLogResult::try_new(transport.bounds, u64::MAX, text, completeness).unwrap();
+        let value = CodeHostResult::CiJobLog(log).into_json_value();
+        assert_eq!(value["truncated"], true);
+        assert!(!value["text"].as_str().unwrap().is_empty());
+        assert!(serde_json::to_vec(&value).unwrap().len() <= MAX_ENCODED_RESULT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn repository_content_selection_obeys_the_lower_general_text_limit() {
+        let bounds = CodeHostNumericBounds::new(None, None, None, Some(4), None, Some(100));
+        let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(b"abcdefgh")]);
+        let body =
+            select_repository_file_content(stream, None, bounds.repository_file_content_bytes())
+                .await
+                .unwrap();
+        let RepositoryFileBodyKind::Text(selection) = body.kind else {
+            panic!("fixture is text")
+        };
+        assert_eq!(selection.content, "abcd");
+        assert_eq!(
+            selection.completeness,
+            CodeHostResultCompleteness::Truncated
         );
     }
 }

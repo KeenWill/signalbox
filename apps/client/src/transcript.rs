@@ -81,6 +81,7 @@ impl TranscriptSnapshot {
                         | TurnState::ActiveAwaitingToolApproval { .. }
                         | TurnState::ActiveAwaitingChild { .. }
                         | TurnState::ActiveAwaitingToolRecovery { .. }
+                        | TurnState::ActiveAwaitingCredentialAvailability { .. }
                         | TurnState::ActiveAwaitingRunnerRecovery { .. }
                 )
             {

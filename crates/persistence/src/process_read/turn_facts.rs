@@ -339,6 +339,9 @@ pub(super) async fn load_next_transcript_turn(
             turn.starting_frontier_id,
             turn.terminal_frontier_id,
             turn.active_phase_kind,
+            credential_wait.wait_attempt_id AS credential_wait_attempt_id,
+            credential_wait.frontier_id AS credential_wait_frontier_id,
+            credential_wait.cause AS credential_wait_cause,
             turn.child_wait_request_id,
             turn.current_attempt_id,
             turn.terminal_disposition_kind,
@@ -351,6 +354,12 @@ pub(super) async fn load_next_transcript_turn(
             turn.runner_recovery_tool_attempt_id,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
+            EXISTS (
+                SELECT 1 FROM credential_pool_terminal_exhaustion AS exhausted
+                 WHERE exhausted.session_id = turn.session_id
+                   AND exhausted.turn_id = turn.turn_id
+                   AND exhausted.terminal_model_call_id IS NULL
+            ) AS credential_pool_exhausted,
             turn.terminal_tool_attempt_id,
             terminal_call.terminal_disposition_kind
                 AS terminal_model_call_disposition_kind,
@@ -489,6 +498,9 @@ pub(super) async fn load_next_transcript_turn(
              ON automatic_reconciliation.turn_id = turn.turn_id
             AND automatic_reconciliation.session_id = turn.session_id
             AND NOT turn.delegation_runtime_terminal
+           LEFT JOIN credential_availability_wait AS credential_wait
+             ON credential_wait.turn_id = turn.turn_id AND credential_wait.session_id = turn.session_id
+            AND credential_wait.consumed_by_attempt_id IS NULL
            LEFT JOIN model_call AS terminal_call
              ON terminal_call.model_call_id = turn.terminal_model_call_id
             AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
