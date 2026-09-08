@@ -6,6 +6,7 @@ import {
   admittedSessionSearch,
   ProductRequestError,
   type ProductSessionState,
+  ProductTransportError,
   productTransport,
   readSessionRates,
 } from './product'
@@ -39,7 +40,7 @@ export function SessionCatalogSurface({
 }: {
   state: ProductSessionState
   onTimelineIds: (ids: readonly string[]) => void
-  onStateChange: (state: ProductSessionState, mode?: 'push' | 'close') => void
+  onStateChange: (state: ProductSessionState, mode?: 'push' | 'close' | 'replace') => void
 }) {
   const dispatch = useAppDispatch()
   const keyboardSelection = useAppSelector((root) => root.app.selectedTimeline)
@@ -230,14 +231,17 @@ export function SessionCatalogSurface({
     const continuation = sessions.data?.continuation
     if (!continuation) return
     restorePageFocus.current = true
-    onStateChange({
-      q: state.q,
-      sort: state.sort,
-      archived: state.archived,
-      afterSession: continuation.session_id,
-      afterActivity:
-        continuation.kind === 'last_activity' ? continuation.unix_microseconds : undefined,
-    })
+    onStateChange(
+      {
+        q: state.q,
+        sort: state.sort,
+        archived: state.archived,
+        afterSession: continuation.session_id,
+        afterActivity:
+          continuation.kind === 'last_activity' ? continuation.unix_microseconds : undefined,
+      },
+      'replace',
+    )
   }
 
   return (
@@ -291,7 +295,9 @@ export function SessionCatalogSurface({
             <p>
               {sessions.error instanceof ProductRequestError
                 ? `${sessions.error.response.error.code}: ${sessions.error.message}`
-                : 'The response did not match the generated web contract.'}
+                : sessions.error instanceof ProductTransportError
+                  ? sessions.error.message
+                  : 'The response did not match the generated web contract.'}
             </p>
             <button
               type="button"

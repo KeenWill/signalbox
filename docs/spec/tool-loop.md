@@ -271,6 +271,10 @@ requests already closed by placement loss. A `KnownFailed`, `Refused`,
 `Cancelled`, or `Ambiguous` terminal judge call for an admissible request
 retains the attended park while immediately admitting a user decision.
 
+A completed judge call records the provider's offered recommendation, the
+effective recommendation, and the cause when withdrawn authority substitutes
+escalation. Completion replay compares the recorded provider offer.
+
 Deny-and-end composes the recorded denial with the applied-interrupt stop path,
 and the interrupt remains the proof-bearing authority for ending the turn. An
 interrupt alone against an approval wait is not a denial and does not bypass the
