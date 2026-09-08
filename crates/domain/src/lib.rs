@@ -158,8 +158,9 @@ pub use model_execution::{
     ProviderModelCallFailureCause, ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
     ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     RefusedModelCallTurnIdentities, ResolvedModelSelection, StopRequestedModelCallTurn,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,
-    ToolResultAttemptCorrelation, ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolDenialCorrelation,
+    ToolInadmissibleCorrelation, ToolResponsePartIdentity, ToolResultAttemptCorrelation,
+    ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
 };
 pub use model_settings::{
     AdjustedModelSettings, AnthropicServiceTier, CodexCliServiceTier, CompatibleModelSettings,
