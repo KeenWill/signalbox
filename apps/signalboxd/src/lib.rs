@@ -125,7 +125,8 @@ pub use daemon_tools::{
     BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,
     DaemonToolComposition, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
     DaemonToolsConstructionError, MappedDaemonCredentialInputs, PinnedWorkspaceFileSystem,
-    SessionWorkspaceRoots, WorkspaceInstructionRootResolver,
+    PostgresSessionStatusWriter, PostgresSessionStatusWriterError, SessionWorkspaceRoots,
+    WorkspaceInstructionRootResolver,
 };
 pub use fenced_database::{
     FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation,
@@ -153,10 +154,9 @@ pub use session_template_configuration::{
 pub use signalbox_tools_basic::{
     CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
     CurrentTimeToolConstructionError, EchoExecutor, EchoExecutorError, EchoTool,
-    EchoToolConstructionError, PostgresSessionStatusWriter, PostgresSessionStatusWriterError,
-    SessionStatusExecutor, SessionStatusExecutorError, SessionStatusTool,
-    SessionStatusToolConstructionError, SessionStatusWrite, SessionStatusWriteOutcome,
-    SessionStatusWriter, SystemCurrentTimeClock,
+    EchoToolConstructionError, SessionStatusExecutor, SessionStatusExecutorError,
+    SessionStatusTool, SessionStatusToolConstructionError, SessionStatusWrite,
+    SessionStatusWriteOutcome, SessionStatusWriter, SystemCurrentTimeClock,
 };
 pub use signalbox_tools_code_host::{
     CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
@@ -1574,6 +1574,16 @@ const fn progressing_turn_is_handed_off(admission: FreshPassAdmission) -> bool {
     )
 }
 
+async fn nudge_after_admission(
+    admission: impl Future<Output = FreshPassAdmission>,
+    nudge: impl FnOnce(),
+) -> FreshPassAdmission {
+    let admission = admission.await;
+    // A newly admitted pass can consume the resumable state immediately.
+    nudge();
+    admission
+}
+
 /// Says what a refused under-lock recovery actually observed.
 ///
 /// [`PostgresTurnLivenessRepository::recover_observed_slot_held_turn`] answers
@@ -1665,13 +1675,15 @@ async fn recover_expired_scheduler_pass_with_repository(
                         // question: the nudge re-drives only a turn a fresh pass
                         // can resume, and durable progress can leave a turn in a
                         // shape that clears no re-admission predicate at all.
-                        recovery.nudge(session);
-                        let admission = fresh_pass_admission(
-                            &resumption,
-                            session,
-                            expected_turn,
-                            attempt,
-                            policy.attempt_bound,
+                        let admission = nudge_after_admission(
+                            fresh_pass_admission(
+                                &resumption,
+                                session,
+                                expected_turn,
+                                attempt,
+                                policy.attempt_bound,
+                            ),
+                            || recovery.nudge(session),
                         )
                         .await;
                         if progressing_turn_is_handed_off(admission) {
@@ -3397,7 +3409,7 @@ mod tests {
         TokenUsage, TurnLivenessRepositoryError, TurnPassExecutionStage,
         WorkspaceInstructionPreparedExecution, WorkspaceInstructionRuntime,
         activation_session_matches, classify_expired_pass_observation,
-        correlate_expired_scheduler_pass, expired_pass_recovery_retry_delay,
+        correlate_expired_scheduler_pass, expired_pass_recovery_retry_delay, nudge_after_admission,
         progressing_turn_is_handed_off, reconcile_retained_once,
         recover_expired_scheduler_pass_with_repository, render_dispatch_authority,
         render_judge_request_payload, render_session_authority_context,
@@ -5334,6 +5346,29 @@ mod tests {
             *observed.lock().expect("active resume observer lock"),
             vec![turn]
         );
+    }
+
+    #[tokio::test]
+    async fn a_nudged_pass_consuming_resumability_does_not_strand_the_handoff() {
+        let resumability = std::cell::Cell::new(FreshPassAdmission::Admissible);
+        let (complete_read, read_completed) = tokio::sync::oneshot::channel::<()>();
+        let handoff = nudge_after_admission(
+            async {
+                read_completed.await.expect("resumability read completes");
+                resumability.get()
+            },
+            || resumability.set(FreshPassAdmission::Stranded),
+        );
+        tokio::pin!(handoff);
+
+        assert!(futures_util::poll!(&mut handoff).is_pending());
+        assert_eq!(resumability.get(), FreshPassAdmission::Admissible);
+        complete_read.send(()).expect("release resumability read");
+        let admission = handoff.await;
+
+        assert_eq!(resumability.get(), FreshPassAdmission::Stranded);
+        assert_eq!(admission, FreshPassAdmission::Admissible);
+        assert!(progressing_turn_is_handed_off(admission));
     }
 
     /// A turn a fresh pass resumes leaves this path: the pass owns it, and only

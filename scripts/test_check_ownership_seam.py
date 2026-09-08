@@ -21,6 +21,7 @@ class OwnershipSeamCheckerTests(unittest.TestCase):
         module_sql: str | None = None,
         core_sql: str | None = None,
         workspace_manifest: str | None = None,
+        tool_source: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -41,6 +42,10 @@ class OwnershipSeamCheckerTests(unittest.TestCase):
                 (root / "crates" / "persistence" / "src" / "query.sql").write_text(
                     core_sql, encoding="utf-8"
                 )
+            if tool_source is not None:
+                tool = root / "crates" / "tools-example" / "src"
+                tool.mkdir(parents=True)
+                (tool / "lib.rs").write_text(tool_source, encoding="utf-8")
             return subprocess.run(
                 [sys.executable, str(CHECKER)],
                 cwd=root,
@@ -48,6 +53,15 @@ class OwnershipSeamCheckerTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+
+    def test_tool_pool_import_is_rejected(self) -> None:
+        result = self.run_checker("", "", tool_source="use sqlx::PgPool;")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden tool persistence type PgPool", result.stderr)
+
+    def test_typed_tool_writer_is_admitted(self) -> None:
+        result = self.run_checker("", "", tool_source="pub trait SessionStatusWriter {}")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_seam_and_external_dependencies_are_admitted(self) -> None:
         result = self.run_checker(

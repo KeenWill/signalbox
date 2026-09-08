@@ -721,10 +721,21 @@ before it crosses into evidence. An `ambient` or `codex_home` profile gives the
 daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
 
+The GitHub and code-host adapters share `github-primary`, which needs API access
+to read pull requests, publish reviews and comments, reply to and resolve review
+threads, read repository files and directories, read checks and CI job logs, and
+rerun failed jobs. Neither adapter pushes Git changes. The repository-watch
+credential needs read access for polling and checkout provisioning; it does not
+need push or workflow-write authority. Classic `repo` is broader than read-only
+access, so a fine-grained read credential limits that role to the watched
+repositories.
+
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
 true; false disables module polling, webhook listening, and command dispatch,
 including convergence-sweep target enrollment and session commissioning.
+Repository-watch duration fields accept integer seconds or Jiff's friendly
+unsigned-duration strings; rule cooldowns retain whole-second precision.
 
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its
