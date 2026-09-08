@@ -140,6 +140,7 @@ const fn code_host_bounds() -> CodeHostNumericBounds {
     CodeHostNumericBounds::new(None, None, None, None, None, None)
 }
 const FIXTURE_USER_CONTENT: &str = "offline tool-loop request";
+const FIXTURE_USER_CONTENT_WIRE: &str = r#"[{"type":"text","text":"offline tool-loop request"}]"#;
 const PROCESS_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
@@ -3286,7 +3287,6 @@ async fn composed_introspection_returns_real_own_transcript() -> Result<(), Box<
         "max_bytes": 131072
     })
     .to_string();
-    let expected_user_content = format!(r#"[{{"type":"text","text":"{FIXTURE_USER_CONTENT}"}}]"#);
     let expected_tool_use_content = format!(
         "{}\n{arguments}",
         signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME
@@ -3313,7 +3313,7 @@ async fn composed_introspection_returns_real_own_transcript() -> Result<(), Box<
             "entries": [{
                 "position": 1,
                 "kind": "user",
-                "content": expected_user_content,
+                "content": FIXTURE_USER_CONTENT_WIRE,
                 "content_truncated": false
             }, {
                 "position": 2,

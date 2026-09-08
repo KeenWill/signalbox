@@ -256,6 +256,7 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         ClientRequest::ImportConversation { .. } => true,
         ClientRequest::CreateSession { .. }
         | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::ReadRunnerStatus { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}

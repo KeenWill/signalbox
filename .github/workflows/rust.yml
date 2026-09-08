@@ -139,10 +139,13 @@ jobs:
           fi
           bazel test --config=api --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:api_documentation_current
       - name: Check documentation consistency
+        if: ${{ !cancelled() }}
         run: /tmp/mdformat-venv/bin/python scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
+        if: ${{ !cancelled() }}
         run: python3 scripts/check_migration_versions.py
       - name: Check ownership-seam boundaries
+        if: ${{ !cancelled() }}
         run: python3 scripts/check_ownership_seam.py
   domain-api-digest:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox' }}
@@ -196,10 +199,11 @@ jobs:
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
-          bazel test --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:python_checker_tests //:markdown_format //:generated_artifact_tests //:rust_format_tests
+          bazel test --keep_going --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:python_checker_tests //:markdown_format //:generated_artifact_tests //:rust_format_tests
       # The scan rejects row-lock clauses and advisory-lock calls outside the
       # inventory in production Rust. This performs no Rust or SQL parsing.
       - name: Check explicit-lock inventory
+        if: ${{ !cancelled() }}
         run: |
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
@@ -251,17 +255,17 @@ jobs:
             test "$BAZEL_RESULT" = success
           fi
       - name: Check out repository for Cargo contract checks
-        if: needs.rust-change-scope.outputs.skip_rust != 'true'
+        if: ${{ !cancelled() && needs.rust-change-scope.outputs.skip_rust != 'true' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Check the catalog workspace dependency boundary
-        if: needs.rust-change-scope.outputs.skip_rust != 'true'
+        if: ${{ !cancelled() && needs.rust-change-scope.outputs.skip_rust != 'true' }}
         run: >-
           cargo test --no-fail-fast -p signalbox-model-reference-catalog --test catalog
           -- reference_catalog_has_no_workspace_dependency_edge --exact
       - name: Check the pinned Codex schema fixtures
-        if: needs.rust-change-scope.outputs.skip_rust != 'true'
+        if: ${{ !cancelled() && needs.rust-change-scope.outputs.skip_rust != 'true' }}
         run: cargo test --no-fail-fast -p signalbox-model-runtime-codex-cli --test schema_fixtures
 
   # Report-only by owner decision: this job publishes deterministic counts

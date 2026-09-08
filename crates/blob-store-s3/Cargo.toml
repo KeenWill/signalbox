@@ -54,6 +54,8 @@ signalbox-blob-store = { path = "../blob-store", features = ["test-support"] }
 tempfile = "3.27.0"
 tokio = { version = "1.53.0", default-features = false, features = [
     "macros",
+    "net",
+    "test-util",
     "rt-multi-thread",
 ] }
 

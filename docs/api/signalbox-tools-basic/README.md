@@ -6,4 +6,4 @@
 | --- | ---: | ---: | ---: | --- |
 | current_time | 5 | 1 | 0 | [current_time](current_time.md) |
 | echo | 4 | 0 | 0 | [echo](echo.md) |
-| session_status | 8 | 1 | 0 | [session_status](session_status.md) |
+| session_status | 6 | 1 | 0 | [session_status](session_status.md) |

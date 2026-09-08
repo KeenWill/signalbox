@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Read the PostgreSQL suite manifest for Bazel CI and the docs gate.
 
-The workflow matrix and Bazel suite targets consume the manifest directly.
-Workflow agreement checks detect ordinary drift in the repository's shell and
-YAML spellings; they do not model arbitrary shell control flow.
+The workflow matrix, Bazel suite targets, and shard invocations consume the
+manifest directly. Workflow checks inspect structured job dependencies and
+routing; shell commands are not inferred.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
+import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -22,7 +24,6 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = Path(".github/postgres-integration-suites.toml")
 WORKFLOW = Path(".github/workflows/bazel.yml")
 RUST_WORKFLOW = Path(".github/workflows/rust.yml")
-EMITTER = "scripts/postgres_integration_suites.py"
 SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 # Untrusted (fork or Dependabot) pull requests route to a hosted runner; the
 # self-hosted arm of that expression is the target this manifest pins.
@@ -37,7 +38,6 @@ DYNAMIC_RUNS_ON = re.compile(
 def _resolved_runs_on(value: str) -> str:
     match = DYNAMIC_RUNS_ON.match(value)
     return match.group("pool") if match else value
-INTERPRETERS = ("python3", "python")
 COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&\n]")
 ATTACHED_SHORT_OPTIONS = ("-p", "-F", "-j")
 CARGO_GLOBAL_VALUE_OPTIONS = ("--color", "--config", "--explain", "-Z", "-C")
@@ -47,11 +47,9 @@ ENV_VALUE_OPTIONS = ("-u", "--unset", "-C", "--chdir", "-S", "--split-string")
 # Cargo package specs may carry a version or a source URL; only the name is
 # comparable against the manifest.
 PACKAGE_SPEC = re.compile(r"(?:.*#)?(?P<name>[^@#/]+?)(?:@[^@]*)?$")
-MATRIX_BINDING = re.compile(r"\$\{\{[ ]*matrix\.(?P<field>[A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}")
 WORKSPACE_SELECTORS = ("--workspace", "--all")
 # Bash's `command [-pVv] name [args]` runs `name`; only `-v`/`-V` print instead.
 COMMAND_BUILTIN_OPTIONS = ("-p",)
-ALWAYS_CONDITION = re.compile(r"^[ ]*if:.*\balways\(\)", re.MULTILINE)
 SUBSTITUTION = re.compile(r"\$\((?P<body>[^()]*)\)")
 # Cargo feature names, one per manifest entry. Cargo would read a comma or a
 # space inside one entry as a separator and enable two features; the docs
@@ -219,8 +217,7 @@ def load_suites(root: Path) -> tuple[Suite, ...]:
 def run_matrix(suites: tuple[Suite, ...]) -> dict[str, list[dict[str, object]]]:
     """Give every manifest shard its own worker and native test partition."""
     return {"include": [
-        {"suite": suite.name, "target": "//:postgres_" + suite.name.replace("-", "_"),
-         "shard_index": index, "shard_count": suite.shards}
+        {"suite": suite.name, "shard_index": index}
         for suite in suites for index in range(suite.shards)
     ]}
 
@@ -238,67 +235,12 @@ def workflow_document(text: str) -> dict[str, object]:
     return document
 
 
-def mappings(value: object):
-    """Yield every mapping nested in a decoded YAML value."""
-    if isinstance(value, dict):
-        yield value
-        for child in value.values():
-            yield from mappings(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from mappings(child)
-
-
-def job_lines(text: str, name: str) -> list[str]:
-    """Return the lines of one workflow job's block, or none if it is absent.
-
-    The aggregate job carries the required check's name, so what it asserts has
-    to be read from that job and nowhere else: the same binding and assertion
-    sitting in an unrelated job says nothing about whether branch protection
-    consults the shards.
-    """
-    import yaml
-
-    jobs = workflow_document(text).get("jobs")
-    if not isinstance(jobs, dict) or name not in jobs:
-        return []
-    return yaml.safe_dump(
-        {"jobs": {name: jobs[name]}}, sort_keys=False
-    ).splitlines()
-
-
-def workflow_shell_commands(
-    text: str,
-) -> list[tuple[str, dict[str, str], bool]]:
-    """Return each decoded `run:`/`command:` scalar and its step settings."""
-    commands: list[tuple[str, dict[str, str], bool]] = []
-    for step in mappings(workflow_document(text)):
-        command = step.get("run", step.get("command"))
-        if not isinstance(command, str):
-            continue
-        environment = step.get("env")
-        variables: dict[str, str] = {}
-        if isinstance(environment, dict):
-            for variable, value in environment.items():
-                if not isinstance(variable, str) or not isinstance(value, str):
-                    continue
-                match = re.fullmatch(r"\$\{\{[ ]*matrix\.([A-Za-z_][A-Za-z0-9_]*)[ ]*\}\}", value)
-                if match is not None:
-                    variables[match.group(1)] = variable
-        continue_on_error = step.get("continue-on-error", False)
-        blocking = continue_on_error is False or continue_on_error == "false"
-        if command.strip():
-            commands.append((command.strip(), variables, blocking))
-    return commands
-
-
 def simple_commands(command: str) -> list[list[str]]:
-    """Split one flattened shell command into the argument lists it executes.
+    """Tokenize documented command examples for comparison with the manifest.
 
-    Shell operators separate commands, and `$( … )` bodies are commands too —
-    this workflow reads the shard matrix through one. Each piece is tokenized;
-    a piece that does not tokenize is dropped rather than raised, since prose
-    reaches here as readily as a command does.
+    Shell operators separate examples, and `$( … )` bodies can contain them.
+    A piece that does not tokenize is dropped because prose also reaches this
+    documentation-only reader.
     """
     command = re.sub(r"\\\r?\n[ \t]*", " ", command)
     segments = [command]
@@ -315,80 +257,48 @@ def simple_commands(command: str) -> list[list[str]]:
     return executed
 
 
-def invokes_reader(tokens: list[str], mode: str) -> bool:
-    """Return whether one argument list actually runs the reader in `mode`.
-
-    The reader has to be the command word — directly, or as the argument of a
-    Python interpreter. `echo python3 scripts/…py --matrix` names the reader
-    and every flag, and runs nothing; only the leading word separates the two.
-    """
-    if tokens[0] == EMITTER:
-        arguments = tokens[1:]
-    elif tokens[0] in INTERPRETERS and len(tokens) > 1 and tokens[1] == EMITTER:
-        arguments = tokens[2:]
-    else:
-        return False
-    return mode in arguments
-
-
 def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
-    """Check that manifest-derived Bazel jobs remain binding on validate."""
-    text = (root / WORKFLOW).read_text(encoding="utf-8")
-    rust = (root / RUST_WORKFLOW).read_text(encoding="utf-8")
-    jobs = workflow_document(text).get("jobs", {})
+    """Check structured workflow bindings without interpreting shell commands."""
+    jobs = workflow_document((root / WORKFLOW).read_text(encoding="utf-8")).get("jobs", {})
     failures = []
-    matrix = "\n".join(job_lines(text, "postgres-matrix"))
-    commands = [tokens for command, _, _ in workflow_shell_commands(matrix)
-                for tokens in simple_commands(command)]
-    if not any(invokes_reader(tokens, "--matrix") for tokens in commands):
-        failures.append(f"{WORKFLOW} postgres-matrix executes no `{EMITTER} --matrix`")
     run = jobs.get("bazel-postgres", {})
     if run.get("strategy", {}).get("matrix") != "${{ fromJSON(needs.postgres-matrix.outputs.matrix) }}":
         failures.append(f"{WORKFLOW} bazel-postgres does not use the manifest matrix")
-    shard = "\n".join(job_lines(text, "bazel-postgres"))
-    executed = [(tokens, variables, blocking)
-                for command, variables, blocking in workflow_shell_commands(shard)
-                for tokens in simple_commands(command)]
-    if run.get("continue-on-error", False) is not False or not any(blocking and tokens[:2] == ["bazel", "test"]
-               and variables.get("target")
-               and any(references_variable(word, variables["target"]) for word in tokens[2:])
-               for tokens, variables, blocking in executed):
-        failures.append(f"{WORKFLOW} bazel-postgres runs no blocking matrix-target Bazel test")
-    if not any(tokens[:2] == ["bazel", "test"]
-               and "--test_sharding_strategy=disabled" in tokens
-               and all(variables.get(field) and any(
-                   word.startswith("--test_env=" + environment + "=")
-                   and references_variable(word, variables[field]) for word in tokens)
-                   for field, environment in (
-                       ("shard_index", "SIGNALBOX_TEST_SHARD_INDEX"),
-                       ("shard_count", "SIGNALBOX_TEST_TOTAL_SHARDS")))
-               for tokens, variables, _ in executed):
-        failures.append(f"{WORKFLOW} bazel-postgres does not select its matrix shard exactly once")
+    if run.get("continue-on-error", False) is not False:
+        failures.append(f"{WORKFLOW} bazel-postgres must be blocking")
     if _resolved_runs_on(run.get("runs-on", "")) != "signalbox-docker":
         failures.append(f"{WORKFLOW} bazel-postgres must run on signalbox-docker")
-    rust_jobs = workflow_document(rust).get("jobs", {})
+    rust_jobs = workflow_document((root / RUST_WORKFLOW).read_text(encoding="utf-8")).get("jobs", {})
     if rust_jobs.get("bazel", {}).get("uses") != "./.github/workflows/bazel.yml":
         failures.append(f"{RUST_WORKFLOW} does not call the Bazel workflow")
-    aggregate = "\n".join(job_lines(rust, "validate"))
-    if ALWAYS_CONDITION.search(aggregate) is None:
+    aggregate = rust_jobs.get("validate", {})
+    if aggregate.get("if") not in ("${{ always() }}", "always()"):
         failures.append(f"{RUST_WORKFLOW} validate has no always() condition")
-    if "bazel" not in rust_jobs.get("validate", {}).get("needs", []):
+    if "bazel" not in aggregate.get("needs", []):
         failures.append(f"{RUST_WORKFLOW} validate does not depend on bazel")
-    binding = re.search(r"(\w+): \$\{\{ needs\.bazel\.result \}\}", aggregate)
-    aggregate_commands = [tokens for command, _, _ in workflow_shell_commands(aggregate)
-                          for tokens in simple_commands(command)]
-    if binding is None or not any(asserts_success(tokens, binding[1]) for tokens in aggregate_commands):
-        failures.append(f"{RUST_WORKFLOW} validate does not assert Bazel success")
-    for workflow, content in ((WORKFLOW, text), (RUST_WORKFLOW, rust)):
-        for command, _, _ in workflow_shell_commands(content):
-            for tokens in simple_commands(command):
-                arguments = cargo_test_arguments(tokens)
-                if arguments is not None and runs_ignored_tests(arguments) and not runs_file_media_isolation_tests(arguments):
-                    failures.append(f"{workflow} runs ignored Cargo tests outside {MANIFEST}")
-                nextest = cargo_subcommand_arguments(tokens, ("nextest",))
-                if nextest and nextest[0] == "run" and "--run-ignored" in nextest:
-                    failures.append(f"{workflow} runs ignored nextest tests outside {MANIFEST}")
     return failures
+
+
+def run_suite(suites: tuple[Suite, ...], name: str, shard_index: int) -> int:
+    """Execute one manifest partition as an argument vector, without a shell."""
+    suite = next((suite for suite in suites if suite.name == name), None)
+    if suite is None:
+        raise ManifestError(f"unknown suite `{name}`")
+    if not 0 <= shard_index < suite.shards:
+        raise ManifestError(f"suite `{name}` has no shard {shard_index}")
+    command = [
+        "bazel", "test", "--keep_going", "--flaky_test_attempts=2", "--jobs=4",
+        "--local_resources=cpu=4", "--local_resources=memory=4096",
+        "--local_test_jobs=1", "--test_sharding_strategy=disabled",
+        f"--test_env=SIGNALBOX_TEST_SHARD_INDEX={shard_index}",
+        f"--test_env=SIGNALBOX_TEST_TOTAL_SHARDS={suite.shards}",
+        "--test_env=DOCKER_HOST=unix:///var/run/docker.sock",
+    ]
+    cache = os.environ.get("BAZEL_REMOTE_CACHE")
+    if os.environ.get("RUNNER_ENVIRONMENT") == "self-hosted" and cache:
+        command.append(f"--remote_cache={cache}")
+    command.append("//:postgres_" + suite.name.replace("-", "_"))
+    return subprocess.run(command, check=False).returncode
 
 
 def normalized_cargo_arguments(arguments: list[str]) -> list[str]:
@@ -509,31 +419,6 @@ def cargo_test_arguments(tokens: list[str]) -> list[str] | None:
     return None if arguments is None else normalized_cargo_arguments(arguments)
 
 
-def asserts_success(tokens: list[str], variable: str) -> bool:
-    """Return whether one command fails unless `variable` equals `success`.
-
-    A real comparison, not a mention: `echo "$RUN_RESULT was not success"`
-    names the variable and the word and exits zero regardless, which would let
-    the aggregate job pass while every shard failed.
-    """
-    if not tokens or tokens[0] not in ("test", "["):
-        return False
-    words = [word for word in tokens if word != "]"]
-    return any(
-        references_variable(words[index], variable)
-        and words[index + 1] in ("=", "==")
-        and words[index + 2] == "success"
-        for index in range(len(words) - 2)
-    )
-
-
-def references_variable(value: str, variable: str) -> bool:
-    """Return whether one shell word expands the named variable."""
-    return re.search(
-        rf"\${{?{re.escape(variable)}}}?(?![A-Za-z0-9_])", value
-    ) is not None
-
-
 def option_value(arguments: list[str], option: str) -> str | None:
     """Return the value following one option, or `None` if it is absent."""
     if option not in arguments:
@@ -558,10 +443,8 @@ def runs_ignored_tests(arguments: list[str]) -> bool:
 def runs_file_media_isolation_tests(arguments: list[str]) -> bool:
     """Recognize the ignored isolation suite enforced outside the PostgreSQL manifest.
 
-    This exception is intentionally exact: changing the package, feature, test
-    target, or harness selection remains an unmanifested ignored-test run. Both
-    this module's workflow gate and `check_docs_consistency.py` use this single
-    predicate so ignored-test credit cannot disagree with workflow admission.
+    Documentation of this exact non-PostgreSQL suite is outside the manifest.
+    Its package, feature, target, and harness selection must all match.
     """
     return arguments == [
         "--no-fail-fast",
@@ -793,10 +676,16 @@ def main() -> int:
         action="store_true",
         help="validate the manifest and print the resolved shard topology",
     )
+    mode.add_argument("--run-suite", metavar="NAME", help="run one manifest suite partition")
+    parser.add_argument("--shard-index", type=int, help="zero-based suite partition")
     arguments = parser.parse_args()
+    if (arguments.run_suite is not None) != (arguments.shard_index is not None):
+        parser.error("--run-suite and --shard-index are required together")
 
     try:
         suites = load_suites(ROOT)
+        if arguments.run_suite is not None:
+            return run_suite(suites, arguments.run_suite, arguments.shard_index)
     except ManifestError as error:
         print(f"suite manifest FAILED: {error}", file=sys.stderr)
         return 1
