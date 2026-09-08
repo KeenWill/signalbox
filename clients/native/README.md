@@ -32,6 +32,8 @@ REST, WebSocket, or OpenAI-compatible surfaces.
 - Approve or deny pending tool requests, arm a one-shot override of a delegate
   denial, and stop an active turn while sending its required successor input. An
   override applies to a later matching proposal after one extra model round.
+- Reconcile a model-call recovery wait while sending its continuation, retaining
+  the exact prepared command after an ambiguous response.
 - Create a session by selecting a model alias read from the running daemon and
   optionally supplying a system prompt.
 - Inspect the bounded, read-only entry inventory for an imported conversation

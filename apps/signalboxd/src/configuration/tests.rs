@@ -1419,6 +1419,86 @@ fn repository_watch_parses_the_structured_rule_fields() {
 }
 
 #[test]
+fn repository_watch_durations_accept_friendly_strings() {
+    let mut document = configuration_with_convergence_sweep()
+        .parse::<toml_edit::DocumentMut>()
+        .expect("fixture TOML is valid");
+    document["repository_watch"]["repositories"]
+        .as_array_of_tables_mut()
+        .expect("fixture repositories")
+        .get_mut(0)
+        .expect("first repository")["poll_interval_seconds"] = toml_edit::value("30s");
+    document["repository_watch"]["convergence_sweep"]["interval_seconds"] =
+        toml_edit::value("2 minutes 30 seconds");
+    document["repository_watch"]["convergence_sweep"]["cool_off_seconds"] = toml_edit::value("5m");
+    let configured = HubModelConfiguration::parse(&document.to_string())
+        .expect("friendly durations are admitted");
+    let watch = configured.repository_watch().expect("repository watch");
+    let sweep = watch.convergence_sweep().expect("convergence sweep");
+
+    assert_eq!(
+        watch.repositories()[0].poll_interval(),
+        Duration::from_secs(30)
+    );
+    assert_eq!(sweep.interval(), Duration::from_secs(150));
+    assert_eq!(sweep.cool_off(), Duration::from_secs(300));
+}
+
+#[test]
+fn repository_watch_cooldown_accepts_friendly_strings_with_whole_second_precision() {
+    let mut document = configuration_with_repository_watch_rule()
+        .parse::<toml_edit::DocumentMut>()
+        .expect("fixture TOML is valid");
+    for (input, expected) in [("2h", 7200), ("0s", 0)] {
+        document["repository_watch"]["rules"]
+            .as_array_of_tables_mut()
+            .expect("fixture rules")
+            .get_mut(0)
+            .expect("first rule")["cooldown_seconds"] = toml_edit::value(input);
+        let configured = HubModelConfiguration::parse(&document.to_string())
+            .expect("friendly cooldown is admitted");
+        assert_eq!(
+            configured
+                .repository_watch()
+                .expect("repository watch")
+                .rules()[0]
+                .cooldown(),
+            Duration::from_secs(expected),
+            "{input}"
+        );
+    }
+    for input in ["1.5s", "-1s", "9223372036854775808s", "invalid"] {
+        document["repository_watch"]["rules"]
+            .as_array_of_tables_mut()
+            .expect("fixture rules")
+            .get_mut(0)
+            .expect("first rule")["cooldown_seconds"] = toml_edit::value(input);
+        assert!(
+            HubModelConfiguration::parse(&document.to_string()).is_err(),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn repository_watch_friendly_durations_preserve_positive_and_ceiling_checks() {
+    let mut document = configuration_with_convergence_sweep()
+        .parse::<toml_edit::DocumentMut>()
+        .expect("fixture TOML is valid");
+    // The fixture's interval ceiling is 300 seconds.
+    document["numeric_bounds"]["max_convergence_sweep_interval"] = toml_edit::value("5m");
+    for input in ["0s", "-1s", "301s", "invalid"] {
+        document["repository_watch"]["convergence_sweep"]["interval_seconds"] =
+            toml_edit::value(input);
+        assert_eq!(
+            HubModelConfiguration::parse(&document.to_string()).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration),
+            "{input}"
+        );
+    }
+}
+
+#[test]
 fn repository_watch_parses_the_explicit_convergence_sweep() {
     let configured = HubModelConfiguration::parse(&configuration_with_convergence_sweep())
         .expect("convergence sweep fixture is valid");
@@ -5730,4 +5810,70 @@ reasoning_replay_family = "shared"
             .reasoning_replay_family(),
         Some("shared")
     );
+}
+
+#[test]
+fn review_findings_policy_cannot_exceed_domain_admission() {
+    for replacement in ["33", "\"none\""] {
+        let document = CONFIGURATION.replace(
+            "max_review_findings_per_run = 32",
+            &format!("max_review_findings_per_run = {replacement}"),
+        );
+        assert!(matches!(
+            HubModelConfiguration::parse(&document),
+            Err(HubModelConfigurationError::InvalidNumericBound {
+                field: "max_review_findings_per_run"
+            })
+        ));
+    }
+}
+
+#[test]
+fn imported_title_projection_admits_zero_unbounded_and_above_domain_limits() {
+    for (replacement, expected) in [("0", Some(0)), ("257", Some(257)), ("\"none\"", None)] {
+        let document = CONFIGURATION.replace(
+            "max_imported_conversation_display_title_scalars = 256",
+            &format!("max_imported_conversation_display_title_scalars = {replacement}"),
+        );
+        let configuration =
+            HubModelConfiguration::parse(&document).expect("valid projection limit");
+        assert_eq!(
+            configuration
+                .numeric_bounds()
+                .integer("max_imported_conversation_display_title_scalars"),
+            Some(expected),
+            "{replacement}",
+        );
+    }
+}
+
+#[test]
+fn replica_read_policy_must_admit_the_catalog_write_bound() {
+    let document =
+        CONFIGURATION.replace("max_blob_replica_count = 32", "max_blob_replica_count = 31");
+    assert!(matches!(
+        HubModelConfiguration::parse(&document),
+        Err(HubModelConfigurationError::InvalidNumericBound {
+            field: "max_blob_replica_count"
+        })
+    ));
+}
+
+#[test]
+fn disabling_reconciliation_requires_lossless_nudge_handoff() {
+    let document = CONFIGURATION.replace(
+        "reconciliation_sweep_interval = \"1s\"",
+        "reconciliation_sweep_interval = \"none\"",
+    );
+    assert!(matches!(
+        HubModelConfiguration::parse(&document),
+        Err(HubModelConfigurationError::InvalidNumericBound {
+            field: "nudge_buffer_capacity"
+        })
+    ));
+    let lossless = document.replace(
+        "nudge_buffer_capacity = 1024",
+        "nudge_buffer_capacity = \"none\"",
+    );
+    assert!(HubModelConfiguration::parse(&lossless).is_ok());
 }

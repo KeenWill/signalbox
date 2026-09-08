@@ -185,6 +185,26 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testReconcileRequestEncodesTheExactContinuation() throws {
+    let frame = SignalboxProcessClientFrame(
+      requestID: try SignalboxRequestID(validating: 9),
+      request: .reconcileTurn(
+        commandID: try SignalboxCommandID(validating: turnID),
+        sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+        expectedActiveTurnID: try SignalboxCanonicalUUID(validating: turnID),
+        content: "Recover and continue",
+        expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 3)
+      )
+    )
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(frame)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      #"{"request":{"command_id":"\#(turnID)","content":[{"text":"Recover and continue","type":"text"}],"expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session_id":"\#(sessionID)","type":"reconcile_turn"},"request_id":"9","version":1}"#
+    )
+  }
+
   /// multipart decoding preserves ordered attachment
   /// metadata and structural replay equality.
   func testUserInputContentPreservesOrderedAttachmentMetadata() throws {

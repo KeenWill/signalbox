@@ -1361,6 +1361,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var unresolvedToolDecision: SignalboxPreparedToolRequestDecision?
   private var unresolvedToolOverride: SignalboxPreparedToolDenialOverride?
+  private var recoverableTurnID: SignalboxCanonicalUUID?
+  private var unresolvedReconciliation: SignalboxPreparedTurnReconciliation?
   private var unresolvedTurnStop: SignalboxPreparedTurnStop?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var terminalTurnIDs: Set<SignalboxCanonicalUUID> = []
@@ -1720,6 +1722,105 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  func reconcileAndSendSuccessor() async {
+    let content = composerText
+    guard
+      !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      !isSubmitting,
+      canReconcileAndSend,
+      let activeTurnID = hasRetryableReconciliation
+        ? unresolvedReconciliation?.activeTurnID : recoverableTurnID,
+      let service = connectedService
+    else {
+      return
+    }
+    let generation = serviceGeneration
+    isSubmitting = true
+    defer {
+      if serviceGeneration == generation {
+        isSubmitting = false
+      }
+    }
+    var preparedForAttempt: SignalboxPreparedTurnReconciliation?
+    var reusedUnresolvedReconciliation = false
+    do {
+      let prepared: SignalboxPreparedTurnReconciliation
+      if let unresolvedReconciliation,
+        unresolvedReconciliation.sessionID == session.id,
+        hasExactUTF8(unresolvedReconciliation.content, content)
+      {
+        prepared = unresolvedReconciliation
+        reusedUnresolvedReconciliation = true
+      } else {
+        unresolvedReconciliation = nil
+        prepared = try await service.prepareTurnReconciliation(
+          session: session,
+          activeTurnID: activeTurnID,
+          content: content
+        )
+      }
+      preparedForAttempt = prepared
+      guard serviceGeneration == generation else {
+        return
+      }
+      let submitted = try await service.reconcileTurn(prepared)
+      guard serviceGeneration == generation else {
+        return
+      }
+      let acceptedInput = SignalboxProcessPendingInput(
+        id: submitted.acceptedInputID,
+        turnID: submitted.turnID,
+        acceptancePosition: submitted.acceptancePosition,
+        content: prepared.content
+      )
+      pendingInputs.removeAll { $0.id == submitted.acceptedInputID }
+      acceptedInputsAwaitingTranscript.removeAll { $0.id == submitted.acceptedInputID }
+      if !materializedAcceptedInputIDs.contains(submitted.acceptedInputID) {
+        if terminalTurnIDs.contains(submitted.turnID) {
+          retainAcceptedInputAwaitingTranscript(acceptedInput)
+        } else {
+          pendingInputs.append(acceptedInput)
+          pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
+        }
+      }
+      unresolvedReconciliation = nil
+      if recoverableTurnID == prepared.activeTurnID {
+        recoverableTurnID = nil
+      }
+      if hasExactUTF8(composerText, prepared.content) {
+        composerText = ""
+      }
+      errorMessage = nil
+    } catch {
+      guard serviceGeneration == generation else {
+        return
+      }
+      await refreshSessionDefaultsIfNeeded(
+        after: error,
+        using: service,
+        generation: generation
+      )
+      guard serviceGeneration == generation else {
+        return
+      }
+      if error is CancellationError {
+        unresolvedReconciliation = preparedForAttempt
+      } else if let serviceError = error as? SignalboxProcessServiceError,
+        serviceError.retainsPreparedMutationIdentity
+      {
+        unresolvedReconciliation = preparedForAttempt
+      } else if let openError = error as? SignalboxProcessRequestOpenError,
+        case .definitelyUnsent = openError,
+        reusedUnresolvedReconciliation
+      {
+        unresolvedReconciliation = preparedForAttempt
+      } else {
+        unresolvedReconciliation = nil
+      }
+      errorMessage = error.localizedDescription
+    }
+  }
+
   func stopAndSendSuccessor() async {
     let content = composerText
     guard
@@ -1826,7 +1927,28 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   var canSend: Bool {
-    canSubmit && activeTurnID == nil
+    canSubmit && (activeTurnID == nil || hasRetryableSubmission) && !hasRetryableReconciliation
+  }
+
+  private var hasRetryableSubmission: Bool {
+    unresolvedSubmission.map {
+      $0.sessionID == session.id && hasExactUTF8($0.content, composerText)
+    } ?? false
+  }
+
+  private var hasRetryableReconciliation: Bool {
+    unresolvedReconciliation.map {
+      $0.sessionID == session.id && hasExactUTF8($0.content, composerText)
+    } ?? false
+  }
+
+  var showsReconciliation: Bool {
+    unresolvedSubmission == nil && (recoverableTurnID != nil || hasRetryableReconciliation)
+  }
+
+  var canReconcileAndSend: Bool {
+    canSubmit && showsReconciliation
+      && (unresolvedReconciliation == nil || hasRetryableReconciliation)
   }
 
   var canStopAndSend: Bool {
@@ -1872,6 +1994,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         materializedAcceptedInputIDs = projection.materializedAcceptedInputIDs
         terminalTurnIDs = terminalTurnIDs(in: snapshot)
         activeTurnID = activeTurnID(in: snapshot)
+        recoverableTurnID = snapshot.records.compactMap { record -> SignalboxCanonicalUUID? in
+          guard case .turn(let turn) = record,
+            case .activeAwaitingModelCallRecovery(_, _, _, true) = turn.state
+          else { return nil }
+          return turn.turnID
+        }.first
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = [:]
         activity = projection.activity
@@ -1901,6 +2029,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           self.activeTurnID = nil
         }
         let wasMutationBlocked = !mutationBlocksByTurnID.isEmpty
+        recoverableTurnID = snapshot.records.compactMap { record -> SignalboxCanonicalUUID? in
+          guard case .turn(let turn) = record,
+            case .activeAwaitingModelCallRecovery(_, _, _, true) = turn.state
+          else { return nil }
+          return turn.turnID
+        }.first
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = Dictionary(
           snapshot.records.compactMap { record in
@@ -2094,6 +2228,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     acceptedInputTimelineOffsets = [:]
     activity = .unavailable
     activeTurnID = nil
+    recoverableTurnID = nil
+    unresolvedReconciliation = nil
     runner = nil
     runnerTransition = nil
     mutationBlocksByTurnID = [:]
@@ -2171,6 +2307,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       guard admitsActivation else {
         return
       }
+      recoverableTurnID = nil
       mutationBlocksByTurnID.removeValue(forKey: turnID)
       guard mutationBlocksByTurnID.isEmpty else {
         return
@@ -2629,6 +2766,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   ) {
     let admitsTerminalState = admitsStateTransition(for: turnID, at: cursor)
     terminalTurnIDs.insert(turnID)
+    if recoverableTurnID == turnID { recoverableTurnID = nil }
     if admitsTerminalState {
       mutationBlocksByTurnID.removeValue(forKey: turnID)
     }
@@ -2996,7 +3134,18 @@ struct ProcessSessionDetailScreen: View {
       )
       .accessibilityLabel("Send")
       .accessibilityIdentifier("send-message-button")
-      if viewModel.activeTurnID != nil {
+      if viewModel.showsReconciliation {
+        Button("Reconcile & Send") {
+          Task { await viewModel.reconcileAndSendSuccessor() }
+        }
+        .buttonStyle(.bordered)
+        .disabled(
+          viewModel.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || viewModel.isSubmitting || !viewModel.canReconcileAndSend
+        )
+        .help("Resolve the interrupted model call and send the composer text as its successor.")
+        .accessibilityIdentifier("reconcile-turn-button")
+      } else if viewModel.activeTurnID != nil {
         Button(role: .destructive) {
           Task { await viewModel.stopAndSendSuccessor() }
         } label: {

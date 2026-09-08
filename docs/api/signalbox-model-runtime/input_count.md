@@ -2,14 +2,48 @@
 
 # input_count
 
+## InputTokenCountFailure
+
+```rust
+pub enum InputTokenCountFailure {
+    AdapterUnavailable,
+    Capability,
+    Translation,
+    Serialization,
+    CredentialAccess { failure: CredentialAccessFailure },
+    CredentialHeader,
+    Request,
+    Transport,
+    HttpStatus { status: u16 },
+    ResponseBody,
+    ResponseNesting,
+    ResponseDecode,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl fmt::Display for InputTokenCountFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for InputTokenCountFailure {}
+```
+
 ## InputTokenCountOutcome
 
 ```rust
 pub enum InputTokenCountOutcome<C> {
-    Counted { correlation: C, input_tokens: u64 },
-    Cancelled { correlation: C },
-    Unavailable { correlation: C },
-    Failed { correlation: C },
+    Counted {
+        correlation: C,
+        input_tokens: u64,
+    },
+    Cancelled {
+        correlation: C,
+    },
+    Unavailable {
+        correlation: C,
+    },
+    Failed {
+        correlation: C,
+        failure: InputTokenCountFailure,
+    },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

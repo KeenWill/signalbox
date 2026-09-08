@@ -4,20 +4,14 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    OperatorFailureClass, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
-    ReplaceSessionMetadataService, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutor,
+    OperatorFailureClass, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutor,
     ToolExecutorEvidence,
 };
 use signalbox_domain::{
-    Actor, DurableCommandId, NormalizedToolArguments, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, SessionId, SessionMetadataContent, SessionMetadataSnapshot,
-    ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault, ToolRequestId,
-    ToolResultText,
+    Actor, DurableCommandId, NormalizedToolArguments, SessionId, SessionMetadataContent,
+    SessionMetadataSnapshot, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
+    ToolRequestId, ToolResultText,
 };
-use signalbox_persistence::session_metadata::{
-    SessionMetadataRepository, SessionMetadataRepositoryError,
-};
-use sqlx::PgPool;
 
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -100,14 +94,6 @@ impl schemars::JsonSchema for SessionStatusTitle {
 
     fn inline_schema() -> bool {
         true
-    }
-}
-
-impl SessionStatusTool<PostgresSessionStatusWriter> {
-    /// Composes the production writer around the existing metadata application
-    /// service and PostgreSQL transaction.
-    pub fn try_new_postgres(pool: PgPool) -> Result<Self, SessionStatusToolConstructionError> {
-        Self::try_new(PostgresSessionStatusWriter::new(pool))
     }
 }
 
@@ -220,94 +206,6 @@ pub trait SessionStatusWriter: Send {
         &mut self,
         update: SessionStatusWrite,
     ) -> impl Future<Output = Result<SessionStatusWriteOutcome, Self::Error>> + Send;
-}
-
-/// PostgreSQL-backed writer using `ReplaceSessionMetadataService`.
-#[derive(Clone, Debug)]
-pub struct PostgresSessionStatusWriter {
-    pool: PgPool,
-}
-
-impl PostgresSessionStatusWriter {
-    /// Uses the supplied pool for one command transaction per invocation.
-    pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
-    }
-}
-
-#[derive(signalbox_derive::OperatorError)]
-/// Sanitized PostgreSQL metadata-writer failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PostgresSessionStatusWriterError {
-    #[error("session status command identity is invalid")]
-    /// Request correlation did not form a valid durable command identity.
-    InvalidCommandIdentity,
-    #[error("session status database operation failed")]
-    /// PostgreSQL failed outside the final ambiguous commit acknowledgement.
-    Database,
-    #[error("session status command identity collided")]
-    /// A freshly derived command identity collided with durable identity.
-    IdentityCollision,
-    #[error("session status durable facts are inconsistent")]
-    /// Stored metadata command facts were inconsistent.
-    Corruption,
-}
-
-impl ClassifyOperatorFailure for PostgresSessionStatusWriterError {
-    fn operator_failure_class(&self) -> OperatorFailureClass {
-        match self {
-            Self::InvalidCommandIdentity => OperatorFailureClass::CallerOrHubBug,
-            Self::IdentityCollision => OperatorFailureClass::IdentityCollision,
-            Self::Database => OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false,
-            },
-            Self::Corruption => OperatorFailureClass::FailClosedCorruption,
-        }
-    }
-}
-
-impl SessionStatusWriter for PostgresSessionStatusWriter {
-    type Error = PostgresSessionStatusWriterError;
-
-    async fn write(
-        &mut self,
-        update: SessionStatusWrite,
-    ) -> Result<SessionStatusWriteOutcome, Self::Error> {
-        let request = ReplaceSessionMetadataRequest::try_new_for_tool(
-            update.command,
-            update.session,
-            update.request,
-            update.replacement,
-        )
-        .map_err(|_| PostgresSessionStatusWriterError::InvalidCommandIdentity)?;
-        let mut service =
-            ReplaceSessionMetadataService::new(SessionMetadataRepository::new(self.pool.clone()));
-        match service.execute(request).await {
-            Ok(ReplaceSessionMetadataOutcome::Recorded(ReplaceSessionMetadataResult::Applied(
-                applied,
-            ))) => Ok(SessionStatusWriteOutcome::Applied(
-                applied.snapshot().clone(),
-            )),
-            Ok(ReplaceSessionMetadataOutcome::Recorded(
-                ReplaceSessionMetadataResult::Rejected(
-                    ReplaceSessionMetadataRejectedResult::SessionNotFound(_),
-                ),
-            )) => Ok(SessionStatusWriteOutcome::SessionNotFound),
-            Ok(ReplaceSessionMetadataOutcome::ConflictingReuse { .. }) => {
-                Err(PostgresSessionStatusWriterError::IdentityCollision)
-            }
-            Err(SessionMetadataRepositoryError::CommitAmbiguous(_)) => {
-                Ok(SessionStatusWriteOutcome::Ambiguous)
-            }
-            Err(SessionMetadataRepositoryError::Database(_)) => {
-                Err(PostgresSessionStatusWriterError::Database)
-            }
-            Err(
-                SessionMetadataRepositoryError::DifferentCommandKind { .. }
-                | SessionMetadataRepositoryError::Corruption(_),
-            ) => Err(PostgresSessionStatusWriterError::Corruption),
-        }
-    }
 }
 
 /// Daemon-local session-status executor.
@@ -699,16 +597,6 @@ mod tests {
             request,
             &replacement
         ));
-    }
-
-    /// A durable command already using the freshly attempt-derived identity is
-    /// an operational identity collision rather than a caller defect.
-    #[test]
-    fn session_status_command_reuse_is_identity_collision() {
-        assert_eq!(
-            PostgresSessionStatusWriterError::IdentityCollision.operator_failure_class(),
-            OperatorFailureClass::IdentityCollision
-        );
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

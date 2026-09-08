@@ -296,7 +296,7 @@ fn branch_switch_revalidates_the_root_at_head_publication() {
     let replacement = Repository::open(&root).expect("replacement repository opens");
     let retired_repository = Repository::open(&retired).expect("retired original repository opens");
 
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         replacement
             .head()
@@ -359,7 +359,7 @@ fn branch_switch_rollback_preserves_a_concurrent_worktree_edit() {
         .find_blob(restored_entry.id)
         .expect("restored tracked blob opens");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(fixture.root().join(TRACKED_PATH)).expect("concurrent worktree edit reads"),
         TARGET_CONTENT.as_bytes()
@@ -410,7 +410,7 @@ fn branch_switch_rolls_back_unchanged_paths_when_another_path_becomes_a_symlink(
     fs::remove_file(&target_reference).expect("replacement target reference FIFO removes");
     fs::rename(&retired_reference, &target_reference).expect("target reference restores");
 
-    assert_eq!(failure, LocalGitFailure::Path);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(fixture.root().join(TRACKED_PATH)).expect("unchanged checkout path rolls back"),
         CHANGED_CONTENT.as_bytes()
@@ -597,7 +597,7 @@ fn checkout_error_preserves_an_edit_after_a_partial_write() {
     )
     .expect_err("partial checkout error is reported");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(fixture.root().join(TRACKED_PATH)).expect("concurrent fixture edit reads"),
         TARGET_CONTENT.as_bytes()

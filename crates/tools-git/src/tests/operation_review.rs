@@ -547,7 +547,7 @@ fn branch_switch_preserves_an_index_replaced_before_head_publication() {
         .expect_err("replaced index rejects HEAD publication");
     let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         observed.head().expect("original HEAD remains").shorthand(),
         Ok("main")
@@ -592,7 +592,7 @@ fn checkout_rollback_preserves_a_same_content_foreign_replacement() {
     fs::rename(&replacement_path, fixture.root().join(tracked_path))
         .expect("foreign replacement publishes");
 
-    atomic_restore_checkout_path(
+    let failure = atomic_restore_checkout_path(
         &executor.filesystem,
         &executor.root,
         &executor.repository_authority,
@@ -601,7 +601,8 @@ fn checkout_rollback_preserves_a_same_content_foreign_replacement() {
         &expected,
         Some(&expected_identities),
     )
-    .expect("foreign replacement is preserved");
+    .expect_err("foreign replacement leaves rollback unproven");
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
 
     assert_eq!(
         fs::read(fixture.root().join(tracked_path)).expect("foreign replacement reads"),
@@ -644,7 +645,7 @@ fn branch_switch_rejects_a_same_content_replacement_during_checkout_capture() {
         .expect_err("checkout identity transition rejects");
     let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         observed.head().expect("original HEAD remains").shorthand(),
         Ok("main")
@@ -685,7 +686,7 @@ fn branch_switch_rolls_back_owned_paths_when_checkout_capture_rejects_a_symlink(
         .expect_err("symlinked checkout capture rejects");
     let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
 
-    assert_eq!(failure, LocalGitFailure::Path);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         observed.head().expect("original HEAD remains").shorthand(),
         Ok("main")
@@ -743,7 +744,7 @@ fn failed_checkout_preserves_a_same_content_replacement_after_notification() {
     )
     .expect_err("failed checkout reports failure");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(fixture.root().join(TRACKED_PATH)).expect("foreign content remains"),
         CHANGED_CONTENT.as_bytes()
@@ -1322,12 +1323,13 @@ fn stage_rejects_when_a_captured_live_object_disappears_before_publication() {
     let executor = fixture.executor();
 
     let failure = executor
-        .stage_with_pre_publish_hook(
+        .stage_with_publish_hooks(
             &repository,
             GitStageArguments {
                 paths: vec![TRACKED_PATH.to_owned()],
             },
             || fs::remove_file(&initial_blob_path).expect("captured live blob removes"),
+            || {},
         )
         .expect_err("missing captured object rejects index publication");
     let observed_index = Repository::open(fixture.root())
@@ -1359,12 +1361,13 @@ fn stage_rejects_when_its_new_object_pack_disappears_before_publication() {
     let executor = fixture.executor();
 
     let failure = executor
-        .stage_with_pre_publish_hook(
+        .stage_with_publish_hooks(
             &repository,
             GitStageArguments {
                 paths: vec![TRACKED_PATH.to_owned()],
             },
             || remove_first_installed_pack(fixture.root()),
+            || {},
         )
         .expect_err("missing newly installed objects reject index publication");
     let observed_index = Repository::open(fixture.root())

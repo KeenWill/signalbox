@@ -521,17 +521,15 @@ pub(crate) async fn await_turn_terminal(
             queued_turn_recovery(&mut snapshot, turn_id)?;
             let mut poll_automatic_recovery = automatic_recovery_pending(&mut snapshot, turn_id)?;
             let mut observed_cursor = snapshot.cursor();
+            let mut recovery_poll = tokio::time::interval(FOLLOW_RECOVERY_REFETCH_INTERVAL);
+            recovery_poll.reset();
             loop {
                 let message = if poll_automatic_recovery {
-                    match tokio::time::timeout(
-                        FOLLOW_RECOVERY_REFETCH_INTERVAL,
-                        connection.message(),
-                    )
-                    .await
-                    {
-                        Ok(message) => message?,
-                        Err(_) => {
+                    tokio::select! {
+                        biased;
+                        _ = recovery_poll.tick() => {
                             let mut refreshed = transcript_command(client, session_id).await?;
+                            recovery_poll.reset();
                             let refreshed_state = refreshed.turn_state(turn_id)?;
                             if let Some(terminal) =
                                 terminal_snapshot_state(refreshed_state.as_ref())?
@@ -543,6 +541,7 @@ pub(crate) async fn await_turn_terminal(
                                 automatic_recovery_pending(&mut refreshed, turn_id)?;
                             continue;
                         }
+                        message = connection.message() => message?,
                     }
                 } else {
                     connection.message().await?
@@ -562,6 +561,7 @@ pub(crate) async fn await_turn_terminal(
                         }
                         if selected_turn_recovery_transition(&event, turn_id) {
                             let mut refreshed = transcript_command(client, session_id).await?;
+                            recovery_poll.reset();
                             let refreshed_state = refreshed.turn_state(turn_id)?;
                             if let Some(terminal) =
                                 terminal_snapshot_state(refreshed_state.as_ref())?
@@ -582,6 +582,7 @@ pub(crate) async fn await_turn_terminal(
                         }
                         if child_lifecycle_terminalization(&event, session_id) {
                             let mut refreshed = transcript_command(client, session_id).await?;
+                            recovery_poll.reset();
                             let refreshed_state = refreshed.turn_state(turn_id)?;
                             if let Some(terminal) =
                                 terminal_snapshot_state(refreshed_state.as_ref())?
@@ -593,6 +594,7 @@ pub(crate) async fn await_turn_terminal(
                         }
                         if session_recovery_transition(&event) {
                             let mut refreshed = transcript_command(client, session_id).await?;
+                            recovery_poll.reset();
                             let refreshed_state = refreshed.turn_state(turn_id)?;
                             if let Some(terminal) =
                                 terminal_snapshot_state(refreshed_state.as_ref())?
