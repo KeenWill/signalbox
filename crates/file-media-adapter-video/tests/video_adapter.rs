@@ -1121,8 +1121,8 @@ async fn metadata_read_uses_the_same_source_window_as_validation() -> Result<(),
 }
 
 #[tokio::test]
-async fn probe_evidence_does_not_exceed_the_effective_validation_ceiling()
--> Result<(), Box<dyn Error>> {
+async fn probe_evidence_above_the_effective_validation_ceiling_fails() -> Result<(), Box<dyn Error>>
+{
     let source = VideoFixture::mp4_with_metadata_after_probe_prefix().into_source()?;
     let mut ceilings = FileMediaCeilings::version_one();
     ceilings.validation_source_bytes = 4096;
@@ -1136,9 +1136,9 @@ async fn probe_evidence_does_not_exceed_the_effective_validation_ceiling()
         ProcessorIsolation::Available,
     )?
     .inspect(&DirectProcessor::new(), request, &source, &NeverCancelled)
-    .await?;
+    .await;
 
-    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    assert_eq!(inspection, Err(FileMediaFailure::ProcessorFailed));
     Ok(())
 }
 

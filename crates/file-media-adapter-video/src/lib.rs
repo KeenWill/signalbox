@@ -1951,6 +1951,7 @@ fn parse_ebml_scope(
     let mut encryption_seen = false;
     let mut encoding_type = None;
     let mut encryption_algorithm_seen = false;
+    let mut crc_seen = false;
     while cursor < bytes.len() {
         let (id, id_bytes, _) = match read_ebml_vint(
             bytes,
@@ -2300,11 +2301,12 @@ fn parse_ebml_scope(
                 pixel_height_seen = true;
             }
             (EBML_CRC32, _) => {
-                if payload.len() != 4 || cursor != 0 {
+                if payload.len() != 4 || crc_seen {
                     return Err(VideoIssue::Malformed);
                 }
+                crc_seen = true;
                 if !allow_truncated_tail
-                    && payload != ebml_crc32(&bytes[payload_end..]).to_le_bytes()
+                    && payload != ebml_crc32(&bytes[..cursor], &bytes[payload_end..]).to_le_bytes()
                 {
                     return Err(VideoIssue::Malformed);
                 }
@@ -2355,10 +2357,10 @@ fn parse_ebml_scope(
     })
 }
 
-// RFC 8794 section 11.3.1: IEEE CRC-32 excludes the leading CRC element.
-fn ebml_crc32(bytes: &[u8]) -> u32 {
+// RFC 8794 section 11.3.1: IEEE CRC-32 excludes the CRC element itself.
+fn ebml_crc32(before: &[u8], after: &[u8]) -> u32 {
     let mut crc = u32::MAX;
-    for byte in bytes {
+    for byte in before.iter().chain(after) {
         crc ^= u32::from(*byte);
         for _ in 0..8 {
             crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
@@ -2810,34 +2812,40 @@ mod cutoff_tests {
     }
 
     #[test]
-    fn complete_master_crc_covers_its_remaining_children() {
-        // CRC-32/ISO-HDLC of the TimecodeScale element 2a d7 b1 81 01.
-        let mut bytes = vec![
-            0xbf, 0x84, 0x23, 0x4c, 0xd3, 0x67, 0x2a, 0xd7, 0xb1, 0x81, 1,
-        ];
-        assert_eq!(
-            parse_ebml_scope(
-                &bytes,
-                0,
-                EbmlScope::Info,
-                false,
-                bytes.len() as u64,
-                &mut EbmlState::default()
-            ),
-            Ok(VideoTrackPresence::Absent)
-        );
-        bytes[10] = 2;
-        assert_eq!(
-            parse_ebml_scope(
-                &bytes,
-                0,
-                EbmlScope::Info,
-                false,
-                bytes.len() as u64,
-                &mut EbmlState::default()
-            ),
-            Err(VideoIssue::Malformed)
-        );
+    fn complete_master_crc_covers_children_before_and_after_it() {
+        // Independently computed CRC-32/ISO-HDLC of TimecodeScale followed by Void.
+        let children = [0x2a, 0xd7, 0xb1, 0x81, 1, 0xec, 0x81, 0x5a];
+        let crc = [0xbf, 0x84, 0x8f, 0x9a, 0x82, 0x8f];
+        for position in [0, 5, children.len()] {
+            let bytes = [&children[..position], &crc, &children[position..]].concat();
+            assert_eq!(
+                parse_ebml_scope(
+                    &bytes,
+                    0,
+                    EbmlScope::Info,
+                    false,
+                    bytes.len() as u64,
+                    &mut EbmlState::default()
+                ),
+                Ok(VideoTrackPresence::Absent)
+            );
+            for corrupt_child in [4, 7] {
+                let mut corrupted = children;
+                corrupted[corrupt_child] ^= 0x02;
+                let bytes = [&corrupted[..position], &crc, &corrupted[position..]].concat();
+                assert_eq!(
+                    parse_ebml_scope(
+                        &bytes,
+                        0,
+                        EbmlScope::Info,
+                        false,
+                        bytes.len() as u64,
+                        &mut EbmlState::default()
+                    ),
+                    Err(VideoIssue::Malformed)
+                );
+            }
+        }
     }
 
     #[test]

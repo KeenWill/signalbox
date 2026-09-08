@@ -362,7 +362,17 @@ impl FileMediaRegistry {
             .map(|candidate| candidate.reader.clone())
             .collect::<std::collections::BTreeSet<_>>();
         if media_types.len() != 1 || readers.len() != 1 {
-            if !collision_validation_allowed(evidence, candidates.len()) {
+            if !collision_validation_allowed(evidence, candidates.len())
+                || candidates.iter().any(|candidate| {
+                    self.readers.get(&candidate.reader).is_some_and(|reader| {
+                        candidate.evidence_bytes
+                            > self
+                                .ceilings
+                                .validation_source_bytes
+                                .min(reader.validation().source_bytes())
+                    })
+                })
+            {
                 return Ok(FileInspection::Ambiguous {
                     source: request.source,
                     media_types,
@@ -469,9 +479,7 @@ impl FileMediaRegistry {
                 .validation_source_bytes
                 .min(reader.validation().source_bytes())
         {
-            return Ok(FileInspection::Unknown {
-                source: request.source,
-            });
+            return Err(FileMediaFailure::ProcessorFailed);
         }
         let raw = processor
             .validate(
