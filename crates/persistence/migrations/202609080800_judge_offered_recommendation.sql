@@ -15,4 +15,4 @@ ALTER TABLE tool_approval_judge_model_call
         OR (terminal_disposition_kind IS DISTINCT FROM 'completed'
             AND offered_recommendation_kind IS NULL
             AND substitution_cause IS NULL)
-    ) IS TRUE);
+    ) IS TRUE) NOT VALID;

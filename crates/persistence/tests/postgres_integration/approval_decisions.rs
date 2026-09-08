@@ -3857,3 +3857,43 @@ async fn decision_correlation_mismatches_stay_typed_rejections() -> Result<(), B
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn judge_offer_migration_retains_existing_rows_and_checks_new_completions()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "CREATE TEMP TABLE tool_approval_judge_model_call (
+            terminal_disposition_kind text, recommendation_kind text
+         ) ON COMMIT DROP;
+         INSERT INTO tool_approval_judge_model_call VALUES ('completed', 'approve');",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/202609080800_judge_offered_recommendation.sql"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    let retained_without_offer: bool = sqlx::query_scalar(
+        "SELECT offered_recommendation_kind IS NULL AND substitution_cause IS NULL
+           FROM tool_approval_judge_model_call",
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    assert!(retained_without_offer);
+    let error = sqlx::query(
+        "INSERT INTO tool_approval_judge_model_call (terminal_disposition_kind, recommendation_kind)
+         VALUES ('completed', 'approve')",
+    ).execute(&mut *transaction).await.expect_err("new completions must retain their offer");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_judge_offered_recommendation_shape")
+    );
+    transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
