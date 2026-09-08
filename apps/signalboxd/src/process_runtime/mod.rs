@@ -396,3 +396,5 @@ pub(crate) use protocol::interrupt_for_committed_closure;
 use protocol::*;
 #[cfg(test)]
 include!("tests.rs");
+
+mod credential_pool;

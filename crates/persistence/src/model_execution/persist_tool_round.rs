@@ -329,8 +329,8 @@ pub(super) async fn insert_credential_pool_terminal_exhaustion(
     sqlx::query(
         "INSERT INTO credential_pool_terminal_exhaustion
             (terminal_attempt_id, terminal_model_call_id,
-             session_id, turn_id, pool_name, cause_kind)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+             session_id, turn_id, pool_name, cause_kind, pool_policy_id)
+         VALUES ($1, $2, $3, $4, $5, $6, (SELECT pool_policy_id FROM credential_pool_exhaustion_member WHERE terminal_attempt_id = $1 AND ordinal = 0))",
     )
     .bind(attempt.into_uuid())
     .bind(last_call.map(ModelCallId::into_uuid))
@@ -347,15 +347,28 @@ pub(super) async fn persist_credential_pool_exhaustion(
     connection: &mut PgConnection,
     exhausted: &CredentialPoolExhaustedModelCallTurn,
 ) -> Result<(), ModelCallRepositoryError> {
+    let pool_exhausted: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM credential_pool_exhaustion_member WHERE terminal_attempt_id = $1)",
+    )
+    .bind(exhausted.failed().attempt().id().into_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
     persist_failed_with_delegated_child_result(
         connection,
         exhausted.failed(),
-        TurnTerminalCause::CredentialPoolExhausted,
+        if pool_exhausted {
+            TurnTerminalCause::CredentialPoolExhausted
+        } else {
+            TurnTerminalCause::ModelCallFailed
+        },
         ProviderReportedTokenUsage::unreported(),
         None,
         None,
     )
     .await?;
+    if !pool_exhausted {
+        return Ok(());
+    }
     insert_credential_pool_terminal_exhaustion(
         connection,
         exhausted.failed().attempt().id(),
@@ -365,7 +378,10 @@ pub(super) async fn persist_credential_pool_exhaustion(
         None,
         None,
     )
-    .await
+    .await?;
+    sqlx::query("WITH header AS (INSERT INTO outbox_event (event_kind, storage_version, session_id) VALUES ('turn_credential_pool_exhausted', 1, $1) RETURNING event_sequence, event_kind, storage_version, session_id) INSERT INTO credential_pool_exhaustion_outbox_event SELECT event_sequence, event_kind, storage_version, session_id, $2 FROM header")
+        .bind(exhausted.failed().session().into_uuid()).bind(exhausted.failed().attempt().id().into_uuid()).execute(connection).await?;
+    Ok(())
 }
 
 pub(super) async fn persist_tool_continuation_headroom_exhaustion(

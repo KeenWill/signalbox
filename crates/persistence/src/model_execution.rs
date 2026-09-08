@@ -7,6 +7,8 @@
 
 mod continuation;
 mod credential_pool;
+#[path = "credential_pool_evidence.rs"]
+mod credential_pool_evidence;
 #[path = "credential_pool_records.rs"]
 mod credential_pool_records;
 mod delegated_result;

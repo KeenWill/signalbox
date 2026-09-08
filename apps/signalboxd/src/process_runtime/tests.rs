@@ -1384,6 +1384,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credential_pool_policy_read_holds_snapshot_capacity() -> Result<(), Box<dyn Error>> {
+        let budget = Arc::new(Semaphore::new(1));
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let request = ClientRequest::ReadCredentialPoolPolicy {
+            session_id: fixture_identity(1),
+            turn_id: fixture_identity(2),
+            pool_policy_id: fixture_identity(3),
+        };
+        let permit = admit_snapshot_reader(&request, Arc::clone(&budget), &mut shutdown_receiver)
+            .await?
+            .ok_or_else(|| io::Error::other("the running reader must be admitted"))?
+            .ok_or_else(|| io::Error::other("the policy read must reserve its pooled connection"))?;
+        assert_eq!(budget.available_permits(), 0);
+        drop(permit);
+        assert_eq!(budget.available_permits(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn review_read_admission_draws_on_the_shared_reader_budget() -> Result<(), Box<dyn Error>>
     {
         let capacity = 3;

@@ -61,5 +61,6 @@
 | usage | 3 | 0 | 1 | [usage](usage.md) |
 | workspace | 3 | 0 | 0 | [workspace](workspace.md) |
 | workspace_instructions | 6 | 0 | 0 | [workspace_instructions](workspace_instructions.md) |
+| credential_pool_exhaustion | 4 | 0 | 3 | [credential_pool_exhaustion](credential_pool_exhaustion.md) |
 | reload_configuration | 8 | 0 | 0 | [reload_configuration](reload_configuration.md) |
 | root | 0 | 0 | 10 | [root](root.md) |

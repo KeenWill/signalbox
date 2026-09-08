@@ -777,8 +777,7 @@ impl PostgresModelCallRepository {
         // a quarantined or rejected account, and that count fails, aborting
         // activation before preparation could record the typed exhaustion. The
         // caller activates the turn call-free instead and lets ordinary
-        // preparation own the closure, exactly as the counted-activation
-        // checkpoint already does when selection admits no member.
+        // preparation own the closure.
         let Some(credential_reference) = selected.reference else {
             transaction.rollback().await?;
             return Ok(None);
@@ -856,9 +855,8 @@ impl PostgresModelCallRepository {
         .await?;
         outbox::lock_sequence_allocator(connection).await?;
         let Some(credential_reference) = selected.reference.as_ref() else {
-            // The activated turn remains call-free. The ordinary counted path
-            // hands it to preparation; a definitive attachment path already
-            // has identities and closes the typed exhaustion in this transaction.
+            // The caller must close this call-free exhaustion in the same
+            // transaction as its retained member evidence.
             let policy = selected
                 .policy
                 .ok_or(ModelCallRepositoryError::InvalidTransition(
@@ -885,6 +883,26 @@ impl PostgresModelCallRepository {
         Ok(CountedActivationCheckpointOutcome::Prepared)
     }
 
+    pub(crate) async fn fail_counted_pool_exhaustion_in_transaction(
+        &self,
+        connection: &mut PgConnection,
+        activated: &signalbox_domain::ActivatedTurn,
+        policy: &super::CredentialPoolRuntimePolicy,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
+        let execution =
+            require_live_execution(connection, activated.session(), &self.targets).await?;
+        let exhausted = execution
+            .fail_credential_pool_exhausted(policy.name().to_owned(), identities)
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "credential-pool exhaustion could not close counted activation",
+                )
+            })?;
+        persist_credential_pool_exhaustion(connection, &exhausted).await?;
+        Ok(exhausted.into_failed())
+    }
+
     /// Checkpoints and closes the exact prospective call after attachment
     /// verification found a definitive failure during provider-native counting.
     pub(crate) async fn fail_counted_attachment_in_transaction(
@@ -905,17 +923,11 @@ impl PostgresModelCallRepository {
             )
             .await?;
         if let CountedActivationCheckpointOutcome::PoolExhausted(policy) = checkpoint {
-            let execution =
-                require_live_execution(connection, activated.session(), &self.targets).await?;
-            let exhausted = execution
-                .fail_credential_pool_exhausted(policy.name().to_owned(), identities)
-                .map_err(|_| {
-                    ModelCallRepositoryError::InvalidTransition(
-                        "credential-pool exhaustion could not close counted activation",
-                    )
-                })?;
-            persist_credential_pool_exhaustion(connection, &exhausted).await?;
-            return Ok(exhausted.into_failed());
+            return self
+                .fail_counted_pool_exhaustion_in_transaction(
+                    connection, activated, &policy, identities,
+                )
+                .await;
         }
         let call = prospective.prepared().call().id();
         let execution = require_exact_call(
