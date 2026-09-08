@@ -38,11 +38,12 @@ the operator surface that clears them is on
 Pool policies have immutable identities; each clearable exclusion retains its
 generation and origin, and selection ignores cleared generations.
 
-An admission selects a member, selects an exhausted wait, or fails. A bound
-same-credential retry whose credential is excluded before preparation fails
-before wait selection; `park` applies only to pool admission. A released wait
-that selects no member or wait fails through a fresh attempt, retaining a
-predecessor provider cause exactly when its chain issued a call.
+An admission selects a member, selects a credential wait, or fails. A bound
+same-credential retry whose credential has a durable availability exclusion
+before preparation fails before wait selection; `park` applies only to pool
+admission. A released wait that selects no member or wait fails through a fresh
+attempt, retaining a predecessor provider cause exactly when its chain issued a
+call.
 
 ## Design decisions
 
@@ -202,7 +203,10 @@ invocation-capacity locks before updating waits.
 Contended-wait: no member is admitted and at least one otherwise-admissible
 member is skipped only for its configured invocation bound. Either exhaustion
 policy enters the same call-free wait with cause contended, retaining every
-bounded member and its reservation identities alongside excluded members.
+bounded member and its reservation identities alongside excluded members. A
+same-credential retry blocked only by its invocation bound enters this wait and
+retains its retry binding.
+
 Preparation reserves only its selected `codex_home` member; invocation
 completion releases that reservation and grants eligibility to contended waits
 naming that bounded member in one transaction. Competing releases admit only the
