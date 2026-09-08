@@ -610,6 +610,19 @@ evidence. Rejected staging workspaces retain exact manifest and connection-epoch
 cleanup authority, and a release receipt records completion only under that
 authority.
 
+Runner status reads current enrollment authority, enrollment-request receipts,
+current session placements, and retained replacement-provisioning failures in
+one read-only repeatable-read transaction, closed before protocol output. The
+daemon spools the complete page to an anonymous temporary file before
+transmission. Failure rows join their immutable provisioning authorization and
+order by its UUID bytes; an `operation_failure { authorization_id }` cursor
+continues exclusively, with one lookahead row establishing whether another page
+exists. The shared page budget traverses enrollments by runner UUID, placements
+by session UUID, then failures; each query is limited to the remaining budget
+plus one lookahead row. Enrollment and placement cursors continue exclusively. A
+`workspace_leak { runner_id, locator, entry_digest }` cursor is beyond failures;
+there are no retained leak rows.
+
 OAuth provisioning locks its profile and every retained pool co-member in
 reference order, rereads membership, and retries acquisition if membership grew.
 Pool-policy insertion locks every member in the same order. Authorization

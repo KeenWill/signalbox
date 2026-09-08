@@ -32,6 +32,17 @@ describe('application state', () => {
     testStore = createAppStore()
   })
 
+  it('releases retired original loads without reviving them on a late completion', () => {
+    const retired = 'product-artifact:1:retired'
+    const current = 'product-artifact:2:current'
+    testStore.dispatch(actions.artifactOriginalRequested(retired))
+    testStore.dispatch(actions.artifactOriginalRequested(current))
+    testStore.dispatch(actions.artifactOriginalReleased(retired))
+    testStore.dispatch(actions.artifactOriginalSettled({ id: retired, result: 'loaded' }))
+
+    expect(selectApp(testStore.getState()).originalArtifacts).toEqual({ [current]: 'loading' })
+  })
+
   it('records logical-position fixtures in declared order', () => {
     const sessionIds = recordLogicalPositionFixture('fixture', 2, (index) => String(index + 1))
 

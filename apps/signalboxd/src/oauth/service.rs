@@ -467,7 +467,7 @@ mod tests {
                     let blocked: bool = sqlx::query_scalar(
                         "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
                          WHERE datname = current_database() AND wait_event_type = 'Lock'
-                         AND query LIKE '%oauth_credential_profile%')",
+                         AND cardinality(pg_blocking_pids(pid)) > 0)",
                     )
                     .fetch_one(&pool)
                     .await?;
@@ -478,7 +478,7 @@ mod tests {
                 }
             };
             tokio::select! {
-                result = &mut waiting => panic!("preparation bypassed held row lock: {result:?}"),
+                result = &mut waiting => panic!("preparation bypassed held credential lease: {result:?}"),
                 result = tokio::time::timeout(std::time::Duration::from_secs(10), blocked) => result??,
             }
             cancel.send(()).expect("waiting preparation");

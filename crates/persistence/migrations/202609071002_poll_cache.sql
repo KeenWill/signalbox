@@ -21,4 +21,4 @@ CREATE TABLE poll_cache_page (
     CHECK (etag IS NOT NULL OR last_modified IS NOT NULL)
 );
 RESET ROLE;
-SET search_path = public;
+RESET search_path;

@@ -64,6 +64,22 @@ pub enum ServerMessage {
         pool_policy_id: CanonicalUuid,
         policy_members: vec::Vec<string::String>,
     },
+    RunnerStatusStart {},
+    RunnerStatus {
+        status: RunnerStatusFact,
+    },
+    RunnerOperationFailure {
+        failure: RunnerOperationFailure,
+    },
+    RunnerWorkspaceLeak {
+        leak: RunnerWorkspaceLeak,
+    },
+    RunnerStatusEnd {
+        runner_count: CanonicalU64,
+        failure_count: CanonicalU64,
+        leak_count: CanonicalU64,
+        next_after: option::Option<RunnerStatusCursor>,
+    },
     WorkspaceRegistered {
         command_id: CommandId,
         workspace_id: CanonicalUuid,

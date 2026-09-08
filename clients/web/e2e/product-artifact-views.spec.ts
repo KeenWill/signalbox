@@ -1,5 +1,5 @@
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, type TestInfo, test } from './fontTest'
 import { useDeterministicImportApi } from './import-api-fixture'
 
 const watchBrowser = (page: Page) => {
@@ -93,7 +93,7 @@ test('captures the selected imported artifact on a phone viewport', async ({ pag
   await expect(importedArtifact).toBeVisible()
   await page.getByRole('button', { name: 'Use light theme' }).click()
   await importedArtifact.scrollIntoViewIfNeeded()
-  await expect(page).toHaveScreenshot('imports-artifact-mobile-light.png', {
+  await expect.soft(page).toHaveScreenshot('imports-artifact-mobile-light.png', {
     animations: 'disabled',
   })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })

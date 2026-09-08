@@ -1313,6 +1313,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     _ event: SignalboxProcessSessionEvent
   ) -> Bool {
     switch event {
+    case .childLifecycleDisposition(_, let child, _, _, _):
+      return child == sessionID
     case .toolBatchTransition(_, _, let state):
       switch state {
       case .proposed, .resultsProjected:
@@ -1323,7 +1325,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
-    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+    case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult,
+      .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .modelCallTransition, .turnActivated, .runnerStateTransition:
       return false
     }
@@ -2050,7 +2053,8 @@ extension SignalboxProcessSessionEvent {
       return ("tool_batch_transition.state.\(kind)", nil)
     case .unknown(let kind, _, let diagnostic):
       return (kind, diagnostic)
-    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+    case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
+      .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition,
       .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
@@ -2069,6 +2073,10 @@ extension SignalboxProcessSessionEvent {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .turnCredentialPoolExhausted(_, let evidence): return evidence.retainedUTF8Bytes
+    case .sessionMessage(_, _, _, _, _, _, let content):
+      return UInt(content.utf8.count)
+    case .childResult(_, _, _, let content, _, _):
+      return UInt(content?.utf8.count ?? 0)
     case .inputAccepted(_, _, _, let content):
       return content.retainedUTF8Bytes
     case .modelCallTransition(_, _, let state):
@@ -2084,7 +2092,8 @@ extension SignalboxProcessSessionEvent {
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+    case .goalTurnRetired, .childSpawned, .childWaiting, .childLifecycleDisposition,
+      .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .turnActivated, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
       .turnToolReconciliationRequired:

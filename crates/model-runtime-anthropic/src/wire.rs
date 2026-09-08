@@ -26,7 +26,7 @@ pub(crate) struct MessagesRequest {
     pub max_tokens: u32,
     pub messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<Vec<WireSystemBlock>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop_sequences: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,6 +76,19 @@ pub(crate) struct WireMessage {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct WireSystemBlock {
+    pub r#type: &'static str,
+    pub text: String,
+    pub cache_control: CacheControl,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum CacheControl {
+    Ephemeral,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum WireRequestBlock {
     Known(WireKnownRequestBlock),
@@ -86,18 +99,26 @@ pub(crate) enum WireRequestBlock {
 #[serde(tag = "type")]
 pub(crate) enum WireKnownRequestBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: Box<serde_json::value::RawValue>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
         content: String,
         is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     #[serde(rename = "thinking")]
     Thinking { thinking: String, signature: String },
@@ -133,7 +154,7 @@ pub(crate) struct CountTokensRequest {
     pub model: String,
     pub messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<Vec<WireSystemBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -494,4 +515,28 @@ pub(crate) struct MessageDeltaBody {
 pub(crate) enum MessageStopEvent {
     #[serde(rename = "message_stop")]
     MessageStop,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WireResponseBlock, parse_response_block};
+
+    #[test]
+    fn tool_use_input_preserves_reserved_number_key_objects() {
+        let raw = serde_json::from_str(
+            r#"{"type":"tool_use","id":"call-fixture","name":"lookup","input":{"nested":{"$serde_json::private::Number":"1"}}}"#,
+        )
+        .expect("fixture is valid raw JSON");
+
+        let WireResponseBlock::ToolUse { input, .. } =
+            parse_response_block(raw).expect("tool input remains an ordinary JSON object")
+        else {
+            panic!("fixture is a tool use");
+        };
+
+        assert_eq!(
+            input.get(),
+            r#"{"nested":{"$serde_json::private::Number":"1"}}"#
+        );
+    }
 }

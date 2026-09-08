@@ -462,117 +462,140 @@ pub(crate) async fn await_turn_terminal(
     session_id: CanonicalUuid,
     turn_id: CanonicalUuid,
 ) -> Result<TurnTerminal, ClientError> {
+    let mut retry = crate::connection::FollowRetry::default();
     loop {
-        let mut connection = client
-            .request(ClientRequest::FollowSession { session_id })
-            .await?;
-        let mut snapshot = read_snapshot(client, &mut connection, session_id).await?;
-        let state = snapshot.turn_state(turn_id)?;
-        if let Some(terminal) = terminal_snapshot_state(state.as_ref())? {
-            return Ok(terminal);
-        }
-        queued_turn_recovery(&mut snapshot, turn_id)?;
-        let mut poll_automatic_recovery = automatic_recovery_pending(&mut snapshot, turn_id)?;
-        let mut observed_cursor = snapshot.cursor();
-        loop {
-            let message = if poll_automatic_recovery {
-                match tokio::time::timeout(FOLLOW_RECOVERY_REFETCH_INTERVAL, connection.message())
+        let result: Result<Option<TurnTerminal>, ClientError> = async {
+            let mut connection = client
+                .request(ClientRequest::FollowSession { session_id })
+                .await?;
+            let mut snapshot = read_snapshot(client, &mut connection, session_id).await?;
+            let state = snapshot.turn_state(turn_id)?;
+            if let Some(terminal) = terminal_snapshot_state(state.as_ref())? {
+                return Ok(Some(terminal));
+            }
+            queued_turn_recovery(&mut snapshot, turn_id)?;
+            let mut poll_automatic_recovery = automatic_recovery_pending(&mut snapshot, turn_id)?;
+            let mut observed_cursor = snapshot.cursor();
+            loop {
+                let message = if poll_automatic_recovery {
+                    match tokio::time::timeout(
+                        FOLLOW_RECOVERY_REFETCH_INTERVAL,
+                        connection.message(),
+                    )
                     .await
-                {
-                    Ok(message) => message?,
-                    Err(_) => {
-                        let mut refreshed = transcript_command(client, session_id).await?;
-                        let refreshed_state = refreshed.turn_state(turn_id)?;
-                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
-                            return Ok(terminal);
-                        }
-                        queued_turn_recovery(&mut refreshed, turn_id)?;
-                        poll_automatic_recovery =
-                            automatic_recovery_pending(&mut refreshed, turn_id)?;
-                        continue;
-                    }
-                }
-            } else {
-                connection.message().await?
-            };
-            match message {
-                ServerMessage::SessionEvent {
-                    cursor,
-                    session_id: event_session,
-                    event,
-                } if event_session == session_id => {
-                    if cursor.value() <= observed_cursor {
-                        continue;
-                    }
-                    crate::credential_pool::validate_event(client, session_id, &event).await?;
-                    observed_cursor = cursor.value();
-                    if let Some(terminal) = terminal_event_state(&event, turn_id) {
-                        if matches!(event, SessionEvent::TurnFailed { .. }) {
+                    {
+                        Ok(message) => message?,
+                        Err(_) => {
                             let mut refreshed = transcript_command(client, session_id).await?;
-                            let state = refreshed.turn_state(turn_id)?;
-                            return terminal_snapshot_state(state.as_ref())?.ok_or(
-                                ClientError::Protocol("a failure event lacks a terminal snapshot"),
-                            );
-                        }
-                        return Ok(terminal);
-                    }
-                    if selected_turn_recovery_transition(&event, turn_id) {
-                        let mut refreshed = transcript_command(client, session_id).await?;
-                        let refreshed_state = refreshed.turn_state(turn_id)?;
-                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
-                            return Ok(terminal);
-                        }
-                        queued_turn_recovery(&mut refreshed, turn_id)?;
-                        poll_automatic_recovery =
-                            automatic_recovery_pending(&mut refreshed, turn_id)?;
-                        if poll_automatic_recovery {
+                            let refreshed_state = refreshed.turn_state(turn_id)?;
+                            if let Some(terminal) =
+                                terminal_snapshot_state(refreshed_state.as_ref())?
+                            {
+                                return Ok(Some(terminal));
+                            }
+                            queued_turn_recovery(&mut refreshed, turn_id)?;
+                            poll_automatic_recovery =
+                                automatic_recovery_pending(&mut refreshed, turn_id)?;
                             continue;
                         }
-                        if !runner_recovery_transition(&event) {
-                            return Err(ClientError::Protocol(
-                                "a recovery event did not produce recovery or terminal state",
-                            ));
+                    }
+                } else {
+                    connection.message().await?
+                };
+                match message {
+                    ServerMessage::SessionEvent {
+                        cursor,
+                        session_id: event_session,
+                        event,
+                    } if event_session == session_id => {
+                        if cursor.value() <= observed_cursor {
+                            continue;
+                        }
+                        crate::credential_pool::validate_event(client, session_id, &event).await?;
+                        observed_cursor = cursor.value();
+                        if let Some(terminal) = terminal_event_state(&event, turn_id) {
+                            if matches!(event, SessionEvent::TurnFailed { .. }) {
+                                let mut refreshed = transcript_command(client, session_id).await?;
+                                let state = refreshed.turn_state(turn_id)?;
+                                return terminal_snapshot_state(state.as_ref())?
+                                    .ok_or(ClientError::Protocol(
+                                        "a failure event lacks a terminal snapshot",
+                                    ))
+                                    .map(Some);
+                            }
+                            return Ok(Some(terminal));
+                        }
+                        if selected_turn_recovery_transition(&event, turn_id) {
+                            let mut refreshed = transcript_command(client, session_id).await?;
+                            let refreshed_state = refreshed.turn_state(turn_id)?;
+                            if let Some(terminal) =
+                                terminal_snapshot_state(refreshed_state.as_ref())?
+                            {
+                                return Ok(Some(terminal));
+                            }
+                            queued_turn_recovery(&mut refreshed, turn_id)?;
+                            poll_automatic_recovery =
+                                automatic_recovery_pending(&mut refreshed, turn_id)?;
+                            if poll_automatic_recovery {
+                                continue;
+                            }
+                            if !runner_recovery_transition(&event) {
+                                return Err(ClientError::Protocol(
+                                    "a recovery event did not produce recovery or terminal state",
+                                ));
+                            }
+                        }
+                        if child_lifecycle_terminalization(&event, session_id) {
+                            let mut refreshed = transcript_command(client, session_id).await?;
+                            let refreshed_state = refreshed.turn_state(turn_id)?;
+                            if let Some(terminal) =
+                                terminal_snapshot_state(refreshed_state.as_ref())?
+                            {
+                                return Ok(Some(terminal));
+                            }
+                            poll_automatic_recovery =
+                                automatic_recovery_pending(&mut refreshed, turn_id)?;
+                        }
+                        if session_recovery_transition(&event) {
+                            let mut refreshed = transcript_command(client, session_id).await?;
+                            let refreshed_state = refreshed.turn_state(turn_id)?;
+                            if let Some(terminal) =
+                                terminal_snapshot_state(refreshed_state.as_ref())?
+                            {
+                                return Ok(Some(terminal));
+                            }
+                            queued_turn_recovery(&mut refreshed, turn_id)?;
+                            poll_automatic_recovery =
+                                automatic_recovery_pending(&mut refreshed, turn_id)?;
                         }
                     }
-                    if child_lifecycle_terminalization(&event, session_id) {
-                        let mut refreshed = transcript_command(client, session_id).await?;
-                        let refreshed_state = refreshed.turn_state(turn_id)?;
-                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
-                            return Ok(terminal);
-                        }
-                        poll_automatic_recovery =
-                            automatic_recovery_pending(&mut refreshed, turn_id)?;
+                    ServerMessage::ProviderTextDelta {
+                        session_id: delta_session,
+                        ..
+                    } if delta_session == session_id => {}
+                    ServerMessage::Error {
+                        code: ErrorCode::ResyncRequired,
+                        ..
+                    } => break,
+                    ServerMessage::Error {
+                        code,
+                        message,
+                        detail,
+                    } => return Err(ClientError::remote(code, message, detail)),
+                    _ => {
+                        return Err(ClientError::Protocol(
+                            "follow returned an unexpected response",
+                        ));
                     }
-                    if session_recovery_transition(&event) {
-                        let mut refreshed = transcript_command(client, session_id).await?;
-                        let refreshed_state = refreshed.turn_state(turn_id)?;
-                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
-                            return Ok(terminal);
-                        }
-                        queued_turn_recovery(&mut refreshed, turn_id)?;
-                        poll_automatic_recovery =
-                            automatic_recovery_pending(&mut refreshed, turn_id)?;
-                    }
-                }
-                ServerMessage::ProviderTextDelta {
-                    session_id: delta_session,
-                    ..
-                } if delta_session == session_id => {}
-                ServerMessage::Error {
-                    code: ErrorCode::ResyncRequired,
-                    ..
-                } => break,
-                ServerMessage::Error {
-                    code,
-                    message,
-                    detail,
-                } => return Err(ClientError::remote(code, message, detail)),
-                _ => {
-                    return Err(ClientError::Protocol(
-                        "follow returned an unexpected response",
-                    ));
                 }
             }
+            Ok(None)
+        }
+        .await;
+        match result {
+            Ok(Some(terminal)) => return Ok(terminal),
+            Ok(None) => {}
+            Err(error) => tokio::time::sleep(retry.next_delay(error)?).await,
         }
     }
 }
@@ -672,8 +695,8 @@ pub(crate) fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), C
         | TurnState::QueuedDelegationWake { .. }
         | TurnState::DelegationTerminated { .. }
         | TurnState::ActiveRunning { .. }
-        | TurnState::ActiveAwaitingCredentialAvailability { .. }
         | TurnState::ActiveAwaitingToolApproval { .. }
+        | TurnState::ActiveAwaitingCredentialAvailability { .. }
         | TurnState::ActiveAwaitingChild { .. }
         | TurnState::Completed { .. }
         | TurnState::FailedCredentialPoolExhausted { .. }
@@ -808,8 +831,8 @@ pub(crate) fn terminal_snapshot_state(
             | TurnState::QueuedDelegated { .. }
             | TurnState::QueuedDelegationWake { .. }
             | TurnState::ActiveRunning { .. }
-            | TurnState::ActiveAwaitingCredentialAvailability { .. }
             | TurnState::ActiveAwaitingToolApproval { .. }
+            | TurnState::ActiveAwaitingCredentialAvailability { .. }
             | TurnState::ActiveAwaitingChild { .. },
         ) => Ok(None),
         Some(
