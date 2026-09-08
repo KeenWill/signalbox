@@ -739,3 +739,26 @@ async fn pool_projection_reconstructs_the_widest_applicable_source() -> Result<(
     }
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn fresh_schema_enforces_positive_oauth_exclusion_generations() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _) = migrated_postgres().await?;
+    for origin in ["codex_home", "oauth_refresh"] {
+        sqlx::query("INSERT INTO credential_exclusion (kind, profile, origin, oauth_generation) VALUES ('profile_quarantine', 'migration-profile', $1, 1)")
+            .bind(origin).execute(&pool).await?;
+        let error = sqlx::query("INSERT INTO credential_exclusion (kind, profile, origin, oauth_generation) VALUES ('profile_quarantine', 'migration-profile', $1, 0)")
+            .bind(origin).execute(&pool).await.expect_err("OAuth generations remain positive");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("23514")
+        );
+    }
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
