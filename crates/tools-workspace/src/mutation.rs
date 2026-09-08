@@ -16,8 +16,8 @@ use std::{
 };
 
 use rustix::fs::{
-    AtFlags, FileType, Mode, OFlags, RenameFlags, fchmod, fstat, openat, renameat_with, statat,
-    unlinkat,
+    AtFlags, FileType, Mode, OFlags, RenameFlags, Stat, fchmod, fstat, openat, renameat_with,
+    statat, unlinkat,
 };
 
 use signalbox_application::{
@@ -1083,7 +1083,7 @@ struct StagedMutation {
     backup_created: bool,
     target_installed: bool,
     writes_target: bool,
-    installed_file: Option<File>,
+    installed_file: Option<(File, Stat)>,
 }
 
 fn stage_mutation(
@@ -1162,7 +1162,7 @@ fn write_staged_file(
     content: &str,
     mode: u32,
     path: &WorkspaceMutationPath,
-) -> Result<File, WorkspaceMutationCommitError> {
+) -> Result<(File, Stat), WorkspaceMutationCommitError> {
     let descriptor = openat(
         parent,
         name,
@@ -1177,9 +1177,10 @@ fn write_staged_file(
             fchmod(&file, Mode::from_bits_retain((mode & 0o1777) as _))
                 .map_err(std::io::Error::from)
         })
-        .and_then(|()| file.sync_all());
-    if result.is_ok() {
-        return Ok(file);
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fstat(&file).map_err(std::io::Error::from));
+    if let Ok(identity) = result {
+        return Ok((file, identity));
     }
     drop(file);
     unlinkat(parent, name, AtFlags::empty())
@@ -1265,7 +1266,7 @@ fn rollback_staged(staged: &mut [StagedMutation]) -> Result<(), ()> {
 }
 
 fn remove_installed_target(file: &StagedMutation) -> Result<(), ()> {
-    let installed = file.installed_file.as_ref().ok_or(())?;
+    let (_installed, expected) = file.installed_file.as_ref().ok_or(())?;
     let displaced = transaction_name("rollback");
     renameat_with(
         &file.parent,
@@ -1275,11 +1276,14 @@ fn remove_installed_target(file: &StagedMutation) -> Result<(), ()> {
         RenameFlags::NOREPLACE,
     )
     .map_err(|_| ())?;
-    let owned = fstat(installed)
-        .and_then(|expected| {
-            statat(&file.parent, &displaced, AtFlags::SYMLINK_NOFOLLOW).map(|current| {
-                current.st_dev == expected.st_dev && current.st_ino == expected.st_ino
-            })
+    let owned = statat(&file.parent, &displaced, AtFlags::SYMLINK_NOFOLLOW)
+        .map(|current| {
+            current.st_dev == expected.st_dev
+                && current.st_ino == expected.st_ino
+                && current.st_size == expected.st_size
+                && current.st_mtime == expected.st_mtime
+                && current.st_mtime_nsec == expected.st_mtime_nsec
+                && current.st_mode == expected.st_mode
         })
         .unwrap_or(false);
     if !owned {
@@ -1676,6 +1680,62 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(target).expect("target reads"),
             "concurrent writer"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup).expect("backup retained"),
+            "original"
+        );
+    }
+
+    #[test]
+    fn rollback_preserves_a_same_size_in_place_rewrite_of_an_installed_target() {
+        let workspace = tempfile::tempdir().expect("workspace constructs");
+        let target = workspace.path().join("file.txt");
+        std::fs::write(&target, "original").expect("original writes");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root = WorkspaceMutationFileSystem::open_root(&filesystem, workspace.path())
+            .expect("root opens");
+        let path = WorkspaceMutationPath::try_new("file.txt").expect("path validates");
+        let expected = filesystem
+            .snapshot(
+                &root,
+                std::slice::from_ref(&path),
+                MAX_WORKSPACE_MUTATION_FILE_BYTES,
+            )
+            .expect("snapshot reads");
+        let mut staged = stage_mutation(
+            &root,
+            &expected,
+            &WorkspaceFileMutation::Write {
+                path,
+                content: String::from("tool replacement"),
+            },
+        )
+        .expect("mutation stages");
+        let verified = verify_precondition(&expected, &staged).expect("original verifies");
+        install_staged(&mut staged, &expected, verified.as_ref()).expect("tool installs");
+        let backup = workspace
+            .path()
+            .join(staged.backup.as_ref().expect("backup retained"));
+        // Equal-size content keeps inode and size unchanged; an explicit mtime avoids clock granularity.
+        std::fs::write(&target, "concurrent write").expect("concurrent writer rewrites in place");
+        File::options()
+            .write(true)
+            .open(&target)
+            .expect("target opens")
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+            .expect("concurrent modification time is distinct");
+
+        assert_eq!(
+            rollback_result(
+                std::slice::from_mut(&mut staged),
+                WorkspaceMutationCommitError::Conflict
+            ),
+            WorkspaceMutationCommitError::Ambiguous
+        );
+        assert_eq!(
+            std::fs::read_to_string(target).expect("target reads"),
+            "concurrent write"
         );
         assert_eq!(
             std::fs::read_to_string(backup).expect("backup retained"),
