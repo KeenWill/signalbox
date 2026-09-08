@@ -295,10 +295,15 @@ pub(super) async fn park_failed(
     if policy.on_pool_exhausted != CredentialPoolRuntimeExhaustion::Park {
         return Ok(None);
     }
-    let target = execution
-        .current_call()
-        .ok_or(ModelCallCorruption::Missing("credential wait predecessor"))?
-        .target();
+    let effective_target: Uuid = sqlx::query_scalar(
+        "SELECT effective_provider_model_identity_id FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(observation.call().into_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    let target = ResolvedProviderTarget::naming(
+        signalbox_domain::ProviderModelIdentity::from_uuid(effective_target),
+    );
     let excluded =
         load_durable_pool_exclusions(connection, execution.session(), execution.turn(), policy)
             .await?;
