@@ -419,7 +419,7 @@ where
                 session_id = %session.as_uuid(),
                 turn_id = %turn.as_uuid(),
                 model_call_id = %call.as_uuid(),
-                "completed model output exceeded a configured usage limit and was preserved"
+                "completed model usage exceeded a configured usage limit; the output was preserved"
             );
         }
         Ok(observation)
