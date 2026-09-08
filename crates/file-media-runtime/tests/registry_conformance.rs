@@ -576,13 +576,30 @@ fn selection_registry_with_parts(
     ceilings: FileMediaCeilings,
     validation_source_bytes: u64,
 ) -> FileMediaRegistry {
+    selection_registry_with_media_types(
+        &[owned_media_type],
+        streaming_text_fallback,
+        ceilings,
+        validation_source_bytes,
+    )
+}
+
+fn selection_registry_with_media_types(
+    owned_media_types: &[&str],
+    streaming_text_fallback: StreamingTextFallback,
+    ceilings: FileMediaCeilings,
+    validation_source_bytes: u64,
+) -> FileMediaRegistry {
     let provider =
         FileReaderProviderName::try_new("selection").expect("fixture provider name is valid");
     let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
         provider: provider.clone(),
         reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
-        media_types: vec![media_type(owned_media_type)],
+        media_types: owned_media_types
+            .iter()
+            .map(|value| media_type(value))
+            .collect(),
         probe: ProbeDeclaration::new(ProbeDeclarationInput {
             prefix_bytes: 4,
             suffix_bytes: 0,
@@ -715,6 +732,35 @@ fn declared_candidate_follows_probe_miss() {
 
     assert_eq!(
         validated_evidence(inspection),
+        ValidationEvidence::DeclaredCandidateStructurallyValidated
+    );
+}
+
+#[test]
+fn streaming_fallback_reader_validates_its_other_declared_media_type() {
+    let registry = selection_registry_with_media_types(
+        &["text/markdown", "text/plain"],
+        StreamingTextFallback::Enabled,
+        FileMediaCeilings::version_one(),
+        MAX_VALIDATION_SOURCE_BYTES,
+    );
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::NoMatch,
+        validation: SelectionValidation::Validated,
+    };
+    let inspection = inspect(
+        &registry,
+        &processor,
+        &MemorySource::synthetic(),
+        "text/markdown",
+    )
+    .expect("declared Markdown validates under the shared reader");
+    let FileInspection::Validated(validated) = inspection else {
+        panic!("declared Markdown must not become a plain-text mismatch");
+    };
+    assert_eq!(validated.detected_media_type().as_str(), "text/markdown");
+    assert_eq!(
+        validated.validation(),
         ValidationEvidence::DeclaredCandidateStructurallyValidated
     );
 }

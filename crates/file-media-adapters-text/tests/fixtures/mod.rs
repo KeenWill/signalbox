@@ -221,3 +221,12 @@ pub(crate) fn one_column_row_bomb_csv() -> Vec<u8> {
 pub(crate) fn oversized(fill: u8) -> Vec<u8> {
     vec![fill; signalbox_file_media_adapters_text::MAX_TEXT_FAMILY_BYTES as usize + 1]
 }
+
+pub(crate) fn csv_truncated_probe_with_trailing_prose() -> Vec<u8> {
+    let mut bytes = b"name,value\nalpha,1\n".to_vec();
+    while bytes.len() < 4_096 {
+        bytes.extend_from_slice(b"beta,2\n");
+    }
+    bytes.extend_from_slice(b"plain prose\n");
+    bytes
+}
