@@ -813,6 +813,16 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testAmbiguousModelCallReadsTheAuthoritativeRecoveryWait() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(cursor: 10)
+    let effects = transport.send(.frame(
+      generation: 1,
+      message: try SynchronizationFixture.ambiguousModelCallEvent(cursor: 11)))
+
+    XCTAssertEqual(SynchronizationFixture.effectNames(effects),
+      ["publish_event", "request_side_snapshot", "arm_deadline"])
+  }
+
   func testFreshSideSnapshotMergesBeforeBufferedStreamEvent() throws {
     let bufferedCursor = SynchronizationFixture.sideBufferedCursor
     var transport = try SynchronizationFixture.synchronizedTransport(
@@ -4246,6 +4256,26 @@ private enum SynchronizationFixture {
           "turn_id":"\(turn)",
           "model_call_id":"\(modelCall)",
           "state":{"type":"fixture_future_model_call_state"}
+        }
+      }
+      """
+    )
+  }
+
+  static func ambiguousModelCallEvent(
+    cursor: UInt64
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":"\(cursor)",
+        "session_id":"\(session)",
+        "event":{
+          "type":"model_call_transition",
+          "turn_id":"\(turn)",
+          "model_call_id":"\(modelCall)",
+          "state":{"type":"terminal","disposition":"ambiguous"}
         }
       }
       """

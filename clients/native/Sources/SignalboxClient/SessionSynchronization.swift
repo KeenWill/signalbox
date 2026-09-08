@@ -1313,6 +1313,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     _ event: SignalboxProcessSessionEvent
   ) -> Bool {
     switch event {
+    case .modelCallTransition(_, _, .terminal(.ambiguous)):
+      return true
     case .toolBatchTransition(_, _, let state):
       switch state {
       case .proposed, .resultsProjected:
