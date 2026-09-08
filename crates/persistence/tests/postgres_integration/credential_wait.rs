@@ -363,3 +363,6 @@ mod wakes;
 
 #[path = "credential_wait_capacity.rs"]
 mod capacity;
+
+#[path = "credential_wait_projection.rs"]
+mod projection;

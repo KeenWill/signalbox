@@ -647,7 +647,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return terminalModelCallID
     case .cancelled(_, _, let terminalModelCallID):
       return terminalModelCallID
-    case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
+    case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
       .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .refused,
       .reconciliationRequired, .toolReconciliationRequired, .unknown:
@@ -665,7 +665,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         .refused(_, _, let modelCallID),
         .reconciliationRequired(_, _, let modelCallID):
         modelCallIDs.insert(modelCallID.rawValue)
-      case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
+      case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
         .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingToolApproval,
         .activeAwaitingToolRecovery, .failed, .completed, .cancelled,
         .toolReconciliationRequired, .unknown:
@@ -1198,7 +1198,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .cancelled:
         content = nil
       }
-    case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+    case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
       .activeAwaitingCredentialAvailability, .activeAwaitingChild,
       .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
@@ -1302,7 +1302,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .reconciliationRequired,
       .toolReconciliationRequired:
       return true
-    case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .failed,
+    case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .failed,
       .completed, .refused, .cancelled, .unknown:
       return false
     }
@@ -1974,9 +1974,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
       return .init(state: .running, label: "Running")
     case .activeAwaitingCredentialAvailability(_, let cause):
-      return .init(
-        state: .running,
-        label: cause == .contended ? "Awaiting credential capacity" : "Awaiting credential availability")
+      let label = cause == .contended ? "Awaiting credential capacity" : "Awaiting credential availability"
+      return .init(state: .running, label: label)
     case .activeAwaitingChild:
       return .init(state: .running, label: "Awaiting child")
     case .activeAwaitingToolApproval:
@@ -1984,6 +1983,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery,
       .reconciliationRequired, .toolReconciliationRequired:
       return .init(state: .recoveryRequired, label: "Recovery required")
+    case .failedAfterCredentialWait(_, _, let predecessor):
+      let label = predecessor.cause.map { "Failed: \(providerFailureLabel($0))" } ?? "Failed"
+      return .init(state: .failed, label: SignalboxProcessPresentation.retainedLabel(label))
     case .failedCredentialPoolExhausted:
       return .init(state: .failed, label: "Credential pool exhausted")
     case .failed(_, _, let terminalModelCall):

@@ -96,7 +96,9 @@ resolved and carries contiguous member rows in policy order, each naming the
 member's exclusion, widest scope first. Partial, foreign or stale evidence fails
 reconstitution closed. The terminalizing commit emits `turn_failed` and
 `turn_credential_pool_exhausted`; its header retains the resolved pool-policy
-identity and member evidence rows attach in a separate table.
+identity and member evidence rows attach in a separate table. A pre-projection
+header with a null pool-policy identity and no member rows reconstitutes as the
+ordinary failed turn without an exhaustion projection.
 
 Post-failure fail: the observation that closes a qualifying provider failure
 finds every member excluded. The turn terminalizes Failed and adds no further
@@ -221,10 +223,13 @@ registrations and retained reservations; restart alone grants no eligibility.
 Invocation identity retains the process-group ID and its leader's start time; a
 reused numeric ID does not retain the prior invocation's reservation. The daemon
 rechecks retained invocation groups until their exit permits reservation
-release. Startup and periodic recovery release null-group reservations once the
-call is terminal; live calls retain their reservations. Failed registration
-retains the observed group through cleanup so proven group exit releases
-capacity while the call retains its boundary-loss outcome.
+release. Release and periodic invocation recovery nudge eligible waits even
+without a configured reconciliation sweep; recovery retries dropped hints and
+wakes deferred by retry deadlines. Startup and periodic recovery release
+null-group reservations once the call is terminal; live calls retain their
+reservations. Failed registration retains the observed group through cleanup so
+proven group exit releases capacity while the call retains its proven-unsent
+outcome when registration aborts before request delivery.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
 wait attempt and closed cause. Committed wait changes require connected
@@ -238,4 +243,10 @@ across catalog reloads. The rendered provider operation uses that retained
 target. A post-failure wait retains its already mapped serving target separately
 from the turn's base-target pin; successor delivery does not apply a reloaded
 fast-mode mapping to that pin. Parking retains the exclusions that selected the
-wait.
+wait. An exclusion with an absent or zero record generation is the oldest
+generation and cannot make its member wakeable by an operator clear.
+
+A terminal release after a predecessor call projects
+`failed_after_credential_wait` with the fresh terminal attempt and the
+predecessor's provider failure. A release without a predecessor uses the typed
+pre-call exhaustion state and live event.

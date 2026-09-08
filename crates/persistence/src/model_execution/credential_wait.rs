@@ -47,12 +47,18 @@ fn selects_wait(members: &[Vec<Candidate>]) -> bool {
     members.iter().all(|exclusions| !exclusions.is_empty())
         && members.iter().any(|exclusions| {
             !exclusions.is_empty()
-                && exclusions.iter().all(|exclusion| {
-                    !matches!(
-                        exclusion.exclusion,
-                        CredentialPoolExclusion::ChainExclusion { .. }
-                    )
-                })
+                && exclusions
+                    .iter()
+                    .all(|exclusion| match &exclusion.exclusion {
+                        CredentialPoolExclusion::ProfileQuarantine { record_generation }
+                        | CredentialPoolExclusion::MembershipExclusion { record_generation }
+                        | CredentialPoolExclusion::SessionDisplacement { record_generation } => {
+                            record_generation.unwrap_or(0) > 0
+                        }
+                        CredentialPoolExclusion::ChainExclusion { .. } => false,
+                        CredentialPoolExclusion::TransientExclusion { .. }
+                        | CredentialPoolExclusion::HeadroomReserve { .. } => true,
+                    })
         })
 }
 

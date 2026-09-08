@@ -460,17 +460,21 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
         }
     };
     if let Some(process_group) = child.process_group_id {
-        let registered = tokio::select! {
+        let registration = tokio::select! {
             biased;
-            registered = sink.register_process(correlation.clone(), process_group) => registered,
-            () = &mut *cancellation => false,
-            () = wait_for_deadline(deadline) => false,
+            registered = sink.register_process(correlation.clone(), process_group) => {
+                registered.then_some(()).ok_or_else(|| UnsentCause::ConnectFailed(
+                    TransportFacts::new("invocation process registration failed"),
+                ))
+            },
+            () = &mut *cancellation => Err(UnsentCause::CancelledBeforeSend),
+            () = wait_for_deadline(deadline) => Err(UnsentCause::ConnectFailed(
+                TransportFacts::new("exchange deadline elapsed before process registration"),
+            )),
         };
-        if !registered {
+        if let Err(cause) = registration {
             force_kill(&mut child).await;
-            return pre_exchange_transport_loss(
-                "invocation process registration failed".to_owned(),
-            );
+            return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence { cause });
         }
     }
     let Some(mut stdin) = child.stdin.take() else {
@@ -2101,7 +2105,12 @@ mod tests {
         let mut sink = RegistrationSink { group: None };
         let evidence =
             execute_cli_process(request, &mut sink, &mut CancellationSignal::never()).await;
-        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(_),
+            })
+        ));
         let group = rustix::process::Pid::from_raw(sink.group.expect("spawn is registered") as i32)
             .expect("positive group");
         assert_eq!(

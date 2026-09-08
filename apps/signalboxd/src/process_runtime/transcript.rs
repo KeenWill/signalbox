@@ -1961,6 +1961,20 @@ pub(super) fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             placement_revision: PositiveCanonicalU64::from(*placement_revision),
             tool_attempt_id: interrupted_tool_attempt.map(|attempt| wire_uuid(attempt.into_uuid())),
         },
+        ProcessTurnState::FailedAfterCredentialWait {
+            terminal_frontier,
+            terminal_attempt,
+            predecessor_call,
+            provider_cause,
+        } => TurnState::FailedAfterCredentialWait {
+            terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
+            predecessor_model_call:
+                signalbox_process_protocol::FailedTerminalModelCall::known_failed_with_cause(
+                    wire_uuid(predecessor_call.into_uuid()),
+                    wire_provider_failure_cause(*provider_cause),
+                ),
+        },
         ProcessTurnState::FailedCredentialPoolExhausted(evidence) => {
             TurnState::FailedCredentialPoolExhausted {
                 terminal_frontier_id: wire_uuid(evidence.terminal_frontier_id),

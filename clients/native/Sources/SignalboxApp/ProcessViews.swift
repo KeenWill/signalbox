@@ -2411,7 +2411,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         break
       case .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
         .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .failed,
-        .failedCredentialPoolExhausted, .completed, .refused,
+        .failedAfterCredentialWait, .failedCredentialPoolExhausted, .completed, .refused,
         .cancelled, .delegationTerminated,
         .reconciliationRequired, .toolReconciliationRequired:
         unresolvedUnknownTurnID = nil
@@ -3032,7 +3032,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           return nil
         }
         switch turn.state {
-        case .failed, .failedCredentialPoolExhausted, .completed, .refused, .cancelled,
+        case .failed, .failedAfterCredentialWait, .failedCredentialPoolExhausted, .completed, .refused, .cancelled,
           .delegationTerminated,
           .reconciliationRequired, .toolReconciliationRequired:
           return turn.turnID
@@ -3057,7 +3057,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery:
         return turn.turnID
       case .queued, .queuedDelegated, .queuedDelegationWake, .failed,
-        .failedCredentialPoolExhausted, .completed, .refused,
+        .failedAfterCredentialWait, .failedCredentialPoolExhausted, .completed, .refused,
         .cancelled, .delegationTerminated,
         .reconciliationRequired, .toolReconciliationRequired, .unknown:
         return nil

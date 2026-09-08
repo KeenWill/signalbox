@@ -2991,6 +2991,10 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
     operatorActionRequired: Bool)
   case activeAwaitingCredentialAvailability(
     waitAttemptID: SignalboxCanonicalUUID, cause: SignalboxCredentialAvailabilityWaitCause)
+  case failedAfterCredentialWait(
+    terminalFrontierID: SignalboxCanonicalUUID,
+    terminalAttemptID: SignalboxCanonicalUUID,
+    predecessorModelCall: SignalboxFailedTerminalModelCall)
   case failedCredentialPoolExhausted(SignalboxCredentialPoolExhaustion)
   case failed(
     terminalFrontierID: SignalboxCanonicalUUID,
@@ -3149,6 +3153,24 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
         try tagged.rejectUnadmittedFields(["type", "wait_attempt_id", "cause"], decoder: decoder)
         self = .activeAwaitingCredentialAvailability(
           waitAttemptID: try decoder.decode("wait_attempt_id"), cause: try decoder.decode("cause"))
+      case "failed_after_credential_wait":
+        try tagged.rejectUnadmittedFields(
+          ["type", "terminal_frontier_id", "terminal_attempt_id", "predecessor_model_call"],
+          decoder: decoder)
+        let predecessor: SignalboxFailedTerminalModelCall = try decoder.decode("predecessor_model_call")
+        guard predecessor.disposition == .knownFailed, let cause = predecessor.cause else {
+          throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+            debugDescription: "A terminal credential wait requires its predecessor provider failure."))
+        }
+        switch cause {
+        case .attachmentTooLarge, .attachmentMissing, .attachmentCorrupt, .unknown:
+          throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+            debugDescription: "A terminal credential wait requires a closed provider cause."))
+        default: break
+        }
+        self = .failedAfterCredentialWait(
+          terminalFrontierID: try decoder.decode("terminal_frontier_id"),
+          terminalAttemptID: try decoder.decode("terminal_attempt_id"), predecessorModelCall: predecessor)
       case "failed_credential_pool_exhausted":
         try tagged.rejectUnadmittedFields(["type", "terminal_frontier_id", "terminal_attempt_id", "failure_entry_id", "pool_policy_id", "policy_members", "members"], decoder: decoder)
         self = .failedCredentialPoolExhausted(try SignalboxCredentialPoolExhaustion(from: decoder))

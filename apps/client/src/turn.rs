@@ -246,6 +246,10 @@ async fn await_and_report_turn(
                 Some(TurnState::FailedCredentialPoolExhausted { .. }) => {
                     Err(ClientError::TurnFailed(None))
                 }
+                Some(TurnState::FailedAfterCredentialWait {
+                    predecessor_model_call,
+                    ..
+                }) => Err(ClientError::TurnFailed(predecessor_model_call.cause())),
                 Some(TurnState::Failed {
                     terminal_model_call,
                     ..
@@ -749,6 +753,7 @@ pub(crate) fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), C
         | TurnState::ActiveAwaitingCredentialAvailability { .. }
         | TurnState::ActiveAwaitingChild { .. }
         | TurnState::Completed { .. }
+        | TurnState::FailedAfterCredentialWait { .. }
         | TurnState::FailedCredentialPoolExhausted { .. }
         | TurnState::Failed { .. }
         | TurnState::Refused { .. }
@@ -867,9 +872,9 @@ pub(crate) fn terminal_snapshot_state(
 ) -> Result<Option<TurnTerminal>, ClientError> {
     match state {
         Some(TurnState::Completed { .. }) => Ok(Some(TurnTerminal::Completed)),
-        Some(TurnState::FailedCredentialPoolExhausted { .. }) | Some(TurnState::Failed { .. }) => {
-            Ok(Some(TurnTerminal::Failed))
-        }
+        Some(TurnState::FailedAfterCredentialWait { .. })
+        | Some(TurnState::FailedCredentialPoolExhausted { .. })
+        | Some(TurnState::Failed { .. }) => Ok(Some(TurnTerminal::Failed)),
         Some(TurnState::Refused { .. }) => Ok(Some(TurnTerminal::Refused)),
         Some(TurnState::Cancelled { .. }) => Ok(Some(TurnTerminal::Cancelled)),
         Some(TurnState::DelegationTerminated { .. }) => Ok(Some(TurnTerminal::Cancelled)),

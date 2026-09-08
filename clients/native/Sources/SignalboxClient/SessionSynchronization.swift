@@ -1749,6 +1749,8 @@ extension SignalboxTranscriptTurnState {
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
     case .queued, .queuedDelegated, .queuedDelegationWake: return .impossible
+    case .failedAfterCredentialWait(_, _, let predecessor):
+      return .required(.identity(predecessor.modelCallID))
     case .failedCredentialPoolExhausted, .delegationTerminated: return .permitted
     case .unknown: return .permitted
     case .activeAwaitingCredentialAvailability, .activeAwaitingChild: return .permitted
@@ -1786,7 +1788,7 @@ extension SignalboxTranscriptTurnState {
         && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
-    case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+    case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
       .activeRunning, .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed,
@@ -1807,6 +1809,7 @@ extension SignalboxTranscriptTurnState {
     case .delegationTerminated:
       return 0
     case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
+    case .failedAfterCredentialWait(_, _, let predecessor): return predecessor.retainedUTF8Bytes
     case .failedCredentialPoolExhausted(let evidence): return evidence.retainedUTF8Bytes
     case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
     case .unknown(let kind, let payload, let diagnostic):
@@ -2164,7 +2167,7 @@ extension SignalboxTranscriptTurnState {
       .activeAwaitingCredentialAvailability, .activeAwaitingChild,
       .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .completed, .failed, .failedCredentialPoolExhausted, .refused, .cancelled,
+      .activeAwaitingToolRecovery, .completed, .failed, .failedAfterCredentialWait, .failedCredentialPoolExhausted, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return nil
     }
