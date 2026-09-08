@@ -427,6 +427,10 @@ correlation against the ended attempt; absent or cross-wired evidence fails
 closed. A delegation effect commits in the same transaction as its terminal
 tool-attempt row.
 
+The parent receives delegation content from the child's terminal result record.
+A child completion concatenates its completed call's ordered assistant text
+without a separator; absent or oversized text records `ChildResultUnavailable`.
+
 The provider bridge derives the provider-visible tool-call correlation from
 `ToolRequestId`, so provider-native identifier types and messages never cross
 the application boundary. Every rendered result resolves its referenced durable
@@ -523,8 +527,6 @@ the hint until a full nudge buffer has capacity.
 - Instruction admission: the commit-result and continuation transactions append
   an `InstructionAdmission` and a successor instruction manifest for a
   successful `instructions_read`; see
-  [tool-loop design](../design/tool-loop.md).
-- Delivery of a delegated child's terminal result to the parent: see
   [tool-loop design](../design/tool-loop.md).
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).

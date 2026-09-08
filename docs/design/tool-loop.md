@@ -92,15 +92,6 @@ authenticated by the new `Prepared` model call. An idempotent replay receipt or
 an `already_admitted` receipt contributes no row and cannot duplicate a bundle
 or alter the successor manifest digest.
 
-The tool result delivered to the parent is copied from the child's terminal
-result record, and the executor never reads or returns the child transcript. The
-child's terminal completion concatenates the ordered assistant text entries from
-its proof-bearing completed call without a separator and admits those bytes as
-the delegation content. A completion with no assistant text, or text over the
-delegation-content bound, instead records a failed outcome carrying the
-`ChildResultUnavailable` reason. Duplicate observation is idempotent by spawning
-request and cannot attach a late result to another parent tool call.
-
 ## Compatibility constraints
 
 The four implemented continuation effects and the successor manifest must
