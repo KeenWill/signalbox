@@ -631,5 +631,5 @@ following that turn.
 
 ## Planned
 
-- Runner creation and status requests, and the status read's failure evidence:
+- Terminal failure after credential wait release:
   [design](../design/process-protocol.md).
