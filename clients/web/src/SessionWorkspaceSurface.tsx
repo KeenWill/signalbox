@@ -120,6 +120,7 @@ export const pruneExpandedSessionItems = (
 export function SessionWorkspaceSurface({
   initialSessionId,
   onSessionOpen,
+  onReturnToCatalog,
   onSelectionEvidence,
   onTimelineIds,
   onTimelineWindowAvailable,
@@ -132,6 +133,7 @@ export function SessionWorkspaceSurface({
 }: {
   initialSessionId?: string
   onSessionOpen: (sessionId: string) => void
+  onReturnToCatalog: () => void
   onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
@@ -460,6 +462,12 @@ export function SessionWorkspaceSurface({
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}
             onChange={(event) => setDraftId(event.target.value.trim())}
+            onKeyDown={(event) => {
+              if (event.key !== 'Escape') return
+              event.preventDefault()
+              event.stopPropagation()
+              onReturnToCatalog()
+            }}
             pattern={NATIVE_SESSION_ID_PATTERN}
             required
           />
@@ -472,7 +480,7 @@ export function SessionWorkspaceSurface({
         </button>
       </form>
 
-      {sessionId === null ? (
+      {sessionId === null || timelineCapability !== 'available' ? (
         <p className="session-entry" role="status">
           {timelineCapability === 'checking'
             ? 'Connecting…'

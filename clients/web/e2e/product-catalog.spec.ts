@@ -228,11 +228,38 @@ test('filters and opens a session with Enter, then returns to the catalog', asyn
   await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
     firstSessionId,
   )
-  await page.getByRole('main').focus()
-  await page.keyboard.press('Escape')
+  await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
   await expect(page).toHaveURL(/q=Release/)
   await expect(session).toBeVisible()
   await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('shows unavailable timelines after opening a catalog row', async ({ page }, testInfo) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_session_timeline: false },
+      },
+    }),
+  )
+  let timelineReads = 0
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.endsWith('/timeline')) timelineReads += 1
+  })
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
+    firstSessionId,
+  )
+  await page.screenshot({ path: testInfo.outputPath('timeline-unavailable.png') })
+  await expect(page.getByRole('status').filter({ hasText: 'Sessions unavailable' })).toBeVisible()
+  await expect(page.getByText('Loading session…', { exact: true })).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
+  expect(timelineReads).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

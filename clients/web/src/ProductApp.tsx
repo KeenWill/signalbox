@@ -947,6 +947,7 @@ export function ProductApp({
         onSessionOpen={(session) =>
           updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
         }
+        onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
         onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}
