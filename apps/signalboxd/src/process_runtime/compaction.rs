@@ -469,7 +469,8 @@ pub(super) async fn automatic_context_compaction_boundary(
                 ContextCompactionRangeLoadError::Read(error) => {
                     AutomaticContextCompactionError::Read(error)
                 }
-                ContextCompactionRangeLoadError::CatalogUnavailable => {
+                ContextCompactionRangeLoadError::CatalogUnavailable
+                | ContextCompactionRangeLoadError::AttachmentUnavailable => {
                     AutomaticContextCompactionError::Model
                 }
                 ContextCompactionRangeLoadError::Integrity => {
@@ -716,7 +717,10 @@ pub(crate) async fn compact_automatically(
             .map_err(AutomaticContextCompactionError::Repository)?;
             return Err(AutomaticContextCompactionError::Read(error));
         }
-        Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
+        Err(
+            ContextCompactionRangeLoadError::CatalogUnavailable
+            | ContextCompactionRangeLoadError::AttachmentUnavailable,
+        ) => {
             return Err(AutomaticContextCompactionError::Model);
         }
         Err(ContextCompactionRangeLoadError::Integrity) => {
@@ -820,17 +824,23 @@ pub(super) async fn load_context_compaction_range(
         digests,
     )
     .await
-    .map_err(|failure| match failure {
-        signalbox_application::AttachmentPreparationFailure::Unavailable => {
-            ContextCompactionRangeLoadError::CatalogUnavailable
-        }
-        _ => ContextCompactionRangeLoadError::Integrity,
-    })?;
+    .map_err(attachment_verification_range_error)?;
     let mut values = Vec::with_capacity(entries.len());
     for entry in &entries {
         values.push(context_compaction_entry_value(entry, &catalog).await?);
     }
     serde_json::to_string(&values).map_err(|_| ContextCompactionRangeLoadError::Integrity)
+}
+
+pub(super) fn attachment_verification_range_error(
+    failure: signalbox_application::AttachmentPreparationFailure,
+) -> ContextCompactionRangeLoadError {
+    match failure {
+        signalbox_application::AttachmentPreparationFailure::Unavailable => {
+            ContextCompactionRangeLoadError::AttachmentUnavailable
+        }
+        _ => ContextCompactionRangeLoadError::Integrity,
+    }
 }
 
 pub(super) async fn retry_context_compaction_range_database_reads<Load, LoadFuture>(
@@ -1467,7 +1477,8 @@ where
     Writer: AsyncWrite + Unpin,
 {
     match error {
-        ContextCompactionRangeLoadError::CatalogUnavailable => {
+        ContextCompactionRangeLoadError::CatalogUnavailable
+        | ContextCompactionRangeLoadError::AttachmentUnavailable => {
             if let Err(repository_error) = fail_context_compaction_until_resolved(
                 repository,
                 prepared,
@@ -1648,6 +1659,7 @@ where
 pub(super) enum ContextCompactionRangeLoadError {
     Read(ProcessReadError),
     CatalogUnavailable,
+    AttachmentUnavailable,
     Integrity,
 }
 

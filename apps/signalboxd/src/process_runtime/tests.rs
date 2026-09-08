@@ -817,6 +817,27 @@ mod tests {
         SessionId::from_uuid(Uuid::from_u128(1))
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn rejected_attachment_admission_does_not_retry_database_reads() {
+        let mut attempts = 0;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            retry_context_compaction_range_database_reads(|| {
+                attempts += 1;
+                std::future::ready(Err(super::compaction::attachment_verification_range_error(
+                    signalbox_application::AttachmentPreparationFailure::Unavailable,
+                )))
+            }),
+        )
+        .await
+        .expect("attachment admission must return immediately");
+        assert!(matches!(
+            result,
+            Err(ContextCompactionRangeLoadError::AttachmentUnavailable)
+        ));
+        assert_eq!(attempts, 1, "an admission refusal is not a retriable database read");
+    }
+
     /// an explicit compaction whose commit outcome cannot be decided raises the same fatal recovery
     /// signal its automatic sibling raises through the scheduler pass, and still answers the client
     /// with the stable ambiguous code.
