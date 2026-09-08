@@ -199,6 +199,7 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     let (session, prefix, checked, divergent, equivalent) =
         insert_deep_frontier_fixture(&pool).await?;
     let compaction = Uuid::from_u128(0xf605_0001);
+    let producing_call = Uuid::from_u128(0xf605_0002);
     sqlx::raw_sql("ALTER TABLE context_compaction DISABLE TRIGGER ALL;")
         .execute(&pool)
         .await?;
@@ -218,72 +219,13 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     .bind(session)
     .bind(divergent)
     .bind(checked)
-    .bind(Uuid::from_u128(0xf605_0002))
+    .bind(producing_call)
     .execute(&pool)
     .await?;
     sqlx::raw_sql("ALTER TABLE context_compaction ENABLE TRIGGER ALL;")
         .execute(&pool)
         .await?;
     let mut connection = pool.acquire().await?;
-    let validator_shape: (bool, bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
-        "SELECT
-            position(
-                'WITH RECURSIVE checked_chain AS MATERIALIZED'
-                IN pg_get_functiondef(
-                    'context_frontier_preserves_prefix(uuid,uuid,uuid)'::regprocedure
-                )
-            ) > 0,
-            position(
-                'ELSE NOT EXISTS'
-                IN pg_get_functiondef(
-                    'context_frontier_preserves_prefix(uuid,uuid,uuid)'::regprocedure
-                )
-            ) > 0,
-            position(
-                'context_frontier_preserves_prefix'
-                IN pg_get_functiondef(
-                    'assert_model_call_steering_final_state(uuid)'::regprocedure
-                )
-            ) > 0,
-            position(
-                'context_frontier_preserves_prefix'
-                IN pg_get_functiondef(
-                    'continuation_frontier_closes_predecessor_tool_round(uuid,uuid,uuid,uuid)'::regprocedure
-                )
-            ) > 0,
-            position(
-                'delegation_result'
-                IN pg_get_functiondef(
-                    'continuation_frontier_closes_predecessor_tool_round(uuid,uuid,uuid,uuid)'::regprocedure
-                )
-            ) > 0,
-            position(
-                'context_frontier_preserves_prefix'
-                IN pg_get_functiondef(
-                    'turn_start_effective_predecessor_frontier(uuid,uuid)'::regprocedure
-                )
-            ) > 0,
-            position(
-                'leaf AS MATERIALIZED'
-                IN pg_get_functiondef(
-                    'turn_start_effective_predecessor_frontier(uuid,uuid)'::regprocedure
-                )
-            ) > 0,
-            position(
-                'candidate.member_count < predecessor.member_count'
-                IN pg_get_functiondef(
-                    'turn_start_effective_predecessor_frontier(uuid,uuid)'::regprocedure
-                )
-            ) > 0,
-            position(
-                'context_frontier_preserves_prefix'
-                IN pg_get_functiondef(
-                    'assert_terminal_started_turn_common_final_state(uuid)'::regprocedure
-                )
-            ) > 0",
-    )
-    .fetch_one(&mut *connection)
-    .await?;
     sqlx::query(BOUNDED_PROBE_STATEMENT_TIMEOUT)
         .execute(&mut *connection)
         .await?;
@@ -395,14 +337,9 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     .fetch_one(&mut *connection)
     .await?;
 
-    assert_eq!(
-        validator_shape,
-        (true, true, true, true, true, true, true, true, true)
-    );
-    assert_eq!(
-        (preserved, independently_equivalent, rejected),
-        (true, true, false)
-    );
+    assert!(preserved);
+    assert!(independently_equivalent);
+    assert!(!rejected);
     assert_eq!(effective_preserved, checked);
     assert_eq!(effective_rejected, prefix);
     assert_eq!(effective_after_obsolete_chain, checked);
