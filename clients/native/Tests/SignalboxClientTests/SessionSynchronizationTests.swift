@@ -2287,7 +2287,7 @@ final class SessionSynchronizationTests: XCTestCase {
     let effects = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.textEntry(
+        message: try SynchronizationFixture.userEntry(
           index: 1,
           entryID: SynchronizationFixture.secondAcceptedInput,
           turnID: SynchronizationFixture.secondTurn,
@@ -2402,37 +2402,44 @@ final class SessionSynchronizationTests: XCTestCase {
     _ = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.secondActiveRunningTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
         message: try SynchronizationFixture.modelCallsEnd(count: 0)
       )
     )
     _ = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.textEntry()
-      )
-    )
-    _ = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.content()
+        message: try SynchronizationFixture.userEntry(
+          turnID: SynchronizationFixture.secondTurn
+        )
       )
     )
     _ = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
         message: try SynchronizationFixture.modelIdentityMarker(
-          turnID: SynchronizationFixture.turn,
+          turnID: SynchronizationFixture.secondTurn,
           index: 1,
           entryID: SynchronizationFixture.secondAcceptedInput
         )
       )
     )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.history(cursor: SynchronizationFixture.initialCursor)
+    )
     let effects = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.textEntry(
+        message: try SynchronizationFixture.userEntry(
           index: 2,
-          entryID: SynchronizationFixture.toolRequest
+          entryID: SynchronizationFixture.toolRequest,
+          turnID: SynchronizationFixture.secondTurn
         )
       )
     )
@@ -3948,6 +3955,27 @@ private enum SynchronizationFixture {
             "state":{"type":"\(currentModelCallState)"}
           }
         }
+      }
+      """
+    )
+  }
+
+  static func userEntry(
+    index: UInt64 = 0,
+    entryID: String = entry,
+    turnID: String = turn,
+    sourceSessionID: String = session
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_user_entry",
+        "entry_index":"\(index)",
+        "source_session_id":"\(sourceSessionID)",
+        "entry_id":"\(entryID)",
+        "accepted_input_id":"\(acceptedInput)",
+        "turn_id":"\(turnID)",
+        "content":[{"type":"text","text":"fixture user input"}]
       }
       """
     )
