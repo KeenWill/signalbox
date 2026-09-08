@@ -14,6 +14,22 @@ use crate::wire::{
     parse_response_block,
 };
 
+/// Measures one standalone history message through the adapter's request serializer.
+///
+/// Returns `None` for a message the adapter cannot render. Independent message
+/// envelopes conservatively retain framing that adjacent messages may share.
+/// `replay_provider_compaction` is the effective target capability.
+pub fn serialized_message_bytes(
+    message: &ConversationMessage,
+    replay_provider_compaction: bool,
+) -> Option<usize> {
+    let rendered = wire_message(message, replay_provider_compaction).ok()?;
+    if rendered.content.is_empty() {
+        return Some(0);
+    }
+    serde_json::to_vec(&rendered).ok().map(|bytes| bytes.len())
+}
+
 /// Builds the wire request for one operation.
 ///
 /// Pure translation: any failure is a trustworthy [`PreparationFailure`]

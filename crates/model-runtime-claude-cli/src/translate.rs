@@ -358,3 +358,10 @@ pub(crate) enum TranslationError {
     Failure(PreparationFailure),
     Defect(PreparationDefect),
 }
+
+/// Measures one standalone history message through the adapter's request serializer.
+/// Returns `None` for a message the adapter cannot render.
+pub fn serialized_message_bytes(message: &ConversationMessage) -> Option<usize> {
+    let rendered = render_message(message).ok()?;
+    serde_json::to_vec(&rendered).ok().map(|bytes| bytes.len())
+}

@@ -393,6 +393,19 @@ impl signalbox_application::ClassifyOperatorFailure for RuntimeInputTokenCountEr
 }
 ```
 
+## rendered_entry_bytes
+
+```rust
+pub fn rendered_entry_bytes(
+    messages: &[signalbox_application::ModelConversationMessage],
+    provenance: &[signalbox_application::ProviderReasoningProvenance],
+    models: &RuntimeModelCatalog,
+    measure: impl function::FnMut(
+        &signalbox_model_runtime::ConversationMessage,
+    ) -> option::Option<usize>,
+) -> option::Option<map::BTreeMap<signalbox_domain::SemanticTranscriptEntryRef, u64>>;
+```
+
 ## InvalidRuntimeToolSchema
 
 ```rust

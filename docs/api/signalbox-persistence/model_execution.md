@@ -52,6 +52,7 @@ impl model_execution::ProspectiveModelCall {
 
 ```rust
 pub enum ProspectiveModelInput<'a> {
+    Rendered(&'a map::BTreeMap<signalbox_domain::SemanticTranscriptEntryRef, u64>),
     Committed(signalbox_domain::ContextFrontierId),
     Preview {
         projected_members: &'a [signalbox_domain::SemanticTranscriptEntryRef],

@@ -7,14 +7,5 @@
 ```rust
 pub fn serialized_message_bytes(
     message: &signalbox_model_runtime::ConversationMessage,
-    replay_provider_compaction: bool,
 ) -> option::Option<usize>;
-```
-
-## validate_model_settings
-
-```rust
-pub fn validate_model_settings(
-    settings: &signalbox_model_runtime::ModelSettings,
-) -> result::Result<(), signalbox_model_runtime::PreparationFailure>;
 ```
