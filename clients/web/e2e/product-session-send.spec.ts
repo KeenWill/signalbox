@@ -715,3 +715,16 @@ for (const size of ['short viewport', 'expanded textarea']) {
     expect(api.state.submissions[0]?.message).toBe('Continue after resizing.')
   })
 }
+
+test('replaces the sent notice when followed work starts', async ({ page }) => {
+  const api = await sessionApi(page)
+  await openSession(page)
+  const composer = page.getByRole('form', { name: 'Message composer' })
+  await composer.getByRole('textbox', { name: 'Message', exact: true }).fill('Start the next turn.')
+  await composer.getByRole('button', { name: 'Send message', exact: true }).click()
+  await expect(composer.getByRole('status')).toHaveText('Message sent')
+  api.state.active = true
+  api.grow()
+  await expect(composer.getByRole('status')).toHaveText('Session running')
+  await expect(composer.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
+})

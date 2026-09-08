@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
 import { ArrowUp } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { invokeCommand } from './commands'
 import type { WebSubmitInputRequest } from './generated/web-contract.mjs'
 import {
@@ -37,6 +37,9 @@ export function SessionComposer({
   const newInputBlocked = retained === null && capacityReached
   const [text, setText] = useState('')
   const [notice, setNotice] = useState('')
+  useEffect(() => {
+    if (notice === 'Message sent' && activeState != null) setNotice('')
+  }, [activeState, notice])
   const mutation = useMutation({
     mutationFn: (input: WebSubmitInputRequest) => submitSessionInput(sessionId, input),
     onSuccess: (_, input) => {
