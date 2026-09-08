@@ -573,7 +573,5 @@ incompatible shape requires a new protocol version.
 
 ## Planned
 
-- Runner creation and status requests, and the status read's failure evidence:
-  [design](../design/process-protocol.md).
 - Typed projection of credential-pool exhaustion and of the
   credential-availability wait: [design](../design/process-protocol.md).
