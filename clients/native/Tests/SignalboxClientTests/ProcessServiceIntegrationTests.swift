@@ -3796,6 +3796,54 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(error, ProcessDriverFixture.mismatchedSubmissionSessionError)
   }
 
+  func testStopReceiptRequiresItsRequestedDescendantScope() async throws {
+    let prepared = try ProcessSubmissionFixture.preparedStop(descendantScope: .parentAndDescendants)
+    let invalidReceipts: [String?] = [
+      nil,
+      #"{"descendant_scope":"parent_alone","descendant_count":"0"}"#,
+    ]
+    for termination in invalidReceipts {
+      let requester = StaticProcessRequester(frames: [
+        try ProcessDriverFixture.inputSubmitted(
+          validatedForSelectionID: ProcessDriverFixture.modelCall,
+          terminationJSON: termination)
+      ])
+      let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+      let error = await capturedServiceError { _ = try await service.stopTurn(prepared) }
+      XCTAssertEqual(error, SignalboxProcessServiceError.unexpectedMessage(
+        "The stop receipt omitted termination metadata or named a different descendant scope."))
+    }
+  }
+
+  func testStopReceiptPreservesTheMatchingRecordedCount() async throws {
+    let prepared = try ProcessSubmissionFixture.preparedStop(descendantScope: .parentAndDescendants)
+    let requester = StaticProcessRequester(frames: [
+      try ProcessDriverFixture.inputSubmitted(
+        validatedForSelectionID: ProcessDriverFixture.modelCall,
+        terminationJSON: #"{"descendant_scope":"parent_and_descendants","descendant_count":"18446744073709551615"}"#)
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let receipt = try await service.stopTurn(prepared)
+    XCTAssertEqual(receipt.termination?.descendantCount.rawValue, UInt64.max)
+  }
+
+  func testPresentTerminationMetadataCannotBeNull() throws {
+    XCTAssertThrowsError(try ProcessDriverFixture.inputSubmitted(terminationJSON: "null"))
+  }
+
+  func testOrdinarySubmissionRejectsTerminationMetadata() async throws {
+    let submission = try ProcessSubmissionFixture.preparedSubmission()
+    let requester = StaticProcessRequester(frames: [
+      try ProcessDriverFixture.inputSubmitted(
+        validatedForSelectionID: ProcessDriverFixture.modelCall,
+        terminationJSON: #"{"descendant_scope":"parent_alone","descendant_count":"0"}"#)
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let error = await capturedServiceError { _ = try await service.submit(submission) }
+    XCTAssertEqual(error, SignalboxProcessServiceError.unexpectedMessage(
+      "The input-submission receipt unexpectedly carried termination metadata."))
+  }
+
   func testStopReceiptRejectsSettingsForAnotherDirectModel() async throws {
     let expectedSelection = try SignalboxCanonicalUUID(
       validating: ProcessDriverFixture.modelCall
@@ -3813,7 +3861,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let requester = StaticProcessRequester(
       frames: [
         try ProcessDriverFixture.inputSubmitted(
-          validatedForSelectionID: ProcessDriverFixture.metadataSessionA
+          validatedForSelectionID: ProcessDriverFixture.metadataSessionA,
+          terminationJSON: #"{"descendant_scope":"parent_alone","descendant_count":"0"}"#
         )
       ]
     )
@@ -4478,6 +4527,23 @@ private enum ProcessSubmissionFixture {
     refreshed: SignalboxProcessSession
   ) -> [SignalboxCanonicalUInt64] {
     [session.defaultsVersion, refreshed.defaultsVersion]
+  }
+
+  /// Canonical stop fixture; the caller chooses its descendant scope.
+  static func preparedStop(
+    descendantScope: SignalboxDescendantTerminationScope
+  ) throws -> SignalboxPreparedTurnStop {
+    SignalboxPreparedTurnStop(
+      commandID: try SignalboxCommandID(validating: commandID),
+      sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
+      activeTurnID: try SignalboxCanonicalUUID(validating: acceptedTurnID),
+      content: content,
+      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      descendantScope: descendantScope,
+      modelSelection: .direct(
+        selectionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.modelCall)
+      )
+    )
   }
 
   static func preparedSubmission() throws -> SignalboxPreparedInputSubmission {
@@ -6185,13 +6251,16 @@ private enum ProcessDriverFixture {
 
   static func inputSubmitted(
     sessionID: String = session,
-    validatedForSelectionID: String? = nil
+    validatedForSelectionID: String? = nil,
+    terminationJSON: String? = nil
   ) throws -> SignalboxProcessServerFrame {
+    let terminationMember = terminationJSON.map { "\"termination\":\($0)," } ?? ""
     let validationIdentity = validatedForSelectionID.map { "\"\($0)\"" } ?? "null"
     return try frame(
       """
       {
         "type":"input_submitted",
+        \(terminationMember)
         "session_id":"\(sessionID)",
         "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
         "acceptance_position":"1",

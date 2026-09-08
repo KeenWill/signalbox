@@ -611,6 +611,7 @@ fn goal_mutation_receipt_rejects_a_cross_wired_session() {
     let selected_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
     let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
     let message = ServerMessage::GoalTransitionApplied {
+        termination: None,
         session_id: foreign_session,
         event_ordinal: CanonicalU64::new(1),
         generation: CanonicalU64::new(1),
@@ -4187,6 +4188,106 @@ async fn submit_connection_failure_is_definitely_uncommitted() -> Result<(), Box
 }
 
 #[tokio::test]
+async fn submit_input_rejects_stop_termination_metadata() -> Result<(), Box<dyn Error>> {
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let content = InputContent::new(String::from("continue"));
+    let expected_request = ClientRequest::SubmitInput {
+        command_id,
+        session_id,
+        content: UserInputContent::text(content.clone().into_string()),
+        expected_defaults_version: Some(CanonicalU64::new(1)),
+        model_settings: ModelSettingsOverlay::inherit_all(),
+        delivery: None,
+    };
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &expected_request,
+            ServerMessage::InputSubmitted {
+                termination: Some(signalbox_process_protocol::TerminationReceipt {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    descendant_count: CanonicalU64::new(0),
+                }),
+                session_id,
+                accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                acceptance_position: CanonicalU64::new(1),
+                turn_id,
+                model_settings: provider_default_model_settings(),
+            },
+        )
+        .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let result = submit_input(
+        &mut client,
+        command_id,
+        session_id,
+        content,
+        Some(CanonicalU64::new(1)),
+        None,
+    )
+    .await;
+    assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_turn_rejects_stop_termination_metadata() -> Result<(), Box<dyn Error>> {
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let content = InputContent::new(String::from("continue"));
+    let expected_request = ClientRequest::ReconcileTurn {
+        command_id,
+        session_id,
+        expected_active_turn_id: turn_id,
+        content: UserInputContent::text(content.clone().into_string()),
+        expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
+    };
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &expected_request,
+            ServerMessage::InputSubmitted {
+                termination: Some(signalbox_process_protocol::TerminationReceipt {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    descendant_count: CanonicalU64::new(0),
+                }),
+                session_id,
+                accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                acceptance_position: CanonicalU64::new(1),
+                turn_id,
+                model_settings: provider_default_model_settings(),
+            },
+        )
+        .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let result = reconcile_turn(
+        &mut client,
+        command_id,
+        session_id,
+        turn_id,
+        content,
+        CanonicalU64::new(1),
+    )
+    .await;
+    assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn submit_input_releases_its_connection_after_acceptance() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("client.sock");
@@ -4218,6 +4319,7 @@ async fn submit_input_releases_its_connection_after_acceptance() -> Result<(), B
             request.version(),
             request.request_id(),
             ServerMessage::InputSubmitted {
+                termination: None,
                 session_id,
                 accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 acceptance_position: CanonicalU64::new(1),
@@ -4361,6 +4463,7 @@ async fn reconcile_turn_names_the_parked_turn_and_returns_its_successor()
             request.version(),
             request.request_id(),
             ServerMessage::InputSubmitted {
+                termination: None,
                 session_id,
                 accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 acceptance_position: CanonicalU64::new(2),
@@ -4424,6 +4527,10 @@ async fn stop_turn_names_the_active_turn_and_returns_its_successor() -> Result<(
             request.version(),
             request.request_id(),
             ServerMessage::InputSubmitted {
+                termination: Some(signalbox_process_protocol::TerminationReceipt {
+                    descendant_scope: selected_scope,
+                    descendant_count: CanonicalU64::new(2),
+                }),
                 session_id,
                 accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 acceptance_position: CanonicalU64::new(2),
@@ -4449,7 +4556,7 @@ async fn stop_turn_names_the_active_turn_and_returns_its_successor() -> Result<(
         selected_scope,
     )
     .await?;
-    assert_eq!(accepted_successor, successor_turn_id);
+    assert_eq!(accepted_successor.turn_id, successor_turn_id);
     server.await??;
     Ok(())
 }

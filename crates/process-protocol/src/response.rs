@@ -22,7 +22,7 @@ use crate::scalars::{
     BlobChunk, CanonicalBlobDigest, CanonicalU64, CanonicalUuid, ContentFragment,
     FrameValidationError, MAX_BLOB_READ_BYTES, MAX_MODEL_CAPABILITY_CATALOG_ENTRIES,
     ModelCallDollarCost, ModelCallTokenUsage, SystemPromptMember, SystemPromptText,
-    UsageProvenance, deserialize_required_nullable,
+    UsageProvenance, deserialize_optional_non_null, deserialize_required_nullable,
 };
 use crate::session::{
     ConversationCursor, ConversationSummary, MetadataLastWriter, SessionMetadata, SessionPlacement,
@@ -43,6 +43,14 @@ use crate::transcript::{
 };
 use crate::user_input::UserInputContent;
 use serde::{Deserialize, Serialize};
+
+/// The selected stop scope and its immutable descendant disposition count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminationReceipt {
+    pub descendant_scope: crate::goal::DescendantTerminationScope,
+    pub descendant_count: CanonicalU64,
+}
 
 /// Closed terminal OAuth administration outcomes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -288,6 +296,13 @@ pub enum ServerMessage {
     },
     /// Input acceptance receipt.
     InputSubmitted {
+        /// Present exactly for a stop-turn acceptance.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,
         /// Accepted input.
@@ -312,6 +327,13 @@ pub enum ServerMessage {
     },
     /// A durable user goal command appended one event.
     GoalTransitionApplied {
+        /// Present exactly for a stop-goal transition.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,
         /// Appended event position.
@@ -878,6 +900,19 @@ pub enum ServerMessage {
 
 impl ServerMessage {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::InputSubmitted {
+            termination: Some(receipt),
+            ..
+        }
+        | Self::GoalTransitionApplied {
+            termination: Some(receipt),
+            ..
+        } = self
+            && receipt.descendant_scope == crate::goal::DescendantTerminationScope::ParentAlone
+            && receipt.descendant_count.value() != 0
+        {
+            return Err(FrameValidationError::DelegationShape);
+        }
         validate_operator_status_message(self)?;
         match self {
             Self::OauthCredentialAuthorization {

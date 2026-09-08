@@ -302,6 +302,7 @@ pub struct SubmitInputRepository {
     pool: PgPool,
     model_capabilities: Option<ModelCapabilityCatalog>,
     attachment_maximum_bytes: Option<u64>,
+    stop_receipt: bool,
 }
 
 impl SubmitInputRepository {
@@ -311,6 +312,7 @@ impl SubmitInputRepository {
             pool,
             model_capabilities: None,
             attachment_maximum_bytes: None,
+            stop_receipt: false,
         }
     }
 
@@ -324,6 +326,7 @@ impl SubmitInputRepository {
             pool,
             model_capabilities: Some(model_capabilities),
             attachment_maximum_bytes: None,
+            stop_receipt: false,
         }
     }
 
@@ -333,6 +336,26 @@ impl SubmitInputRepository {
     pub const fn with_attachment_maximum_bytes(mut self, maximum_bytes: u64) -> Self {
         self.attachment_maximum_bytes = Some(maximum_bytes);
         self
+    }
+
+    /// Records stop receipt metadata with a newly committed input command.
+    #[must_use]
+    pub const fn with_stop_receipt(mut self) -> Self {
+        self.stop_receipt = true;
+        self
+    }
+
+    /// Reads the receipt kind retained by the command's first handling.
+    pub async fn is_recorded_stop(
+        &self,
+        command_id: DurableCommandId,
+    ) -> Result<bool, SubmitInputRepositoryError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM submit_input_stop_receipt WHERE command_id = $1)",
+        )
+        .bind(command_id.into_uuid())
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Handles an unseen command or resolves its immutable recorded meaning.
@@ -445,6 +468,7 @@ impl SubmitInputRepository {
         NextClosureDecision: FnMut() -> DurableCommandId + Send,
         NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
     {
+        let command_id = command.command_id();
         let mut transaction = self.pool.begin().await?;
         let decision = Box::pin(handle_in_transaction(
             &mut transaction,
@@ -466,6 +490,12 @@ impl SubmitInputRepository {
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
+                if self.stop_receipt {
+                    sqlx::query("INSERT INTO submit_input_stop_receipt (command_id) VALUES ($1)")
+                        .bind(command_id.into_uuid())
+                        .execute(&mut *transaction)
+                        .await?;
+                }
                 transaction
                     .commit()
                     .await

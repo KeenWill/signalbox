@@ -9,9 +9,8 @@ owner has committed and the daemon and terminal client do not implement.
 Future implementation of these surfaces under protocol version 1 must pair each
 daemon handler with its terminal-client consumer in the same change:
 credential-exclusion administration, program-run
-cancellation, runner placement facts, cascade metadata on stop receipts, and the
-typed projection of credential-pool exhaustion and of the
-credential-availability wait.
+cancellation, runner placement facts, and the typed projection of
+credential-pool exhaustion and of the credential-availability wait.
 
 ## Design
 
@@ -93,12 +92,6 @@ later runner facts: a new fact adds a state and its members to this event kind,
 never a second kind. A snapshot's session summary carries the same runner
 object, with connection health present exactly for a pinned placement.
 
-A successful cascade receipt for `stop_goal` or `stop_turn` carries the selected
-`descendant_scope` and the exact count of recorded descendant dispositions, so a
-zero-child choice and an unperformed cascade cannot be confused. An equal
-durable-command retry returns those stored values without re-evaluating the
-cascade.
-
 The credential projection adds
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a `transcript_turn` state variant,
@@ -163,9 +156,8 @@ every exclusion origin, and a delivery-origin OAuth-refresh quarantine is
 neither listed nor clearable.
 
 An equal `command_id` replay returns the stored receipt for
-`clear_credential_exclusion`, `cancel_program_run`, and a cascading stop, and
-`stale_generation` is evaluated only for a fresh command and only within the
-target's own scope.
+`clear_credential_exclusion` and `cancel_program_run`, and `stale_generation` is
+evaluated only for a fresh command and only within the target's own scope.
 
 A follower learns a live runner loss, change, or relocation through
 `runner_state_transition` and the current runner state from its snapshot, and

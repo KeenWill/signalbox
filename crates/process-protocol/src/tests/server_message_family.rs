@@ -18,6 +18,7 @@ fn server_message_family_has_exact_closed_wire_shapes() -> Result<(), Box<dyn st
     assert_server_message_round_trip(
         request(2)?,
         ServerMessage::InputSubmitted {
+            termination: None,
             session_id: uuid(1),
             accepted_input_id: uuid(2),
             acceptance_position: CanonicalU64::new(1),

@@ -155,6 +155,7 @@ fn submit_exchange_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         ProtocolVersion::One,
         request_id,
         ServerMessage::InputSubmitted {
+            termination: None,
             session_id: uuid(3),
             accepted_input_id: uuid(4),
             acceptance_position: CanonicalU64::new(1),
