@@ -160,11 +160,12 @@ active exclusion can be cleared by a wake. A chain exclusion never qualifies.
 The attempt ends call-free WithoutStop(YieldedToDurableWait), the active turn
 keeps its session slot, and the transaction appends no transcript entry.
 
-The wait retains its policy identity, latest frontier, complete member exclusion
-snapshot and optional deadline. A member contributes a deadline only when every
-active exclusion expires: its deadline is their latest reset, and the wait's is
-the earliest member deadline. Chain exclusions, displacements and quarantines do
-not expire by time passage.
+A fresh availability chain resolves the current catalog; calls and waits retain
+the policy identity governing their chain. The wait retains its latest frontier,
+complete member exclusion snapshot and optional deadline. A member contributes a
+deadline only when every active exclusion expires: its deadline is their latest
+reset, and the wait's is the earliest member deadline. Chain exclusions,
+displacements and quarantines do not expire by time passage.
 
 An eligible wait reruns admission against current exclusions under the session
 lock. Re-parking rewrites the same wait's evidence and deadline without another
