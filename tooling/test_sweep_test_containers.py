@@ -230,7 +230,11 @@ def container_start_sites() -> tuple[list[str], list[str]]:
             marked = MARKED_START.search("\n".join(lines[head - 2 : number]))
             if marked is None or (
                 marked.group("qualifier") == "crate"
-                and not name.startswith("crates/persistence/")
+                and (
+                    not name.startswith("crates/persistence/src/")
+                    or name.startswith("crates/persistence/src/bin/")
+                    or name == "crates/persistence/src/main.rs"
+                )
             ):
                 unmarked.append(f"{name}:{number}")
     return sites, unmarked
@@ -463,6 +467,11 @@ class SweepTestContainersTest(unittest.TestCase):
             {"file": "apps/fixture.rs", "qualifier": "signalbox_persistence::", "unmarked": 0},
             {"file": "crates/persistence/src/fixture.rs", "qualifier": "crate::", "unmarked": 0},
             {"file": "apps/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/tests/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/benches/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/examples/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/src/bin/fixture.rs", "qualifier": "crate::", "unmarked": 1},
+            {"file": "crates/persistence/src/main.rs", "qualifier": "crate::", "unmarked": 1},
             {"file": "apps/fixture.rs", "qualifier": "unrelated::", "unmarked": 1},
             {"file": "crates/persistence/src/fixture.rs", "qualifier": "unrelated::", "unmarked": 1},
         ]
