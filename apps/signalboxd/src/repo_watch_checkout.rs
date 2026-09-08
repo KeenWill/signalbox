@@ -134,21 +134,16 @@ pub(crate) async fn provision<Runner: ProcessRunner>(
     pull_request: &PullRequestEventContext,
     credentials: &RepositoryWatchClientLoader,
 ) -> Result<(), CheckoutProvisioningFailed> {
-    let result = provision_git(runner, checkout, repository, pull_request, credentials).await;
-    if result.is_err() && checkout.staged_name.is_none() {
-        retain_dispatch_marker(checkout)?;
-    }
-    result
-}
-
-async fn provision_git<Runner: ProcessRunner>(
-    runner: &mut Runner,
-    checkout: &mut CheckoutDirectory,
-    repository: &RepositorySlug,
-    pull_request: &PullRequestEventContext,
-    credentials: &RepositoryWatchClientLoader,
-) -> Result<(), CheckoutProvisioningFailed> {
     if let Some(name) = &checkout.staged_name {
+        // Git clone requires an empty directory; inode metadata survives publication without adding entries.
+        #[cfg(target_os = "linux")]
+        rustix::fs::fsetxattr(
+            &checkout.directory,
+            PUBLICATION_MARKER,
+            checkout.dispatch.into_uuid().to_string().as_bytes(),
+            rustix::fs::XattrFlags::empty(),
+        )
+        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
         rustix::fs::renameat_with(
             &checkout.parent,
             name,
@@ -257,7 +252,7 @@ async fn provision_git<Runner: ProcessRunner>(
 }
 
 fn retain_dispatch_marker(checkout: &CheckoutDirectory) -> Result<(), CheckoutProvisioningFailed> {
-    let git_directory = create_directory(&checkout.directory, std::ffi::OsStr::new(".git"))
+    let git_directory = openat(&checkout.directory, ".git", DIRECTORY_FLAGS, Mode::empty())
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
     let marker = openat(
         &git_directory,
@@ -270,6 +265,11 @@ fn retain_dispatch_marker(checkout: &CheckoutDirectory) -> Result<(), CheckoutPr
     std::fs::File::from(marker)
         .write_all(checkout.dispatch.into_uuid().to_string().as_bytes())
         .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+    #[cfg(target_os = "linux")]
+    match rustix::fs::fremovexattr(&checkout.directory, PUBLICATION_MARKER) {
+        Ok(()) | Err(rustix::io::Errno::NODATA) => {}
+        Err(_) => return Err(CheckoutProvisioningFailed::at(CheckoutStep::Workspace)),
+    }
     Ok(())
 }
 
@@ -343,6 +343,8 @@ fn create_directory(
 }
 
 const DISPATCH_MARKER: &str = "signalbox-dispatch";
+#[cfg(target_os = "linux")]
+const PUBLICATION_MARKER: &str = "user.signalbox.dispatch";
 
 fn staging_name(dispatch: RepoWatchDispatchId) -> OsString {
     format!(".checkout-{}", dispatch.into_uuid()).into()
@@ -445,7 +447,16 @@ fn marker_matches(
     directory: &OwnedFd,
     dispatch: RepoWatchDispatchId,
 ) -> Result<bool, rustix::io::Errno> {
-    restore_owner_permissions(directory, Mode::XUSR)?;
+    let readable = read_removal_directory(directory)?;
+    let mut publication = [0; uuid::fmt::Hyphenated::LENGTH + 1];
+    match rustix::fs::fgetxattr(&readable, PUBLICATION_MARKER, &mut publication) {
+        Ok(count) => {
+            return Ok(&publication[..count] == dispatch.into_uuid().to_string().as_bytes());
+        }
+        Err(rustix::io::Errno::NODATA) => {}
+        Err(rustix::io::Errno::RANGE) => return Ok(false),
+        Err(error) => return Err(error),
+    }
     let git_directory = match pin_removal_directory(directory, std::ffi::OsStr::new(".git")) {
         Ok(directory) => directory,
         Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {

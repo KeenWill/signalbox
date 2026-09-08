@@ -226,18 +226,21 @@ creation ownership and the directory device/inode before publishing a new
 directory at the session path. Unpublished staging names derive from the
 dispatch id and permit empty-directory cleanup before ownership recording;
 cancellation leaves staging for replay or cleanup. Replay resumes staged
-provisioning only when its identity matches the retained identity. Provisioning
-writes the dispatch id to `.git/signalbox-dispatch`. Directories not created by
-the dispatch are neither adopted nor removed. Removal verifies retained
-identities before changing permissions; both original and renamed paths require
-the matching dispatch marker before traversing contents. A missing or mismatched
-identity leaves removal pending. If that pathname is absent, cleanup searches
-its direct siblings under the derived session parent for the retained
-device/inode and matching dispatch marker; without a matching marker it settles
-without deleting. The parent is retained. The removal migration settles existing
-provisioned rows without a retained location. Removal restores owner search
-permission before marker lookup, owner read permission on the marker, and owner
-directory permissions before traversal, and refuses mount crossings; it reports
+provisioning only when its identity matches the retained identity. Before
+publication on Linux, provisioning writes the dispatch id to the directory's
+`user.signalbox.dispatch` extended attribute; `.git/signalbox-dispatch` replaces
+that evidence after clone. Cleanup checks the attribute while present and the
+file marker otherwise. Directories not created by the dispatch are neither
+adopted nor removed. Removal verifies retained identities before changing
+permissions; both original and renamed paths require the matching dispatch
+marker before traversing contents. A missing or mismatched identity leaves
+removal pending. If that pathname is absent, cleanup searches its direct
+siblings under the derived session parent for the retained device/inode and
+matching dispatch marker; without a matching marker it settles without deleting.
+The parent is retained. The removal migration settles existing provisioned rows
+without a retained location. Removal restores owner search permission before
+marker lookup, owner read permission on the marker, and owner directory
+permissions before traversal, and refuses mount crossings; it reports
 unsupported outside Linux and leaves cleanup pending. Pending submission
 follow-ups remain retryable after core command settlement, including
 interruption of a live turn whose session is closing. Synchronous

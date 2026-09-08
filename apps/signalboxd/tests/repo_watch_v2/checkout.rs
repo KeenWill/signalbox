@@ -127,6 +127,38 @@ impl ProcessRunner for LocalGitRunner {
     }
 }
 
+/// Suspends the clone after it has begun writing into the published directory.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct PausingCloneRunner {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(target_os = "linux")]
+impl ProcessRunner for PausingCloneRunner {
+    fn sandbox_launcher_program(&self) -> &Path {
+        Path::new("/unused-checkout-fixture-launcher")
+    }
+    fn sandbox_launcher_descriptor(&self) -> Option<i32> {
+        None
+    }
+    async fn bwrap_availability(&mut self, _: ProcessRequest) -> BwrapAvailability {
+        BwrapAvailability::Missing
+    }
+    async fn run(&mut self, request: ProcessRequest) -> ProcessRunResult {
+        assert_eq!(request.arguments[0], "clone");
+        std::fs::create_dir_all(request.working_directory.join(".git/objects"))
+            .expect("partial clone directory");
+        std::fs::write(
+            request.working_directory.join(".git/objects/partial"),
+            b"partial clone",
+        )
+        .expect("partial clone data");
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
 struct CheckoutFixture {
     _container: ContainerAsync<Postgres>,
     _files: tempfile::TempDir,
@@ -698,6 +730,15 @@ async fn dispatch_provisions_the_retained_head_at_the_git_tools_root() -> Result
         fixture.head.as_str()
     );
     assert_eq!(repository.head()?.shorthand()?, "review");
+    #[cfg(target_os = "linux")]
+    {
+        let mut publication = [0; uuid::fmt::Hyphenated::LENGTH];
+        assert_eq!(
+            rustix::fs::getxattr(&root, "user.signalbox.dispatch", &mut publication),
+            Err(rustix::io::Errno::NODATA),
+            "completed clone hands ownership evidence to the file marker"
+        );
+    }
     assert_eq!(
         std::fs::read_to_string(root.join("review.txt"))?,
         "retained head\n"
@@ -893,6 +934,84 @@ async fn recovery_fetches_an_existing_checkout_without_cloning_again() -> Result
             .fetch_one(&fixture.module)
             .await?;
     assert_eq!(head, fixture.head.as_str());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+#[cfg(target_os = "linux")]
+async fn cancellation_during_clone_keeps_the_published_checkout_removable()
+-> Result<(), Box<dyn Error>> {
+    assert_interrupted_clone_cleanup(RemovalLocation::Original).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+#[cfg(target_os = "linux")]
+async fn cancellation_during_clone_keeps_a_renamed_checkout_removable() -> Result<(), Box<dyn Error>>
+{
+    assert_interrupted_clone_cleanup(RemovalLocation::Sibling).await
+}
+
+#[cfg(target_os = "linux")]
+async fn assert_interrupted_clone_cleanup(location: RemovalLocation) -> Result<(), Box<dyn Error>> {
+    use signalboxd::repo_watch_dispatch::scavenge_checkouts;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let runner = PausingCloneRunner {
+        started: started.clone(),
+    };
+    let watch = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("watch")
+        .clone();
+    let mut submission = Box::pin(submit_pending_with_runner(
+        &fixture.store,
+        &watch,
+        &mut fixture.sink,
+        runner,
+    ));
+    tokio::select! {
+        result = &mut submission => panic!("clone must remain pending: {result:?}"),
+        result = tokio::time::timeout(Duration::from_secs(10), started.notified()) => result?,
+    }
+    drop(submission);
+    let checkout = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("checkout");
+    let session = checkout.location.expect("retained location").session;
+    let root = fixture.root(session);
+    assert!(root.join(".git/objects/partial").is_file());
+    assert!(
+        !root.join(".git/signalbox-dispatch").exists(),
+        "clone was cancelled before the file marker could be written"
+    );
+    let mut evidence = [0; uuid::fmt::Hyphenated::LENGTH];
+    let count = rustix::fs::getxattr(&root, "user.signalbox.dispatch", &mut evidence)?;
+    assert_eq!(
+        &evidence[..count],
+        checkout.dispatch.into_uuid().to_string().as_bytes()
+    );
+    let retained_path = match location {
+        RemovalLocation::Original => root.clone(),
+        RemovalLocation::Sibling => {
+            let renamed = root.with_file_name("interrupted-clone");
+            std::fs::rename(&root, &renamed)?;
+            renamed
+        }
+    };
+    fixture.stop(session).await;
+    let restarted = RepoWatchStore::new(fixture.module.clone());
+    scavenge_checkouts(&restarted, &fixture.core)
+        .await
+        .expect("interrupted clone removed using publication evidence");
+    assert!(!retained_path.exists());
+    assert!(restarted.checkout_removal_candidates().await?.is_empty());
     Ok(())
 }
 
