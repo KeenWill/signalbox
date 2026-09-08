@@ -24,6 +24,10 @@ that counts a prospective operation's rendered input without a generation
 request, sending the same prompt- and cache-affecting controls the generation
 request would carry.
 
+An input-count failure carries caller correlation and typed stage evidence,
+including a closed credential failure or HTTP status where available, without
+provider text or credential material.
+
 Anthropic Messages generation and input-count requests do not enable tool-result
 context editing; no durable model-call fact represents its applied edits.
 

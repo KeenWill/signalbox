@@ -9,7 +9,7 @@
 | cli_redaction | 4 | 0 | 3 | [cli_redaction](cli_redaction.md) |
 | credential | 4 | 1 | 0 | [credential](credential.md) |
 | evidence | 23 | 0 | 1 | [evidence](evidence.md) |
-| input_count | 1 | 1 | 0 | [input_count](input_count.md) |
+| input_count | 2 | 1 | 0 | [input_count](input_count.md) |
 | message | 5 | 0 | 0 | [message](message.md) |
 | observation | 2 | 1 | 0 | [observation](observation.md) |
 | operation | 5 | 0 | 0 | [operation](operation.md) |
