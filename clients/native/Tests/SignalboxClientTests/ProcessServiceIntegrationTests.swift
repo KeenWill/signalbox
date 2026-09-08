@@ -3106,6 +3106,28 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testOverrideWaitsForTerminalDenialWhileAnotherBatchRequestIsUnresolved() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithLaterUserApproval(
+        modelCallID: ProcessDriverFixture.modelCall, approvalMember: ""
+      )
+    ))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    XCTAssertFalse(viewModel.isTerminalDelegateDenied(invocationID))
+
+    await viewModel.overrideToolDenial(invocationID)
+
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
   func testAmbiguousOverrideRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -3114,8 +3136,12 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await viewModel.connect()
     viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithProposedTool()))
     viewModel.apply(.event(try ProcessProjectionFixture.delegateDenialEvent()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
 
+    XCTAssertTrue(viewModel.isTerminalDelegateDenied(invocationID))
     await viewModel.overrideToolDenial(invocationID)
     XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
     await viewModel.overrideToolDenial(invocationID)
@@ -3212,7 +3238,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     await viewModel.overrideToolDenial(invocationID)
@@ -3232,7 +3260,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     await viewModel.overrideToolDenial(invocationID)
@@ -3248,7 +3278,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     viewModel.apply(.event(try ProcessProjectionFixture.overrideConsumptionEvent()))
@@ -3266,7 +3298,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     await viewModel.overrideToolDenial(invocationID)
@@ -3290,7 +3324,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     await viewModel.overrideToolDenial(invocationID)
@@ -3325,7 +3361,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     await viewModel.overrideToolDenial(invocationID)
@@ -3360,7 +3398,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     await viewModel.overrideToolDenial(invocationID)
@@ -3380,7 +3420,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     await viewModel.overrideToolDenial(invocationID)
@@ -3400,7 +3442,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     await viewModel.overrideToolDenial(invocationID)
@@ -3420,7 +3464,9 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let service = AmbiguousThenAcceptingToolDecisionProcessService()
     let viewModel = ProcessSessionDetailViewModel(session: session) { service }
     await viewModel.connect()
-    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: false)
+    ))
     let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
     await viewModel.overrideToolDenial(invocationID)
     await viewModel.overrideToolDenial(invocationID)
@@ -12516,6 +12562,7 @@ extension ProcessServiceIntegrationTests {
 
     let tool = try ProcessProjectionFixture.onlyToolCard(in: viewModel.timeline)
     XCTAssertEqual(tool.status, .denied)
+    XCTAssertFalse(viewModel.isTerminalDelegateDenied(tool.invocationID))
     XCTAssertEqual(tool.decisionReason, nil)
     XCTAssertEqual(tool.approvalDecider, ProcessProjectionFixture.delegateDenialLabel)
     XCTAssertEqual(tool.approvalRationale, ProcessProjectionFixture.delegateRationale)

@@ -1603,20 +1603,25 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
-  func isDelegateDenied(_ invocationID: SignalboxToolInvocationID) -> Bool {
+  func isTerminalDelegateDenied(_ invocationID: SignalboxToolInvocationID) -> Bool {
     guard let approval = toolApprovalDecisionsByRequestID[invocationID.rawValue],
       case .deny = approval.decision,
       case .delegate = approval.decider
     else {
       return false
     }
-    return true
+    return normalizer.records.contains { record in
+      guard case .processTool(let tool) = record.event else {
+        return false
+      }
+      return tool.toolRequestID.rawValue == invocationID.rawValue && tool.status == .denied
+    }
   }
 
   func overrideToolDenial(_ invocationID: SignalboxToolInvocationID) async {
     guard
       !isDecidingTool,
-      isDelegateDenied(invocationID),
+      isTerminalDelegateDenied(invocationID),
       !armedToolDenials.contains(invocationID.rawValue),
       !retiredToolDenials.contains(invocationID.rawValue),
       mutationBlocksByTurnID.isEmpty,
@@ -3246,7 +3251,7 @@ struct ProcessSessionDetailScreen: View {
             deniedToolRequest = tool.invocationID
           }
         )
-        if tool.status == .denied && viewModel.isDelegateDenied(tool.invocationID) {
+        if viewModel.isTerminalDelegateDenied(tool.invocationID) {
           if viewModel.armedToolDenials.contains(tool.invocationID.rawValue) {
             Text("One-shot override armed")
           } else if viewModel.retiredToolDenials.contains(tool.invocationID.rawValue) {
