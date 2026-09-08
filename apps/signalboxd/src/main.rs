@@ -1607,6 +1607,7 @@ async fn run_hub(
             .roots()
             .to_vec(),
     );
+    let checkout_runner = tools.process_runner();
     let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
@@ -1870,9 +1871,16 @@ async fn run_hub(
     let repository_watch_runtime = {
         let start = async {
             let module_pool = connect_repository_watch_pool(&pool).await?;
+            signalboxd::repo_watch_dispatch::scavenge_checkouts(
+                &signalbox_module_repo_watch_v2::RepoWatchStore::new(module_pool.clone()),
+                &pool,
+            )
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
             Ok::<_, RepositoryWatchRuntimeError>(RepositoryWatchRuntime::unstarted(
                 module_pool,
                 RepositoryWatchServices {
+                    checkout_runner: checkout_runner.clone(),
                     core_pool: pool.clone(),
                     models: Arc::new(model_configuration.clone()),
                     templates: Arc::new(template_configuration.clone()),

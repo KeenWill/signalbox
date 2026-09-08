@@ -32,6 +32,7 @@ use crate::{
 
 /// Core capabilities remain in daemon-owned adapters; the module receives its own pool.
 pub struct RepositoryWatchServices {
+    pub checkout_runner: Option<signalbox_tools_exec::TokioProcessRunner>,
     pub core_pool: PgPool,
     pub models: Arc<HubModelConfiguration>,
     pub templates: Arc<SessionTemplateConfiguration>,
@@ -169,6 +170,7 @@ impl RepositoryWatchRuntime {
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
                 factory: RepositoryWatchCommandFactory(services.templates),
                 sink: RepositoryWatchCommandSink {
+                    checkout_runner: services.checkout_runner,
                     pool: services.core_pool,
                     models: services.models,
                     eligibility_nudge: services.eligibility_nudge,
@@ -446,7 +448,7 @@ impl RepositoryWatchRuntime {
         }
     }
 
-    /// Supervises configured workers and retains only idle control while disabled.
+    /// Supervises configured workers and checkout cleanup while disabled.
     pub async fn run(
         self,
         mut shutdown: watch::Receiver<bool>,
@@ -458,10 +460,7 @@ impl RepositoryWatchRuntime {
             }
             let (active, changed) = {
                 let state = self.state.lock().await;
-                (
-                    !state.paused && state.configuration.as_ref().is_some_and(|c| c.enabled()),
-                    state.changed.clone(),
-                )
+                (!state.paused, state.changed.clone())
             };
             if !active {
                 tokio::select! {
@@ -511,14 +510,8 @@ impl RuntimeState {
     }
 
     fn start_commands(&mut self, runtime: RepositoryWatchRuntime) {
-        if self
-            .configuration
-            .as_ref()
-            .is_some_and(|configuration| configuration.enabled())
-        {
-            let (shutdown, receiver) = watch::channel(false);
-            self.commands = Some((shutdown, tokio::spawn(runtime.run_commands(receiver))));
-        }
+        let (shutdown, receiver) = watch::channel(false);
+        self.commands = Some((shutdown, tokio::spawn(runtime.run_commands(receiver))));
     }
 
     fn health(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
@@ -597,6 +590,9 @@ impl RuntimeState {
         if self.paused {
             return Ok(());
         }
+        crate::repo_watch_dispatch::scavenge_checkouts(&self.store, &self.sink.pool)
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
         let Some(configuration) = self
             .configuration
             .as_ref()
@@ -662,6 +658,7 @@ mod tests {
         let runtime = RepositoryWatchRuntime::unstarted(
             pool.clone(),
             RepositoryWatchServices {
+                checkout_runner: None,
                 core_pool: pool,
                 models: Arc::new(
                     crate::configuration::checked_in_example_configuration().expect("models"),
