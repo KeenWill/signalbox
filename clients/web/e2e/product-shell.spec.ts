@@ -1148,10 +1148,12 @@ test('retries a transient Attention bootstrap failure in place', async ({ page }
 
   await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
-  await page.getByRole('button', { name: 'Retry Attention' }).click()
+  await expect(page.getByRole('button', { name: /^Retry/ })).toHaveCount(1)
+  await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
 
   await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: '0 sessions' })).toBeVisible()
+  await expect(page.getByRole('main')).toBeFocused()
   expect(admission.attempts).toBe(2)
 })
 
@@ -1820,22 +1822,29 @@ test('starts the settled exact import filter without the previous page cursor', 
   await expect.poll(() => requests.at(-1)).toEqual({ source: 'source-session-1', after: null })
 })
 
-test('keeps connection recovery controls inside a phone viewport', async ({ page }, testInfo) => {
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invalid: true } }))
-  await page.goto('/attention')
-  const retry = page.getByRole('button', { name: 'Retry connection', exact: true })
-  const palette = page.getByRole('button', { name: 'Open command palette', exact: true })
-  await expect(retry).toBeVisible()
-  for (const control of [retry, palette]) {
-    const box = await control.boundingBox()
-    expect(box).not.toBeNull()
-    expect(box?.x).toBeGreaterThanOrEqual(0)
-    expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(390)
-  }
-  expect(await page.locator('.product-shell').evaluate((element) => element.scrollWidth)).toBe(390)
-  await page.screenshot({ path: testInfo.outputPath('phone-connection-error.png') })
-})
+for (const surface of ['attention', 'sessions'] as const) {
+  test(`keeps connection recovery controls inside a phone viewport on ${surface}`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invalid: true } }))
+    await page.goto(`/${surface}`)
+    const retry = page.getByRole('button', { name: 'Retry connection', exact: true })
+    const palette = page.getByRole('button', { name: 'Open command palette', exact: true })
+    await expect(retry).toBeVisible()
+    for (const control of [retry, palette]) {
+      const box = await control.boundingBox()
+      expect(box).not.toBeNull()
+      expect(box?.x).toBeGreaterThanOrEqual(0)
+      expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(390)
+    }
+    expect(await page.locator('.product-shell').evaluate((element) => element.scrollWidth)).toBe(
+      390,
+    )
+    await page.screenshot({ path: testInfo.outputPath('phone-connection-error.png') })
+    await expect(page.getByRole('button', { name: /^Retry/ })).toHaveCount(1)
+  })
+}
 
 for (const entry of ['button', 'palette'] as const) {
   test(`hides empty import controls and retries failed discovery from the ${entry}`, async ({

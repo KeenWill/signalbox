@@ -543,7 +543,9 @@ test('recovers after retrying a transient bootstrap failure', async ({ page }) =
   await page.route('**/api/sessions?**', (route) => route.fulfill({ json: firstPage }))
 
   await page.goto('/sessions')
-  await page.getByRole('button', { name: 'Retry sessions' }).click()
+  await expect(page.getByRole('button', { name: 'Retry connection', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Retry/ })).toHaveCount(1)
+  await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
   await expect(page.getByRole('heading', { name: `${firstPage.total} sessions` })).toBeVisible()
   await expect(page.getByRole('main')).toBeFocused()
   expect(bootstrapReads).toBe(2)

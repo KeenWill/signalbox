@@ -466,7 +466,6 @@ export function ProductApp({
     }
   }, [artifactRequest, dispatch])
   const narrowInspector = useNarrowInspector()
-  const [focusAfterBootstrapRecovery, setFocusAfterBootstrapRecovery] = useState(false)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const [windowRequest, setWindowRequest] = useState<{
@@ -720,13 +719,6 @@ export function ProductApp({
   }, [app.density, app.theme])
 
   useEffect(() => {
-    if (!focusAfterBootstrapRecovery || !bootstrap.isSuccess) return
-    setFocusAfterBootstrapRecovery(false)
-    const frame = requestAnimationFrame(() => mainRef.current?.focus())
-    return () => cancelAnimationFrame(frame)
-  }, [bootstrap.isSuccess, focusAfterBootstrapRecovery])
-
-  useEffect(() => {
     const returnedToSidePane = artifactOpen && inspectorWasInSheet.current && !inspectorInSheet
     if (artifactOpen && !inspectorInSheet && (!artifactSideWasOpen.current || returnedToSidePane)) {
       artifactSideWasOpen.current = true
@@ -790,18 +782,6 @@ export function ProductApp({
         <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
           <div>
             <h2>{bootstrap.isError ? 'Attention unavailable' : 'Loading Attention…'}</h2>
-            {bootstrap.isError && (
-              <button
-                type="button"
-                className="bootstrap-retry"
-                onClick={() => {
-                  setFocusAfterBootstrapRecovery(true)
-                  void bootstrap.refetch()
-                }}
-              >
-                Retry Attention
-              </button>
-            )}
           </div>
         </section>
       </div>
@@ -840,19 +820,6 @@ export function ProductApp({
     ) : surface === 'sessions' ? (
       <div className="catalog-notice">
         <p>Sessions unavailable</p>
-        {bootstrap.isError && (
-          <button
-            type="button"
-            onClick={() => {
-              setFocusAfterBootstrapRecovery(true)
-              void bootstrap.refetch().then((result) => {
-                if (result.isSuccess) requestAnimationFrame(() => mainRef.current?.focus())
-              })
-            }}
-          >
-            Retry sessions
-          </button>
-        )}
       </div>
     ) : surface === 'search' && bootstrap.isError ? (
       <div className="surface-body">
