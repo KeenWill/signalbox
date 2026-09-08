@@ -1186,3 +1186,99 @@ async fn the_table_refuses_a_workspace_root_the_newtype_refuses() -> Result<(), 
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn workspace_operator_records_generated_facts_and_replays_original_identities()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::workspace::UuidV7WorkspaceIdentityGenerator;
+    use signalbox_domain::{WorkspaceCommand, WorkspaceCommandResult, WorkspaceOperation};
+    use signalbox_persistence::workspace::{WorkspaceOutcome, WorkspaceRepository};
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = WorkspaceRepository::new(pool.clone());
+    let mut ids = UuidV7WorkspaceIdentityGenerator;
+    let register = WorkspaceCommand::new(
+        command_id(1),
+        WorkspaceOperation::Register {
+            root: WorkspaceRootPath::try_new(WORKSPACE_ROOT.to_owned())?,
+        },
+    );
+    let registered = repository.handle(register.clone(), &mut ids).await?;
+    let WorkspaceOutcome::Applied(WorkspaceCommandResult::Registered(workspace)) = registered
+    else {
+        panic!("expected workspace receipt, got {registered:?}");
+    };
+    assert_eq!(
+        workspace.as_uuid().get_version(),
+        Some(uuid::Version::SortRand)
+    );
+    assert_eq!(
+        repository.handle(register.clone(), &mut ids).await?,
+        registered
+    );
+    let changed_root = WorkspaceCommand::new(
+        register.command_id(),
+        WorkspaceOperation::Register {
+            root: WorkspaceRootPath::try_new(OTHER_WORKSPACE_ROOT.to_owned())?,
+        },
+    );
+    assert_eq!(
+        repository.handle(changed_root, &mut ids).await?,
+        WorkspaceOutcome::ConflictingReuse
+    );
+    let mint = WorkspaceCommand::new(
+        command_id(2),
+        WorkspaceOperation::MintRemote {
+            workspace,
+            name: GitRemoteName::try_new(NAME.to_owned())?,
+            url: GitRemoteUrl::try_new(URL.to_owned())?,
+        },
+    );
+    let minted = repository.handle(mint.clone(), &mut ids).await?;
+    let WorkspaceOutcome::Applied(WorkspaceCommandResult::Minted(mint_id)) = minted else {
+        panic!("expected mint receipt, got {minted:?}");
+    };
+    assert_eq!(
+        mint_id.as_uuid().get_version(),
+        Some(uuid::Version::SortRand)
+    );
+    assert_eq!(repository.handle(mint.clone(), &mut ids).await?, minted);
+    let withdrawal = WorkspaceCommand::new(
+        command_id(3),
+        WorkspaceOperation::WithdrawRemote { mint: mint_id },
+    );
+    let withdrawn = repository.handle(withdrawal.clone(), &mut ids).await?;
+    let WorkspaceOutcome::Applied(WorkspaceCommandResult::Withdrawn(withdrawal_id)) = withdrawn
+    else {
+        panic!("expected withdrawal receipt, got {withdrawn:?}");
+    };
+    assert_eq!(
+        withdrawal_id.as_uuid().get_version(),
+        Some(uuid::Version::SortRand)
+    );
+    assert_eq!(
+        repository.handle(withdrawal.clone(), &mut ids).await?,
+        withdrawn
+    );
+    assert_eq!(repository.handle(mint.clone(), &mut ids).await?, minted);
+    let replacement = WorkspaceCommand::new(command_id(4), mint.operation().clone());
+    let replacement_result = repository.handle(replacement, &mut ids).await?;
+    assert_ne!(replacement_result, minted);
+    assert_eq!(
+        repository
+            .handle(
+                WorkspaceCommand::new(register.command_id(), withdrawal.operation().clone()),
+                &mut ids
+            )
+            .await?,
+        WorkspaceOutcome::ConflictingReuse
+    );
+    let live_mints: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM configured_git_remote_live WHERE workspace_id = $1",
+    )
+    .bind(workspace.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(live_mints, 1);
+    Ok(())
+}

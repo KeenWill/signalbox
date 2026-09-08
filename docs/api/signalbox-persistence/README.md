@@ -59,6 +59,7 @@
 | tool_loop | 3 | 0 | 0 | [tool_loop](tool_loop.md) |
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |
+| workspace | 3 | 0 | 0 | [workspace](workspace.md) |
 | workspace_instructions | 6 | 0 | 0 | [workspace_instructions](workspace_instructions.md) |
 | reload_configuration | 8 | 0 | 0 | [reload_configuration](reload_configuration.md) |
 | root | 0 | 0 | 10 | [root](root.md) |

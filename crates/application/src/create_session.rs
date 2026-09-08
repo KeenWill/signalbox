@@ -42,12 +42,29 @@ pub struct CreateSessionRequest {
     initial_configuration_defaults: SessionConfigurationDefaults,
     template_provenance: Option<SessionTemplateProvenance>,
     placement: SessionPlacement,
+    runner_placement: Option<signalbox_domain::SessionRunnerPlacementRequest>,
     start_gate: StartGate,
     ownership: SessionOwnership,
     finish_condition: Option<FinishCondition>,
 }
 
 impl CreateSessionRequest {
+    /// Sets the caller's optional runner placement request.
+    pub fn with_runner_placement(
+        mut self,
+        placement: Option<signalbox_domain::SessionRunnerPlacementRequest>,
+    ) -> Self {
+        self.runner_placement = placement;
+        self
+    }
+
+    /// Borrows the runner placement retained by this creation command.
+    pub const fn runner_placement(
+        &self,
+    ) -> Option<&signalbox_domain::SessionRunnerPlacementRequest> {
+        self.runner_placement.as_ref()
+    }
+
     /// Validates the caller-supplied identity before canonical construction.
     pub fn try_new(
         command_id: DurableCommandId,
@@ -65,6 +82,7 @@ impl CreateSessionRequest {
             initial_configuration_defaults,
             template_provenance: None,
             placement: SessionPlacement::pathless(),
+            runner_placement: None,
             start_gate: StartGate::Open,
             ownership: SessionOwnership::Unmonitored,
             finish_condition: None,
@@ -90,6 +108,7 @@ impl CreateSessionRequest {
             initial_configuration_defaults: resolved_configuration_defaults,
             template_provenance: Some(template_provenance),
             placement: SessionPlacement::pathless(),
+            runner_placement: None,
             start_gate: StartGate::Open,
             ownership: SessionOwnership::Unmonitored,
             finish_condition: None,
@@ -284,6 +303,7 @@ where
             initial_configuration_defaults,
             template_provenance,
             placement,
+            runner_placement,
             start_gate,
             ownership,
             finish_condition,
@@ -307,6 +327,7 @@ where
                 placement,
             ),
         }
+        .with_runner_placement(runner_placement)
         .with_lifecycle(start_gate, ownership, finish_condition);
         let prepared = command
             .prepare(candidate_session)
