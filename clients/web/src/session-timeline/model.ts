@@ -730,6 +730,24 @@ export const detailExcerptAt = (body: DetailBody, cursor: BodyCursor) => {
   }
 }
 
+// Excerpt contents advance by page; their immutable byte totals are checked separately.
+const immutableDetailFacts = (value: unknown): string | undefined =>
+  JSON.stringify(value, (_key, child: unknown) => {
+    if (child == null) return undefined
+    if (typeof child !== 'object' || Array.isArray(child)) return child
+    if ('text' in child && 'offset_bytes' in child && 'total_bytes' in child) return undefined
+    return Object.fromEntries(
+      Object.entries(child).sort(([left], [right]) => left.localeCompare(right)),
+    )
+  })
+
+const bodyFacts = (body: DetailBody) =>
+  immutableDetailFacts(
+    body.type === 'tool_batch'
+      ? { ...body, projected_member_index: undefined, tools: undefined, goal_events: undefined }
+      : body,
+  )
+
 export const validateDetailContinuation = (
   page: WebSessionTimelineDetailPage,
   continuation: WebTimelineDetailContinuation | null,
@@ -810,31 +828,23 @@ export const validateDetailContinuation = (
   )
   if (prior) {
     if (prior.kind !== initial.kind) throw new TypeError('Continued detail changed its event kind')
+    if (bodyFacts(prior.body) !== bodyFacts(initial.body))
+      throw new TypeError('Continued detail changed its immutable body facts')
     if (
       prior.body.type === 'tool_batch' &&
       initial.body.type === 'tool_batch' &&
-      prior.body.projected_member_index === initial.body.projected_member_index &&
-      cursor.field !== 'goal_text'
+      prior.body.projected_member_index === initial.body.projected_member_index
     ) {
-      const priorTool = prior.body.tools[0]
-      const nextTool = initial.body.tools[0]
-      if (priorTool?.request_id !== nextTool?.request_id)
-        throw new TypeError('Continued detail changed its tool member identity')
-      const before = priorTool?.evidence
-      const after = nextTool?.evidence
-      if (
-        before?.type !== after?.type ||
-        (before?.type === 'physical_attempt' &&
-          after?.type === 'physical_attempt' &&
-          (before.attempt_id !== after.attempt_id ||
-            before.state !== after.state ||
-            before.effect_posture !== after.effect_posture ||
-            (before.sandbox_posture ?? null) !== (after.sandbox_posture ?? null) ||
-            before.result_present !== after.result_present ||
-            before.failure_present !== after.failure_present ||
-            (before.cause ?? null) !== (after.cause ?? null)))
-      )
-        throw new TypeError('Continued detail changed its immutable tool attempt evidence')
+      for (const members of ['tools', 'goal_events'] as const) {
+        const before = prior.body[members]
+        const after = initial.body[members]
+        if (
+          before.length &&
+          after.length &&
+          immutableDetailFacts(before) !== immutableDetailFacts(after)
+        )
+          throw new TypeError('Continued detail changed its immutable body facts')
+      }
     }
     const priorExcerpt = detailExcerptAt(prior.body, cursor)
     if (priorExcerpt && priorExcerpt.total_bytes !== excerpt.total_bytes)
