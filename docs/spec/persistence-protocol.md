@@ -50,10 +50,11 @@ documents the lock order stated under Contracts. Row locks issued inline
 elsewhere in Rust are stated at the statement that takes them, and locks taken
 inside triggers are stated in the migrations that define them.
 
-A program capability answer is appended to the program journal inside the
-transaction that commits its consequence. The append locks that run's journal
-sequence FOR UPDATE, inserts the frame, and advances the sequence, so the
-consequence and the answer commit together.
+A program journal append locks that run's sequence FOR UPDATE, inserts the
+frame, and advances the sequence. An effect's consequence can commit before its
+answer; recovery adopts a proven outcome, reissues a declared-idempotent
+operation, or journals ambiguity as [program substrate](program-substrate.md)
+defines.
 
 Reconstitution turns rows back into domain values and returns one complete value
 or a typed corruption error. Failures that reach an operator are classified in
@@ -580,17 +581,39 @@ Every durable runner state change appends one runner-state-transition event per
 affected session in the transaction that commits it.
 
 Every pool-selected model call stores, beside its credential reference, an
-insert-only snapshot of the pool it was authorized under: the pool name, its
-ordered members, and its trigger actions. The observation commit joins through
-the call to that exact snapshot before applying a trigger action, so a racing
-credential-history update cannot substitute a newer policy. A chain-exclusion
-row carries the correlation of its qualifying observation rather than its own
-generation, as an insert-only turn-local fact. Exhaustion evidence is one
-turn-correlated failure header naming the pool and its cause. An availability
-successor is a predecessor-linked attempt with its own closed origin, distinct
-from the tool-loop continuation origin, and stores its predecessor call,
-qualifying cause, and non-acceptance evidence atomically. What these rows mean
-is owned by [credential-availability](credential-availability.md).
+interned immutable snapshot of the pool it was authorized under: the pool name,
+its ordered members, and its trigger actions. The observation commit joins
+through the call to that exact snapshot before applying a trigger action, so a
+racing credential-history update cannot substitute a newer policy. A
+chain-exclusion row carries the correlation of its qualifying observation rather
+than its own generation, as an insert-only turn-local fact. Exhaustion evidence
+is one turn-correlated failure header naming the pool and its cause. An
+availability successor is a predecessor-linked attempt with its own closed
+origin, distinct from the tool-loop continuation origin, and stores its
+predecessor call, qualifying cause, and non-acceptance evidence atomically. What
+these rows mean is owned by
+[credential-availability](credential-availability.md).
+
+Each fresh availability chain resolves the current catalog and freezes its
+policy revision before its first call or wait. A credential wait records that
+revision, every member's exclusion evidence, the latest frontier and optional
+deadline. Its released successor names the consumed wait and retains any
+predecessor call and non-acceptance proof. Release commits the successor's
+prepared call or terminal disposition with wait consumption; re-parking replaces
+evidence and deadline in place. Member-availability updates and successful
+exclusion clears grant named waits eligibility in their committing transactions;
+replayed or ineffective clears grant none. Wait inserts and changes publish a
+transactional database notification for scheduler nudges and follower
+resynchronization. The scheduler rechecks due deadlines and eligible waits.
+
+A contended wait additionally retains the complete bounded-member set and each
+member's invocation reservations. Admission locks capacity rows in profile byte
+order after every credential action head and retains them through counting,
+selection, wait insertion or rewrite, and commit. Reservation release holds the
+member's capacity row through its wait-eligibility update. A reservation records
+the process group before request delivery; completion and startup release it
+only after proving that group absent, or without a process when dispatch is
+proven unsent.
 
 Runner replacement and abandonment commit the placement move, terminal command
 result, and one runner-state-transition event per affected session atomically.
@@ -641,12 +664,9 @@ retaining registration and history.
   [persistence-protocol design](../design/persistence-protocol.md).
 - General runner operation-failure evidence stored before acknowledgement:
   [persistence-protocol design](../design/persistence-protocol.md).
-- Runner placement in imported-create command records, for which storage version
-  4 is reserved:
+- Imported-create placement authentication against revision one on replay:
   [persistence-protocol design](../design/persistence-protocol.md).
 - Instruction admitted-set storage and its locks:
   [persistence-protocol design](../design/persistence-protocol.md).
-- Credential-pool state, capacity reservations, and availability-wait storage:
-  [persistence-protocol design](../design/persistence-protocol.md).
-- OAuth refresh member-availability wakeups:
+- Credential-pool action-head and cursor storage:
   [persistence-protocol design](../design/persistence-protocol.md).

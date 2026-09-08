@@ -6,27 +6,24 @@ use crate::credential_pool_exhaustion::{
 use signalbox_domain::TurnAttemptId;
 use sqlx::types::time::OffsetDateTime;
 
-struct Candidate {
-    exclusion: Exclusion,
-    rank: u8,
-    action: Option<i64>,
-    reset: Option<i64>,
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Candidate {
+    pub(super) exclusion: Exclusion,
+    pub(super) rank: u8,
+    pub(super) action: Option<i64>,
+    pub(super) reset: Option<i64>,
 }
 
-pub(super) async fn record(
+pub(super) async fn snapshot(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
-    attempt: TurnAttemptId,
     policy: &CredentialPoolRuntimePolicy,
     observed_at: OffsetDateTime,
     headroom: &HashMap<String, Option<i64>>,
-) -> Result<(), ModelCallRepositoryError> {
+) -> Result<Vec<Vec<Candidate>>, ModelCallRepositoryError> {
     let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
-    let ceiling: i64 =
-        sqlx::query_scalar("SELECT COALESCE(max(record_generation), 0) FROM credential_exclusion")
-            .fetch_one(&mut *connection)
-            .await?;
     let completed: HashSet<String> = sqlx::query_scalar("SELECT DISTINCT call.credential_reference FROM model_call call JOIN model_call_credential_pool_policy policy USING (model_call_id) WHERE call.session_id = $1 AND policy.pool_name = $2 AND call.state_kind = 'terminal' AND call.terminal_disposition_kind = 'completed'")
         .bind(session.into_uuid()).bind(policy.name()).fetch_all(&mut *connection).await?.into_iter().collect();
     let actions = sqlx::query("SELECT a.action_id, a.credential_reference, a.action_kind, a.observed_session_id, a.observed_turn_id, x.record_generation FROM credential_pool_member_action a LEFT JOIN credential_exclusion_state x ON x.action_id = a.action_id WHERE a.consumed_turn_id IS NULL AND ((x.active AND (x.pool_policy_id = $1 OR x.kind = 'profile_quarantine')) OR (x.record_generation IS NULL AND (a.pool_name = $2 OR a.action_kind = 'quarantine'))) ORDER BY x.record_generation DESC NULLS LAST, a.action_id DESC")
@@ -36,7 +33,8 @@ pub(super) async fn record(
         .bind(session.into_uuid()).bind(turn.into_uuid()).fetch_all(&mut *connection).await?;
     let transient = sqlx::query("SELECT credential_reference, observation_model_call_id, reset_at FROM credential_pool_transient_exclusion WHERE reset_at > $1 ORDER BY reset_at DESC, observation_model_call_id")
         .bind(observed_at).fetch_all(&mut *connection).await?;
-    for (ordinal, member) in policy.members().iter().enumerate() {
+    let mut members = Vec::new();
+    for member in policy.members() {
         let profile = member.credential_reference();
         let mut candidates = Vec::new();
         for row in &quarantines {
@@ -127,6 +125,28 @@ pub(super) async fn record(
                 reset: Some(unix_ms(OffsetDateTime::from(reset))?),
             });
         }
+        members.push(candidates);
+    }
+    Ok(members)
+}
+
+pub(super) async fn record(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    attempt: TurnAttemptId,
+    policy: &CredentialPoolRuntimePolicy,
+    observed_at: OffsetDateTime,
+    headroom: &HashMap<String, Option<i64>>,
+) -> Result<(), ModelCallRepositoryError> {
+    let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
+    let ceiling: i64 =
+        sqlx::query_scalar("SELECT COALESCE(max(record_generation), 0) FROM credential_exclusion")
+            .fetch_one(&mut *connection)
+            .await?;
+    let members = snapshot(connection, session, turn, policy, observed_at, headroom).await?;
+    for (ordinal, (member, candidates)) in policy.members().iter().zip(members).enumerate() {
+        let profile = member.credential_reference();
         let reset = if candidates.iter().all(|candidate| candidate.reset.is_some()) {
             candidates
                 .iter()

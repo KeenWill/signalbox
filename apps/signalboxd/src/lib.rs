@@ -56,6 +56,7 @@ mod configuration;
 mod context_guard;
 mod convergence_sweep_runtime;
 mod conversation_introspection;
+pub mod credential_invocations;
 mod credential_pools;
 mod daemon_tools;
 mod fenced_database;
@@ -2401,6 +2402,7 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
                     | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::AttachmentUnavailable
+                    | ModelCallExecutionOutcome::WaitFailed(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
@@ -3138,6 +3140,7 @@ where
                     ModelCallExecutionOutcome::Checkpointed(_)
                     | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
+                    | ModelCallExecutionOutcome::WaitFailed(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
@@ -3341,6 +3344,7 @@ impl PostgresScriptedModelExecution {
                     | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::AttachmentUnavailable
+                    | ModelCallExecutionOutcome::WaitFailed(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)

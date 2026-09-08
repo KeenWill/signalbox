@@ -148,6 +148,7 @@ pub struct ReportedUsageCompaction {
     runtime_models: RuntimeModelCatalog,
     model_configuration: HubModelConfiguration,
     compaction_model: Arc<dyn ContextCompactionModel>,
+    blob_registry: Option<Arc<crate::BlobStoreRegistry>>,
     continuation: Option<RepositoryWatchContinuation>,
 }
 
@@ -188,8 +189,18 @@ impl ReportedUsageCompaction {
             runtime_models,
             model_configuration,
             compaction_model,
+            blob_registry: None,
             continuation: None,
         }
+    }
+
+    /// Supplies the configured stores for verification before compaction authorization.
+    pub fn with_blob_store_registry(
+        mut self,
+        registry: Option<Arc<crate::BlobStoreRegistry>>,
+    ) -> Self {
+        self.blob_registry = registry;
+        self
     }
 
     /// Enables bounded successor admission for repository-watch continuation failures.
@@ -251,6 +262,7 @@ impl ReportedUsageCompaction {
             turn,
             continuation_selection,
             observe_prepared,
+            self.blob_registry.as_deref(),
         )
         .await
         {
@@ -286,7 +298,10 @@ impl ReportedUsageCompaction {
             Err(error) => {
                 let failure_class = error.operator_failure_class();
                 let cause_code = error.operator_failure_cause_code();
-                if failure_class
+                if !matches!(
+                    error,
+                    crate::process_runtime::AutomaticContextCompactionError::AttachmentUnavailable
+                ) && failure_class
                     != (OperatorFailureClass::Infrastructure {
                         commit_ambiguous: true,
                     })
@@ -422,9 +437,57 @@ impl ReportedUsageCompaction {
         {
             return Ok(None);
         }
-        // The preview's starting frontier is never committed, so it names the
-        // model-visible input it would send rather than an identity no durable
-        // membership resolves.
+        let adapter = self
+            .model_configuration
+            .adapter_for_provider_model(definition.provider_model())
+            .ok_or(ReportedUsageCompactionError::Render(turn))?;
+        let routes = self.model_configuration.adapter_routes();
+        let capabilities = self.model_configuration.runtime_model_capability_catalog();
+        let mut measurement = signalbox_model_runtime::ModelOperation::new(
+            (),
+            signalbox_model_runtime::CredentialReference::new(
+                operation.credential_reference().as_str().to_owned(),
+            ),
+            signalbox_model_runtime::RequestedTarget::new(selected.provider_model().to_owned()),
+            signalbox_model_runtime::ResolvedTarget::new(selected.provider_model().to_owned()),
+            Vec::new(),
+            signalbox_model_runtime::ModelSettings::new(definition.max_output_tokens()),
+        );
+        measurement.settings.fast_mode = match fast_mode {
+            signalbox_domain::FastMode::Enabled => signalbox_model_runtime::FastMode::Enabled,
+            signalbox_domain::FastMode::Disabled => signalbox_model_runtime::FastMode::Disabled,
+        };
+        let rendered_bytes = signalbox_model_provider_runtime::rendered_entry_bytes(
+            operation.messages(),
+            operation.reasoning_provenance(),
+            &self.runtime_models,
+            |message| {
+                measurement.messages = vec![message.clone()];
+                crate::model_adapter::projected_messages_bytes(
+                    &mut measurement,
+                    &routes,
+                    &capabilities,
+                    |message| match adapter {
+                        ModelAdapter::Anthropic => {
+                            signalbox_model_runtime_anthropic::serialized_message_bytes(
+                                message,
+                                definition.provider_compaction_supported(),
+                            )
+                        }
+                        ModelAdapter::OpenAi => {
+                            signalbox_model_runtime_openai::serialized_message_bytes(message)
+                        }
+                        ModelAdapter::CodexCli => {
+                            signalbox_model_runtime_codex_cli::serialized_message_bytes(message)
+                        }
+                        ModelAdapter::ClaudeCli => {
+                            signalbox_model_runtime_claude_cli::serialized_message_bytes(message)
+                        }
+                    },
+                )
+            },
+        )
+        .ok_or(ReportedUsageCompactionError::Render(turn))?;
         let reported = self
             .model_calls
             .latest_reported_usage(
@@ -432,7 +495,9 @@ impl ReportedUsageCompaction {
                 target,
                 fast_mode,
                 definition.provider_compaction_supported(),
-                prospective.prospective_input(),
+                signalbox_persistence::model_execution::ProspectiveModelInput::Rendered(
+                    &rendered_bytes,
+                ),
             )
             .await
             .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
@@ -625,6 +690,7 @@ pub struct ContextGuardedTurnPass<Counter, Catalog, Execution> {
     runtime_models: RuntimeModelCatalog,
     model_configuration: HubModelConfiguration,
     compaction_model: Arc<dyn ContextCompactionModel>,
+    blob_registry: Option<Arc<crate::BlobStoreRegistry>>,
     reported_usage_compaction: Option<ReportedUsageCompaction>,
     workspace_instructions: Option<WorkspaceInstructionRuntime>,
     execution: Execution,
@@ -676,11 +742,21 @@ impl<Counter, Catalog, Execution> ContextGuardedTurnPass<Counter, Catalog, Execu
             runtime_models,
             model_configuration,
             compaction_model,
+            blob_registry: None,
             reported_usage_compaction: None,
             workspace_instructions: None,
             execution,
             occupancy_recovery: None,
         }
+    }
+
+    /// Supplies the configured stores for verification before compaction authorization.
+    pub fn with_blob_store_registry(
+        mut self,
+        registry: Option<Arc<crate::BlobStoreRegistry>>,
+    ) -> Self {
+        self.blob_registry = registry;
+        self
     }
 
     /// Keeps the reported-usage preflight for adapters without provider estimation.
@@ -769,6 +845,7 @@ where
         let runtime_models = self.runtime_models.clone();
         let model_configuration = self.model_configuration.clone();
         let compaction_model = Arc::clone(&self.compaction_model);
+        let blob_registry = self.blob_registry.clone();
         let reported_usage_compaction = self.reported_usage_compaction.clone();
         let workspace_instructions = self.workspace_instructions.clone();
         let execution = self.execution.clone();
@@ -941,7 +1018,8 @@ where
                                 })?;
                             match committed {
                                 CommitCountedAttachmentFailurePreviewOutcome::Stale => continue,
-                                CommitCountedAttachmentFailurePreviewOutcome::Failed(failed_turn) => {
+                                CommitCountedAttachmentFailurePreviewOutcome::Failed(failed_turn)
+                                | CommitCountedAttachmentFailurePreviewOutcome::CredentialWait(failed_turn) => {
                                     observe_turn(failed_turn);
                                     report_guarded_turn_activation(session, failed_turn);
                                     return Ok(());
@@ -1051,6 +1129,7 @@ where
                             turn,
                             None,
                             observe_prepared.as_deref(),
+                            blob_registry.as_deref(),
                         )
                         .await;
                         drop(compaction_window);
@@ -1079,8 +1158,8 @@ where
                             Err(error) => {
                                 let failure_class = error.operator_failure_class();
                                 let cause_code = error.operator_failure_cause_code();
-                                if failure_class
-                                    != (OperatorFailureClass::Infrastructure {
+                                if !matches!(error, crate::process_runtime::AutomaticContextCompactionError::AttachmentUnavailable)
+                                    && failure_class != (OperatorFailureClass::Infrastructure {
                                         commit_ambiguous: true,
                                     })
                                 {
@@ -1406,6 +1485,67 @@ fn compaction_failure_closure_collision_is_retryable(error: &CommitActivationPre
 #[cfg(test)]
 mod tests {
     use super::ReportedUsageCompactionError;
+
+    #[test]
+    fn reported_usage_counts_closed_tool_result_framing() {
+        use signalbox_application::{ModelConversationMessage, ModelToolResultContent};
+        use signalbox_domain::{
+            SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolRequestId,
+        };
+        use signalbox_model_provider_runtime::{RuntimeModelCatalog, rendered_entry_bytes};
+
+        // Arbitrary distinct identities; the request identity is rendered below.
+        let source = SemanticTranscriptEntryRef::from_source(
+            SessionId::from_uuid(uuid::Uuid::from_u128(1)),
+            SemanticTranscriptEntryId::from_uuid(uuid::Uuid::from_u128(2)),
+        );
+        let messages = [ModelConversationMessage::ToolResult {
+            source,
+            request: ToolRequestId::from_uuid(uuid::Uuid::from_u128(3)),
+            content: ModelToolResultContent::ClosedByTurnEnd,
+        }];
+        let models =
+            RuntimeModelCatalog::try_from_definitions([]).expect("no reasoning provenance");
+        let bytes = rendered_entry_bytes(
+            &messages,
+            &[],
+            &models,
+            signalbox_model_runtime_openai::serialized_message_bytes,
+        )
+        .expect("closed tool result renders");
+        let expected = r#"[{"type":"function_call_output","call_id":"00000000-0000-0000-0000-000000000003","output":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}"}]"#;
+
+        assert_eq!(bytes.get(&source), Some(&(expected.len() as u64)));
+
+        let expected_cli = r#"[{"role":"user","parts":[{"type":"tool_result","tool_call_id":"00000000-0000-0000-0000-000000000003","content":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}","is_error":true}]}]"#;
+        let codex = rendered_entry_bytes(
+            &messages,
+            &[],
+            &models,
+            signalbox_model_runtime_codex_cli::serialized_message_bytes,
+        )
+        .expect("Codex closed result");
+        let claude = rendered_entry_bytes(
+            &messages,
+            &[],
+            &models,
+            signalbox_model_runtime_claude_cli::serialized_message_bytes,
+        )
+        .expect("Claude closed result");
+        assert_eq!(codex.get(&source), Some(&(expected_cli.len() as u64)));
+        assert_eq!(claude.get(&source), Some(&(expected_cli.len() as u64)));
+
+        let expected_anthropic = r#"[{"role":"user","content":[{"type":"tool_result","tool_use_id":"00000000-0000-0000-0000-000000000003","content":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}","is_error":true,"cache_control":{"type":"ephemeral"}}]}]"#;
+        let anthropic = rendered_entry_bytes(&messages, &[], &models, |message| {
+            signalbox_model_runtime_anthropic::serialized_message_bytes(message, false)
+        })
+        .expect("Anthropic closed result");
+        assert_eq!(
+            anthropic.get(&source),
+            Some(&(expected_anthropic.len() as u64))
+        );
+    }
+
     #[test]
     fn reported_usage_activation_preview_failure_keeps_its_operator_cause() {
         let error =

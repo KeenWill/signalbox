@@ -211,7 +211,7 @@ pub(super) async fn require_live_execution_with_targets(
              SELECT 1
                FROM credential_pool_availability_successor
               WHERE successor_turn_attempt_id = $1
-         )",
+         ) OR EXISTS (SELECT 1 FROM credential_availability_wait_release WHERE turn_attempt_id = $1)",
     )
     .bind(current_attempt.id().into_uuid())
     .fetch_one(&mut *connection)
@@ -225,7 +225,7 @@ pub(super) async fn require_live_execution_with_targets(
         }
         None => None,
     };
-    let successor_snapshot = if availability_successor && call_snapshot.is_none() {
+    let successor_snapshot = if call_snapshot.is_none() {
         load_availability_predecessor_snapshot(
             connection,
             requested_session,
@@ -275,7 +275,13 @@ pub(super) async fn require_live_execution_with_targets(
         load_tool_denial_correlations(connection, &frontier_entries).await?;
     let recovered_targets;
     let targets = if let Some(targets) = configured_targets {
-        targets.clone()
+        super::credential_wait::retain_target_catalog(
+            connection,
+            active_turn.turn(),
+            *active_turn.configuration().effective().model(),
+            targets,
+        )
+        .await?
     } else {
         let mut definitions = calls
             .iter()
@@ -1085,7 +1091,8 @@ async fn load_availability_predecessor_snapshot(
                    AND frontier.prefix_context_frontier_id = predecessor.context_frontier_id
                  ORDER BY boundary.placement_revision DESC LIMIT 1
            ) AS relocation ON true
-          WHERE successor.successor_turn_attempt_id = $1",
+          WHERE successor.successor_turn_attempt_id = $1
+          UNION ALL SELECT waiting.frontier_id FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1",
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)

@@ -1478,7 +1478,7 @@ async fn create_session_first_handling_appends_exactly_once() -> Result<(), Box<
         vec![(
             Decimal::ONE,
             "session_created".to_owned(),
-            2,
+            3,
             creation.applied_result().session().into_uuid(),
         )]
     );

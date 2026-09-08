@@ -189,7 +189,7 @@ fn log_rejects_oversized_commit_object() {
         }))
         .expect_err("oversized commit object rejects");
 
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Operation);
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn log_rejects_an_exact_oid_before_loading_an_oversized_commit() {
         }))
         .expect_err("exact oversized commit object rejects");
 
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Operation);
 }
 
 #[test]
@@ -337,5 +337,5 @@ fn log_bounds_the_extra_commit_used_only_for_truncation() {
         }))
         .expect_err("oversized truncation candidate rejects before parsing");
 
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Operation);
 }

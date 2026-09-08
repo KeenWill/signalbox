@@ -1749,9 +1749,11 @@ extension SignalboxTranscriptTurnState {
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
     case .queued, .queuedDelegated, .queuedDelegationWake: return .impossible
+    case .failedAfterCredentialWait(_, _, let predecessor):
+      return .required(.identity(predecessor.modelCallID))
     case .failedCredentialPoolExhausted, .delegationTerminated: return .permitted
     case .unknown: return .permitted
-    case .activeAwaitingChild: return .permitted
+    case .activeAwaitingCredentialAvailability, .activeAwaitingChild: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID, _, _):
       return .required(.identity(recoveryModelCallID))
     case .failed(_, _, let terminalModelCall):
@@ -1786,8 +1788,8 @@ extension SignalboxTranscriptTurnState {
         && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
-    case .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
-      .activeRunning, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+    case .failedAfterCredentialWait, .failedCredentialPoolExhausted, .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+      .activeRunning, .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed,
       .refused, .cancelled, .reconciliationRequired,
@@ -1807,12 +1809,13 @@ extension SignalboxTranscriptTurnState {
     case .delegationTerminated:
       return 0
     case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
+    case .failedAfterCredentialWait(_, _, let predecessor): return predecessor.retainedUTF8Bytes
     case .failedCredentialPoolExhausted(let evidence): return evidence.retainedUTF8Bytes
     case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
     case .unknown(let kind, let payload, let diagnostic):
       return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+    case .activeAwaitingCredentialAvailability, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return 0
@@ -1932,9 +1935,9 @@ extension SignalboxTranscriptEntry {
         .saturatedAdding(UInt(arguments.utf8.count))
         .saturatedAdding(approvalBytes)
     case .toolExecutionResult(_, _, let content),
-      .toolDenied(_, let content),
+      .toolDenied(_, let content, _),
       .toolInadmissible(_, let content),
-      .toolClosed(_, let content):
+      .toolClosed(_, let content, _):
       return UInt(content.utf8.count)
     case .delegatedTask(_, _, _, let content),
       .delegationMessage(_, _, _, _, _, _, let content):
@@ -2161,10 +2164,10 @@ extension SignalboxTranscriptTurnState {
         decodingDiagnostic: nil
       )
     case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
-      .activeAwaitingChild,
+      .activeAwaitingCredentialAvailability, .activeAwaitingChild,
       .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .completed, .failed, .failedCredentialPoolExhausted, .refused, .cancelled,
+      .activeAwaitingToolRecovery, .completed, .failed, .failedAfterCredentialWait, .failedCredentialPoolExhausted, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return nil
     }

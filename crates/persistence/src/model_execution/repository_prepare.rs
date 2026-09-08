@@ -49,7 +49,7 @@ use signalbox_domain::{
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
     ResolvedProviderTarget, SessionId, TurnId, TurnTerminalCause,
 };
-use sqlx::Row;
+use sqlx::{Row, types::Uuid};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -71,6 +71,57 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
+            let waiting_turn: Option<Uuid> = sqlx::query_scalar(
+                "SELECT turn_id FROM credential_availability_wait
+                  WHERE session_id = $1 AND consumed_by_attempt_id IS NULL",
+            )
+            .bind(session.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let mut wait_steering_candidates = if let Some(turn) = waiting_turn {
+                let pending: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT accepted_input_id FROM accepted_input
+                      WHERE session_id = $1 AND expected_active_turn_id = $2
+                        AND disposition_kind = 'pending_steering'
+                      ORDER BY acceptance_position",
+                )
+                .bind(session.into_uuid())
+                .bind(turn)
+                .fetch_all(&mut *transaction)
+                .await?;
+                let candidates = pending
+                    .into_iter()
+                    .map(|input| {
+                        let input = AcceptedInputId::from_uuid(input);
+                        (input, next_steering_identities(input))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                super::reserve_frontier_write_identities(
+                    &mut transaction,
+                    candidates
+                        .values()
+                        .map(|(entry, _)| entry.into_uuid())
+                        .chain([
+                            steering_frontier.into_uuid(),
+                            failure_identities.failure_entry().into_uuid(),
+                            failure_identities.terminal_frontier().into_uuid(),
+                        ]),
+                )
+                .await?;
+                Some(candidates)
+            } else {
+                None
+            };
+            if let Some(wait) = super::credential_wait::prepare_release(
+                &mut transaction,
+                self,
+                session,
+                signalbox_domain::TurnAttemptId::from_uuid(call.into_uuid()),
+            )
+            .await?
+            {
+                return Ok((true, PrepareInitialModelCallOutcome::CredentialWait(wait)));
+            }
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
             if execution.current_call().is_none()
@@ -125,6 +176,18 @@ impl PostgresModelCallRepository {
                             PrepareInitialModelCallOutcome::Ready {
                                 request: Box::new(request),
                                 credential_reference,
+                                retained_mapped_target:
+                                    super::credential_wait::retained_mapped_target(
+                                        &mut transaction,
+                                        execution.current_attempt().id(),
+                                    )
+                                    .await?,
+                                invocation_capacity_reserved: sqlx::query_scalar(
+                                    "SELECT EXISTS (SELECT 1 FROM credential_invocation_reservation WHERE model_call_id = $1 AND released_at IS NULL)",
+                                )
+                                .bind(current_call_id.into_uuid())
+                                .fetch_one(&mut *transaction)
+                                .await?,
                                 dangerous_tool_auto_approval,
                                 recorded_user_overrides,
                                 system_prompt,
@@ -148,7 +211,15 @@ impl PostgresModelCallRepository {
                 Vec::with_capacity(execution.active_turn().pending_steering().len());
             for pending in execution.active_turn().pending_steering() {
                 let accepted_input = pending.accepted_input();
-                let (entry, turn) = next_steering_identities(accepted_input);
+                let (entry, turn) =
+                    match &mut wait_steering_candidates {
+                        Some(candidates) => candidates.remove(&accepted_input).ok_or(
+                            ModelCallCorruption::Missing(
+                                "reserved credential-wait steering identities",
+                            ),
+                        )?,
+                        None => next_steering_identities(accepted_input),
+                    };
                 if !reserved_entries.insert(entry) {
                     return Err(ModelCallRepositoryError::IdentityCollision(
                         ModelCallIdentityCollision::SemanticEntry,
@@ -171,6 +242,18 @@ impl PostgresModelCallRepository {
                 ));
             }
             let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
+            super::reserve_frontier_write_identities(
+                &mut transaction,
+                steering_entries
+                    .iter()
+                    .map(|entry| entry.into_uuid())
+                    .chain(steering_snapshot.map(|frontier| frontier.into_uuid()))
+                    .chain([
+                        failure_identities.failure_entry().into_uuid(),
+                        failure_identities.terminal_frontier().into_uuid(),
+                    ]),
+            )
+            .await?;
             let fast_mode = execution
                 .configuration()
                 .effective()
@@ -197,6 +280,13 @@ impl PostgresModelCallRepository {
                     resolved.target(),
                     fast_mode,
                 );
+                let serving_evidence = super::credential_wait::retain_serving_target(
+                    &mut transaction,
+                    execution.current_attempt().id(),
+                    self.credential_families.as_ref(),
+                    serving_evidence,
+                )
+                .await?;
                 let selected = Some(
                     select_runtime_pool_credential(
                         &mut transaction,
@@ -214,6 +304,35 @@ impl PostgresModelCallRepository {
             } else {
                 None
             };
+            if let Some(wait) = super::credential_wait::park_initial(
+                &mut transaction,
+                &execution,
+                selected.as_ref(),
+            )
+            .await?
+            {
+                return Ok((true, PrepareInitialModelCallOutcome::CredentialWait(wait)));
+            }
+            if let Some(failed) = super::credential_wait::fail_released_chain(
+                &mut transaction,
+                &execution,
+                selected.as_ref(),
+                failure_identities
+                    .clone()
+                    .with_pending_steering_reclassifications(
+                        steering_identities
+                            .iter()
+                            .map(|(_, identity)| *identity)
+                            .collect(),
+                    ),
+            )
+            .await?
+            {
+                return Ok((
+                    true,
+                    PrepareInitialModelCallOutcome::WaitFailed(Box::new(failed)),
+                ));
+            }
             if let Some(SelectedRuntimePoolCredential {
                 reference: None,
                 policy: Some(policy),
@@ -325,6 +444,13 @@ impl PostgresModelCallRepository {
                 prepared.call().target(),
                 fast_mode,
             );
+            let serving_evidence = super::credential_wait::retain_serving_target(
+                &mut transaction,
+                prepared.attempt(),
+                self.credential_families.as_ref(),
+                serving_evidence,
+            )
+            .await?;
             insert_prepared_call(
                 &mut transaction,
                 &prepared,
@@ -399,6 +525,13 @@ impl PostgresModelCallRepository {
                 current.target(),
                 fast_mode,
             );
+            let current_serving_evidence = super::credential_wait::retain_serving_target(
+                &mut transaction,
+                execution.current_attempt().id(),
+                self.credential_families.as_ref(),
+                current_serving_evidence,
+            )
+            .await?;
             let current_effective_target = current_serving_evidence.effective_target;
             let stored_serving_evidence = sqlx::query(
                 "SELECT effective_provider_model_identity_id,
@@ -465,7 +598,8 @@ impl PostgresModelCallRepository {
             ))?;
         match outcome {
             ModelCallObservationCommitOutcome::Terminal(outcome) => Ok(*outcome),
-            ModelCallObservationCommitOutcome::AvailabilitySuccessor(_) => {
+            ModelCallObservationCommitOutcome::AvailabilitySuccessor(_)
+            | ModelCallObservationCommitOutcome::CredentialWait(_) => {
                 Err(ModelCallRepositoryError::InvalidTransition(
                     "exact terminal candidates produced an availability successor",
                 ))
@@ -519,6 +653,27 @@ impl PostgresModelCallRepository {
                     &mut next_reclassified_turn,
                 )?;
                 let usage = observation.usage();
+                let (entries, frontier) = match &identities {
+                    ModelCallTerminalIdentityCandidates::Exact(identities) => {
+                        identities.frontier_identity_candidates()
+                    }
+                    ModelCallTerminalIdentityCandidates::Availability { failed, .. } => {
+                        (vec![failed.failure_entry()], failed.terminal_frontier())
+                    }
+                    ModelCallTerminalIdentityCandidates::ToolRound { .. } => {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "terminal candidate selection retained a nonterminal alternative",
+                        ));
+                    }
+                };
+                super::reserve_frontier_write_identities(
+                    &mut transaction,
+                    entries
+                        .into_iter()
+                        .map(|entry| entry.into_uuid())
+                        .chain([frontier.into_uuid()]),
+                )
+                .await?;
                 if let Some(snapshot) = observation.rate_limits() {
                     retain_call_capacity_policy_observation(
                         &mut transaction,
@@ -695,6 +850,19 @@ impl PostgresModelCallRepository {
                                     AvailabilitySuccessorOutcome::new(successor, backoff),
                                 )),
                             ));
+                        }
+                        if let Some(outcome) = super::credential_wait::park_failed(
+                            &mut transaction,
+                            &execution,
+                            &policy,
+                            &observation,
+                            successor_attempt,
+                            cause,
+                            &self.targets,
+                        )
+                        .await?
+                        {
+                            return Ok(Some(outcome));
                         }
                         insert_credential_pool_terminal_exhaustion(
                             &mut transaction,

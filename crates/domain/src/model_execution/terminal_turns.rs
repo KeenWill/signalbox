@@ -90,6 +90,7 @@ pub struct ToolRoundModelCallTurn {
 /// One availability-failed call and the distinct prepared attempt succeeding it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AvailabilitySuccessorModelCallTurn {
+    pub(super) non_acceptance_proven: bool,
     pub(super) session: SessionId,
     pub(super) turn: TurnId,
     pub(super) predecessor_call: EndedModelCall,
@@ -98,6 +99,10 @@ pub struct AvailabilitySuccessorModelCallTurn {
 }
 
 impl AvailabilitySuccessorModelCallTurn {
+    /// Whether the predecessor observation proved provider non-acceptance.
+    pub const fn non_acceptance_proven(&self) -> bool {
+        self.non_acceptance_proven
+    }
     /// Returns the owning session.
     pub const fn session(&self) -> SessionId {
         self.session

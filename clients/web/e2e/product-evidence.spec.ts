@@ -93,6 +93,7 @@ const useDeterministicSession = (page: Page) =>
     return route.fulfill({
       json: {
         session_id: sessionEvidenceFixture.id,
+        repository_watch: null,
         sizes: {
           item_count: sessionEvidenceFixture.itemCount,
           projected_text_bytes: '48000000',
@@ -139,10 +140,10 @@ const captureSessionEvidence = async (page: Page) => {
   await useDeterministicSession(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(`${sessionsEvidence.path}?workspace=true`)
-  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionEvidenceFixture.id)
-  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await page.getByRole('textbox', { name: 'Session ID' }).fill(sessionEvidenceFixture.id)
+  await page.getByRole('button', { name: 'Open', exact: true }).click()
   await expect(page.getByRole('heading', { name: sessionEvidenceFixture.id })).toBeVisible()
-  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   await expect.soft(page).toHaveScreenshot('sessions-desktop-dark.png', { animations: 'disabled' })
   await page.getByRole('button', { name: 'Use light theme' }).click()
   await expect.soft(page).toHaveScreenshot('sessions-desktop-light.png', { animations: 'disabled' })

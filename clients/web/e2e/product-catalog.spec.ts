@@ -182,6 +182,7 @@ const useCatalogFixture = async (page: Page) => {
     return route.fulfill({
       json: {
         session_id: sessionId,
+        repository_watch: null,
         sizes: {
           item_count: '1',
           projected_text_bytes: '0',
@@ -214,29 +215,133 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   )
 }
 
-test('filters and inspects a session without a mouse, then restores focus', async ({ page }) => {
+test('filters and opens a session with Enter, then returns to the catalog', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
   await page.goto('/sessions')
-  await expect(page.getByRole('heading', { name: `${firstPage.total} sessions` })).toBeVisible()
-
   await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
   await page.getByRole('textbox', { name: 'Search titles' }).press('Enter')
   await expect(page).toHaveURL(/q=Release/)
-  await expect(page.getByRole('heading', { name: `${filteredPage.total} sessions` })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '1 session', exact: true })).toBeFocused()
   const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await session.focus()
   await page.keyboard.press('Enter')
-  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
-  await expect(
-    page.getByRole('heading', { name: firstPage.summaries[0].title_summary, level: 2 }),
-  ).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeFocused()
-  await page.keyboard.press('Escape')
-  await expect(
-    page.getByRole('heading', { name: firstPage.summaries[0].title_summary, level: 2 }),
-  ).toBeHidden()
+  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
+    firstSessionId,
+  )
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
+  await expect(page).toHaveURL(/q=Release/)
   await expect(session).toBeFocused()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('leaves the composer before returning to the catalog on Escape', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
+  await session.click()
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  const composer = page.getByRole('textbox', { name: 'Message to session', exact: true })
+  const draft = 'Keep the draft while leaving the field.'
+  await composer.fill(draft)
+  await composer.press('Escape')
+  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toBeFocused()
+  await expect(composer).toHaveValue(draft)
+  await page.keyboard.press('Escape')
+  await expect(session).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns browser Back focus to the row that opened a workspace', async ({
+  page,
+}, testInfo) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  const session = page.getByRole('button', { name: firstPage.summaries[1].title_summary })
+  await session.click()
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await expect(timeline).toBeVisible()
+  await timeline.focus()
+  await page.goBack()
+  await expect(session).toBeFocused()
+  await page.screenshot({ path: testInfo.outputPath('catalog-return-focus.png') })
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+for (const returnMethod of ['Escape', 'Back'] as const) {
+  test(`retains catalog state and page order on ${returnMethod}`, async ({ page }) => {
+    const problems = watchBrowser(page)
+    await useCatalogFixture(page)
+    await page.goto('/sessions')
+    const lifecycle = page.getByRole('combobox', { name: /^State/ })
+    const order = page.getByRole('combobox', { name: /^Page order/ })
+    await lifecycle.selectOption('active')
+    await order.selectOption('failure')
+    const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
+    await expect(
+      page.getByRole('button', { name: firstPage.summaries[1].title_summary }),
+    ).toHaveCount(0)
+    await session.click()
+    await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+    if (returnMethod === 'Escape')
+      await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
+    else await page.goBack()
+    await expect(lifecycle).toHaveValue('active')
+    await expect(order).toHaveValue('failure')
+    await expect(session).toBeFocused()
+    await expect(
+      page.getByRole('button', { name: firstPage.summaries[1].title_summary }),
+    ).toHaveCount(0)
+    expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+  })
+}
+
+test('consumes return focus before a later catalog remount', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
+  await session.click()
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
+  await expect(session).toBeFocused()
+  await page.getByRole('link', { name: /Settings/ }).click()
+  const sessionsLink = page.getByRole('link', { name: /Sessions/ })
+  await sessionsLink.click()
+  await expect(session).toBeVisible()
+  await expect(page.getByRole('main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('shows unavailable timelines after opening a catalog row', async ({ page }, testInfo) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_session_timeline: false },
+      },
+    }),
+  )
+  let timelineReads = 0
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.endsWith('/timeline')) timelineReads += 1
+  })
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
+    firstSessionId,
+  )
+  await page.screenshot({ path: testInfo.outputPath('timeline-unavailable.png') })
+  await expect(page.getByRole('status').filter({ hasText: 'Sessions unavailable' })).toBeVisible()
+  await expect(page.getByText('Loading session…', { exact: true })).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
+  expect(timelineReads).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -295,13 +400,31 @@ test('rejects an over-bound search before changing URL state', async ({ page }) 
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('preserves the complete admitted title query on submit and reload', async ({ page }) => {
+  await useCatalogFixture(page)
+  const queries: string[] = []
+  await page.route('**/api/sessions?**', (route) => {
+    queries.push(new URL(route.request().url()).searchParams.get('search') ?? '')
+    return route.fulfill({ json: { ...filteredPage, summaries: [], total: '0' } })
+  })
+  await page.goto('/sessions')
+  const q = 'é'.repeat(512)
+  await page.getByRole('textbox', { name: 'Search titles' }).fill(q)
+  await page.getByRole('button', { name: 'Apply' }).click()
+  await expect.poll(() => queries.at(-1)).toBe(q)
+  await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe(q)
+  await page.reload()
+  await expect(page.getByRole('textbox', { name: 'Search titles' })).toHaveValue(q)
+  await expect.poll(() => queries.at(-1)).toBe(q)
+})
+
 test('restores focus after filters replace the bounded catalog page', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
   await page.goto('/sessions')
   await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
   await page.getByRole('button', { name: 'Apply' }).click()
-  await expect(page.getByRole('heading', { name: `${filteredPage.total} sessions` })).toBeFocused()
+  await expect(page.getByRole('heading', { name: `${filteredPage.total} session` })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -359,66 +482,17 @@ test('keeps visible search synchronized when history distinguishes absent from u
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('keeps Escape and browser history aligned with the desktop inspector', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useCatalogFixture(page)
-  await page.goto('/attention')
-  await page.getByRole('link', { name: 'Sessions' }).click()
-  const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
-  await session.click()
-  await page.getByRole('heading', { name: `${firstPage.total} sessions` }).focus()
-  await page.keyboard.press('Escape')
-  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeHidden()
-
-  await session.click()
-  await page.getByRole('button', { name: 'Close session inspector' }).click()
-  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeHidden()
-  await page.goBack()
-  await expect(page).toHaveURL(/attention/)
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('uses the full catalog width until an inspector is selected', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useCatalogFixture(page)
-  await page.goto('/sessions')
-
-  const workbench = page.locator('.catalog-workbench')
-  await expect(workbench).not.toHaveClass(/catalog-workbench-selected/)
-  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
-
-  await expect(workbench).toHaveClass(/catalog-workbench-selected/)
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
 test('opens the selected catalog row in the landed timeline workspace', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
   await page.goto('/sessions')
 
   await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
-  await page.getByRole('button', { name: 'Open timeline workspace' }).click()
 
   await expect.poll(() => new URL(page.url()).searchParams.get('workspace')).toBe('true')
-  await expect(page.getByRole('textbox', { name: 'Exact session ID' })).toHaveValue(firstSessionId)
-  await expect(page.getByRole('textbox', { name: 'Exact session ID' })).toBeFocused()
+  await expect(page.getByRole('textbox', { name: 'Session ID' })).toHaveValue(firstSessionId)
+  await expect(page.getByRole('textbox', { name: 'Session ID' })).toBeFocused()
   await expect(page.getByText(`Session workspace loaded for ${firstSessionId}.`)).toBeVisible()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('replaces history when switching the inspected session', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useCatalogFixture(page)
-  await page.goto('/sessions')
-  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
-  await page.getByRole('button', { name: firstPage.summaries[1].title_summary }).click()
-  await expect(
-    page.getByRole('heading', { name: firstPage.summaries[1].title_summary, level: 2 }),
-  ).toBeVisible()
-  await page.getByRole('button', { name: 'Close session inspector' }).click()
-
-  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeHidden()
-  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBeNull()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -459,23 +533,6 @@ test('gates catalog reads on a successful bootstrap', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('leaves search editing before dismissing a selected inspector', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useCatalogFixture(page)
-  await page.goto('/sessions')
-  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
-
-  const search = page.getByRole('textbox', { name: 'Search titles' })
-  await search.focus()
-  await page.keyboard.press('Escape')
-
-  await expect(page.getByRole('main')).toBeFocused()
-  await expect(
-    page.getByRole('heading', { name: firstPage.summaries[0].title_summary, level: 2 }),
-  ).toBeVisible()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
 test('recovers after retrying a transient bootstrap failure', async ({ page }) => {
   const problems = watchBrowser(page)
   let bootstrapReads = 0
@@ -495,57 +552,15 @@ test('recovers after retrying a transient bootstrap failure', async ({ page }) =
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('focuses a deep-linked mobile inspector after data arrives', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useCatalogFixture(page)
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto(`/sessions?session=${firstSessionId}`)
-
-  const inspector = page.getByRole('dialog', { name: firstPage.summaries[0].title_summary })
-  await expect(inspector).toHaveAttribute('aria-modal', 'true')
-  const close = page.getByRole('button', { name: 'Close session inspector' })
-  const openWorkspace = page.getByRole('button', { name: 'Open timeline workspace' })
-  await expect(close).toBeFocused()
-  await page.keyboard.press('Tab')
-  await expect(openWorkspace).toBeFocused()
-  await page.keyboard.press('Tab')
-  await expect(close).toBeFocused()
-  await page.keyboard.press('Shift+Tab')
-  await expect(openWorkspace).toBeFocused()
-  await close.focus()
-  await close.click()
-  await expect(
-    page.getByRole('button', { name: firstPage.summaries[0].title_summary }),
-  ).toBeFocused()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('lets the command palette own focus over a mobile inspector', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useCatalogFixture(page)
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto(`/sessions?session=${firstSessionId}`)
-  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeFocused()
-
-  const modifier = await page.evaluate(() =>
-    /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control',
-  )
-  await page.keyboard.press(`${modifier}+K`)
-  const palette = page.getByRole('dialog', { name: 'Command palette' })
-  await expect(palette).toBeVisible()
-  await page.keyboard.press('Tab')
-  await expect
-    .poll(() => palette.evaluate((element) => element.contains(document.activeElement)))
-    .toBe(true)
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('exposes the server-owned blocked-goal reason in the inspector', async ({ page }) => {
+test('exposes the server-owned blocked-goal need on its row', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
   await page.goto('/sessions')
-  await page.getByRole('button', { name: firstPage.summaries[1].title_summary }).click()
-  await expect(page.getByText('Reason: user input required')).toBeVisible()
+  await expect(
+    page.getByText('user input required · Select the authoritative deployment target.', {
+      exact: true,
+    }),
+  ).toBeVisible()
   await expect(page.getByText('provide goal need', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -576,27 +591,21 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
-  await page.goto(`/sessions?session=${firstSessionId}`)
-  await expect(
-    page.getByRole('heading', { name: firstPage.summaries[0].title_summary, level: 2 }),
-  ).toBeVisible()
-  await expect(page.getByLabel('Listed session rates')).toContainText('2 failed / 72 turns')
-  const ratesBounds = await page.getByLabel('Listed session rates').boundingBox()
-  const listBounds = await page.locator('.catalog-list').boundingBox()
-  expect(ratesBounds && listBounds && ratesBounds.y + ratesBounds.height <= listBounds.y).toBe(true)
+  await page.goto('/sessions')
+  await expect(page.getByRole('heading', { name: '48 sessions', exact: true })).toBeVisible()
+  await expect(page.locator('.catalog-list li').first()).toContainText('10 turns')
   await expect.soft(page).toHaveScreenshot('catalog-desktop-dark.png', { animations: 'disabled' })
 
   await page.getByRole('button', { name: 'Use light theme' }).click()
   await expect.soft(page).toHaveScreenshot('catalog-desktop-light.png', { animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
-  const mobileInspector = page.getByRole('dialog', {
-    name: firstPage.summaries[0].title_summary,
-  })
-  await expect(mobileInspector).toBeVisible()
-  await expect(mobileInspector).toHaveAttribute('aria-modal', 'true')
-  await page.keyboard.press('Tab')
-  await expect(page.getByRole('button', { name: 'Open timeline workspace' })).toBeFocused()
+  const row = page.locator('.catalog-list li').first().getByRole('button')
+  const bounds = await row.boundingBox()
+  const arrow = await row.locator('svg').boundingBox()
+  expect(
+    bounds && arrow && arrow.x >= bounds.x && arrow.x + arrow.width <= bounds.x + bounds.width,
+  ).toBe(true)
   await expect.soft(page).toHaveScreenshot('catalog-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -604,13 +613,13 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
 test('listed outcomes expose failures and lifecycle filtering', async ({ page }) => {
   await useCatalogFixture(page)
   await page.goto('/sessions')
-  await expect(page.getByLabel('Listed session rates')).toContainText('2 failed / 72 turns')
-  await page.getByLabel('Order on this page').selectOption('failure')
+  await expect(page.locator('.catalog-list li').first()).toContainText('10 turns')
+  await page.getByLabel('Page order').selectOption('failure')
   await expect(page.locator('.catalog-list li').first()).toContainText('Deployment decision')
   await expect(page.locator('.catalog-list li').first()).toContainText('quota exhausted')
-  await page.getByLabel('State on this page').selectOption('parked')
+  await page.getByLabel('State').selectOption('parked')
   await expect(page.locator('.catalog-list li')).toHaveCount(1)
-  await expect(page.getByLabel('Listed session rates')).toContainText('100% failed turns')
+  await expect(page.locator('.catalog-list li').first()).toContainText('2 turns · 2 failed')
 })
 
 test('catalog keyboard selection opens a session', async ({ page }) => {
@@ -621,7 +630,9 @@ test('catalog keyboard selection opens a session', async ({ page }) => {
   await expect(page.locator('.catalog-list li').first().getByRole('button')).toBeFocused()
   await page.keyboard.press('j')
   await page.keyboard.press('Enter')
-  await expect(page.getByRole('dialog', { name: 'Deployment decision' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
+    secondSessionId,
+  )
 })
 
 test('keeps catalog rows and their order while outcomes are pending or unavailable', async ({
@@ -656,48 +667,14 @@ test('keeps catalog rows and their order while outcomes are pending or unavailab
   await page.goto('/sessions')
   await expect(page.locator('.catalog-list li')).toHaveCount(32)
   const rows = await page.locator('.catalog-list li strong').allTextContents()
-  await page.getByLabel('Order on this page').selectOption('failure')
-  await page.getByLabel('State on this page').selectOption('parked')
+  await page.getByLabel('Page order').selectOption('failure')
+  await page.getByLabel('State').selectOption('parked')
   await expect(page.locator('.catalog-list li')).toHaveCount(32)
   await expect(page.locator('.catalog-list li strong')).toHaveText(rows)
   finish()
   await expect(page.getByText('Session outcomes unavailable.')).toBeVisible()
   await expect(page.locator('.catalog-list li strong')).toHaveText(rows)
   await expect(page.locator('.catalog-list li')).toHaveCount(32)
-})
-
-test('filters out an inspected row and keeps lifecycle chip styling consistent', async ({
-  page,
-}) => {
-  await useCatalogFixture(page)
-  await page.goto('/sessions')
-  await expect(page.getByLabel('Listed session rates')).toContainText('2 failed / 72 turns')
-  const parked = page.getByRole('button', { name: firstPage.summaries[1].title_summary })
-  await expect(parked.locator('.state-chip')).toHaveClass('state-chip state-parked')
-  await parked.click()
-  await expect(
-    page.getByRole('dialog', { name: firstPage.summaries[1].title_summary }),
-  ).toBeVisible()
-  await page.getByLabel('State on this page').selectOption('active')
-  await expect(page.getByRole('dialog')).toHaveCount(0)
-  await expect(page).not.toHaveURL(/session=/)
-  await expect(page.getByRole('heading', { name: '48 sessions', exact: true })).toBeFocused()
-})
-
-test('resynchronizes inspector history after Back before opening another session', async ({
-  page,
-}) => {
-  await useCatalogFixture(page)
-  await page.goto('/attention')
-  await page.getByRole('link', { name: 'Sessions' }).click()
-  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
-  await page.goBack()
-  await expect(page).not.toHaveURL(/session=/)
-  await page.getByRole('button', { name: firstPage.summaries[1].title_summary }).click()
-  await page.getByRole('button', { name: 'Close session inspector' }).click()
-  await expect(page).toHaveURL(/\/sessions$/)
-  await page.goBack()
-  await expect(page).toHaveURL(/\/attention$/)
 })
 
 test('replaces catalog continuation history instead of accumulating visited pages', async ({
@@ -712,35 +689,13 @@ test('replaces catalog continuation history instead of accumulating visited page
   await expect(page).toHaveURL(/\/attention$/)
 })
 
-test('closes an inspector restored by Back without leaving a duplicate catalog entry', async ({
-  page,
-}) => {
-  await useCatalogFixture(page)
-  await page.goto('/attention')
-  await page.getByRole('link', { name: 'Sessions' }).click()
-  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
-  await page.getByRole('button', { name: 'Open timeline workspace' }).click()
-  const input = page.getByRole('textbox', { name: 'Exact session ID' })
-  await input.fill(secondSessionId)
-  await input.press('Enter')
-  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(secondSessionId)
-  await page.goBack()
-  await expect(
-    page.getByRole('dialog', { name: firstPage.summaries[0].title_summary }),
-  ).toBeVisible()
-  await page.getByRole('button', { name: 'Close session inspector' }).click()
-  await expect(page).toHaveURL(/\/sessions$/)
-  await page.goBack()
-  await expect(page).toHaveURL(/\/attention$/)
-})
-
 test('keeps opened workspace identities in the URL and restores them on reload', async ({
   page,
 }) => {
   await useCatalogFixture(page)
   await page.goto('/sessions')
-  await page.getByRole('button', { name: 'Open workspace by ID' }).click()
-  const input = page.getByRole('textbox', { name: 'Exact session ID' })
+  await page.getByRole('button', { name: 'Open by ID' }).click()
+  const input = page.getByRole('textbox', { name: 'Session ID' })
   await expect(input).toBeFocused()
   await input.fill(firstSessionId)
   await input.press('Enter')
@@ -755,27 +710,6 @@ test('keeps opened workspace identities in the URL and restores them on reload',
   await expect(page.getByText(`Session workspace loaded for ${secondSessionId}.`)).toBeVisible()
 })
 
-test('unwinds a workspace and its catalog inspector through their existing history entries', async ({
-  page,
-}) => {
-  await useCatalogFixture(page)
-  await page.goto('/attention')
-  await page.getByRole('link', { name: 'Sessions' }).click()
-  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
-  await page.getByRole('button', { name: 'Open timeline workspace' }).click()
-  await expect(page).toHaveURL(/workspace=true/)
-  await page.getByRole('main').focus()
-  await page.keyboard.press('Escape')
-  await expect(
-    page.getByRole('dialog', { name: firstPage.summaries[0].title_summary }),
-  ).toBeVisible()
-  await page.getByRole('button', { name: 'Close session inspector' }).focus()
-  await page.keyboard.press('Escape')
-  await expect(page).toHaveURL(/\/sessions$/)
-  await page.goBack()
-  await expect(page).toHaveURL(/\/attention$/)
-})
-
 test('classifies a catalog connection failure as transport unavailability', async ({ page }) => {
   await useCatalogFixture(page)
   await page.route('**/api/sessions?**', (route) => route.abort())
@@ -785,16 +719,12 @@ test('classifies a catalog connection failure as transport unavailability', asyn
   await expect(page.getByRole('alert')).toContainText('The Signalbox daemon could not be reached.')
 })
 
-test('restores the page heading when a refresh removes the inspected row', async ({ page }) => {
+test('opens a session link directly on a phone without an inspector', async ({ page }) => {
   await useCatalogFixture(page)
-  await page.goto('/sessions')
-  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
-  await page.route('**/api/sessions?**', (route) =>
-    route.fulfill({
-      json: { ...firstPage, continuation: null, summaries: [firstPage.summaries[1]], total: '1' },
-    }),
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`/sessions?session=${firstSessionId}`)
+  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
+    firstSessionId,
   )
-  await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
-  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeHidden()
-  await expect(page.getByRole('heading', { name: '1 sessions', exact: true })).toBeFocused()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
 })

@@ -4,13 +4,16 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| program_registration | 5 | 0 | 0 | [program_registration](program_registration.md) |
+| program_session | 6 | 1 | 0 | [program_session](program_session.md) |
 | accepted_input | 5 | 0 | 0 | [accepted_input](accepted_input.md) |
-| actor | 1 | 0 | 0 | [actor](actor.md) |
+| actor | 2 | 0 | 0 | [actor](actor.md) |
 | applied_interrupt | 2 | 0 | 0 | [applied_interrupt](applied_interrupt.md) |
 | blob | 10 | 0 | 0 | [blob](blob.md) |
 | configuration | 24 | 0 | 0 | [configuration](configuration.md) |
 | context_compaction | 12 | 0 | 0 | [context_compaction](context_compaction.md) |
 | context_frontier | 6 | 0 | 0 | [context_frontier](context_frontier.md) |
+| credential_availability | 2 | 0 | 0 | [credential_availability](credential_availability.md) |
 | delivery_request | 2 | 0 | 0 | [delivery_request](delivery_request.md) |
 | git_remote | 4 | 0 | 2 | [git_remote](git_remote.md) |
 | goal | 26 | 0 | 0 | [goal](goal.md) |
@@ -47,4 +50,4 @@
 | workspace | 4 | 0 | 0 | [workspace](workspace.md) |
 | workspace_command | 3 | 0 | 0 | [workspace_command](workspace_command.md) |
 | workspace_instruction | 18 | 0 | 0 | [workspace_instruction](workspace_instruction.md) |
-| root | 32 | 0 | 0 | [root](root.md) |
+| root | 33 | 0 | 0 | [root](root.md) |

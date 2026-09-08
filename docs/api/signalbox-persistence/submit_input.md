@@ -159,7 +159,7 @@ impl submit_input::SubmitInputRepository {
     >(
         &self,
         command: signalbox_domain::SubmitInput,
-        principal: signalbox_domain::CommandPrincipal,
+        principal: impl convert::Into<option::Option<signalbox_domain::CommandPrincipal>>,
         cascade_root_kind: signalbox_domain::ParentTerminationKind,
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: option::Option<signalbox_domain::TurnId>,

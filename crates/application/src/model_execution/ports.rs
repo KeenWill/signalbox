@@ -13,6 +13,10 @@ use super::{
 /// Result of the authoritative prepare-call transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrepareModelCallOutcome {
+    /// Admission of a released wait failed with its predecessor provider evidence.
+    WaitFailed(Box<FailedModelCallTurn>),
+    /// Credential admission retained the turn without preparing a call.
+    CredentialWait(signalbox_domain::CredentialAvailabilityWait),
     /// The scheduling hint no longer identifies runnable work.
     NoWork,
     /// A durable availability-successor deadline has not elapsed.
@@ -27,6 +31,10 @@ pub enum PrepareModelCallOutcome {
         request: Box<PreparedModelCallRequest>,
         /// Non-secret credential reference captured with the call.
         credential_reference: ModelCallCredentialReference,
+        /// Retained mapped serving target whose fast-mode mapping is already applied.
+        retained_mapped_target: Option<signalbox_domain::ResolvedProviderTarget>,
+        /// Whether this exact call holds a durable invocation-capacity reservation.
+        invocation_capacity_reserved: bool,
         /// Frozen dangerous blanket posture for initial request decisions.
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         /// Recorded, not-yet-consumed user overrides of delegate denials, frozen
@@ -367,6 +375,8 @@ pub trait ModelCallInputTokenCounter {
 /// One durable result of committing a correlated model-call observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCallObservationCommitOutcome {
+    /// A failed call's chain yielded to a call-free credential admission wait.
+    CredentialWait(signalbox_domain::CredentialAvailabilityWait),
     /// The observation reached an ordinary terminal or durable-wait outcome.
     Terminal(Box<ModelCallTerminalOutcome>),
     /// Pool policy authorized a distinct availability successor attempt.

@@ -55,8 +55,7 @@ where
                 correlation: operation.correlation,
             };
         }
-        omit_unreplayable_provider_compaction(&mut operation, ModelAdapter::Anthropic);
-        omit_unreplayable_provider_reasoning(&mut operation, &self.routes, &self.capabilities);
+        project_provider_history(&mut operation, &self.routes, &self.capabilities);
         let Some(runtime) = self.anthropic.as_ref() else {
             return InputTokenCountOutcome::Failed {
                 correlation: operation.correlation,
@@ -214,6 +213,34 @@ fn map_preparation<C, P, R>(
     }
 }
 
+/// Applies the same provider-only history projection before counting and preparing.
+fn project_provider_history<C>(
+    operation: &mut ModelOperation<C>,
+    routes: &HashMap<String, ModelAdapter>,
+    capabilities: &ModelCapabilityCatalog,
+) {
+    if let Some(adapter) = routes.get(operation.resolved_target.as_str()) {
+        omit_unreplayable_provider_compaction(operation, *adapter);
+    }
+    omit_unreplayable_provider_reasoning(operation, routes, capabilities);
+}
+
+/// Counts serialized messages after the configured runtime's replay projection.
+pub(crate) fn projected_messages_bytes<C>(
+    operation: &mut ModelOperation<C>,
+    routes: &HashMap<String, ModelAdapter>,
+    capabilities: &ModelCapabilityCatalog,
+    mut measure: impl FnMut(&signalbox_model_runtime::ConversationMessage) -> Option<usize>,
+) -> Option<usize> {
+    project_provider_history(operation, routes, capabilities);
+    operation
+        .messages
+        .iter()
+        .try_fold(0_usize, |total, message| {
+            Some(total.saturating_add(measure(message)?))
+        })
+}
+
 fn omit_unreplayable_provider_compaction<C>(
     operation: &mut ModelOperation<C>,
     adapter: ModelAdapter,
@@ -247,7 +274,11 @@ fn omit_unreplayable_provider_reasoning<C>(
         .resolve(&operation.resolved_target)
         .and_then(|selected| {
             selected
-                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
+                .effective_target(
+                    &operation.resolved_target,
+                    operation.settings.fast_mode,
+                    operation.retained_mapped_target.as_ref(),
+                )
                 .ok()
         })
         .map(|(target, _)| target);
@@ -296,10 +327,7 @@ where
         cancellation: CancellationSignal,
     ) -> PreparationOutcome<C, Self::Prepared> {
         let adapter = self.routes.get(operation.resolved_target.as_str()).copied();
-        if let Some(adapter) = adapter {
-            omit_unreplayable_provider_compaction(&mut operation, adapter);
-        }
-        omit_unreplayable_provider_reasoning(&mut operation, &self.routes, &self.capabilities);
+        project_provider_history(&mut operation, &self.routes, &self.capabilities);
         match adapter {
             Some(ModelAdapter::Anthropic) => {
                 let runtime = match self.anthropic.as_ref() {
@@ -578,6 +606,61 @@ mod tests {
     }
 
     #[test]
+    fn projected_measurement_omits_foreign_compaction_and_empty_entries() {
+        let capabilities = ModelCapabilityCatalog::try_from_definitions([])
+            .expect("empty catalog has distinct targets");
+        let routes = HashMap::from([(String::from("gpt-exact"), ModelAdapter::OpenAi)]);
+        let mut operation = operation_with_provider_compaction("gpt-exact");
+        let expected = r#"[{"type":"message","role":"assistant","content":"preserved output"}]"#;
+        assert_eq!(
+            super::projected_messages_bytes(
+                &mut operation,
+                &routes,
+                &capabilities,
+                signalbox_model_runtime_openai::serialized_message_bytes,
+            ),
+            Some(expected.len()),
+        );
+        assert_eq!(operation.messages.len(), 1);
+    }
+
+    #[test]
+    fn projected_measurement_omits_incompatible_reasoning_and_retains_compatible_reasoning() {
+        let ReasoningReplayFixture {
+            source,
+            routes,
+            capabilities,
+        } = reasoning_replay_fixture("gpt-producer").expect("distinct fixture targets");
+        let expected = r#"[{"type":"message","role":"assistant","content":"preserved output"}]"#;
+        for target in ["gpt-other", "gpt-untagged", "claude-foreign"] {
+            let mut operation = source.clone();
+            operation.resolved_target = ResolvedTarget::new(target);
+            // Measuring with the strict OpenAI serializer proves the foreign
+            // opaque items are removed before any adapter serializer runs.
+            assert_eq!(
+                super::projected_messages_bytes(
+                    &mut operation,
+                    &routes,
+                    &capabilities,
+                    signalbox_model_runtime_openai::serialized_message_bytes,
+                ),
+                Some(expected.len()),
+                "{target}",
+            );
+        }
+        let mut compatible = source.clone();
+        let bytes = super::projected_messages_bytes(
+            &mut compatible,
+            &routes,
+            &capabilities,
+            signalbox_model_runtime_openai::serialized_message_bytes,
+        )
+        .expect("compatible reasoning serializes");
+        assert!(bytes > expected.len());
+        assert_eq!(compatible.messages, source.messages);
+    }
+
+    #[test]
     fn reasoning_replay_omits_incompatible_parts_and_keeps_the_source_for_a_later_call() {
         let ReasoningReplayFixture {
             source,
@@ -715,7 +798,7 @@ context_window_tokens = 200000
             .expect("the selected target declares fast mode");
 
         assert_eq!(
-            capabilities.effective_target(&selected, settings.fast_mode),
+            capabilities.effective_target(&selected, settings.fast_mode, None),
             Ok((&expected, FastMode::Disabled))
         );
     }

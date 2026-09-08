@@ -19,6 +19,8 @@ mod repo_watch;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
+mod scheduler_slot;
+pub use scheduler_slot::with_scheduler_slot_released;
 mod search;
 mod session_delegation;
 mod session_live;
@@ -262,3 +264,6 @@ pub use workspace_instructions::{
     InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
     InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
 };
+
+/// Verified host-side session attribution for program input.
+pub mod program_session;

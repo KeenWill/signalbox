@@ -2,6 +2,16 @@
 
 # transcript
 
+## CredentialAvailabilityWaitCause
+
+```rust
+pub enum CredentialAvailabilityWaitCause {
+    Contended,
+    Exhausted,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## CurrentModelCallState
 
 ```rust
@@ -85,6 +95,15 @@ impl<'de> de::Deserialize<'de> for FailedTerminalModelCall {
 
 ```rust
 pub enum TurnState {
+    FailedAfterCredentialWait {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        predecessor_model_call: FailedTerminalModelCall,
+    },
+    ActiveAwaitingCredentialAvailability {
+        wait_attempt_id: CanonicalUuid,
+        cause: CredentialAvailabilityWaitCause,
+    },
     Queued {
         accepted_input_id: CanonicalUuid,
         content: UserInputContent,
@@ -298,6 +317,7 @@ pub enum TranscriptEntry {
     ToolDenied {
         tool_request_id: CanonicalUuid,
         content: string::String,
+        override_recorded: bool,
     },
     ToolInadmissible {
         tool_request_id: CanonicalUuid,
@@ -306,6 +326,7 @@ pub enum TranscriptEntry {
     ToolClosed {
         tool_request_id: CanonicalUuid,
         content: string::String,
+        approved_before_close: bool,
     },
     TurnCompleted {
         turn_id: CanonicalUuid,

@@ -47,7 +47,7 @@ pub enum LifecycleActor {
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl LifecycleActor {
-    pub const fn classify(actor: Actor) -> Self;
+    pub const fn classify(actor: Actor) -> option::Option<Self>;
 }
 ```
 

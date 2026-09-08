@@ -26,7 +26,7 @@ use signalbox_domain::{
     SessionId, TurnId, TurnTerminalCause,
 };
 use sqlx::{PgConnection, Row};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// Reconstitutes one continuation against caller-owned, transaction-local tool
 /// results before the shared model-call/outbox ordering guard is acquired.
@@ -57,7 +57,7 @@ pub(crate) async fn load_tool_continuation_execution(
 /// model-call/outbox ordering guard before projecting any result outbox event,
 /// and commits or rolls back this function's writes together with that result.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
+pub(crate) async fn prepare_tool_continuation_call(
     connection: &mut PgConnection,
     _outbox_order_guard: ModelCallOutboxOrderGuard,
     execution: ModelCallExecution,
@@ -74,12 +74,11 @@ pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     call: ModelCallId,
     failure_identities: FailedModelCallTurnIdentities,
     steering_frontier: signalbox_domain::ContextFrontierId,
-    mut next_steering_identities: NextSteeringIdentities,
-) -> Result<PrepareToolContinuationOutcome, ModelCallRepositoryError>
-where
-    NextSteeringIdentities:
-        FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
-{
+    mut steering_candidates: BTreeMap<
+        AcceptedInputId,
+        (signalbox_domain::SemanticTranscriptEntryId, TurnId),
+    >,
+) -> Result<PrepareToolContinuationOutcome, ModelCallRepositoryError> {
     let continuation_snapshot = projection.snapshot();
     if execution.turn() != turn || execution.current_call().is_some() {
         return Ok(PrepareToolContinuationOutcome::NoWork);
@@ -92,7 +91,9 @@ where
         Vec::with_capacity(execution.active_turn().pending_steering().len());
     for pending in execution.active_turn().pending_steering() {
         let accepted_input = pending.accepted_input();
-        let (entry, successor_turn) = next_steering_identities(accepted_input);
+        let (entry, successor_turn) = steering_candidates
+            .remove(&accepted_input)
+            .ok_or(ModelCallCorruption::Missing("reserved steering identities"))?;
         if !reserved_entries.insert(entry) {
             return Err(ModelCallRepositoryError::IdentityCollision(
                 ModelCallIdentityCollision::SemanticEntry,
@@ -212,6 +213,11 @@ where
     } else {
         None
     };
+    if let Some(wait) =
+        super::credential_wait::park_initial(connection, &execution, selected.as_ref()).await?
+    {
+        return Ok(PrepareToolContinuationOutcome::CredentialWait(wait));
+    }
     if let Some(SelectedRuntimePoolCredential {
         reference: None,
         policy: Some(policy),

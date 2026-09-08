@@ -1505,6 +1505,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(retained_origin.rule_id(), rule.id());
     assert_eq!(retained_origin.rule_revision(), rule.version());
     assert_eq!(retained_origin.event_id(), event.id());
+    assert_eq!(retained_origin.event_kind(), event.kind().name());
     let mismatched_retained_reaction = plan_retained_lifecycle_reaction_for_test(
         NonZeroU64::new(44).expect("forty-four is positive"),
         SessionId::from_uuid(Uuid::from_u128(81)),

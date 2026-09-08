@@ -13,8 +13,11 @@ queued turn that never activated. At most one turn per session is active, and it
 holds the session's progressing slot. An active turn is running or parked in a
 durable wait that retains the slot: on a tool approval, on a recovery decision
 after an ambiguous operation, on a lost runner, or on a foreground delegated
-child. Which credential a model call uses, and what happens to the turn when
-none is available, is owned by
+child, or on credential availability. A credential wait ends a call-free attempt
+WithoutStop(YieldedToDurableWait) and retains its latest frontier without a
+current attempt or transcript entry. The session projects Waiting with the
+external-recheck waker. Which credential a model call uses, and what happens to
+the turn when none is available, is owned by
 [credential-availability](credential-availability.md).
 
 A turn attempt is one exclusive physical orchestration tenure;
@@ -213,16 +216,18 @@ prepared model call, and only then activates a queued turn; failure of either
 lookup is an ordinary failed pass, and only a failure after active-turn
 execution begins trips fatal recovery supervision. A pass releases its slot
 during attachment or blob-store I/O and reacquires one before send
-authorization, and its guarded transaction revalidates authority. A
-model-originated blob read authorizes no later send, so it reacquires its slot
-before the correlated tool result commits. A pass that cannot immediately get an
+authorization, and its guarded transaction revalidates authority. Returning
+passes queue for reacquisition ahead of fresh admission. A model-originated blob
+read authorizes no later send, so it reacquires its slot before the correlated
+tool result commits. An ordinary model pass that cannot immediately get an
 attachment-preparation permit ends and leaves only the durable prepared row for
-a later sweep. When a pass exceeds its occupancy bound, the handoff invokes the
-startup-recovery transaction only for a turn whose attempt and turn-progress
-frontier did not change between two observations, and a resumability read that
-does not settle counts as a resumption; a pass that expires inside
-pre-activation compaction instead hands off only the exact compaction call that
-window made durable.
+a later sweep. Prepared compactions retain their call and retry transient
+attachment failures in process, releasing admission while waiting. When a pass
+exceeds its occupancy bound, the handoff invokes the startup-recovery
+transaction only for a turn whose attempt and turn-progress frontier did not
+change between two observations, and a resumability read that does not settle
+counts as a resumption; a pass that expires inside pre-activation compaction
+instead hands off only the exact compaction call that window made durable.
 
 A quiescent candidate is an active turn with an accepted-input origin in the
 running phase, with no tool round, approval, or recovery attempt, and no live
@@ -282,14 +287,15 @@ awaiting a recovery decision. A stop-requested attempt with a
 cancellation-requested call ends both and terminalizes reconciliation-required
 with that call as its exact ambiguity set. A turn already parked in the
 model-call recovery wait is not reclassified; the transaction rolls back and
-reports the session as awaiting a recovery decision. An approval wait remains
-parked unchanged. A running tool attempt follows its stored effect class:
-prepared or effect-free work closes known-failed and fails the turn, and
-in-flight external-effect work closes ambiguous and parks. A running tool batch
-whose requests are all resolved with no current tool attempt is returned as
-resumable work for a scheduler pass. In the two failing branches only, one
-failure entry is appended, preceded in the tool branch by one correlated result
-entry per request in proposal order. Identity collisions are retried with fresh
+reports the session as awaiting a recovery decision. Approval and
+credential-availability waits remain parked unchanged, including delegated
+turns. A running tool attempt follows its stored effect class: prepared or
+effect-free work closes known-failed and fails the turn, and in-flight
+external-effect work closes ambiguous and parks. A running tool batch whose
+requests are all resolved with no current tool attempt is returned as resumable
+work for a scheduler pass. In the two failing branches only, one failure entry
+is appended, preceded in the tool branch by one correlated result entry per
+request in proposal order. Identity collisions are retried with fresh
 candidates; infrastructure failures and fail-closed corruption stop startup
 visibly. The scan is idempotent: a rerun inventories only work still active, and
 a stale observation rolls back.
@@ -467,9 +473,6 @@ cancellation.
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - Recovery-only startup: a runner reconciliation phase between migrations and
   the generic scan; design in
-  [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
-- The credential-pool availability wait as a distinct active phase, with its
-  attempt yield, scheduler wake conditions, and release; design in
   [turn-lifecycle-and-scheduling design](../design/turn-lifecycle-and-scheduling.md).
 - The instruction-eligibility freeze in the activation transaction and the
   replacement command's lock order; design in

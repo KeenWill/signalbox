@@ -1,5 +1,5 @@
 import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
+import { ChevronDown, ChevronRight, SkipBack, SkipForward } from 'lucide-react'
 import {
   type FormEvent,
   type KeyboardEvent,
@@ -120,6 +120,7 @@ export const pruneExpandedSessionItems = (
 export function SessionWorkspaceSurface({
   initialSessionId,
   onSessionOpen,
+  onReturnToCatalog,
   onSelectionEvidence,
   onTimelineIds,
   onTimelineWindowAvailable,
@@ -132,6 +133,7 @@ export function SessionWorkspaceSurface({
 }: {
   initialSessionId?: string
   onSessionOpen: (sessionId: string) => void
+  onReturnToCatalog: () => void
   onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
@@ -453,13 +455,19 @@ export function SessionWorkspaceSurface({
     <div className="surface-body session-workspace-surface">
       <form className="session-open-form" onSubmit={submitSession}>
         <label>
-          Exact session ID
+          Session ID
           <input
             ref={entryInput}
-            aria-label="Exact session ID"
+            aria-label="Session ID"
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}
             onChange={(event) => setDraftId(event.target.value.trim())}
+            onKeyDown={(event) => {
+              if (event.key !== 'Escape') return
+              event.preventDefault()
+              event.stopPropagation()
+              onReturnToCatalog()
+            }}
             pattern={NATIVE_SESSION_ID_PATTERN}
             required
           />
@@ -468,38 +476,25 @@ export function SessionWorkspaceSurface({
           type="submit"
           disabled={!isCanonicalSessionId(draftId.trim()) || timelineCapability !== 'available'}
         >
-          Open workspace
+          Open
         </button>
       </form>
 
-      {sessionId === null ? (
-        <section className="surface-empty session-entry" aria-labelledby="session-entry-heading">
-          <Radio aria-hidden="true" />
-          <div>
-            <span
-              className={`availability-tag ${timelineCapability === 'available' ? 'ready' : ''}`}
-            >
-              {timelineCapability === 'checking'
-                ? 'Checking timeline capability'
-                : timelineCapability === 'available'
-                  ? 'Timeline reads available'
-                  : 'Timeline reads unavailable'}
-            </span>
-            <h2 id="session-entry-heading">Open a known session by immutable identity</h2>
-            <p>
-              {timelineCapability === 'available'
-                ? 'Enter an exact server-issued ID to read bounded history, follow live updates, and send a message.'
-                : 'The validated daemon bootstrap has not authorized bounded session timeline reads. Signalbox will not call or advertise that surface until the capability is available.'}
-            </p>
-          </div>
-        </section>
+      {sessionId === null || timelineCapability !== 'available' ? (
+        <p className="session-entry" role="status">
+          {timelineCapability === 'checking'
+            ? 'Connecting…'
+            : timelineCapability === 'unavailable'
+              ? 'Sessions unavailable'
+              : 'Session ID required'}
+        </p>
       ) : session.isError ? (
         <p className="session-load-state" role="alert">
-          The daemon could not provide this bounded session window: {session.error.message}
+          Session unavailable: {session.error.message}
         </p>
       ) : displayedSession === undefined ? (
         <p className="session-load-state" role="status">
-          Loading descriptor and bounded history…
+          Loading session…
         </p>
       ) : (
         <section className="session-workspace" aria-labelledby="session-workspace-heading">
@@ -508,16 +503,8 @@ export function SessionWorkspaceSurface({
           </p>
           <header className="session-workspace-header">
             <div>
-              <span className="eyebrow">Stable timeline identity</span>
               <h2 id="session-workspace-heading">{sessionId}</h2>
-              <p>
-                {displayedSession.active ? 'Active' : 'Inactive'} ·{' '}
-                {displayedSession.anchor.kind === 'first'
-                  ? 'opened at first'
-                  : displayedSession.anchor.kind === 'latest'
-                    ? 'opened near latest'
-                    : 'restored logical position'}
-              </p>
+              <p>{displayedSession.active ? 'Active' : 'Inactive'}</p>
             </div>
             <dl className="session-telemetry">
               <div>
@@ -538,6 +525,28 @@ export function SessionWorkspaceSurface({
               </div>
             </dl>
           </header>
+          {displayedSession.descriptor.repository_watch && (
+            <section className="session-provenance" aria-label="Repository watch origin">
+              Repository watch · {displayedSession.descriptor.repository_watch.repository}
+              {displayedSession.descriptor.repository_watch.pull_request !== null &&
+                ` #${displayedSession.descriptor.repository_watch.pull_request}`}
+              {' · Rule '}
+              {displayedSession.descriptor.repository_watch.rule_id}
+              {' v'}
+              {displayedSession.descriptor.repository_watch.rule_revision}
+              {' · '}
+              {displayedSession.descriptor.repository_watch.event_kind.replaceAll('_', ' ')}
+              <details>
+                <summary>Dispatch provenance</summary>
+                <p>
+                  Dispatch {displayedSession.descriptor.repository_watch.dispatch_id}
+                  {' · Action '}
+                  {displayedSession.descriptor.repository_watch.action_ordinal}
+                </p>
+                <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
+              </details>
+            </section>
+          )}
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
             <button
               type="button"
@@ -562,7 +571,7 @@ export function SessionWorkspaceSurface({
                 }
               }}
             >
-              Previous window
+              Previous
             </button>
             <button
               type="button"
@@ -575,10 +584,10 @@ export function SessionWorkspaceSurface({
                 }
               }}
             >
-              Next window
+              Next
             </button>
             <span>
-              {displayedSession.window.items.length} bounded items ·{' '}
+              {displayedSession.window.items.length} events ·{' '}
               {displayedSession.window.projected_structured_bytes} B
             </span>
           </div>
@@ -733,6 +742,7 @@ export function SessionWorkspaceSurface({
           activeState={live ? (live.active?.state.kind ?? null) : undefined}
           stateUnavailable={followFailed && live === null}
           onAccepted={refetchSession}
+          onEscape={() => entryInput.current?.focus()}
         />
       )}
     </div>

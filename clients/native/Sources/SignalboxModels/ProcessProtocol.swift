@@ -604,6 +604,11 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
     descendantScope: SignalboxDescendantTerminationScope
   )
+  case overrideDeniedToolRequest(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
+  )
   case decideToolRequest(
     commandID: SignalboxCommandID,
     sessionID: SignalboxCanonicalUUID,
@@ -718,6 +723,11 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
       try container.encode(descendantScope, forKey: "descendant_scope")
       try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+    case .overrideDeniedToolRequest(let commandID, let sessionID, let toolRequestID):
+      try container.encode("override_denied_tool_request", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(toolRequestID, forKey: "tool_request_id")
     case .decideToolRequest(let commandID, let sessionID, let toolRequestID, let decision):
       try container.encode("decide_tool_request", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
@@ -1029,6 +1039,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   )
   case inputSubmitted(SignalboxInputSubmitted)
   case toolRequestDecided(SignalboxToolRequestDecided)
+  case toolDenialOverridden(toolRequestID: SignalboxCanonicalUUID)
   case sessionDefaults(SignalboxSessionDefaultsRead)
   case sessionsStart
   case sessionSummary(SignalboxProcessSessionSummary)
@@ -1113,6 +1124,9 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         )
       case "input_submitted":
         self = .inputSubmitted(try SignalboxInputSubmitted(from: decoder))
+      case "tool_denial_overridden":
+        try tagged.rejectUnadmittedFields(["type", "tool_request_id"], decoder: decoder)
+        self = .toolDenialOverridden(toolRequestID: try decoder.decode("tool_request_id"))
       case "tool_request_decided":
         self = .toolRequestDecided(try SignalboxToolRequestDecided(from: decoder))
       case "session_defaults":
@@ -2938,6 +2952,11 @@ public struct SignalboxTranscriptTurn: Decodable, Equatable, Sendable {
   }
 }
 
+public enum SignalboxCredentialAvailabilityWaitCause: String, Decodable, Equatable, Sendable {
+  case contended
+  case exhausted
+}
+
 public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
   case queued(acceptedInputID: SignalboxCanonicalUUID, content: SignalboxUserInputContent)
   case queuedDelegated(
@@ -2970,6 +2989,12 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
     recoveryToolAttemptID: SignalboxCanonicalUUID,
     automaticReconciliationAttempts: SignalboxCanonicalUInt64,
     operatorActionRequired: Bool)
+  case activeAwaitingCredentialAvailability(
+    waitAttemptID: SignalboxCanonicalUUID, cause: SignalboxCredentialAvailabilityWaitCause)
+  case failedAfterCredentialWait(
+    terminalFrontierID: SignalboxCanonicalUUID,
+    terminalAttemptID: SignalboxCanonicalUUID,
+    predecessorModelCall: SignalboxFailedTerminalModelCall)
   case failedCredentialPoolExhausted(SignalboxCredentialPoolExhaustion)
   case failed(
     terminalFrontierID: SignalboxCanonicalUUID,
@@ -3124,6 +3149,28 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
             "automatic_reconciliation_attempts"),
           operatorActionRequired: try decoder.decode("operator_action_required")
         )
+      case "active_awaiting_credential_availability":
+        try tagged.rejectUnadmittedFields(["type", "wait_attempt_id", "cause"], decoder: decoder)
+        self = .activeAwaitingCredentialAvailability(
+          waitAttemptID: try decoder.decode("wait_attempt_id"), cause: try decoder.decode("cause"))
+      case "failed_after_credential_wait":
+        try tagged.rejectUnadmittedFields(
+          ["type", "terminal_frontier_id", "terminal_attempt_id", "predecessor_model_call"],
+          decoder: decoder)
+        let predecessor: SignalboxFailedTerminalModelCall = try decoder.decode("predecessor_model_call")
+        guard predecessor.disposition == .knownFailed, let cause = predecessor.cause else {
+          throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+            debugDescription: "A terminal credential wait requires its predecessor provider failure."))
+        }
+        switch cause {
+        case .attachmentTooLarge, .attachmentMissing, .attachmentCorrupt, .unknown:
+          throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+            debugDescription: "A terminal credential wait requires a closed provider cause."))
+        default: break
+        }
+        self = .failedAfterCredentialWait(
+          terminalFrontierID: try decoder.decode("terminal_frontier_id"),
+          terminalAttemptID: try decoder.decode("terminal_attempt_id"), predecessorModelCall: predecessor)
       case "failed_credential_pool_exhausted":
         try tagged.rejectUnadmittedFields(["type", "terminal_frontier_id", "terminal_attempt_id", "failure_entry_id", "pool_policy_id", "policy_members", "members"], decoder: decoder)
         self = .failedCredentialPoolExhausted(try SignalboxCredentialPoolExhaustion(from: decoder))
@@ -3529,9 +3576,11 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     approval: SignalboxTranscriptToolApproval?)
   case toolExecutionResult(
     toolRequestID: SignalboxCanonicalUUID, toolAttemptID: SignalboxCanonicalUUID, content: String)
-  case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String)
+  case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String, overrideRecorded: Bool)
   case toolInadmissible(toolRequestID: SignalboxCanonicalUUID, content: String)
-  case toolClosed(toolRequestID: SignalboxCanonicalUUID, content: String)
+  case toolClosed(
+    toolRequestID: SignalboxCanonicalUUID, content: String, approvedBeforeClose: Bool
+  )
   case turnCompleted(turnID: SignalboxCanonicalUUID)
   case turnFailed(turnID: SignalboxCanonicalUUID)
   case turnCancelled(turnID: SignalboxCanonicalUUID)
@@ -3691,12 +3740,13 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         )
       case "tool_denied":
         try tagged.rejectUnadmittedFields(
-          ["type", "tool_request_id", "content"],
+          ["type", "tool_request_id", "content", "override_recorded"],
           decoder: decoder
         )
         self = .toolDenied(
           toolRequestID: try decoder.decode("tool_request_id"),
-          content: try decoder.decode("content"))
+          content: try decoder.decode("content"),
+          overrideRecorded: try decoder.decode("override_recorded"))
       case "tool_inadmissible":
         try tagged.rejectUnadmittedFields(
           ["type", "tool_request_id", "content"],
@@ -3707,12 +3757,13 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           content: try decoder.decode("content"))
       case "tool_closed":
         try tagged.rejectUnadmittedFields(
-          ["type", "tool_request_id", "content"],
+          ["type", "tool_request_id", "content", "approved_before_close"],
           decoder: decoder
         )
         self = .toolClosed(
           toolRequestID: try decoder.decode("tool_request_id"),
-          content: try decoder.decode("content"))
+          content: try decoder.decode("content"),
+          approvedBeforeClose: try decoder.decode("approved_before_close"))
       case "turn_completed":
         try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
         self = .turnCompleted(turnID: try decoder.decode("turn_id"))
@@ -5354,9 +5405,9 @@ extension Decoder {
 
 
 public enum SignalboxCredentialPoolExclusion: Decodable, Equatable, Sendable {
-  case profileQuarantine(recordGeneration: SignalboxCanonicalUInt64?)
-  case membershipExclusion(recordGeneration: SignalboxCanonicalUInt64?)
-  case sessionDisplacement(recordGeneration: SignalboxCanonicalUInt64?)
+  case profileQuarantine(recordGeneration: SignalboxCanonicalUInt64)
+  case membershipExclusion(recordGeneration: SignalboxCanonicalUInt64)
+  case sessionDisplacement(recordGeneration: SignalboxCanonicalUInt64)
   case chainExclusion(predecessorModelCallID: SignalboxCanonicalUUID)
   case transientExclusion(observationModelCallID: SignalboxCanonicalUUID)
   case headroomReserve(observedHeadroomPercent: Int64, reservePercent: UInt8)
@@ -5368,8 +5419,7 @@ public enum SignalboxCredentialPoolExclusion: Decodable, Equatable, Sendable {
     case "profile_quarantine", "membership_exclusion", "session_displacement":
       try payload.rejectUnadmittedFields(["kind", "record_generation"], decoder: decoder)
       try payload.requireFields(["record_generation"], decoder: decoder)
-      let generation: SignalboxCanonicalUInt64? = try decoder.decodeIfPresent("record_generation")
-      if let generation, generation.rawValue == 0 { throw poolEvidenceError(decoder) }
+      let generation: SignalboxCanonicalUInt64 = try decoder.decode("record_generation")
       switch kind {
       case "profile_quarantine": self = .profileQuarantine(recordGeneration: generation)
       case "membership_exclusion": self = .membershipExclusion(recordGeneration: generation)

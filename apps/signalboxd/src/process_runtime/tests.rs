@@ -778,7 +778,7 @@ mod tests {
             SessionMetadataUpdatedAt::from_unix_micros(METADATA_WRITE_UNIX_MICROS),
             actor,
         );
-        let projected = wire_metadata_last_writer(writer);
+        let projected = wire_metadata_last_writer(writer).expect("metadata actor is supported");
         assert_eq!(projected.actor(), expected_actor);
         assert_eq!(
             projected.updated_at_unix_micros().value(),
@@ -815,6 +815,43 @@ mod tests {
 
     fn compaction_session() -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(1))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepared_compaction_retries_attachment_admission_before_returning_its_range() {
+        let expected_range = String::from("verified compaction range");
+        let mut outcomes = VecDeque::from([
+            Err(ContextCompactionRangeLoadError::AttachmentUnavailable),
+            Ok(expected_range.clone()),
+        ]);
+        let began = tokio::time::Instant::now();
+        let loaded = super::compaction::retry_prepared_context_compaction_range(|| {
+            std::future::ready(outcomes.pop_front().expect("one refusal then success"))
+        }).await.expect("attachment admission resumes the retained call");
+        assert_eq!(loaded, expected_range);
+        assert!(outcomes.is_empty());
+        assert!(began.elapsed() >= super::CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejected_attachment_admission_does_not_retry_database_reads() {
+        let mut attempts = 0;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            retry_context_compaction_range_database_reads(|| {
+                attempts += 1;
+                std::future::ready(Err(super::compaction::attachment_verification_range_error(
+                    signalbox_application::AttachmentPreparationFailure::Unavailable,
+                )))
+            }),
+        )
+        .await
+        .expect("attachment admission must return immediately");
+        assert!(matches!(
+            result,
+            Err(ContextCompactionRangeLoadError::AttachmentUnavailable)
+        ));
+        assert_eq!(attempts, 1, "an admission refusal is not a retriable database read");
     }
 
     /// an explicit compaction whose commit outcome cannot be decided raises the same fatal recovery
@@ -1384,20 +1421,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_pool_policy_read_holds_snapshot_capacity() -> Result<(), Box<dyn Error>> {
+    async fn credential_pool_policy_read_proceeds_while_follow_holds_reader_capacity() -> Result<(), Box<dyn Error>> {
         let budget = Arc::new(Semaphore::new(1));
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let follow = ClientRequest::FollowSession { session_id: fixture_identity(1) };
+        let follow_permit = admit_snapshot_reader(&follow, Arc::clone(&budget), &mut shutdown_receiver)
+            .await?
+            .flatten()
+            .ok_or_else(|| io::Error::other("the follow must hold snapshot capacity"))?;
         let request = ClientRequest::ReadCredentialPoolPolicy {
             session_id: fixture_identity(1),
             turn_id: fixture_identity(2),
             pool_policy_id: fixture_identity(3),
         };
-        let permit = admit_snapshot_reader(&request, Arc::clone(&budget), &mut shutdown_receiver)
-            .await?
-            .ok_or_else(|| io::Error::other("the running reader must be admitted"))?
-            .ok_or_else(|| io::Error::other("the policy read must reserve its pooled connection"))?;
+        let permit = timeout(Duration::from_secs(1), admit_snapshot_reader(&request, Arc::clone(&budget), &mut shutdown_receiver))
+            .await??
+            .ok_or_else(|| io::Error::other("the policy read must proceed while follow holds capacity"))?;
+        assert!(permit.is_none());
         assert_eq!(budget.available_permits(), 0);
-        drop(permit);
+        drop(follow_permit);
         assert_eq!(budget.available_permits(), 1);
         Ok(())
     }
@@ -2881,6 +2923,86 @@ mod tests {
                 ..
             } if fragment_index.value() == 0 && content_fragment.as_str().is_empty()
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_closure_preserves_approval_evidence_on_the_wire() -> Result<(), Box<dyn Error>> {
+        let request_id = RequestId::try_new(11)?;
+        let source_session = SessionId::from_uuid(Uuid::from_u128(1));
+        let entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(2));
+        let tool_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(3));
+        for approved_before_close in [true, false] {
+            let (mut writer, mut reader) = duplex(4_096);
+            write_transcript_entry(
+                &mut writer,
+                ProtocolVersion::One,
+                request_id,
+                &ProcessTranscriptEntry::ToolClosed {
+                    entry_index: 0,
+                    source_session,
+                    entry,
+                    request: tool_request,
+                    content: String::from("closed before execution"),
+                    approved_before_close,
+                },
+            )
+            .await?;
+            drop(writer);
+            let mut encoded = Vec::new();
+            reader.read_to_end(&mut encoded).await?;
+            let frame = decode_server_line(&encoded)?;
+            assert!(matches!(
+                frame.message(),
+                ServerMessage::TranscriptEntry {
+                    entry: signalbox_process_protocol::TranscriptEntry::ToolClosed {
+                        approved_before_close: actual,
+                        ..
+                    },
+                    ..
+                } if *actual == approved_before_close
+            ), "approval evidence {approved_before_close} must survive wire projection");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_denial_preserves_recorded_override_on_the_wire() -> Result<(), Box<dyn Error>> {
+        let request_id = RequestId::try_new(11)?;
+        let source_session = SessionId::from_uuid(Uuid::from_u128(1));
+        let entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(2));
+        let tool_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(3));
+        for override_recorded in [true, false] {
+            let (mut writer, mut reader) = duplex(4_096);
+            write_transcript_entry(
+                &mut writer,
+                ProtocolVersion::One,
+                request_id,
+                &ProcessTranscriptEntry::ToolDenied {
+                    entry_index: 0,
+                    source_session,
+                    entry,
+                    request: tool_request,
+                    content: String::from("denied"),
+                    override_recorded,
+                },
+            )
+            .await?;
+            drop(writer);
+            let mut encoded = Vec::new();
+            reader.read_to_end(&mut encoded).await?;
+            let frame = decode_server_line(&encoded)?;
+            assert!(matches!(
+                frame.message(),
+                ServerMessage::TranscriptEntry {
+                    entry: signalbox_process_protocol::TranscriptEntry::ToolDenied {
+                        override_recorded: actual,
+                        ..
+                    },
+                    ..
+                } if *actual == override_recorded
+            ), "recorded override {override_recorded} must survive wire projection");
+        }
         Ok(())
     }
 

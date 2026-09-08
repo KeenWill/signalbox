@@ -63,6 +63,7 @@ pub struct ProgramJournalRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl program_journal::ProgramJournalRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub fn registrations(&self) -> program_registration::ProgramRegistrationRepository;
     pub async fn create_stream(
         &self,
         run: signalbox_domain::ProgramRunId,
@@ -133,5 +134,42 @@ impl program_journal::ProgramJournalRepository {
         option::Option<signalbox_domain::ProgramJournal>,
         program_journal::ProgramJournalRepositoryError,
     >;
+}
+impl signalbox_domain::program_session::ProgramRunVerifier
+    for program_journal::ProgramJournalRepository
+{
+    type Error = program_journal::ProgramSessionCapabilityError;
+    async fn verify_run(
+        &self,
+        run: signalbox_domain::ProgramRunId,
+    ) -> result::Result<bool, <Self as signalbox_domain::program_session::ProgramRunVerifier>::Error>;
+}
+```
+
+## ProgramSessionCapability
+
+```rust
+pub use signalbox_application::program_session::ProgramSessionCapability;
+```
+
+## ProgramSessionHost
+
+```rust
+pub use signalbox_application::program_session::ProgramSessionHost;
+```
+
+## ProgramSessionCapabilityError
+
+```rust
+pub enum ProgramSessionCapabilityError {
+    Journal(program_journal::ProgramJournalRepositoryError),
+    Registration(program_registration::ProgramRegistrationError),
+}
+// derives: fmt::Debug
+impl fmt::Display for program_journal::ProgramSessionCapabilityError {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for program_journal::ProgramSessionCapabilityError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 ```

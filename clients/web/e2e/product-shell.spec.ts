@@ -133,6 +133,7 @@ const useDeterministicSession = async (
     return route.fulfill({
       json: {
         session_id: requestedSessionId,
+        repository_watch: null,
         sizes: {
           item_count: sessionWorkspaceFixture.itemCount,
           projected_text_bytes: '0',
@@ -271,8 +272,8 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
   )
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
+  await expect(page.getByText('Sessions unavailable')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -288,8 +289,8 @@ test('gates Sessions on valid timeline limits', async ({ page }) => {
   )
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
+  await expect(page.getByText('Sessions unavailable')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -315,7 +316,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
   scenario.recover()
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
 
-  await expect(page.getByText('Timeline reads available')).toBeVisible()
+  await expect(page.getByText('Session ID required')).toBeVisible()
   await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
@@ -470,11 +471,11 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
-  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
   await expect(page.getByRole('form', { name: 'Message composer' })).toBeVisible()
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
@@ -543,7 +544,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
@@ -552,8 +553,8 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await page.getByRole('link', { name: /Settings/ }).click()
   await page.getByRole('radio', { name: 'Full' }).check()
   await page.getByRole('link', { name: /Sessions/ }).click()
-  await page.getByRole('button', { name: 'Open workspace by ID' }).click()
-  const reopenedSessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await page.getByRole('button', { name: 'Open by ID' }).click()
+  const reopenedSessionId = page.getByRole('textbox', { name: 'Session ID' })
   await reopenedSessionId.fill(sessionWorkspaceFixture.id)
   await reopenedSessionId.press('Enter')
 
@@ -567,7 +568,7 @@ test('keeps palette selection commands focused on the Session timeline', async (
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
@@ -591,7 +592,7 @@ test('preserves the saved row when reopening the current Session fails', async (
   await useDeterministicSession(page, () => failTimeline)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await page.getByRole('option', { name: /43 turn completed/ }).click()
@@ -629,7 +630,7 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
   )
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await page.getByRole('option', { name: /43 turn completed/ }).click()
@@ -668,7 +669,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   await useDeterministicSession(page, () => failTimeline)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
@@ -676,9 +677,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   failTimeline = true
   await page.getByRole('button', { name: /Latest/ }).click()
 
-  await expect(page.getByRole('alert')).toContainText(
-    'The daemon could not provide this bounded session window',
-  )
+  await expect(page.getByRole('alert')).toContainText('Session unavailable')
   await expect(page.getByRole('listbox', { name: 'Session timeline' })).toHaveCount(0)
   await expect(page.getByLabel('Inspector').getByText(sessionWorkspaceFixture.id)).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
@@ -701,7 +700,7 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
   )
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await expect(page.getByRole('option', { name: /43 turn completed/ })).toBeVisible()
@@ -827,10 +826,8 @@ test('runs product navigation sequences but leaves Mod+K to an editing field', a
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
   await expect(search).toHaveAttribute('data-mod-k-default-prevented', 'false')
 
-  // The landed shell keeps `surface.escape` away from every editable product control, so Escape
-  // does not release the field and the sequence stays ordinary text input. Narrowing that guard is
-  // deferred on KeenWill/signalbox#1316.
-  await search.press('Escape')
+  // Navigation sequences remain ordinary text while the search field owns focus.
+  await expect(search).toBeFocused()
   await page.keyboard.press('g')
   await page.keyboard.press('a')
   await expect(page).toHaveURL(/\/search$/)
@@ -1207,15 +1204,68 @@ test('shares expired Imports admission failure with the shell retry state', asyn
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.clock.fastForward(30_001)
-  await page
-    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
-    .fill('expired-admission')
+  await page.getByRole('textbox', { name: 'Source session' }).fill('expired-admission')
   await expect(page.getByText('Contract rejected')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry bootstrap' })).toBeVisible()
   await useDeterministicBootstrap(page)
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('withholds Search focus after cached bootstrap refetch failure and restores it on retry', async ({
+  page,
+}) => {
+  await page.clock.install()
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.clock.fastForward(30_001)
+  await page
+    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
+    .fill('expired-admission')
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await page.getByRole('link', { name: /^Search Global and session search/ }).click()
+  await expect(
+    page.getByRole('heading', { name: 'Search availability could not be checked' }),
+  ).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await page.evaluate(() => {
+    let shortcutEvent: KeyboardEvent | undefined
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.shiftKey && event.key.toLowerCase() === 'f') {
+          shortcutEvent = event
+        }
+      },
+      true,
+    )
+    document.addEventListener('keyup', (event) => {
+      if (event.key.toLowerCase() === 'f' && shortcutEvent) {
+        document.body.dataset.searchFocusDefaultPrevented = String(shortcutEvent.defaultPrevented)
+      }
+    })
+  })
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+Shift+f`)
+  await expect(page.locator('body')).toHaveAttribute('data-search-focus-default-prevented', 'false')
+
+  await useDeterministicBootstrap(page)
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeVisible()
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Focus lexical search/ }).click()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await page.keyboard.press(`${modifier}+Shift+f`)
+  await expect(page.locator('body')).toHaveAttribute('data-search-focus-default-prevented', 'true')
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
 })
 
 test('mounts Imports after the daemon contract recovers', async ({ page }) => {
@@ -1241,10 +1291,8 @@ test('serves exact source-session searches through the deterministic adapter', a
 
   const rows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
   await expect(rows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
-  await page
-    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
-    .fill('source-session-0')
-  await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
+  await page.getByRole('textbox', { name: 'Source session' }).fill('source-session-0')
+  await page.getByRole('checkbox', { name: 'Filter by source' }).check()
 
   await expect(rows).toHaveAttribute('data-total-loaded', '1')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -1411,7 +1459,7 @@ test('locks product navigation while an ambiguous continuation command is retain
     .getByRole('textbox', { name: 'Initial model selection UUID' })
     .fill('00000000-0000-7000-8000-000000000777')
   await page.getByRole('button', { name: 'Resume' }).click()
-  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
 
   const settingsLink = page.getByRole('link', { name: /Settings/ })
   await expect(settingsLink).toHaveAttribute('aria-disabled', 'true')
@@ -1420,7 +1468,7 @@ test('locks product navigation while an ambiguous continuation command is retain
   await page.keyboard.press('g')
   await page.keyboard.press(',')
   await expect(page).toHaveURL(/\/imports$/)
-  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
   const expectedResourceError =
     'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
   expect(problems.pageErrors).toEqual([])
@@ -1450,25 +1498,25 @@ test('retains exact retry after a lost acknowledgement and corrupt continuation 
     .getByRole('textbox', { name: 'Initial model selection UUID' })
     .fill('00000000-0000-7000-8000-000000000777')
   await page.getByRole('button', { name: 'Resume' }).click()
-  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  await expect(page.getByRole('alert')).toContainText('Outcome unknown.')
   const corruptReceipt = page.waitForResponse((response) => response.status() === 500)
-  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
   await corruptReceipt
-  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
-  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('alert')).toContainText('Outcome unknown.')
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: /Settings/ })).toHaveAttribute(
     'aria-disabled',
     'true',
   )
   await page.getByRole('link', { name: /Settings/ }).click({ force: true })
   await expect(page).toHaveURL(/\/imports$/)
-  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
   await expect(page.getByText('Session created:', { exact: false })).toBeVisible()
   expect(requests).toHaveLength(3)
   expect(requests[1]).toBe(requests[0])
   expect(requests[2]).toBe(requests[0])
   await expect(page.getByRole('alert')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Retry exact command' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
 })
 
@@ -1643,9 +1691,9 @@ test('retains window control focus while loading and after the new window arrive
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
-  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionWorkspaceFixture.id)
-  await page.getByRole('button', { name: 'Open workspace' }).click()
-  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await page.getByRole('textbox', { name: 'Session ID' }).fill(sessionWorkspaceFixture.id)
+  await page.getByRole('button', { name: 'Open', exact: true }).click()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   let releaseWindow = () => {}
   const windowReady = new Promise<void>((resolve) => {
     releaseWindow = resolve
@@ -1662,11 +1710,11 @@ test('retains window control focus while loading and after the new window arrive
   await expect.poll(() => requested).toBe(true)
   await expect(first).toBeFocused()
   releaseWindow()
-  await expect(page.getByText('Active · opened at first')).toBeVisible()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   await expect(first).toBeFocused()
   const latest = page.getByRole('button', { name: /Latest/ })
   await latest.click()
-  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   await expect(latest).toBeFocused()
 })
 
@@ -1674,7 +1722,7 @@ test('trims the session identity before native form validation', async ({ page }
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
-  const input = page.getByRole('textbox', { name: 'Exact session ID' })
+  const input = page.getByRole('textbox', { name: 'Session ID' })
   await input.fill(`  ${sessionWorkspaceFixture.id}  `)
   await expect(input).toHaveValue(sessionWorkspaceFixture.id)
   await input.press('Enter')
@@ -1715,15 +1763,15 @@ test('starts the settled exact import filter without the previous page cursor', 
   await page.clock.install()
   await page.clock.pauseAt(new Date(Date.now() + 1_000))
   const input = page.getByRole('textbox', {
-    name: 'Filter imports by exact source session evidence',
+    name: 'Source session',
   })
   await input.fill('source-session-0')
   await page.clock.runFor(200)
-  await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
+  await page.getByRole('checkbox', { name: 'Filter by source' }).check()
   await expect.poll(() => requests.at(-1)?.source).toBe('source-session-0')
-  await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Next', exact: true })).toBeEnabled()
   await input.fill('source-session-1')
-  await page.getByRole('button', { name: 'Next page', exact: true }).click()
+  await page.getByRole('button', { name: 'Next', exact: true }).click()
   await expect
     .poll(() =>
       requests.some((request) => request.source === 'source-session-0' && request.after !== null),
@@ -1732,3 +1780,112 @@ test('starts the settled exact import filter without the previous page cursor', 
   await page.clock.runFor(200)
   await expect.poll(() => requests.at(-1)).toEqual({ source: 'source-session-1', after: null })
 })
+
+for (const entry of ['button', 'palette'] as const) {
+  test(`hides empty import controls and retries failed discovery from the ${entry}`, async ({
+    page,
+  }) => {
+    await useDeterministicBootstrap(page)
+    await useDeterministicImportApi(page)
+    let mode: 'empty' | 'failed' | 'ready' = 'empty'
+    await page.route('**/api/imports/**', async (route) => {
+      if (
+        new URL(route.request().url()).pathname.replace(/\/$/, '') !== '/api/imports' ||
+        mode === 'ready'
+      )
+        return route.fallback()
+      return mode === 'empty'
+        ? route.fulfill({ json: { items: [] } })
+        : route.fulfill({ status: 503, body: 'unavailable' })
+    })
+    await page.goto('/imports')
+    await expect(page.getByRole('table', { name: 'Imported conversations' })).toBeVisible()
+    await expect(page.locator('.import-inspector')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0)
+    mode = 'failed'
+    await page.reload()
+    await expect(page.getByRole('alert')).toContainText('Imports unavailable')
+    await expect(page.locator('.import-inspector')).toHaveCount(0)
+    mode = 'ready'
+    const opener = page.getByRole('button', { name: 'Open command palette', exact: true })
+    if (entry === 'palette') await opener.click()
+    const retry =
+      entry === 'button'
+        ? page.getByRole('button', { name: 'Retry imports', exact: true })
+        : page
+            .getByRole('dialog', { name: 'Command palette' })
+            .getByRole('button', { name: /Retry imports/ })
+    await retry.focus()
+    await retry.press('Enter')
+    await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+    await expect(page.locator('.import-inspector')).toBeVisible()
+    await expect(
+      entry === 'button' ? page.getByRole('region', { name: 'Imports', exact: true }) : opener,
+    ).toBeFocused()
+    await opener.click()
+    await expect(
+      page
+        .getByRole('dialog', { name: 'Command palette' })
+        .getByRole('button', { name: /Retry imports/ }),
+    ).toHaveCount(0)
+  })
+}
+
+for (const outcome of ['success', 'rejection'] as const) {
+  test(`keeps a restored import continuation ${outcome} visible while discovery fails`, async ({
+    page,
+  }) => {
+    const problems = watchBrowser(page)
+    await useDeterministicBootstrap(page)
+    await useDeterministicImportApi(page)
+    const requests: string[] = []
+    await page.route('**/api/imports/*/continuations', (route) => {
+      requests.push(route.request().postData() ?? '')
+      if (requests.length === 1) return route.abort('failed')
+      return outcome === 'success'
+        ? route.fallback()
+        : route.fulfill({
+            status: 400,
+            json: {
+              error: {
+                kind: 'application',
+                code: 'invalid_import_request',
+                message: 'Request rejected.',
+              },
+            },
+          })
+    })
+    await page.goto(importsProductFixture.path)
+    await page
+      .getByRole('textbox', { name: 'Initial model selection UUID' })
+      .fill('00000000-0000-7000-8000-000000000777')
+    await page.getByRole('button', { name: 'Resume', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
+    await page.route('**/api/imports/**', (route) =>
+      new URL(route.request().url()).pathname.replace(/\/$/, '') === '/api/imports'
+        ? route.fulfill({ status: 503, body: 'unavailable' })
+        : route.fallback(),
+    )
+    await page.reload()
+    await expect(page.getByText('Imports unavailable', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(
+      page.getByText(outcome === 'success' ? 'Session created:' : 'Request rejected.', {
+        exact: false,
+      }),
+    ).toBeVisible()
+    await expect(page.getByText('Imports unavailable', { exact: true })).toBeVisible()
+    await expect(page.locator('.import-inspector')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: /Settings/ })).not.toHaveAttribute(
+      'aria-disabled',
+      'true',
+    )
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toBe(requests[0])
+    expect(
+      await page.evaluate(() => sessionStorage.getItem('signalbox.import-continuation.production')),
+    ).toBeNull()
+    expect(problems.pageErrors).toEqual([])
+  })
+}

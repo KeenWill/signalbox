@@ -1,5 +1,9 @@
 use super::*;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the transcript read keeps runtime and protocol boundaries explicit"
+)]
 pub(super) async fn handle_read_transcript<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -7,6 +11,7 @@ pub(super) async fn handle_read_transcript<Writer>(
     session_id: CanonicalUuid,
     pool: &PgPool,
     model_configuration: &HubModelConfiguration,
+    reload: Option<&crate::configuration_reload::ConfigurationReload>,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -19,6 +24,7 @@ where
         version,
         request_id,
         model_configuration,
+        reload,
     )
     .await;
     drop(snapshot_permit);
@@ -55,6 +61,7 @@ pub(super) async fn handle_follow_session<Writer>(
     session_id: CanonicalUuid,
     pool: &PgPool,
     model_configuration: &HubModelConfiguration,
+    reload: Option<&crate::configuration_reload::ConfigurationReload>,
     fanouts: &ProcessFanouts,
     mut shutdown: watch::Receiver<bool>,
     snapshot_permit: OwnedSemaphorePermit,
@@ -72,6 +79,7 @@ where
             version,
             request_id,
             model_configuration,
+            reload,
         ),
     )
     .await;
@@ -138,6 +146,21 @@ where
         };
         let queued_at_snapshot = consume_snapshot_queued_update(&mut updates_queued_at_snapshot);
         match update {
+            ProcessUpdate::ResyncRequired { session } => {
+                if session.is_none_or(|session| session == selected_session) {
+                    return run_until_shutdown(
+                        &mut shutdown,
+                        write_error(
+                            writer,
+                            version,
+                            request_id,
+                            ProtocolError::without_detail(ErrorCode::ResyncRequired),
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Ok(()));
+                }
+            }
             ProcessUpdate::Durable {
                 cursor,
                 session,
@@ -217,6 +240,7 @@ pub(super) async fn spool_transcript(
     version: ProtocolVersion,
     request_id: RequestId,
     model_configuration: &HubModelConfiguration,
+    reload: Option<&crate::configuration_reload::ConfigurationReload>,
 ) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
     let reader = repository.open_transcript(session).await;
     let Some(mut reader) = reader.map_err(TranscriptSpoolError::Read)? else {
@@ -233,6 +257,18 @@ pub(super) async fn spool_transcript(
         version,
         request_id,
         ServerMessage::TranscriptSnapshotStart {
+            repository_watch: match reload {
+                Some(reload) => reload
+                    .repository_watch_origin(session)
+                    .await
+                    .map_err(|_| {
+                        TranscriptSpoolError::Spool(SnapshotSpoolError::Io(io::Error::other(
+                            "repository-watch origin could not be read",
+                        )))
+                    })?
+                    .map(wire_repository_watch_origin),
+                None => None,
+            },
             session_id,
             cursor,
             runner: reader
@@ -891,6 +927,7 @@ where
             .await
         }
         ProcessTranscriptEntry::ToolDenied {
+            override_recorded,
             entry_index,
             source_session,
             entry,
@@ -906,6 +943,7 @@ where
                     source_session_id: wire_uuid(source_session.into_uuid()),
                     entry_id: wire_uuid(entry.into_uuid()),
                     entry: TranscriptEntry::ToolDenied {
+                        override_recorded: *override_recorded,
                         tool_request_id: wire_uuid(request.into_uuid()),
                         content: content.clone(),
                     },
@@ -963,6 +1001,7 @@ where
             entry,
             request,
             content,
+            approved_before_close,
         } => {
             write_message(
                 writer,
@@ -975,6 +1014,7 @@ where
                     entry: TranscriptEntry::ToolClosed {
                         tool_request_id: wire_uuid(request.into_uuid()),
                         content: content.clone(),
+                        approved_before_close: *approved_before_close,
                     },
                 },
             )
@@ -1734,7 +1774,10 @@ pub(super) fn wire_system_prompt(
 pub(super) fn wire_list_metadata(
     item: &SessionMetadataListItem,
 ) -> Option<(Option<String>, Vec<String>, Option<MetadataLastWriter>)> {
-    let last_writer = item.last_writer().map(wire_metadata_last_writer);
+    let last_writer = match item.last_writer() {
+        Some(writer) => Some(wire_metadata_last_writer(writer)?),
+        None => None,
+    };
     Some((
         item.title().map(str::to_owned),
         item.tags().map(str::to_owned).collect(),
@@ -1756,12 +1799,18 @@ pub(super) fn wire_metadata_snapshot(
         content.archived(),
     )
     .ok()?;
-    let last_writer = snapshot.last_writer().map(wire_metadata_last_writer);
+    let last_writer = match snapshot.last_writer() {
+        Some(writer) => Some(wire_metadata_last_writer(writer)?),
+        None => None,
+    };
     Some((metadata, last_writer))
 }
 
-pub(super) fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> MetadataLastWriter {
+pub(super) fn wire_metadata_last_writer(
+    writer: SessionMetadataLastWriter,
+) -> Option<MetadataLastWriter> {
     let actor = match writer.actor() {
+        Actor::Program { .. } => return None,
         Actor::User => MetadataActor::User {},
         Actor::Core => MetadataActor::Core {},
         Actor::Model { turn } => MetadataActor::Model {
@@ -1772,10 +1821,10 @@ pub(super) fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> Me
             tool_request_id: wire_uuid(request.into_uuid()),
         },
     };
-    MetadataLastWriter::new(
+    Some(MetadataLastWriter::new(
         CanonicalU64::new(writer.updated_at().as_unix_micros()),
         actor,
-    )
+    ))
 }
 
 pub(super) const fn wire_imported_source_speaker(
@@ -1911,6 +1960,19 @@ pub(super) fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             )),
             operator_action_required: *operator_action_required,
         },
+        ProcessTurnState::ActiveAwaitingCredentialAvailability { wait } => {
+            TurnState::ActiveAwaitingCredentialAvailability {
+                wait_attempt_id: wire_uuid(wait.attempt().into_uuid()),
+                cause: match wait.cause() {
+                    signalbox_domain::CredentialAvailabilityWaitCause::Contended => {
+                        signalbox_process_protocol::CredentialAvailabilityWaitCause::Contended
+                    }
+                    signalbox_domain::CredentialAvailabilityWaitCause::Exhausted => {
+                        signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted
+                    }
+                },
+            }
+        }
         ProcessTurnState::ActiveAwaitingRunnerRecovery {
             runner,
             placement_revision,
@@ -1919,6 +1981,20 @@ pub(super) fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             runner_id: wire_uuid(runner.into_uuid()),
             placement_revision: PositiveCanonicalU64::from(*placement_revision),
             tool_attempt_id: interrupted_tool_attempt.map(|attempt| wire_uuid(attempt.into_uuid())),
+        },
+        ProcessTurnState::FailedAfterCredentialWait {
+            terminal_frontier,
+            terminal_attempt,
+            predecessor_call,
+            provider_cause,
+        } => TurnState::FailedAfterCredentialWait {
+            terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
+            predecessor_model_call:
+                signalbox_process_protocol::FailedTerminalModelCall::known_failed_with_cause(
+                    wire_uuid(predecessor_call.into_uuid()),
+                    wire_provider_failure_cause(*provider_cause),
+                ),
         },
         ProcessTurnState::FailedCredentialPoolExhausted(evidence) => {
             TurnState::FailedCredentialPoolExhausted {
@@ -2022,6 +2098,64 @@ pub(super) fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                     terminal_tool_attempt_id: wire_uuid(attempt.into_uuid()),
                 }
             }
+        },
+    }
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "the retained domain action has positive ordinals and pull request numbers"
+)]
+fn wire_repository_watch_origin(
+    origin: signalbox_module_repo_watch_v2::RetainedDispatchAction,
+) -> signalbox_process_protocol::RepositoryWatchProvenance {
+    use signalbox_domain::RepoWatchEventKindNameV1;
+    use signalbox_process_protocol::{RepositoryWatchEventKind, RepositoryWatchProvenance};
+    RepositoryWatchProvenance {
+        dispatch_id: wire_uuid(origin.dispatch().into_uuid()),
+        action_ordinal: signalbox_process_protocol::PositiveCanonicalU64::try_new(
+            origin.action_ordinal().get(),
+        )
+        .expect("positive action ordinal"),
+        repository: origin.repository().as_str().to_owned(),
+        rule_id: origin.rule_id().as_str().to_owned(),
+        rule_revision: signalbox_process_protocol::PositiveCanonicalU64::try_new(
+            origin.rule_revision().get(),
+        )
+        .expect("positive rule revision"),
+        event_id: wire_uuid(origin.event_id().into_uuid()),
+        pull_request: origin.pull_request().map(|number| {
+            signalbox_process_protocol::PositiveCanonicalU64::try_new(number.get())
+                .expect("positive pull request number")
+        }),
+        event_kind: match origin.event_kind() {
+            RepoWatchEventKindNameV1::PullRequestOpened => {
+                RepositoryWatchEventKind::PullRequestOpened
+            }
+            RepoWatchEventKindNameV1::PullRequestClosed => {
+                RepositoryWatchEventKind::PullRequestClosed
+            }
+            RepoWatchEventKindNameV1::PullRequestMerged => {
+                RepositoryWatchEventKind::PullRequestMerged
+            }
+            RepoWatchEventKindNameV1::HeadChanged => RepositoryWatchEventKind::HeadChanged,
+            RepoWatchEventKindNameV1::MergeableStateChanged => {
+                RepositoryWatchEventKind::MergeableStateChanged
+            }
+            RepoWatchEventKindNameV1::ChecksCompleted => RepositoryWatchEventKind::ChecksCompleted,
+            RepoWatchEventKindNameV1::CheckRunCompleted => {
+                RepositoryWatchEventKind::CheckRunCompleted
+            }
+            RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => {
+                RepositoryWatchEventKind::BranchWorkflowRunCompleted
+            }
+            RepoWatchEventKindNameV1::ReviewSubmitted => RepositoryWatchEventKind::ReviewSubmitted,
+            RepoWatchEventKindNameV1::ThreadOpened => RepositoryWatchEventKind::ThreadOpened,
+            RepoWatchEventKindNameV1::ThreadResolved => RepositoryWatchEventKind::ThreadResolved,
+            RepoWatchEventKindNameV1::Labeled => RepositoryWatchEventKind::Labeled,
+            RepoWatchEventKindNameV1::Unlabeled => RepositoryWatchEventKind::Unlabeled,
+            RepoWatchEventKindNameV1::BaseAdvanced => RepositoryWatchEventKind::BaseAdvanced,
+            RepoWatchEventKindNameV1::ReactionChanged => RepositoryWatchEventKind::ReactionChanged,
         },
     }
 }

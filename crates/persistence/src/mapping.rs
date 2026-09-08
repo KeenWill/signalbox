@@ -502,12 +502,16 @@ pub(crate) fn program_scope_operation_from_str(value: &str) -> Option<ScopeOpera
 pub(crate) const fn program_reject_reason_to_str(value: RejectReason) -> &'static str {
     match value {
         RejectReason::OutstandingRequests => "outstanding_requests",
+        RejectReason::CapabilityDenied => "capability_denied",
+        RejectReason::UnsupportedOperation => "unsupported_operation",
     }
 }
 
 pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason> {
     match value {
         "outstanding_requests" => Some(RejectReason::OutstandingRequests),
+        "capability_denied" => Some(RejectReason::CapabilityDenied),
+        "unsupported_operation" => Some(RejectReason::UnsupportedOperation),
         _ => None,
     }
 }
@@ -776,6 +780,7 @@ pub fn instruction_finding_kind_from_str(value: &str) -> Option<InstructionDisco
 /// Closed active-turn phase discriminators stored by PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ActiveTurnPhaseStorageKind {
+    AwaitingCredentialAvailability,
     Running,
     AwaitingToolApproval,
     AwaitingChild,
@@ -787,6 +792,9 @@ pub(crate) enum ActiveTurnPhaseStorageKind {
 #[cfg(test)]
 pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) -> &'static str {
     match value {
+        ActiveTurnPhaseStorageKind::AwaitingCredentialAvailability => {
+            "awaiting_credential_availability"
+        }
         ActiveTurnPhaseStorageKind::Running => "running",
         ActiveTurnPhaseStorageKind::AwaitingToolApproval => "awaiting_tool_approval",
         ActiveTurnPhaseStorageKind::AwaitingChild => "awaiting_child",
@@ -798,6 +806,9 @@ pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) 
 
 pub(crate) fn active_turn_phase_from_str(value: &str) -> Option<ActiveTurnPhaseStorageKind> {
     match value {
+        "awaiting_credential_availability" => {
+            Some(ActiveTurnPhaseStorageKind::AwaitingCredentialAvailability)
+        }
         "running" => Some(ActiveTurnPhaseStorageKind::Running),
         "awaiting_tool_approval" => Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval),
         "awaiting_child" => Some(ActiveTurnPhaseStorageKind::AwaitingChild),
@@ -1267,6 +1278,7 @@ pub(crate) fn delegation_outcome_reason_from_str(value: &str) -> Option<Delegati
 /// Closed session-creation cause discriminators stored in PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionCreationCauseStorageKind {
+    Workflow,
     Interactive,
     ModuleDispatched,
     Delegated,
@@ -1275,6 +1287,7 @@ pub(crate) enum SessionCreationCauseStorageKind {
 /// Encodes a session-creation cause as its closed PostgreSQL spelling.
 pub(crate) const fn session_creation_cause_to_str(value: &SessionCreationCause) -> &'static str {
     match value {
+        SessionCreationCause::Workflow { .. } => "workflow",
         SessionCreationCause::Interactive => "interactive",
         SessionCreationCause::ModuleDispatched { .. } => "module_dispatched",
         SessionCreationCause::Delegated { .. } => "delegated",
@@ -1286,6 +1299,7 @@ pub(crate) fn session_creation_cause_from_str(
     value: &str,
 ) -> Option<SessionCreationCauseStorageKind> {
     match value {
+        "workflow" => Some(SessionCreationCauseStorageKind::Workflow),
         "interactive" => Some(SessionCreationCauseStorageKind::Interactive),
         "module_dispatched" => Some(SessionCreationCauseStorageKind::ModuleDispatched),
         "delegated" => Some(SessionCreationCauseStorageKind::Delegated),

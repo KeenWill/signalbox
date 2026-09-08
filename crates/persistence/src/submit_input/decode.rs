@@ -455,7 +455,7 @@ pub(super) fn decode_origin_runtime_state(
     }
 }
 
-pub(super) fn decode_complete(
+pub(super) async fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
     related_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
@@ -481,7 +481,15 @@ pub(super) fn decode_complete(
         required(&row, "actor_kind")?,
         row.try_get("actor_turn_id")?,
         row.try_get("actor_tool_request_id")?,
-    )?;
+        row.try_get("actor_program_run_id")?,
+        row.try_get("verified_actor_program_run_id")?,
+        typed_version,
+    )
+    .await?;
+    let issuer: String = required(&row, "registry_issuer_kind")?;
+    if matches!(actor, Actor::Program { .. }) != (issuer == "program") {
+        return Err(SubmitInputCorruption::Inconsistent("actor and envelope principal").into());
+    }
     let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
     let session = session_id_from_uuid(required(&row, "command_session_id")?);
     let content = decode_content(required(&row, "command_content_parts")?, "command content")?;
@@ -497,26 +505,34 @@ pub(super) fn decode_complete(
         command_model_settings_override,
         "command delivery",
     )?;
-    let command = match (actor, delivery) {
-        (Actor::Core, DeliveryRequest::StartWhenNoActiveTurn { configuration }) => {
-            SubmitInput::new_core_continuation(command_id, session, content, configuration)
+    let command = match actor {
+        Actor::User => SubmitInput::new(command_id, session, content, delivery),
+        Actor::Program { run } => {
+            SubmitInput::new_program(command_id, session, content, delivery, run)
         }
-        (
-            Actor::Core,
+        Actor::Model { .. } | Actor::Tool { .. } | Actor::Recovery => {
+            SubmitInput::new(command_id, session, content, delivery)
+        }
+        Actor::Core => match delivery {
+            DeliveryRequest::StartWhenNoActiveTurn { configuration } => {
+                SubmitInput::new_core_continuation(command_id, session, content, configuration)
+            }
             DeliveryRequest::Interrupt {
                 expected_active_turn,
                 descendant_scope,
                 configuration,
-            },
-        ) => SubmitInput::new_core_interrupt(
-            command_id,
-            session,
-            content,
-            expected_active_turn,
-            descendant_scope,
-            configuration,
-        ),
-        (_, delivery) => SubmitInput::new(command_id, session, content, delivery),
+            } => SubmitInput::new_core_interrupt(
+                command_id,
+                session,
+                content,
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            ),
+            DeliveryRequest::NextSafePoint { .. } | DeliveryRequest::AfterCurrentTurn { .. } => {
+                return Err(SubmitInputCorruption::Inconsistent("core input delivery").into());
+            }
+        },
     };
 
     let result_kind: String = required(&row, "result_kind")?;
@@ -670,7 +686,7 @@ pub(super) fn decode_complete(
     };
 
     input
-        .reconstitute()
+        .reconstitute_recorded()
         .map_err(|error| SubmitInputCorruption::Domain(error.failure()).into())
 }
 

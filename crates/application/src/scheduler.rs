@@ -1043,6 +1043,8 @@ where
             shutdown.await;
             return SchedulerLoopExit::Shutdown;
         }
+        let slots = crate::scheduler_slot::SchedulerSlots::new(self.max_in_flight_passes);
+        let mut slot_changes = slots.changes();
         let mut passes = JoinSet::new();
         let mut admission = admission::Admission::default();
         let (admission_sender, mut admission_changes) = mpsc::unbounded_channel();
@@ -1055,12 +1057,14 @@ where
         observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
 
         'scheduler: loop {
-            if let Some(session) = take_admissible_hint(
-                &mut pending_sessions,
-                &mut pending_hints,
-                admission.occupied(&task_sessions),
-                self.max_in_flight_passes,
-            ) {
+            if slots.can_reserve()
+                && let Some(session) = take_admissible_hint(
+                    &mut pending_sessions,
+                    &mut pending_hints,
+                    slots.active(),
+                    self.max_in_flight_passes,
+                )
+            {
                 select! {
                     biased;
 
@@ -1074,6 +1078,11 @@ where
                             observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
                             continue;
                         }
+                        let Some(slot) = slots.reserve() else {
+                            pending_hints.insert(session);
+                            pending_sessions.push_front(session);
+                            continue;
+                        };
                         if in_flight_sessions.insert(session) {
                             // The bound stays on every pass: its expiry is
                             // turn-liveness recovery, which ownership does not
@@ -1084,6 +1093,7 @@ where
                             spawn_pass(
                                 &mut passes,
                                 &mut self.pass,
+                                slot,
                                 session,
                                 counts_toward_occupancy,
                                 self.occupancy_bound,
@@ -1114,10 +1124,11 @@ where
                         biased;
 
                         () = &mut shutdown => break 'scheduler,
+                        _ = slot_changes.changed() => { observe_occupancy(&self.occupancy_observer, &task_sessions, &admission); },
                         Some(change) = admission_changes.recv() => {
                             admission.apply(change, &task_sessions, &mut pending_sessions, &mut pending_hints);
                             observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
-                            if has_admissible_hint(&pending_hints, admission.occupied(&task_sessions), self.max_in_flight_passes) {
+                            if has_admissible_hint(&pending_hints, slots.active(), self.max_in_flight_passes) {
                                 break None;
                             }
                         }
@@ -1139,7 +1150,7 @@ where
                                 )
                                 && has_admissible_hint(
                                     &pending_hints,
-                                    admission.occupied(&task_sessions),
+                                    slots.active(),
                                     self.max_in_flight_passes,
                                 )
                             {
@@ -1155,10 +1166,11 @@ where
                         biased;
 
                         () = &mut shutdown => break 'scheduler,
+                        _ = slot_changes.changed() => { observe_occupancy(&self.occupancy_observer, &task_sessions, &admission); break None; },
                         Some(change) = admission_changes.recv() => {
                             admission.apply(change, &task_sessions, &mut pending_sessions, &mut pending_hints);
                             observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
-                            if has_admissible_hint(&pending_hints, admission.occupied(&task_sessions), self.max_in_flight_passes) {
+                            if has_admissible_hint(&pending_hints, slots.active(), self.max_in_flight_passes) {
                                 break None;
                             }
                         }
@@ -1214,6 +1226,9 @@ where
                 observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
             }
             select! {
+                _ = slot_changes.changed() => {
+                    observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
+                }
                 Some(change) = admission_changes.recv() => {
                     admission.apply(change, &task_sessions, &mut pending_sessions, &mut pending_hints);
                     observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
@@ -1277,8 +1292,9 @@ fn take_admissible_hint(
     pop_pending_hint(pending_sessions, pending_hints)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct InFlightPass {
+    slot: crate::scheduler_slot::SchedulerPassSlot,
     session: SessionId,
     started_at: Instant,
     counts_toward_occupancy: bool,
@@ -1367,6 +1383,7 @@ where
 fn spawn_pass<Pass>(
     passes: &mut JoinSet<PassTaskOutcome<Pass::Error>>,
     pass: &mut Pass,
+    slot: crate::scheduler_slot::SchedulerPassSlot,
     session: SessionId,
     counts_toward_occupancy: bool,
     bound: SchedulerPassOccupancyBound,
@@ -1386,15 +1403,19 @@ fn spawn_pass<Pass>(
     // stack at the spawn boundary.
     let execution = erased_pass_execution(pass, session);
     let task = passes.spawn(
-        admission::scope(
-            admission_sender,
-            bounded_pass(execution, session, bound, shutdown_drain, expiry_handler),
+        crate::scheduler_slot::scope_reserved(
+            slot.clone(),
+            admission::scope(
+                admission_sender,
+                bounded_pass(execution, session, bound, shutdown_drain, expiry_handler),
+            ),
         )
         .instrument(span),
     );
     task_sessions.insert(
         task.id(),
         InFlightPass {
+            slot,
             session,
             started_at: Instant::now(),
             counts_toward_occupancy,
@@ -1454,13 +1475,21 @@ fn observe_occupancy(
     };
     let oldest = passes
         .iter()
-        .filter(|(task, pass)| pass.counts_toward_occupancy && !admission.is_released(**task))
+        .filter(|(task, pass)| {
+            pass.counts_toward_occupancy
+                && pass.slot.is_occupied()
+                && !admission.is_released(**task)
+        })
         .map(|(_, pass)| pass)
         .min_by_key(|pass| pass.started_at)
         .map(|pass| SchedulerOldestInFlightPass::new(pass.session, pass.started_at));
     let occupancy = passes
         .iter()
-        .filter(|(task, pass)| pass.counts_toward_occupancy && !admission.is_released(**task))
+        .filter(|(task, pass)| {
+            pass.counts_toward_occupancy
+                && pass.slot.is_occupied()
+                && !admission.is_released(**task)
+        })
         .count();
     observer.observe(occupancy, oldest);
 }
@@ -2636,6 +2665,66 @@ mod tests {
                 .observed
                 .is_empty()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attachment_io_admits_a_second_session_at_a_one_pass_cap() {
+        struct StorePass {
+            read: Option<oneshot::Receiver<()>>,
+            finish_read: Option<oneshot::Sender<()>>,
+            finished: Option<oneshot::Sender<()>>,
+        }
+        impl EligibilityPass for StorePass {
+            type Error = FakeSweepError;
+            fn run(
+                &mut self,
+                selected: SessionId,
+            ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+                let read = (selected == session(50)).then(|| self.read.take().expect("one reader"));
+                let finish_read = (selected == session(51))
+                    .then(|| self.finish_read.take().expect("one text pass"));
+                let finished = (selected == session(50))
+                    .then(|| self.finished.take().expect("one completion"));
+                async move {
+                    if let Some(read) = read {
+                        crate::with_scheduler_slot_released(async {
+                            read.await.expect("text pass finishes the store read");
+                        })
+                        .await;
+                        finished
+                            .expect("reader owns completion")
+                            .send(())
+                            .expect("scheduler listens");
+                    }
+                    if let Some(finish_read) = finish_read {
+                        finish_read.send(()).expect("reader is pending");
+                    }
+                    Ok(())
+                }
+            }
+        }
+        let (finish_read, read) = oneshot::channel();
+        let (finished, completion) = oneshot::channel();
+        let mut scheduler = SchedulerLoop::with_max_in_flight(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(session(50)), Ok(session(51))]),
+            },
+            StorePass {
+                read: Some(read),
+                finish_read: Some(finish_read),
+                finished: Some(finished),
+            },
+            NonZeroUsize::new(1).expect("one slot"),
+        );
+        let exit = tokio::time::timeout(
+            Duration::from_secs(1),
+            scheduler.run_until(async {
+                completion.await.expect("both passes finish");
+            }),
+        )
+        .await
+        .expect("store I/O cannot retain the only slot");
+        assert_eq!(exit, SchedulerLoopExit::Shutdown);
     }
 
     /// One deployment-configured admission cap, standing in for a live bound.

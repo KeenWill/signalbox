@@ -6,11 +6,12 @@
 //! method holds a database transaction across provider work.
 
 mod continuation;
-mod credential_pool;
+pub(crate) mod credential_pool;
 #[path = "credential_pool_evidence.rs"]
 mod credential_pool_evidence;
 #[path = "credential_pool_records.rs"]
 mod credential_pool_records;
+pub(crate) mod credential_wait;
 mod delegated_result;
 mod delegation_lock;
 mod live_turn;
@@ -26,7 +27,6 @@ mod reread;
 mod transaction_impls;
 
 pub(crate) use credential_pool::acquire_model_call_outbox_order_guard;
-pub(crate) use credential_pool::prepared_serving_evidence;
 pub(crate) use delegation_lock::lock_delegated_child_endpoint_sessions;
 pub(crate) use delegation_lock::lock_delegated_turn_terminal_frontier;
 pub(crate) use live_turn::load_call_snapshot;
@@ -38,8 +38,6 @@ pub(crate) use persist_terminal::persist_automatic_reconciliation;
 pub(crate) use persist_terminal::persist_stop_requested;
 pub(crate) use persist_terminal::persist_terminal_outcome;
 pub(crate) use persist_terminal::persist_tool_reconciliation_required;
-
-pub(crate) use prepared::insert_prepared_call;
 
 pub(crate) use persist_disposition::SnapshotAppend;
 pub(crate) use persist_disposition::SnapshotAppendError;
@@ -160,6 +158,9 @@ pub struct ProspectiveModelCall {
 /// visible and are not part of the next request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProspectiveModelInput<'a> {
+    /// Projected entries measured through the effective adapter's serializer,
+    /// including entries that an activation preview has not committed.
+    Rendered(&'a std::collections::BTreeMap<SemanticTranscriptEntryRef, u64>),
     /// One committed frontier, projected from its durable membership.
     Committed(ContextFrontierId),
     /// One uncommitted activation preview.
@@ -615,6 +616,7 @@ pub(crate) struct ModelCallOutboxOrderGuard {
 }
 
 pub(crate) enum CountedActivationCheckpointOutcome {
+    CredentialWait,
     Prepared,
     PoolExhausted(CredentialPoolRuntimePolicy),
 }
@@ -996,6 +998,29 @@ where
 
 #[cfg(test)]
 mod tests;
+
+/// Serializes colliding frontier candidates before their writers take the
+/// global credential/outbox guard.
+pub(crate) async fn reserve_frontier_write_identities(
+    connection: &mut PgConnection,
+    identities: impl IntoIterator<Item = Uuid>,
+) -> Result<(), ModelCallRepositoryError> {
+    let identities = identities.into_iter().collect::<Vec<_>>();
+    if identities.is_empty() {
+        return Ok(());
+    }
+    let keys: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT hashtextextended('model_call_frontier_write:' || identity::text, 0) AS lock_key
+           FROM unnest($1::uuid[]) AS identity ORDER BY lock_key",
+    ).bind(&identities).fetch_all(&mut *connection).await?;
+    for key in keys {
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(key)
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod prospective_content_tests {

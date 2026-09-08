@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-const FRAME_CONTRACT_VERSION: i64 = 1;
+pub(crate) const FRAME_CONTRACT_VERSION: i64 = 1;
 
 const LOAD_JOURNAL: &str = r#"SELECT entry.journal_position, entry.frame_direction,
        entry.frame_kind, entry.request_ordinal, entry.delivery_ordinal,
@@ -125,6 +125,11 @@ pub struct ProgramJournalRepository {
 impl ProgramJournalRepository {
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Registration storage sharing this journal's database.
+    pub fn registrations(&self) -> crate::program_registration::ProgramRegistrationRepository {
+        crate::program_registration::ProgramRegistrationRepository::new(self.pool.clone())
     }
 
     /// Creates the journal anchor for one new run under frame contract v1.
@@ -1001,4 +1006,39 @@ fn scope_ordinal(
             .map_err(|_| ProgramJournalCorruption::InvalidOrdinal(field))?,
     )
     .ok_or(ProgramJournalCorruption::InvalidOrdinal(field))
+}
+
+pub use signalbox_application::program_session::{ProgramSessionCapability, ProgramSessionHost};
+
+/// Failure while resolving registration authority for session capability issuance.
+#[derive(Debug, signalbox_derive::OperatorError)]
+pub enum ProgramSessionCapabilityError {
+    #[error(transparent)]
+    Journal(#[source] ProgramJournalRepositoryError),
+    #[error(transparent)]
+    Registration(#[source] crate::program_registration::ProgramRegistrationError),
+}
+
+impl signalbox_application::program_session::ProgramRunVerifier for ProgramJournalRepository {
+    type Error = ProgramSessionCapabilityError;
+
+    async fn verify_run(&self, run: signalbox_domain::ProgramRunId) -> Result<bool, Self::Error> {
+        let Some(registration) = self
+            .registrations()
+            .for_run(run)
+            .await
+            .map_err(ProgramSessionCapabilityError::Registration)?
+        else {
+            return Ok(false);
+        };
+        Ok(registration
+            .content
+            .grants
+            .contains(signalbox_domain::ProgramCapability::Session)
+            && self
+                .load(run)
+                .await
+                .map_err(ProgramSessionCapabilityError::Journal)?
+                .is_some())
+    }
 }

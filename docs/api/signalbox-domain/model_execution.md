@@ -119,6 +119,10 @@ impl ModelCallExecutionReconstitutionError {
 pub struct ModelCallExecution {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ModelCallExecution {
+    pub const fn admission_snapshot(&self) -> &ResolvedContextFrontierSnapshot;
+    pub fn yield_to_credential_availability(
+        &self,
+    ) -> result::Result<EndedTurnAttempt, ModelCallClosureError>;
     pub const fn active_turn(&self) -> &ActivatedTurn;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
@@ -773,6 +777,11 @@ pub enum ModelCallTerminalIdentities {
     Ambiguous(AmbiguousModelCallTurnIdentities),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallTerminalIdentities {
+    pub fn frontier_identity_candidates(
+        &self,
+    ) -> (vec::Vec<SemanticTranscriptEntryId>, ContextFrontierId);
+}
 ```
 
 ## ModelCallTerminalOutcome
@@ -875,6 +884,7 @@ impl ToolRoundModelCallTurn {
 pub struct AvailabilitySuccessorModelCallTurn {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl AvailabilitySuccessorModelCallTurn {
+    pub const fn non_acceptance_proven(&self) -> bool;
     pub const fn session(&self) -> SessionId;
     pub const fn turn(&self) -> TurnId;
     pub const fn predecessor_call(&self) -> &EndedModelCall;

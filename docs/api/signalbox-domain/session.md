@@ -8,6 +8,7 @@
 pub enum SessionCreationCause {
     Interactive,
     ModuleDispatched { dispatch: ModuleDispatch },
+    Workflow { run: ProgramActor },
     Delegated { spawning_request: ToolRequestId },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
@@ -58,6 +59,7 @@ pub struct SessionCreationProvenance {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl SessionCreationProvenance {
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self;
+    pub const fn workflow(capability: program_session::ProgramSessionCapability) -> Self;
     pub const fn delegated(spawning_request: ToolRequestId) -> Self;
     pub const fn module_dispatched(dispatch: ModuleDispatch) -> Self;
     pub const fn cause(&self) -> SessionCreationCause;
@@ -302,6 +304,7 @@ pub enum SessionReconstitutionFailure {
     DelegatedAncestryMismatch,
     DelegatedTemplateProvenance,
     ModuleDispatchedAncestryMismatch,
+    WorkflowAncestryMismatch,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

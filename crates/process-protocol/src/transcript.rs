@@ -12,6 +12,16 @@ use crate::scalars::{
 use crate::user_input::UserInputContent;
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// Closed reason a call-free turn remains parked on credential admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialAvailabilityWaitCause {
+    /// Otherwise-admissible members have their invocation capacity reserved.
+    Contended,
+    /// Every pool member is excluded and at least one can become available again.
+    Exhausted,
+}
+
 /// Durable nonterminal model-call state carried by a transcript snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -192,6 +202,22 @@ impl<'de> Deserialize<'de> for FailedTerminalModelCall {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnState {
+    /// Credential wait release terminalized a call-free successor of a failed provider call.
+    FailedAfterCredentialWait {
+        /// Exact terminal frontier.
+        terminal_frontier_id: CanonicalUuid,
+        /// Fresh terminal attempt, which owns no call.
+        terminal_attempt_id: CanonicalUuid,
+        /// Known-failed predecessor and its provider cause.
+        predecessor_model_call: FailedTerminalModelCall,
+    },
+    /// The turn retains its slot while credential admission waits.
+    ActiveAwaitingCredentialAvailability {
+        /// Call-free ended attempt that owns the wait.
+        wait_attempt_id: CanonicalUuid,
+        /// Closed admission-wait cause.
+        cause: CredentialAvailabilityWaitCause,
+    },
     /// Accepted work has not activated.
     Queued {
         /// Accepted input that created the queued turn.
@@ -358,6 +384,15 @@ pub enum TurnState {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum RawTurnState {
+    FailedAfterCredentialWait {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        predecessor_model_call: FailedTerminalModelCall,
+    },
+    ActiveAwaitingCredentialAvailability {
+        wait_attempt_id: CanonicalUuid,
+        cause: CredentialAvailabilityWaitCause,
+    },
     Queued {
         accepted_input_id: CanonicalUuid,
         content: UserInputContent,
@@ -464,6 +499,38 @@ impl<'de> Deserialize<'de> for TurnState {
         DeserializerT: Deserializer<'de>,
     {
         let state = match RawTurnState::deserialize(deserializer)? {
+            RawTurnState::ActiveAwaitingCredentialAvailability {
+                wait_attempt_id,
+                cause,
+            } => Self::ActiveAwaitingCredentialAvailability {
+                wait_attempt_id,
+                cause,
+            },
+            RawTurnState::FailedAfterCredentialWait {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                predecessor_model_call,
+            } => {
+                if predecessor_model_call.disposition() != FailedModelCallDisposition::KnownFailed
+                    || matches!(
+                        predecessor_model_call.cause(),
+                        None | Some(
+                            FailedModelCallCause::AttachmentTooLarge
+                                | FailedModelCallCause::AttachmentMissing
+                                | FailedModelCallCause::AttachmentCorrupt
+                        )
+                    )
+                {
+                    return Err(serde::de::Error::custom(
+                        "credential wait release requires predecessor provider failure",
+                    ));
+                }
+                Self::FailedAfterCredentialWait {
+                    terminal_frontier_id,
+                    terminal_attempt_id,
+                    predecessor_model_call,
+                }
+            }
             RawTurnState::Queued {
                 accepted_input_id,
                 content,
@@ -963,6 +1030,8 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact provider-visible denial content.
         content: String,
+        /// Whether this denial already has its one permitted user override.
+        override_recorded: bool,
     },
     /// One logical tool request resolved before dispatch.
     ToolInadmissible {
@@ -977,6 +1046,8 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact provider-visible terminal-closure content.
         content: String,
+        /// Whether an approval was recorded before the request closed.
+        approved_before_close: bool,
     },
     /// Explicit completed-turn marker.
     TurnCompleted {
