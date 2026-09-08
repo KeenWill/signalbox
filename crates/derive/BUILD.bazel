@@ -47,6 +47,7 @@ rust_integration_test(
     env = {"SIGNALBOX_TEST_MANIFEST": "$(rootpath Cargo.toml)"},
     env_inherit = [
         "HOME",
+        "PATH",
         "CARGO_HOME",
         "RUSTUP_HOME",
     ],
