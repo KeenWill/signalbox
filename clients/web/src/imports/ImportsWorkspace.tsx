@@ -97,7 +97,10 @@ export function ImportsWorkspace({
   const [sourceSession, setSourceSession] = useState('')
   const [settledSourceSession, setSettledSourceSession] = useState(sourceSession)
   useEffect(() => {
-    const timer = window.setTimeout(() => setSettledSourceSession(sourceSession), 200)
+    const timer = window.setTimeout(() => {
+      setAfter(undefined)
+      setSettledSourceSession(sourceSession)
+    }, 200)
     return () => window.clearTimeout(timer)
   }, [sourceSession])
   const [sourceSessionFilterEnabled, setSourceSessionFilterEnabled] = useState(false)
