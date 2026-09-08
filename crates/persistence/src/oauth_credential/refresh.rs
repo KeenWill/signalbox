@@ -101,6 +101,10 @@ impl OauthDispatchLease {
             .as_ref()
             .ok_or(OauthCredentialRepositoryError::Corruption)?;
         let cause = stored.quarantine.unwrap_or(cause);
+        if cause == OauthQuarantineCause::CredentialHome {
+            sqlx::query("INSERT INTO credential_exclusion (kind, profile, origin, oauth_generation) VALUES ('profile_quarantine', $1, 'codex_home', $2)")
+                .bind(&self.profile).bind(stored.generation).execute(&mut *self.transaction).await?;
+        }
         sqlx::query("INSERT INTO oauth_credential_failure (profile, generation, cause) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
             .bind(&self.profile).bind(stored.generation).bind(cause.spelling()).execute(&mut *self.transaction).await?;
         sqlx::query("UPDATE oauth_credential_authorization SET quarantined = true, quarantine_cause = $2 WHERE profile = $1")
@@ -121,6 +125,10 @@ impl OauthCredentialRepository {
         profile: &str,
     ) -> Result<Option<OauthDispatchLease>, OauthCredentialRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query(crate::lock_inventory::HASHED_TRANSACTION_ADVISORY_LOCK)
+            .bind(format!("credential_pool_action_head:{profile}"))
+            .execute(&mut *transaction)
+            .await?;
         provisioning::read_catalog(&mut transaction).await?;
         let generation: Option<i64> = sqlx::query_scalar(
             "SELECT generation FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE",
@@ -131,7 +139,7 @@ impl OauthCredentialRepository {
         if generation.is_none() {
             return Ok(None);
         }
-        let row = sqlx::query("SELECT tuple::text, refresh_token, identity_token, account_identity::text, generation, refresh_in_progress, quarantine_cause FROM oauth_credential_authorization WHERE profile = $1")
+        let row = sqlx::query("SELECT tuple::text, refresh_token, identity_token, account_identity::text, generation, refresh_in_progress, CASE WHEN quarantine_cause = 'credential_home' AND credential_home_quarantine_cleared(profile, generation) THEN NULL ELSE quarantine_cause END AS quarantine_cause FROM oauth_credential_authorization WHERE profile = $1")
             .bind(profile).fetch_optional(&mut *transaction).await?;
         let stored = row
             .map(|row| {
@@ -186,7 +194,7 @@ pub(crate) async fn quarantined_profiles(
     if profiles.is_empty() {
         return Ok(Vec::new());
     }
-    sqlx::query_scalar("SELECT profile FROM oauth_credential_authorization WHERE quarantined AND profile = ANY($1)")
+    sqlx::query_scalar("SELECT profile FROM oauth_credential_authorization WHERE quarantined AND profile = ANY($1) AND (quarantine_cause <> 'credential_home' OR NOT credential_home_quarantine_cleared(profile, generation))")
         .bind(profiles)
         .fetch_all(connection)
         .await

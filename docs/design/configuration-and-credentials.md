@@ -179,20 +179,17 @@ generation's effective reset is the latest reset any attached correlation
 reported, and an observation reporting no reset makes the generation indefinite;
 indefinite is absorbing. Only an operator clear, an availability probe that
 costs nothing and calls no model, or another durable availability update ends an
-indefinite policy-origin generation. An operator clear removes a pending
-`switch_next_turn` displacement or an `avoid_new_sessions` exclusion exactly as
-it clears a quarantine; the request is owned by
-[process protocol](../spec/process-protocol.md). Each profile carries a durable
-action head, and every transaction that mints, activates, or clears an exclusion
-rereads the current generation under that head's `FOR UPDATE` lock. The first
-commit mints the generation; a later commit for an exclusion already active at
-the same scope and of the same origin records its correlation against that
-generation and mints no second one. Origin is part of the coalescing key because
-a policy-origin quarantine is clearable by operator command while a
-delivery-origin one requires re-provisioning or deletion, except a `codex_home`
-quarantine, which an operator clears once the store is repaired; a
-delivery-origin failure against a profile carrying an active policy-origin
-generation mints its own, and the two are cleared and reported separately.
+indefinite policy-origin generation. Each profile carries a durable action head,
+and every transaction that mints, activates, or clears an exclusion rereads the
+current generation under that head's `FOR UPDATE` lock. The first commit mints
+the generation; a later commit for an exclusion already active at the same scope
+and of the same origin records its correlation against that generation and mints
+no second one. Origin is part of the coalescing key because a policy-origin
+quarantine is clearable by operator command while a delivery-origin one requires
+re-provisioning or deletion, except a `codex_home` quarantine, which an operator
+clears once the store is repaired; a delivery-origin failure against a profile
+carrying an active policy-origin generation mints its own, and the two are
+cleared and reported separately.
 
 The session credential history event carries a complete family-to-pool-policy
 snapshot rather than a family-to-reference one. Each immutable policy includes

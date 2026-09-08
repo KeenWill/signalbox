@@ -22,7 +22,7 @@ use crate::scalars::{
     BlobChunk, CanonicalBlobDigest, CanonicalU64, CanonicalUuid, ContentFragment,
     FrameValidationError, MAX_BLOB_READ_BYTES, MAX_MODEL_CAPABILITY_CATALOG_ENTRIES,
     ModelCallDollarCost, ModelCallTokenUsage, SystemPromptMember, SystemPromptText,
-    UsageProvenance, deserialize_required_nullable,
+    UsageProvenance, deserialize_optional_non_null, deserialize_required_nullable,
 };
 use crate::session::{
     ConversationCursor, ConversationSummary, MetadataLastWriter, SessionMetadata, SessionPlacement,
@@ -43,6 +43,14 @@ use crate::transcript::{
 };
 use crate::user_input::UserInputContent;
 use serde::{Deserialize, Serialize};
+
+/// The selected stop scope and its immutable descendant disposition count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminationReceipt {
+    pub descendant_scope: crate::goal::DescendantTerminationScope,
+    pub descendant_count: CanonicalU64,
+}
 
 /// Closed terminal OAuth administration outcomes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -147,6 +155,27 @@ pub fn validate_oauth_authorization(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+    /// Immutable workspace registration receipt.
+    WorkspaceRegistered {
+        command_id: crate::CommandId,
+        workspace_id: CanonicalUuid,
+    },
+    /// Immutable configured Git remote receipt.
+    GitRemoteMinted {
+        command_id: crate::CommandId,
+        mint_id: CanonicalUuid,
+    },
+    /// Immutable Git remote withdrawal receipt.
+    GitRemoteWithdrawn {
+        command_id: crate::CommandId,
+        withdrawal_id: CanonicalUuid,
+    },
+    /// The stored result of one program cancellation command.
+    ProgramRunCancellationReceipt {
+        command_id: crate::CommandId,
+        run_id: CanonicalUuid,
+        outcome: crate::ProgramRunCancellationOutcome,
+    },
     /// The retained replacement configuration is installed.
     ConfigurationReloaded {
         /// Durable reload identity.
@@ -209,6 +238,23 @@ pub enum ServerMessage {
         profile: String,
         /// Closed terminal result.
         outcome: OauthCredentialOutcome,
+    },
+    /// Opens one exclusion-listing page.
+    CredentialExclusionStart {},
+    /// One exact active clearable exclusion target.
+    CredentialExclusion {
+        target: crate::CredentialExclusionTarget,
+    },
+    /// Closes a page, retaining its exclusive continuation cursor.
+    CredentialExclusionEnd {
+        exclusion_count: CanonicalU64,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        next_after: Option<crate::CredentialExclusionTarget>,
+    },
+    /// An exact exclusion clear committed or equally replayed.
+    CredentialExclusionCleared {
+        target: crate::CredentialExclusionTarget,
+        outcome: crate::CredentialExclusionClearOutcome,
     },
     /// Session creation receipt.
     SessionCreated {
@@ -288,6 +334,13 @@ pub enum ServerMessage {
     },
     /// Input acceptance receipt.
     InputSubmitted {
+        /// Present exactly for a stop-turn acceptance.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,
         /// Accepted input.
@@ -312,6 +365,13 @@ pub enum ServerMessage {
     },
     /// A durable user goal command appended one event.
     GoalTransitionApplied {
+        /// Present exactly for a stop-goal transition.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,
         /// Appended event position.
@@ -878,6 +938,19 @@ pub enum ServerMessage {
 
 impl ServerMessage {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::InputSubmitted {
+            termination: Some(receipt),
+            ..
+        }
+        | Self::GoalTransitionApplied {
+            termination: Some(receipt),
+            ..
+        } = self
+            && receipt.descendant_scope == crate::goal::DescendantTerminationScope::ParentAlone
+            && receipt.descendant_count.value() != 0
+        {
+            return Err(FrameValidationError::DelegationShape);
+        }
         validate_operator_status_message(self)?;
         match self {
             Self::OauthCredentialAuthorization {
@@ -890,6 +963,21 @@ impl ServerMessage {
                 validate_oauth_authorization(user_code, verification_uri)?;
             }
             Self::OauthCredentialReceipt { profile, .. } => validate_oauth_profile(profile)?,
+            Self::CredentialExclusion { target }
+            | Self::CredentialExclusionCleared { target, .. } => target.validate()?,
+            Self::CredentialExclusionEnd {
+                exclusion_count,
+                next_after,
+            } => {
+                if exclusion_count.value() > 100
+                    || (exclusion_count.value() == 0 && next_after.is_some())
+                {
+                    return Err(FrameValidationError::CredentialExclusionShape);
+                }
+                if let Some(target) = next_after {
+                    target.validate()?;
+                }
+            }
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
             Self::SessionAwaitRegistered {
                 mode: DelegationWaitMode::Foreground,

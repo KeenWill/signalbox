@@ -5,6 +5,7 @@
 
 mod command_registry;
 mod conversation_import_codec;
+mod creation_runner_placement;
 mod lock_inventory;
 mod model_settings_resolution;
 mod user_content;
@@ -17,6 +18,7 @@ pub mod blob;
 pub mod blob_derivation;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
+pub mod context_compaction_continuation;
 pub mod convergence_sweep;
 pub mod conversation_import;
 pub mod conversation_import_discovery;
@@ -24,6 +26,7 @@ pub mod conversation_listing;
 pub mod create_session;
 pub mod create_session_from_imported_frontier;
 pub mod credential_capacity;
+pub mod credential_exclusions;
 pub mod goal;
 pub mod goal_turn;
 pub mod hub_fence;
@@ -35,6 +38,7 @@ pub mod operator_status;
 pub mod outbox;
 pub mod plan;
 pub mod process_read;
+pub mod program_cancellation;
 pub mod program_journal;
 pub mod replace_session_defaults;
 pub mod repo_watch_command;
@@ -57,11 +61,13 @@ pub mod session_timeline;
 pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;
+pub mod termination_receipt;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 pub mod tool_loop;
 pub mod turn_liveness;
 pub mod usage;
+pub mod workspace;
 pub mod workspace_instructions;
 
 pub use session_credentials::{

@@ -144,7 +144,17 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::RunnerAbandonmentReceipt { .. }
         | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
-        | ServerMessage::OauthCredentialReceipt { .. } => ConversationImportResponse::Unexpected,
+        | ServerMessage::WorkspaceRegistered { .. }
+        | ServerMessage::GitRemoteMinted { .. }
+        | ServerMessage::GitRemoteWithdrawn { .. }
+        | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::ProgramRunCancellationReceipt { .. }
+        | ServerMessage::CredentialExclusionStart {}
+        | ServerMessage::CredentialExclusion { .. }
+        | ServerMessage::CredentialExclusionEnd { .. }
+        | ServerMessage::CredentialExclusionCleared { .. } => {
+            ConversationImportResponse::Unexpected
+        }
     }
 }
 

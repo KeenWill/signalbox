@@ -70,6 +70,22 @@ impl SubmitInput {
         }
     }
 
+    /// Constructs a daemon-core successor after a terminal continuation needs compaction.
+    pub const fn new_core_continuation(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        configuration: PerInputConfigurationChoices,
+    ) -> Self {
+        Self {
+            command_id,
+            session,
+            actor: Actor::Core,
+            content,
+            delivery: DeliveryRequest::StartWhenNoActiveTurn { configuration },
+        }
+    }
+
     /// Constructs a daemon-core interrupt without model, tool, or user agency.
     pub const fn new_core_interrupt(
         command_id: DurableCommandId,

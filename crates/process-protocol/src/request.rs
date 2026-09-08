@@ -38,6 +38,25 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Register a directory resolved by the daemon operator boundary.
+    RegisterWorkspace { command_id: CommandId, root: String },
+    /// Mint an HTTPS Git remote for a registered workspace.
+    MintGitRemote {
+        command_id: CommandId,
+        workspace_id: CanonicalUuid,
+        name: String,
+        url: String,
+    },
+    /// Withdraw exactly one Git remote mint.
+    WithdrawGitRemote {
+        command_id: CommandId,
+        mint_id: CanonicalUuid,
+    },
+    /// Cancel a retained program run through its journal.
+    CancelProgramRun {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+    },
     /// Re-read and atomically install the reloadable configuration sections.
     ReloadConfiguration {
         /// User-global durable mutation identity.
@@ -87,6 +106,17 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Credential profile identity, including a retired declaration.
         profile: String,
+    },
+    /// List active clearable exclusions in canonical target order.
+    ListCredentialExclusions {
+        page_size: u32,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        after: Option<crate::CredentialExclusionTarget>,
+    },
+    /// Clear one exact retained exclusion generation.
+    ClearCredentialExclusion {
+        command_id: CommandId,
+        target: crate::CredentialExclusionTarget,
     },
     /// Create a user-initiated session.
     CreateSession {
@@ -721,6 +751,15 @@ impl ClientRequest {
             | Self::DeleteOauthCredential { profile, .. } => {
                 crate::response::validate_oauth_profile(profile)?;
             }
+            Self::ListCredentialExclusions { page_size, after } => {
+                if !(1..=100).contains(page_size) {
+                    return Err(FrameValidationError::CredentialExclusionShape);
+                }
+                if let Some(target) = after {
+                    target.validate()?;
+                }
+            }
+            Self::ClearCredentialExclusion { target, .. } => target.validate()?,
             Self::AttachGoal { statement, .. }
             | Self::SupersedeGoal { statement, .. }
             | Self::CommissionSession { statement, .. } => {
@@ -756,6 +795,9 @@ impl ClientRequest {
             | Self::ReadDeploymentLimits {}
             | Self::ListSessions {}
             | Self::ReadOperatorStatus {}
+            | Self::RegisterWorkspace { .. }
+            | Self::MintGitRemote { .. }
+            | Self::WithdrawGitRemote { .. }
             | Self::ReloadConfiguration { .. }
             | Self::UpdateSessionPlacement { .. }
             | Self::ReadGoal { .. }
@@ -827,6 +869,7 @@ impl ClientRequest {
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
             | Self::DecideToolRequest { .. }
+            | Self::CancelProgramRun { .. }
             | Self::OverrideDeniedToolRequest { .. } => {}
         }
         match self {

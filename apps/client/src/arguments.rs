@@ -53,12 +53,14 @@ pub(crate) enum SendDeliveryArgument {
 
 #[derive(Debug)]
 pub(crate) enum Command {
+    Workspace(WorkspaceCommand),
     ReloadConfiguration {
         command_id: Option<CommandId>,
     },
     Runner(RunnerCommand),
 
     Credential(CredentialCommand),
+    Program(ProgramCommand),
     Create {
         selection: Option<ModelSelection>,
         template: Option<String>,
@@ -421,7 +423,7 @@ struct CredentialArguments {
     command: CredentialCommand,
 }
 
-/// Operator-invoked OAuth administration.
+/// Operator credential administration.
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialCommand {
     /// Begin device authorization for a credential profile.
@@ -430,6 +432,20 @@ pub(crate) enum CredentialCommand {
     Reprovision(CredentialTarget),
     /// Delete the profile's retained OAuth authorization.
     Delete(CredentialTarget),
+    /// List one page of active clearable exclusion targets.
+    Exclusions {
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
+        page_size: u32,
+        #[arg(long, value_parser = parse_exclusion_target)]
+        after: Option<signalbox_process_protocol::CredentialExclusionTarget>,
+    },
+    /// Clear one exact target returned by credential exclusions.
+    Clear {
+        #[arg(value_parser = parse_exclusion_target)]
+        target: signalbox_process_protocol::CredentialExclusionTarget,
+        #[arg(long, value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
 }
 
 #[derive(Debug, ClapArgs)]
@@ -442,8 +458,37 @@ pub(crate) struct CredentialTarget {
     pub(crate) command_id: Option<CommandId>,
 }
 
+fn parse_exclusion_target(
+    text: &str,
+) -> Result<signalbox_process_protocol::CredentialExclusionTarget, String> {
+    serde_json::from_str(text).map_err(|error| error.to_string())
+}
+
+#[derive(Debug, ClapArgs)]
+struct ProgramArguments {
+    #[command(subcommand)]
+    command: ProgramCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProgramCommand {
+    /// Cancel a retained program run.
+    Cancel {
+        #[arg(value_name = "RUN_ID", value_parser = canonical_uuid)]
+        run_id: CanonicalUuid,
+        #[arg(long, value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Register workspaces and administer their Git remote destinations.
+    Workspace(WorkspaceArguments),
+
+    /// Operate retained program runs.
+    Program(ProgramArguments),
+
     /// Re-read and validate the daemon configuration and reload its catalogs.
     ReloadConfiguration {
         /// Reuse an exact non-reserved durable command identity.
@@ -453,7 +498,7 @@ enum CliCommand {
     /// Recover a lost runner placement or promote its pending successor.
     Runner(RunnerArguments),
 
-    /// Provision, replace, or delete an OAuth credential.
+    /// Administer OAuth credentials and retained exclusions.
     Credential(CredentialArguments),
     /// Create a session.
     Create(CreateArguments),
@@ -1894,6 +1939,7 @@ pub(crate) fn parse(
         Err(error) => return Err(UsageError(error)),
     };
     let command = match parsed.command {
+        CliCommand::Workspace(arguments) => Command::Workspace(arguments.command),
         CliCommand::Runner(arguments) => Command::Runner(arguments.command),
         CliCommand::Create(arguments) => Command::Create {
             selection: match (arguments.model, arguments.alias) {
@@ -1994,6 +2040,7 @@ pub(crate) fn parse(
                 content: delegation_text_argument(arguments.content, arguments.content_file)?,
             },
         }),
+        CliCommand::Program(arguments) => Command::Program(arguments.command),
         CliCommand::Credential(arguments) => Command::Credential(arguments.command),
         CliCommand::Goal(arguments) => Command::Goal(match arguments.command {
             GoalSubcommand::Attach(arguments) => GoalCommand::Attach {
@@ -4783,4 +4830,44 @@ mod tests {
         assert!(help.contains("Usage: signalbox"));
         assert!(help.contains("Commands:"));
     }
+}
+
+#[derive(Debug, ClapArgs)]
+struct WorkspaceArguments {
+    #[command(subcommand)]
+    command: WorkspaceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum WorkspaceCommand {
+    /// Register a directory after the daemon resolves its canonical root.
+    Register {
+        /// Directory path in the daemon filesystem.
+        root: String,
+        /// Durable identity; omission generates and prints one for retry.
+        #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
+    /// Mint an HTTPS destination under one registered workspace.
+    MintRemote {
+        /// Workspace that owns the destination.
+        #[arg(value_parser = canonical_uuid)]
+        workspace: CanonicalUuid,
+        /// Remote name, at most 255 ASCII bytes.
+        name: String,
+        /// HTTPS destination, at most 4096 ASCII bytes.
+        url: String,
+        /// Durable identity; omission generates and prints one for retry.
+        #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
+    /// Withdraw exactly one destination and release its remote name.
+    WithdrawRemote {
+        /// Mint to withdraw.
+        #[arg(value_parser = canonical_uuid)]
+        mint: CanonicalUuid,
+        /// Durable identity; omission generates and prints one for retry.
+        #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
 }

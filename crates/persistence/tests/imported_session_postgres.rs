@@ -1168,3 +1168,85 @@ async fn current_load_rejects_cross_wired_seed_header_count() -> Result<(), Box<
     ));
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn imported_creation_runner_placement_is_retained_and_compared_on_replay()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        RunnerId, RunnerSandboxProfile, RunnerSelector, RunnerToolPermissionOverrides,
+        SessionRunnerPlacementRequest, WorkingDirectorySelection, WorkspaceRequirement,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(
+        Uuid::now_v7().as_u128(),
+        Uuid::now_v7().as_u128(),
+        "{\"type\":\"summary\",\"value\":null}",
+    );
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let repository = ImportedSessionRepository::new(pool, test_session_credential_pin());
+    let placement = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::Identity(RunnerId::from_uuid(Uuid::now_v7())),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: None,
+        workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: RunnerToolPermissionOverrides::try_new([])
+            .expect("empty permission inventory is admitted"),
+    };
+    for initial in [None, Some(placement.clone())] {
+        let command = imported_command(
+            Uuid::now_v7().as_u128(),
+            &conversation,
+            ImportedSessionRelationship::Resume,
+        )
+        .with_runner_placement(initial.clone());
+        let first = repository
+            .handle(
+                command.clone(),
+                SessionId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                || SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+            )
+            .await?;
+        let replay = repository
+            .handle(
+                command.clone(),
+                SessionId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                || panic!("equal replay must not append a semantic entry"),
+            )
+            .await?;
+        assert_eq!(first, replay);
+        let recorded = repository
+            .load(command.command_id())
+            .await?
+            .expect("imported creation receipt exists");
+        assert_eq!(recorded.command().runner_placement(), initial.as_ref());
+        let changed = command
+            .clone()
+            .with_runner_placement(Some(SessionRunnerPlacementRequest {
+                selector: RunnerSelector::Identity(RunnerId::from_uuid(Uuid::now_v7())),
+                ..placement.clone()
+            }));
+        let outcome = repository
+            .handle(
+                changed,
+                SessionId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                || panic!("conflicting replay must not append a semantic entry"),
+            )
+            .await?;
+        assert_eq!(
+            outcome,
+            CreateSessionFromImportedFrontierOutcome::ConflictingReuse {
+                command_id: command.command_id()
+            }
+        );
+    }
+    Ok(())
+}

@@ -35,11 +35,13 @@ is owned by [persistence-protocol](persistence-protocol.md).
 The scheduler is a loop of per-session authoritative passes. An in-process nudge
 after an accepted input whose applied result is a turn origin feeds it first,
 and a periodic sweep over the durable rows (`PostgresEligibilitySweep`) backs it
-up. The sweep finds four shapes: a queued turn with no active turn, an active
+up. The sweep finds five shapes: a queued turn with no active turn, an active
 turn holding a prepared model call, an active tool round, a terminal pursuing
-goal turn that still lacks its goal disposition. A pass activates a turn and
-then drives its model call through the execution ports owned by
-[model-call-execution](model-call-execution.md) and [tool-loop](tool-loop.md).
+goal turn that still lacks its goal disposition, and a terminal non-goal
+repository-watch headroom continuation with no later accepted turn whose session
+is not terminal. A pass activates a turn and then drives its model call through
+the execution ports owned by [model-call-execution](model-call-execution.md) and
+[tool-loop](tool-loop.md).
 
 Connection-loss propagation retains a post-commit eligibility hint when the
 nudge channel is full and retries when capacity becomes available.

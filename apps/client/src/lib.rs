@@ -60,6 +60,7 @@ mod error;
 mod presentation;
 mod runner;
 mod transcript;
+mod workspace;
 
 const MAX_INPUT_CONTENT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 const MAX_SYSTEM_PROMPT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
@@ -79,7 +80,9 @@ use conversation_import::{
     PreparedImport, collect_import_paths, import_conversation_file, imported, open_import_source,
     read_imported_conversation, scan_conversations, write_single_import_outcome,
 };
+mod credential_exclusions;
 mod delegation;
+mod program;
 use delegation::session_delegation;
 #[cfg(test)]
 use delegation::{
@@ -283,11 +286,13 @@ async fn execute(
         | Command::BlobRead { .. }
         | Command::Create { .. }
         | Command::Place { .. }
+        | Command::Workspace(_)
         | Command::Runner(_)
         | Command::Continue { .. }
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Program(_)
         | Command::Credential(_)
         | Command::Imported { .. }
         | Command::Status
@@ -312,11 +317,13 @@ async fn execute(
         Command::BlobUpload { source } => Some(open_blob_source(source)?),
         Command::Create { .. }
         | Command::Place { .. }
+        | Command::Workspace(_)
         | Command::Runner(_)
         | Command::Continue { .. }
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Program(_)
         | Command::Credential(_)
         | Command::Imported { .. }
         | Command::Status
@@ -351,10 +358,12 @@ async fn execute(
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
         | Command::Place { .. }
+        | Command::Workspace(_)
         | Command::Runner(_)
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Program(_)
         | Command::Credential(_)
         | Command::Status
         | Command::List
@@ -403,6 +412,7 @@ async fn execute(
     }
 
     match arguments.command {
+        Command::Workspace(command) => workspace::run(&mut client, &mut output, command).await,
         Command::Runner(command) => runner::run(&mut client, &mut output, command).await,
         Command::Create {
             selection,
@@ -482,6 +492,7 @@ async fn execute(
             imported_conversation_id,
         } => imported(&mut client, &mut output, imported_conversation_id).await,
         Command::Session(command) => session_delegation(&mut client, &mut output, command).await,
+        Command::Program(command) => program::execute(&mut client, &mut output, command).await,
         Command::Credential(command) => {
             credential::credential(&mut client, &mut output, command).await
         }

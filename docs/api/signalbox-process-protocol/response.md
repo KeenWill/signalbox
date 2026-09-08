@@ -2,6 +2,16 @@
 
 # response
 
+## TerminationReceipt
+
+```rust
+pub struct TerminationReceipt {
+    pub descendant_scope: DescendantTerminationScope,
+    pub descendant_count: CanonicalU64,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## OauthCredentialOutcome
 
 ```rust
@@ -50,6 +60,23 @@ pub fn validate_oauth_authorization(
 
 ```rust
 pub enum ServerMessage {
+    WorkspaceRegistered {
+        command_id: CommandId,
+        workspace_id: CanonicalUuid,
+    },
+    GitRemoteMinted {
+        command_id: CommandId,
+        mint_id: CanonicalUuid,
+    },
+    GitRemoteWithdrawn {
+        command_id: CommandId,
+        withdrawal_id: CanonicalUuid,
+    },
+    ProgramRunCancellationReceipt {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+        outcome: ProgramRunCancellationOutcome,
+    },
     ConfigurationReloaded {
         command_id: CommandId,
         reloaded_sections: vec::Vec<ReloadedSection>,
@@ -84,6 +111,18 @@ pub enum ServerMessage {
         command_id: CommandId,
         profile: string::String,
         outcome: OauthCredentialOutcome,
+    },
+    CredentialExclusionStart {},
+    CredentialExclusion {
+        target: CredentialExclusionTarget,
+    },
+    CredentialExclusionEnd {
+        exclusion_count: CanonicalU64,
+        next_after: option::Option<CredentialExclusionTarget>,
+    },
+    CredentialExclusionCleared {
+        target: CredentialExclusionTarget,
+        outcome: CredentialExclusionClearOutcome,
     },
     SessionCreated {
         session_id: CanonicalUuid,
@@ -129,6 +168,7 @@ pub enum ServerMessage {
         placement: SessionPlacement,
     },
     InputSubmitted {
+        termination: option::Option<TerminationReceipt>,
         session_id: CanonicalUuid,
         accepted_input_id: CanonicalUuid,
         acceptance_position: CanonicalU64,
@@ -142,6 +182,7 @@ pub enum ServerMessage {
         source_turn_id: CanonicalUuid,
     },
     GoalTransitionApplied {
+        termination: option::Option<TerminationReceipt>,
         session_id: CanonicalUuid,
         event_ordinal: CanonicalU64,
         generation: CanonicalU64,

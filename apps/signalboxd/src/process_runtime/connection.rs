@@ -494,6 +494,9 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::CreateSessionFromTemplate { .. }
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
+        | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::CancelProgramRun { .. }
+        | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
         | ClientRequest::ListSessions {}
         | ClientRequest::ReadOperatorStatus {}
@@ -563,6 +566,9 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::OverrideDeniedToolRequest { .. }
         | ClientRequest::ReplaceLostRunner { .. }
         | ClientRequest::AbandonLostRunner { .. }
+        | ClientRequest::RegisterWorkspace { .. }
+        | ClientRequest::MintGitRemote { .. }
+        | ClientRequest::WithdrawGitRemote { .. }
         | ClientRequest::PromotePendingRunner { .. }
         | ClientRequest::ProvisionOauthCredential { .. }
         | ClientRequest::ReprovisionOauthCredential { .. }
@@ -715,9 +721,12 @@ impl SnapshotReaderAdmission {
             | ClientRequest::CreateSessionFromTemplate { .. }
             | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
-            | ClientRequest::ReadDeploymentLimits {}
-            | ClientRequest::ReloadConfiguration { .. }
-        | ClientRequest::UpdateSessionPlacement { .. }
+            | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::CancelProgramRun { .. }
+        | ClientRequest::ClearCredentialExclusion { .. }
+        | ClientRequest::ReloadConfiguration { .. }
+        | ClientRequest::ReadDeploymentLimits {}
+            | ClientRequest::UpdateSessionPlacement { .. }
             | ClientRequest::AttachGoal { .. }
             | ClientRequest::ResumeGoal { .. }
             | ClientRequest::StopGoal { .. }
@@ -773,7 +782,10 @@ impl SnapshotReaderAdmission {
             | ClientRequest::OverrideDeniedToolRequest { .. }
             | ClientRequest::ReplaceLostRunner { .. }
             | ClientRequest::AbandonLostRunner { .. }
-            | ClientRequest::PromotePendingRunner { .. }
+            | ClientRequest::RegisterWorkspace { .. }
+        | ClientRequest::MintGitRemote { .. }
+        | ClientRequest::WithdrawGitRemote { .. }
+        | ClientRequest::PromotePendingRunner { .. }
             | ClientRequest::ProvisionOauthCredential { .. }
         | ClientRequest::ReprovisionOauthCredential { .. }
         | ClientRequest::DeleteOauthCredential { .. } => Self::NotRequired,

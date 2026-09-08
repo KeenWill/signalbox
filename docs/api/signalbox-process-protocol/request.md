@@ -6,6 +6,24 @@
 
 ```rust
 pub enum ClientRequest {
+    RegisterWorkspace {
+        command_id: CommandId,
+        root: string::String,
+    },
+    MintGitRemote {
+        command_id: CommandId,
+        workspace_id: CanonicalUuid,
+        name: string::String,
+        url: string::String,
+    },
+    WithdrawGitRemote {
+        command_id: CommandId,
+        mint_id: CanonicalUuid,
+    },
+    CancelProgramRun {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+    },
     ReloadConfiguration {
         command_id: CommandId,
     },
@@ -33,6 +51,14 @@ pub enum ClientRequest {
     DeleteOauthCredential {
         command_id: CommandId,
         profile: string::String,
+    },
+    ListCredentialExclusions {
+        page_size: u32,
+        after: option::Option<CredentialExclusionTarget>,
+    },
+    ClearCredentialExclusion {
+        command_id: CommandId,
+        target: CredentialExclusionTarget,
     },
     CreateSession {
         command_id: CommandId,

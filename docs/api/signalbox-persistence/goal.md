@@ -43,6 +43,20 @@ pub enum GoalTransitionOutcome {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
+## GoalRecoveryProgress
+
+```rust
+#[cfg(feature = "test-support")]
+pub struct GoalRecoveryProgress {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+#[cfg(feature = "test-support")]
+impl goal::GoalRecoveryProgress {
+    pub const fn resumptions(self) -> i64;
+    pub const fn execution_failure_blocks(self) -> i64;
+    pub const fn turns(self) -> i64;
+}
+```
+
 ## PendingGoalExecutionFailure
 
 ```rust
@@ -162,6 +176,11 @@ impl goal::GoalRepository {
         &self,
         session: signalbox_domain::SessionId,
     ) -> result::Result<option::Option<signalbox_domain::Goal>, goal::GoalRepositoryError>;
+    #[cfg(feature = "test-support")]
+    pub async fn recovery_progress(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<goal::GoalRecoveryProgress, goal::GoalRepositoryError>;
     pub async fn session_owned(
         &self,
         session: signalbox_domain::SessionId,
@@ -235,5 +254,21 @@ impl goal::GoalRepository {
         unmonitored_need: signalbox_domain::GoalNeed,
         provenance: signalbox_domain::GoalSchedulerProvenance,
     ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
+}
+impl goal::GoalRepository {
+    pub async fn continue_after_context_exhaustion<SelectDefinition>(
+        &self,
+        session: signalbox_domain::SessionId,
+        predecessor: signalbox_domain::TurnId,
+        candidates: goal_turn::GoalTurnCandidates,
+        content: &str,
+        select_definition: SelectDefinition,
+    ) -> result::Result<goal_turn::GoalTurnContinuationOutcome, goal::GoalRepositoryError>
+    where
+        SelectDefinition: function::FnOnce(
+            signalbox_domain::ModelAlias,
+        ) -> option::Option<
+            signalbox_domain::FrozenAliasDefinition,
+        >;
 }
 ```
