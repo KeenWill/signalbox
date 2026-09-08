@@ -172,6 +172,21 @@ fn exact_api_snapshots_keep_their_recorded_rate_sets() {
 }
 
 #[test]
+fn launch_aliases_resolve_their_recorded_snapshot_rates() {
+    let catalog = bundled_catalog().unwrap();
+    for (alias, date, expected_rate) in [
+        ("gpt-4-turbo", "2023-11-06", "oai-gpt4-turbo-launch"),
+        ("gpt-4o", "2024-05-13", "oai-gpt4o-launch"),
+    ] {
+        assert_eq!(
+            api_model_rate_set_ids(&catalog, alias, date),
+            Some(vec![String::from(expected_rate)]),
+            "{alias} at {date}"
+        );
+    }
+}
+
+#[test]
 fn rolling_gpt4_alias_shares_its_launch_rate() {
     let catalog = bundled_catalog().unwrap();
 
