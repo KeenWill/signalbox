@@ -216,11 +216,23 @@ pub async fn verify_pinned_codex_cli_version(
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
+    #[cfg(unix)]
+    let exits = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())
+        .map_err(|_| CodexCliVersionProbeError::OutputFailed)?;
     let mut child = command
         .spawn()
         .map_err(|_| CodexCliVersionProbeError::SpawnFailed)?;
-    let mut process_group = VersionProbeProcessGroup(child.id());
-    let output = match tokio::time::timeout_at(deadline, collect_version_output(&mut child)).await {
+    let mut process_group = VersionProbeProcessGroup {
+        id: child.id(),
+        #[cfg(unix)]
+        exits,
+    };
+    let output = match tokio::time::timeout_at(
+        deadline,
+        collect_version_output(&mut child, &mut process_group),
+    )
+    .await
+    {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             process_group.kill();
@@ -257,15 +269,72 @@ pub async fn verify_pinned_codex_cli_version(
         deadline,
     )
     .await?;
-    process_group.0 = None;
     Ok(())
 }
 
-struct VersionProbeProcessGroup(Option<u32>);
+struct VersionProbeProcessGroup {
+    id: Option<u32>,
+    #[cfg(unix)]
+    exits: tokio::signal::unix::Signal,
+}
 
 impl VersionProbeProcessGroup {
+    async fn wait_for_exit(&mut self) -> Result<(), CodexCliVersionProbeError> {
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "cygwin",
+                target_os = "horizon",
+                target_os = "openbsd",
+                target_os = "redox",
+                target_os = "wasi",
+            ))
+        ))]
+        {
+            let pid = self
+                .id
+                .and_then(|raw| rustix::process::Pid::from_raw(raw as i32))
+                .ok_or(CodexCliVersionProbeError::OutputFailed)?;
+            loop {
+                match rustix::process::waitid(
+                    rustix::process::WaitId::Pid(pid),
+                    rustix::process::WaitIdOptions::EXITED
+                        | rustix::process::WaitIdOptions::NOWAIT
+                        | rustix::process::WaitIdOptions::NOHANG,
+                ) {
+                    Ok(Some(_)) => return Ok(()),
+                    Ok(None) => {
+                        self.exits
+                            .recv()
+                            .await
+                            .ok_or(CodexCliVersionProbeError::OutputFailed)?;
+                    }
+                    Err(rustix::io::Errno::INTR) => {}
+                    Err(_) => return Err(CodexCliVersionProbeError::OutputFailed),
+                }
+            }
+        }
+        #[cfg(all(
+            unix,
+            any(
+                target_os = "cygwin",
+                target_os = "horizon",
+                target_os = "openbsd",
+                target_os = "redox",
+                target_os = "wasi",
+            )
+        ))]
+        {
+            Err(CodexCliVersionProbeError::OutputFailed)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+
     fn kill(&mut self) {
-        kill_probe_process_group(self.0.take());
+        kill_probe_process_group(self.id.take());
     }
 }
 
@@ -277,6 +346,7 @@ impl Drop for VersionProbeProcessGroup {
 
 async fn collect_version_output(
     child: &mut tokio::process::Child,
+    process_group: &mut VersionProbeProcessGroup,
 ) -> Result<std::process::Output, CodexCliVersionProbeError> {
     use tokio::io::AsyncReadExt;
 
@@ -301,6 +371,9 @@ async fn collect_version_output(
     }
     bounded.truncate(filled);
     stdout.extend_from_slice(&bounded);
+    // Keep the exited leader unreaped until group cleanup relinquishes its ID.
+    process_group.wait_for_exit().await?;
+    process_group.kill();
     let status = child
         .wait()
         .await

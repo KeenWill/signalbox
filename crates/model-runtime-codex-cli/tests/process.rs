@@ -85,7 +85,7 @@ async fn version_probe_cleanup_uses_the_original_deadline() {
     let directory = tempfile::tempdir().expect("private version-probe fixture");
     let executable = version_probe_with_descendant(directory.path(), "wait");
     let group_record = directory.path().join("probe-group");
-    let readiness = tokio::spawn(wait_for_record(group_record.clone()));
+    let readiness = wall_clock_record_watcher(group_record.clone());
     let start = tokio::time::Instant::now();
     let probe = tokio::spawn(async move {
         verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await
@@ -5294,7 +5294,16 @@ fn linux_own_process_group_has_a_live_member() {
 /// operating-system child is still starting; only the readiness watchdog uses
 /// wall time, and completion of that barrier makes cancellation ready.
 fn cancel_after_wall_clock_record(path: std::path::PathBuf) -> CancellationSignal {
-    let watcher = tokio::task::spawn_blocking(move || {
+    let watcher = wall_clock_record_watcher(path);
+    CancellationSignal::when(async move {
+        watcher
+            .await
+            .expect("the wall-clock readiness barrier completes");
+    })
+}
+
+fn wall_clock_record_watcher(path: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
         let deadline = std::time::Instant::now() + OFFLINE_HARNESS_TIMEOUT;
         while std::fs::read_to_string(&path)
             .map(|content| content.lines().count())
@@ -5307,11 +5316,6 @@ fn cancel_after_wall_clock_record(path: std::path::PathBuf) -> CancellationSigna
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-    });
-    CancellationSignal::when(async move {
-        watcher
-            .await
-            .expect("the wall-clock readiness barrier completes");
     })
 }
 
