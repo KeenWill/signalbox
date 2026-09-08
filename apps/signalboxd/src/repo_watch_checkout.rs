@@ -383,13 +383,11 @@ pub(crate) fn remove(
     if !created {
         return Ok(());
     }
+    let identity = identity.ok_or(rustix::io::Errno::STALE)?;
     let name = path.file_name().ok_or(rustix::io::Errno::INVAL)?;
     let (name, directory) = match pin_removal_directory(&parent, name) {
         Ok(directory) => (name.to_owned(), directory),
         Err(rustix::io::Errno::NOENT) => {
-            let Some(identity) = identity else {
-                return Ok(());
-            };
             let Some(found) = find_renamed_directory(&parent, identity, dispatch)? else {
                 return Ok(());
             };
@@ -398,9 +396,7 @@ pub(crate) fn remove(
         Err(error) => return Err(error),
     };
     let stat = rustix::fs::fstat(&directory)?;
-    if identity
-        .is_some_and(|identity| (identity.device, identity.inode) != (stat.st_dev, stat.st_ino))
-    {
+    if (identity.device, identity.inode) != (stat.st_dev, stat.st_ino) {
         return Err(rustix::io::Errno::STALE);
     }
     if !marker_matches(&directory, dispatch)? {

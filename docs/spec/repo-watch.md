@@ -230,12 +230,11 @@ provisioning only when its identity matches the retained identity. Provisioning
 writes the dispatch id to `.git/signalbox-dispatch`. Directories not created by
 the dispatch are neither adopted nor removed. Removal verifies retained
 identities before changing permissions; both original and renamed paths require
-the matching dispatch marker before traversing contents. An identity mismatch
-leaves removal pending; an unrecorded identity permits removal at the retained
-location with its marker. If that pathname is absent, cleanup searches its
-direct siblings under the derived session parent for the retained device/inode
-and matching dispatch marker; without a matching marker it settles without
-deleting. The parent is retained. The removal migration settles existing
+the matching dispatch marker before traversing contents. A missing or mismatched
+identity leaves removal pending. If that pathname is absent, cleanup searches
+its direct siblings under the derived session parent for the retained
+device/inode and matching dispatch marker; without a matching marker it settles
+without deleting. The parent is retained. The removal migration settles existing
 provisioned rows without a retained location. Removal restores owner search
 permission before marker lookup, owner read permission on the marker, and owner
 directory permissions before traversal, and refuses mount crossings; it reports
