@@ -2227,9 +2227,17 @@ enum CompactionAttachmentFailure {
     CatalogUnavailable,
 }
 
-async fn compaction_attachment_failure_is_settled_before_authorization(
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct CompactionAttachmentState {
+    call_state: String,
+    disposition: Option<String>,
+    unsent: bool,
+    command_result: String,
+}
+
+async fn compaction_attachment_failure_state(
     failure: CompactionAttachmentFailure,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<CompactionAttachmentState, Box<dyn Error>> {
     let mut fixture = CommittedBlobReadFixture::start(b"compaction attachment").await?;
     let session_id = create_alias_session(&mut fixture.connection).await?;
     fixture
@@ -2302,14 +2310,7 @@ async fn compaction_attachment_failure_is_settled_before_authorization(
             .await?;
     }
     assert!(matches!(response.message(), ServerMessage::Error { .. }));
-    #[derive(Debug, PartialEq, sqlx::FromRow)]
-    struct Settlement {
-        call_state: String,
-        disposition: String,
-        unsent: bool,
-        command_result: String,
-    }
-    let state: Settlement = sqlx::query_as(
+    let state: CompactionAttachmentState = sqlx::query_as(
         "SELECT call.state_kind AS call_state, call.terminal_disposition_kind AS disposition,
                 call.in_flight_at IS NULL AS unsent, command.result_kind AS command_result
            FROM context_compaction_model_call AS call
@@ -2320,32 +2321,186 @@ async fn compaction_attachment_failure_is_settled_before_authorization(
     .bind(compaction_command.into_uuid())
     .fetch_one(&fixture.runtime.pool)
     .await?;
-    assert_eq!(
-        state,
-        Settlement {
-            call_state: String::from("terminal"),
-            disposition: String::from("known_failed"),
-            unsent: true,
-            command_result: String::from("failed"),
-        }
-    );
-    fixture.stop().await
+    fixture.stop().await?;
+    Ok(state)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn compaction_missing_attachment_never_authorizes() -> Result<(), Box<dyn Error>> {
-    compaction_attachment_failure_is_settled_before_authorization(
-        CompactionAttachmentFailure::MissingReplica,
-    )
-    .await
+    let state =
+        compaction_attachment_failure_state(CompactionAttachmentFailure::MissingReplica).await?;
+    assert_eq!(
+        state,
+        CompactionAttachmentState {
+            call_state: String::from("terminal"),
+            disposition: Some(String::from("known_failed")),
+            unsent: true,
+            command_result: String::from("failed"),
+        }
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn compaction_catalog_failure_closes_prepared_command() -> Result<(), Box<dyn Error>> {
-    compaction_attachment_failure_is_settled_before_authorization(
-        CompactionAttachmentFailure::CatalogUnavailable,
+async fn compaction_catalog_failure_retains_prepared_command() -> Result<(), Box<dyn Error>> {
+    let state =
+        compaction_attachment_failure_state(CompactionAttachmentFailure::CatalogUnavailable)
+            .await?;
+    assert_eq!(
+        state,
+        CompactionAttachmentState {
+            call_state: String::from("prepared"),
+            disposition: None,
+            unsent: true,
+            command_result: String::from("pending"),
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn unavailable_automatic_compaction_preserves_its_queued_turn() -> Result<(), Box<dyn Error>>
+{
+    let mut fixture = CommittedBlobReadFixture::start(b"compaction attachment").await?;
+    let session_id = create_alias_session(&mut fixture.connection).await?;
+    fixture
+        .connection
+        .request(
+            4,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::from_parts(vec![UserInputPart::Attachment {
+                    digest: fixture.wire_digest,
+                    kind: UserAttachmentKind::File,
+                    media_type: String::from("application/octet-stream"),
+                    display_filename: None,
+                }]),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let turn = accepted_successor_turn(&mut fixture.connection, session_id, 1).await?;
+    let configuration = support::parse_model_configuration(
+        &fixture
+            .runtime
+            .blob_storage_root
+            .as_ref()
+            .expect("blob fixture")
+            .model_configuration()
+            .replace("adapter = \"anthropic\"", "adapter = \"openai\""),
+    )?;
+    execute_recorded_turn(
+        &mut fixture.runtime,
+        RecordingCountedScriptedModel::following(
+            [completed_script(
+                "fixture-model",
+                "attachment received",
+                TokenUsage {
+                    input_tokens: Some(500000),
+                    output_tokens: Some(0),
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                },
+            )],
+            [],
+        ),
+        configuration.clone(),
+        session_id,
+        turn,
     )
-    .await
+    .await?;
+
+    fixture
+        .connection
+        .request(
+            6,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::text(String::from("continue after compaction")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut fixture.connection, session_id, 2).await?;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut registry = BlobStoreRegistry::initialize_for_conformance(
+        configuration.blob_storage(),
+        fixture.runtime.pool.clone(),
+    )
+    .await?
+    .expect("configured blob storage");
+    let (name, inner) = registry.routed_store(BlobStorageClass::UserAttachment);
+    let name = name.clone();
+    assert!(registry.replace_store_for_conformance(
+        &name,
+        Arc::new(TransientUnavailableBlobStore {
+            inner,
+            reads: Arc::clone(&reads),
+        })
+    ));
+    let runtime_models = configuration.runtime_model_catalog();
+    let summary_runtime = ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>());
+    let summary_probe = summary_runtime.clone();
+    let model = Arc::new(RuntimeContextCompactionModel::new(
+        summary_runtime,
+        runtime_models.clone(),
+    ));
+    let repository = PostgresModelCallRepository::new(
+        fixture.runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("unavailable-compaction-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog());
+    let compaction = ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(fixture.runtime.pool.clone()),
+        repository,
+        NoToolCatalog,
+        runtime_models,
+        configuration,
+        model,
+    )
+    .with_blob_store_registry(Some(Arc::new(registry)));
+
+    let outcome = compaction
+        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
+        .await;
+
+    assert!(
+        matches!(
+            outcome,
+            Err(ReportedUsageCompactionError::Compaction {
+                cause_code: "context_compaction_attachment_unavailable",
+                ..
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_eq!(summary_probe.received_operations().len(), 0);
+    let state: (String, Option<String>, bool, String) = sqlx::query_as(
+        "SELECT call.state_kind, call.terminal_disposition_kind, call.in_flight_at IS NULL,
+                turn.state_kind
+           FROM context_compaction_model_call AS call
+           JOIN compact_session_command AS command USING (session_id, model_call_id)
+           JOIN turn_lifecycle AS turn ON turn.session_id = command.session_id
+            AND turn.turn_id = command.automatic_for_turn_id
+          WHERE turn.turn_id = $1",
+    )
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&fixture.runtime.pool)
+    .await?;
+    assert_eq!(
+        state,
+        (String::from("prepared"), None, true, String::from("queued"))
+    );
+    fixture.stop().await
 }

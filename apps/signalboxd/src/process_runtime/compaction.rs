@@ -384,6 +384,7 @@ pub(crate) enum AutomaticContextCompactionError {
     Credential(ModelCallRepositoryError),
     Repository(ContextCompactionRepositoryError),
     Model,
+    AttachmentUnavailable,
     Configuration,
     InputDoesNotFit,
     State,
@@ -404,7 +405,9 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
         match self {
             Self::Credential(error) => error.operator_failure_class(),
             Self::Repository(error) => error.operator_failure_class(),
-            Self::Read(ProcessReadError::Database(_)) | Self::Model => {
+            Self::Read(ProcessReadError::Database(_))
+            | Self::Model
+            | Self::AttachmentUnavailable => {
                 signalbox_application::OperatorFailureClass::Infrastructure {
                     commit_ambiguous: false,
                 }
@@ -436,6 +439,7 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
                 "context_compaction_repository_corruption"
             }
             Self::Model => "context_compaction_model",
+            Self::AttachmentUnavailable => "context_compaction_attachment_unavailable",
             Self::Configuration => "context_compaction_configuration",
             Self::InputDoesNotFit => "context_compaction_input_does_not_fit",
             Self::State => "context_compaction_state",
@@ -471,7 +475,7 @@ pub(super) async fn automatic_context_compaction_boundary(
                 }
                 ContextCompactionRangeLoadError::CatalogUnavailable
                 | ContextCompactionRangeLoadError::AttachmentUnavailable => {
-                    AutomaticContextCompactionError::Model
+                    AutomaticContextCompactionError::AttachmentUnavailable
                 }
                 ContextCompactionRangeLoadError::Integrity => {
                     AutomaticContextCompactionError::Integrity
@@ -721,7 +725,7 @@ pub(crate) async fn compact_automatically(
             ContextCompactionRangeLoadError::CatalogUnavailable
             | ContextCompactionRangeLoadError::AttachmentUnavailable,
         ) => {
-            return Err(AutomaticContextCompactionError::Model);
+            return Err(AutomaticContextCompactionError::AttachmentUnavailable);
         }
         Err(ContextCompactionRangeLoadError::Integrity) => {
             fail_context_compaction_until_resolved(
@@ -1479,23 +1483,6 @@ where
     match error {
         ContextCompactionRangeLoadError::CatalogUnavailable
         | ContextCompactionRangeLoadError::AttachmentUnavailable => {
-            if let Err(repository_error) = fail_context_compaction_until_resolved(
-                repository,
-                prepared,
-                FailedContextCompactionDisposition::KnownFailed,
-            )
-            .await
-            {
-                return write_context_compaction_repository_error(
-                    writer,
-                    version,
-                    request_id,
-                    prepared.session(),
-                    recovery_reporter,
-                    repository_error,
-                )
-                .await;
-            }
             write_error(
                 writer,
                 version,

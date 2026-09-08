@@ -298,7 +298,10 @@ impl ReportedUsageCompaction {
             Err(error) => {
                 let failure_class = error.operator_failure_class();
                 let cause_code = error.operator_failure_cause_code();
-                if failure_class
+                if !matches!(
+                    error,
+                    crate::process_runtime::AutomaticContextCompactionError::AttachmentUnavailable
+                ) && failure_class
                     != (OperatorFailureClass::Infrastructure {
                         commit_ambiguous: true,
                     })
@@ -1094,8 +1097,8 @@ where
                             Err(error) => {
                                 let failure_class = error.operator_failure_class();
                                 let cause_code = error.operator_failure_cause_code();
-                                if failure_class
-                                    != (OperatorFailureClass::Infrastructure {
+                                if !matches!(error, crate::process_runtime::AutomaticContextCompactionError::AttachmentUnavailable)
+                                    && failure_class != (OperatorFailureClass::Infrastructure {
                                         commit_ambiguous: true,
                                     })
                                 {
