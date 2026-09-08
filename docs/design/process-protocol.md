@@ -7,16 +7,14 @@ owner has committed and the daemon and terminal client do not implement.
 ## Goal
 
 Future implementation of these surfaces under protocol version 1 must pair each
-daemon handler with its terminal-client consumer in the same change: the typed
-projection of the credential-availability wait.
+daemon handler with its terminal-client consumer in the same change: terminal
+failure after credential wait release.
 
 ## Design
 
-The credential-availability wait projects as an active turn state retaining the
-same turn and session slot. The after-call wait-transition failure projects the
-predecessor call identity alongside its call-free terminal attempt. The endings
-these shapes project belong to
-[credential-availability.md](../spec/credential-availability.md).
+The after-call wait-transition failure projects the predecessor call identity
+alongside its call-free terminal attempt. The endings these shapes project
+belong to [credential-availability.md](../spec/credential-availability.md).
 
 ## Compatibility constraints
 
@@ -45,9 +43,6 @@ until the daemon and client implement its surface together.
 No response code is reserved for an authorization failure, because client
 identity, authentication, authorization, and revocation are undecided.
 
-Admitting `park` in static configuration alone does not make the wait reachable;
-whatever first makes either wait reachable includes this projection.
-
 ## Acceptance criteria
 
 Every request and message above decodes under version 1 with unknown fields
@@ -55,5 +50,5 @@ rejected, and each surface ships with its daemon handler and the terminal-client
 consumer it lacks; a follower-visible addition also ships the native client's
 decoder and projection updates.
 
-The credential-availability wait projects as an active state that keeps its turn
-and session slot, and reconnect and live follow project the same typed cause.
+A terminal wait release correlates its call-free attempt with the predecessor
+call whose provider failure remains authoritative.

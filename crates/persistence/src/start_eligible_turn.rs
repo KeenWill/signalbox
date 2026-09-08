@@ -198,10 +198,11 @@ pub enum CommitCompactionFailurePreviewOutcome {
     Stale,
 }
 
-/// Outcome of atomically activating and closing the exact prospective call
-/// after definitive attachment failure during provider-native counting.
+/// Outcome of admitting a counted activation after definitive attachment failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommitCountedAttachmentFailurePreviewOutcome {
+    /// Credential admission parked the activated turn without preparing a call.
+    CredentialWait(TurnId),
     /// The exact preview activated and its Prepared call terminalized as failed.
     Failed(TurnId),
     /// Authoritative state changed after preview; the caller must restart the pass.
@@ -279,9 +280,8 @@ impl StartEligibleTurnRepository {
         )))
     }
 
-    /// Revalidates one counted preview and atomically commits both its
-    /// activation and exact no-steering Prepared initial call, or the pool
-    /// exhaustion closure when no member remains admissible.
+    /// Revalidates one counted preview and atomically commits its activation
+    /// with the prepared initial call, credential wait, or pool-exhaustion closure.
     pub async fn commit_counted_preview(
         &self,
         preview: PreparedActivationPreview,
@@ -365,7 +365,8 @@ impl StartEligibleTurnRepository {
             .await
             .map_err(CommitActivationPreviewError::ModelCall)?;
         let outcome = match checkpoint {
-            crate::model_execution::CountedActivationCheckpointOutcome::Prepared => {
+            crate::model_execution::CountedActivationCheckpointOutcome::Prepared
+            | crate::model_execution::CountedActivationCheckpointOutcome::CredentialWait => {
                 CommitActivationPreviewOutcome::Activated(Box::new(activated))
             }
             crate::model_execution::CountedActivationCheckpointOutcome::PoolExhausted(policy) => {
@@ -390,8 +391,8 @@ impl StartEligibleTurnRepository {
         Ok(outcome)
     }
 
-    /// Revalidates one counted preview and atomically commits its activation,
-    /// exact Prepared call, and definitive attachment-failure closure.
+    /// Revalidates counted activation and commits either its credential wait
+    /// or definitive attachment-failure closure.
     pub async fn commit_counted_attachment_failure_preview(
         &self,
         preview: PreparedActivationPreview,
@@ -467,7 +468,7 @@ impl StartEligibleTurnRepository {
             .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
         }
         let turn = activated.turn();
-        model_calls
+        let failed = model_calls
             .fail_counted_attachment_in_transaction(
                 &mut transaction,
                 &activated,
@@ -484,7 +485,11 @@ impl StartEligibleTurnRepository {
                 StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous),
             )
         })?;
-        Ok(CommitCountedAttachmentFailurePreviewOutcome::Failed(turn))
+        Ok(if failed.is_some() {
+            CommitCountedAttachmentFailurePreviewOutcome::Failed(turn)
+        } else {
+            CommitCountedAttachmentFailurePreviewOutcome::CredentialWait(turn)
+        })
     }
 
     /// Revalidates one preview and atomically closes it as a call-free failed
@@ -1362,7 +1367,8 @@ async fn insert_prepared_accepted_activation(
         | ActiveTurnPhase::AwaitingApproval { .. }
         | ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared initial active phase",
             ));
@@ -1574,7 +1580,8 @@ async fn insert_prepared_delegated_activation(
         | ActiveTurnPhase::AwaitingApproval { .. }
         | ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared delegated initial phase",
             ));

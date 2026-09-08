@@ -213,12 +213,12 @@ test('follows new active work after restoring an inactive session position', asy
     )
     .toBe('41')
   await page.reload()
-  await expect(page.getByText('Inactive · restored logical position')).toBeVisible()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Inactive$/ })).toBeVisible()
   expect(api.state.historyReads.at(-1)).toBe('around')
   api.state.active = true
   api.grow()
   await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
-  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   expect(api.state.historyReads).toEqual(['latest', 'around', 'after'])
 })
 
@@ -387,8 +387,8 @@ test('refuses new session input at the retained-command limit while allowing exa
   })
   await openSession(page)
   const open = async (id: string) => {
-    await page.getByRole('textbox', { name: 'Exact session ID' }).fill(id)
-    await page.getByRole('button', { name: 'Open workspace', exact: true }).click()
+    await page.getByRole('textbox', { name: 'Session ID' }).fill(id)
+    await page.getByRole('button', { name: 'Open', exact: true }).click()
   }
   for (const id of ids.slice(0, 4)) {
     await open(id)

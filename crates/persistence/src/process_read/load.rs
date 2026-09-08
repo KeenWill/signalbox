@@ -586,6 +586,10 @@ pub(super) async fn open_transcript_entry_cursor(
             result_attempt.error_kind AS result_error_kind,
             result_attempt.error_detail AS result_error_detail,
             transcript_approval.decision_kind AS transcript_decision_kind,
+            EXISTS (
+                SELECT 1 FROM tool_approval_user_override AS recorded
+                 WHERE recorded.denied_request_id = transcript_request.request_id
+            ) AS transcript_override_recorded,
             transcript_approval.decision_source AS transcript_decision_source,
             transcript_approval.denial_reason AS transcript_denial_reason,
             transcript_approval.user_command_id AS transcript_user_command_id,

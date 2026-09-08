@@ -100,6 +100,10 @@ the module boundary. No out-of-module matcher reads those tables.
 A malformed journal row is typed corruption under the fail-closed reconstitution
 contract in [persistence protocol](persistence-protocol.md).
 
+The host session capability verifies a retained run before fixing its input
+actor. The application submit boundary accepts that attribution without granting
+authority.
+
 ## Planned
 
 - Program registration under an identity of name, revision, and content digests;
@@ -118,10 +122,10 @@ contract in [persistence protocol](persistence-protocol.md).
 - Payload offload to SHA-256 blobs under the `program_journal` storage class;
   every payload is inline today ([design](../design/program-substrate.md)).
 - Session outcome frames carrying session, turn, and input identities and an
-  outcome digest; no session capability exists
+  outcome digest; no session outcome executor exists
   ([design](../design/program-substrate.md)).
 - Turn-by-turn session driving with no contract inside a turn; no session
-  capability exists ([design](../design/program-substrate.md)).
+  outcome executor exists ([design](../design/program-substrate.md)).
 - Host-side execution of every credentialed operation, so credentials never
   enter the isolate; the closed isolate is built and its executors are not
   ([design](../design/program-substrate.md)).

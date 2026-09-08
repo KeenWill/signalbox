@@ -23,11 +23,13 @@ export function SessionComposer({
   activeState,
   stateUnavailable,
   onAccepted,
+  onEscape,
 }: {
   sessionId: string
   activeState: string | null | undefined
   stateUnavailable: boolean
   onAccepted: () => Promise<unknown>
+  onEscape: () => void
 }) {
   const dispatch = useAppDispatch()
   const pending = useAppSelector((state) => selectPendingSessionInput(state, sessionId))
@@ -112,6 +114,12 @@ export function SessionComposer({
         maxLength={MAX_SESSION_MESSAGE_LENGTH}
         value={retained?.message ?? text}
         readOnly={retained !== null}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape') return
+          event.preventDefault()
+          event.stopPropagation()
+          onEscape()
+        }}
         onChange={(event) => {
           if (event.target.value.length <= MAX_SESSION_MESSAGE_LENGTH) setText(event.target.value)
         }}
