@@ -69,7 +69,12 @@ and any probe completion order.
 
 The service repeats inspection for every read, and `file_read` accepts no
 model-supplied media type or reader identity. Why: no classification from an
-earlier call is trusted.
+earlier call is trusted. Image metadata views use the canonical metadata from
+that inspection; absent image fields fail without a second decode.
+
+Validation and read requests carry effective `maximum_image_axis` and
+`maximum_decoded_image_pixels` ceilings. Image decoding clamps both to the
+compiled maxima.
 
 The raw processor output types carry strings and JSON text rather than checked
 registry values, and the registry reparses and cross-checks every claim against

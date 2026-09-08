@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { webContractBootstrapFixture as admittedBootstrap } from '../product.fixture'
 import {
+  correlateImportDescriptor,
+  correlateImportFrontiers,
   HttpImportApi,
   ImportDescriptorCorrelationError,
   ImportListCorrelationError,
@@ -8,6 +10,7 @@ import {
   ImportResponseTooLargeError,
   ImportWindowCorrelationError,
 } from './api'
+import { ScenarioImportApi } from './scenario'
 
 const firstId = '00000000-0000-7000-8000-000000000001'
 const secondId = '00000000-0000-7000-8000-000000000002'
@@ -959,5 +962,119 @@ describe('HttpImportApi correlation', () => {
     await expect(
       new HttpImportApi(() => Promise.resolve()).continueImport(firstId, request),
     ).rejects.toBeInstanceOf(ImportReceiptCorrelationError)
+  })
+})
+
+describe('import request lifetimes and immutable evidence', () => {
+  it.each(['caller', 'deadline'] as const)(
+    'rejects a stalled digest when the %s aborts and ignores its late result',
+    async (source) => {
+      const caller = new AbortController()
+      const deadline = new AbortController()
+      const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal)
+      const digestResult = Promise.withResolvers<ArrayBuffer>()
+      const digest = vi.fn(() => digestResult.promise)
+      const fetch = vi.fn()
+      vi.stubGlobal('crypto', { randomUUID: () => searchCorrelation, subtle: { digest } })
+      vi.stubGlobal('fetch', fetch)
+      try {
+        const pending = new HttpImportApi(() => Promise.resolve()).list(
+          { source_session_id: 'source-session-0' },
+          caller.signal,
+        )
+        await vi.waitFor(() => expect(digest).toHaveBeenCalled())
+        const rejected = expect(pending).rejects.toHaveProperty(
+          'name',
+          source === 'caller' ? 'AbortError' : 'TimeoutError',
+        )
+        if (source === 'caller') caller.abort()
+        else deadline.abort(new DOMException('Request expired', 'TimeoutError'))
+        await rejected
+        digestResult.resolve(new ArrayBuffer(32))
+        await Promise.resolve()
+        expect(fetch).not.toHaveBeenCalled()
+      } finally {
+        timeout.mockRestore()
+      }
+    },
+  )
+
+  it('cancels a hung bootstrap without poisoning a subsequent caller', async () => {
+    let firstSignal: AbortSignal | undefined
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal
+      if (!firstSignal) {
+        firstSignal = signal
+        return await new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      }
+      return new Response(
+        JSON.stringify(_url === '/api/bootstrap' ? admittedBootstrap : { items: [] }),
+      )
+    })
+    vi.stubGlobal('fetch', fetch)
+    const api = new HttpImportApi()
+    const caller = new AbortController()
+    const cancelled = api.list({}, caller.signal)
+    const rejected = expect(cancelled).rejects.toHaveProperty('name', 'AbortError')
+    caller.abort()
+    await rejected
+    expect(firstSignal?.aborted).toBe(true)
+    await expect(api.list({})).resolves.toMatchObject({ items: [] })
+  })
+
+  it('expires a stalled continuation so its exact command can be recovered', async () => {
+    const deadline = new AbortController()
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async (_url: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) =>
+            init.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+              once: true,
+            }),
+          ),
+      ),
+    )
+    const descriptor = await new ScenarioImportApi().descriptor(firstId)
+    const pending = new HttpImportApi(async () => {}).continueImport(firstId, {
+      command_id: secondId,
+      frontier: descriptor.timeline.first,
+      relationship: 'resume',
+      initial_model_selection: { kind: 'direct', selection_id: secondId },
+    })
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalled())
+    const rejected = expect(pending).rejects.toHaveProperty('name', 'TimeoutError')
+    deadline.abort(new DOMException('Request expired', 'TimeoutError'))
+    await rejected
+    timeout.mockRestore()
+  })
+
+  it('rejects contradictory catalog counts and descriptor boundary identities', async () => {
+    const api = new ScenarioImportApi()
+    const descriptor = await api.descriptor(firstId)
+    const catalog = await api.list({ limit: 1 })
+    const row = catalog.items[0]
+    if (!row) throw new Error('Missing fixture row')
+    expect(() =>
+      correlateImportDescriptor(descriptor, { ...row, entry_count: row.entry_count + 1 }),
+    ).toThrow(ImportDescriptorCorrelationError)
+    expect(correlateImportDescriptor(descriptor, row)).toBe(descriptor)
+    for (const anchor of ['first', 'latest'] as const) {
+      const window = await api.entries(firstId, { anchor, before: 0, after: 0 })
+      const changed = {
+        ...window,
+        items: window.items.map((entry) => ({
+          ...entry,
+          frontier: { ...entry.frontier, imported_entry_id: secondId },
+        })),
+      }
+      expect(() => correlateImportFrontiers(changed, descriptor.timeline)).toThrow(
+        ImportWindowCorrelationError,
+      )
+      expect(correlateImportFrontiers(window, descriptor.timeline)).toBe(window)
+    }
   })
 })

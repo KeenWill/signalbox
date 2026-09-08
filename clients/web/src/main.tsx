@@ -34,7 +34,9 @@ import { selectApp, store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
-const scenarioImportApi = new ScenarioImportApi()
+const scenarioImportApi = new ScenarioImportApi(
+  new URLSearchParams(location.search).get('continuation') === 'ambiguous',
+)
 const routeString = (value: unknown): string | undefined =>
   typeof value === 'string' ? value : undefined
 

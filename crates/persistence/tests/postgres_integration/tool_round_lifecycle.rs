@@ -4,6 +4,95 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_reread_reports_decode_corruption_after_an_earlier_mismatch()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // Only supplies distinct identities to the fixture and its response parts.
+    const ARBITRARY_MODEL_CALL_SEED: u128 = 0x6760_0000;
+    let (fixture, repository, authorized) =
+        authorize_checkpointed_model_call(&pool, ARBITRARY_MODEL_CALL_SEED).await?;
+    let text_entry =
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(ARBITRARY_MODEL_CALL_SEED + 20));
+    let tool_entry =
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(ARBITRARY_MODEL_CALL_SEED + 21));
+    let response = ToolUsingAssistantResponse::try_from_parts(vec![
+        AssistantResponsePart::Text(
+            AssistantText::try_new(String::from("expected text")).expect("nonempty text"),
+        ),
+        AssistantResponsePart::ToolCall(ToolCallProposal::new(
+            ToolName::try_new(String::from("current_time")).expect("valid tool name"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("valid arguments"),
+        )),
+    ])
+    .expect("response contains a tool proposal");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![
+                    ToolResponsePartIdentity::text(text_entry),
+                    ToolResponsePartIdentity::tool_call(
+                        tool_entry,
+                        signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(
+                            ARBITRARY_MODEL_CALL_SEED + 22,
+                        )),
+                        InitialToolApproval::Confirm,
+                    ),
+                ],
+                ContextFrontierId::from_uuid(Uuid::from_u128(ARBITRARY_MODEL_CALL_SEED + 23)),
+                None,
+            )),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    // Deliberately bypass the disposable database's write guards to exercise reread corruption.
+    let mut corrupt = pool.begin().await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL")
+        .execute(&mut *corrupt)
+        .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ALTER COLUMN payload_kind DROP NOT NULL")
+        .execute(&mut *corrupt)
+        .await?;
+    sqlx::query("UPDATE semantic_transcript_entry SET assistant_text_value = 'different text' WHERE semantic_entry_id = $1")
+        .bind(text_entry.into_uuid()).execute(&mut *corrupt).await?;
+    sqlx::query(
+        "UPDATE semantic_transcript_entry SET payload_kind = NULL WHERE semantic_entry_id = $1",
+    )
+    .bind(tool_entry.into_uuid())
+    .execute(&mut *corrupt)
+    .await?;
+    sqlx::query("ALTER TABLE semantic_transcript_entry ENABLE TRIGGER ALL")
+        .execute(&mut *corrupt)
+        .await?;
+    corrupt.commit().await?;
+
+    let error = repository
+        .reread_terminal_observation(fixture.session, &observation)
+        .await
+        .expect_err("corrupt retained evidence must be reported");
+    assert!(
+        matches!(
+            error,
+            ModelCallRepositoryError::Corruption(ModelCallCorruption::Missing("payload_kind"))
+        ),
+        "unexpected reread failure: {error:?}"
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn provider_reasoning_commits_in_order_with_tool_proposals() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7efa_0810;
