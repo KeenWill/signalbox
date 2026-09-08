@@ -58,7 +58,24 @@ const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
     "session_token:",
     "\"session_token\":",
 ];
-const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
+const TOKEN_PREFIXES: &[&str] = &[
+    "sk-",
+    "eyJ",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "xoxs-",
+    "AKIA",
+    "ASIA",
+    "glpat-",
+];
 const SPACE_SEPARATED_CREDENTIAL_FLAGS: &[&str] = &["--password", "--api-key", "--passphrase"];
 const CURL_USER_FLAGS: &[&str] = &["-u", "--user", "-U", "--proxy-user"];
 /// PEM armor opening a block, and the label substring that makes the block a
@@ -175,6 +192,7 @@ fn text_might_contain_credential(text: &str) -> bool {
     CREDENTIAL_INDICATORS
         .iter()
         .any(|indicator| find_ascii_case_insensitive(text, indicator).is_some())
+        || TOKEN_PREFIXES.iter().any(|prefix| text.contains(prefix))
         || has_normalized_pwd_assignment_name(text)
 }
 
@@ -4413,6 +4431,56 @@ mod tests {
     }
 
     #[test]
+    fn bare_vendor_tokens_are_redacted_without_assignment_markers() {
+        for value in [
+            "ghp_1234567890abcdefgh",
+            "gho_1234567890abcdefgh",
+            "ghu_1234567890abcdefgh",
+            "ghs_1234567890abcdefgh",
+            "ghr_1234567890abcdefgh",
+            "github_pat_1234567890abcdefgh",
+            "xoxb-1234567890-abcdefgh",
+            "xoxp-1234567890-abcdefgh",
+            "xoxa-1234567890-abcdefgh",
+            "xoxr-1234567890-abcdefgh",
+            "xoxs-1234567890-abcdefgh",
+            "AKIA1234567890ABCDEF",
+            "ASIA1234567890ABCDEF",
+            "glpat-1234567890abcdefgh",
+        ] {
+            assert_eq!(
+                redact_text(value),
+                REDACTED,
+                "unmarked vendor value: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn vendor_token_prefixes_are_held_across_stream_chunks() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            for text in ["github_", "pat_1234567890abcdefgh"] {
+                sink.observe(Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: text.to_owned(),
+                    },
+                });
+            }
+            sink.finish();
+        }
+        let emitted = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+        assert!(!emitted.is_empty());
+        assert_eq!(emitted.replace(REDACTED, ""), "");
+    }
+
+    #[test]
     fn every_scanner_key_is_reachable_through_the_fast_path() {
         assert_fast_path_covers(
             LINE_CREDENTIAL_MARKERS
@@ -4662,7 +4730,7 @@ mod tests {
     /// text yields nothing to rescan.
     #[test]
     fn trailing_credential_context_is_the_unsafe_suffix() {
-        assert_eq!(trailing_credential_context("the quick brown fox"), "");
+        assert_eq!(trailing_credential_context("the quick brown fox "), "");
         assert_eq!(
             trailing_credential_context("some text Authorization:"),
             "Authorization:"
