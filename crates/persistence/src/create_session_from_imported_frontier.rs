@@ -49,7 +49,8 @@ use crate::{
     outbox,
 };
 
-const STORAGE_VERSION: i16 = 5;
+const STORAGE_VERSION: i16 = 6;
+const RUNNER_PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;
 pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 5;
 const INTERACTIVE: &str = "interactive";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";
@@ -528,6 +529,9 @@ async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
+    let runner_placement = crate::creation_runner_placement::RunnerPlacementColumns::encode(
+        command.runner_placement(),
+    );
     sqlx::query(
         "INSERT INTO create_session_from_imported_frontier_command
             (command_id, command_kind, storage_version,
@@ -536,10 +540,11 @@ async fn insert_prepared(
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
              dangerous_tool_auto_approval, system_prompt, model_settings,
-             result_kind, created_session_id)
+             result_kind, created_session_id,
+             runner_selector_kind, runner_selector_id, runner_selector_class, runner_directory_kind, runner_directory, runner_credential_profile, runner_workspace_kind, runner_repository, runner_sandbox, runner_permission_overrides)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-             $14, $15, $16, $17, $18)",
+             $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND)
@@ -570,6 +575,16 @@ async fn insert_prepared(
     ))
     .bind(APPLIED)
     .bind(session_id_to_uuid(prepared.applied_result().session()))
+    .bind(runner_placement.runner_selector_kind)
+    .bind(runner_placement.runner_selector_id)
+    .bind(runner_placement.runner_selector_class)
+    .bind(runner_placement.runner_directory_kind)
+    .bind(runner_placement.runner_directory)
+    .bind(runner_placement.runner_credential_profile)
+    .bind(runner_placement.runner_workspace_kind)
+    .bind(runner_placement.runner_repository)
+    .bind(runner_placement.runner_sandbox)
+    .bind(runner_placement.runner_permission_overrides)
     .execute(&mut *connection)
     .await?;
 
@@ -659,6 +674,16 @@ async fn load_creation_from_connection(
             c.command_id AS typed_command_id,
             c.command_kind AS typed_kind,
             c.storage_version AS typed_version,
+            c.runner_selector_kind,
+            c.runner_selector_id,
+            c.runner_selector_class,
+            c.runner_directory_kind,
+            c.runner_directory,
+            c.runner_credential_profile,
+            c.runner_workspace_kind,
+            c.runner_repository,
+            c.runner_sandbox,
+            c.runner_permission_overrides,
             c.imported_conversation_id AS command_conversation_id,
             c.imported_frontier_entry_id AS command_frontier_entry_id,
             c.imported_frontier_position AS command_frontier_position,
@@ -788,12 +813,19 @@ async fn load_creation_from_connection(
         },
         "command model selection",
     )?;
+    let runner_placement =
+        <crate::creation_runner_placement::RunnerPlacementColumns as sqlx::FromRow<
+            sqlx::postgres::PgRow,
+        >>::from_row(&row)?
+        .decode(typed_version, RUNNER_PLACEMENT_FROM_STORAGE_VERSION)
+        .map_err(ImportedSessionCorruption::Inconsistent)?;
     let command = CreateSessionFromImportedFrontier::new(
         stored_command,
         command_frontier,
         command_relationship,
         command_defaults,
-    );
+    )
+    .with_runner_placement(runner_placement);
 
     let result_session = session_id_from_uuid(required(&row, "result_session_id")?);
     let stored_session = session_id_from_uuid(required(&row, "stored_session_id")?);

@@ -5,6 +5,7 @@
 
 mod command_registry;
 mod conversation_import_codec;
+mod creation_runner_placement;
 mod lock_inventory;
 mod model_settings_resolution;
 mod user_content;
