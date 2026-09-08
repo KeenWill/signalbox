@@ -36,6 +36,8 @@ use signalbox_model_runtime::{
     AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, ProviderReportedModel,
     RefusalEvidence, Script, ScriptedModel, TerminalEvidence, TokenUsage,
 };
+#[cfg(feature = "test-support")]
+use signalbox_persistence::goal::GoalRecoveryProgress;
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
@@ -71,6 +73,15 @@ const DATABASE_NAME: &str = "signalboxd_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const SCHEDULED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal.";
+// numeric-bound: test - identifies the first durable recovery event
+#[cfg(feature = "test-support")]
+const FIRST_RECOVERY_EVENT_COUNT: i64 = 1;
+// numeric-bound: test - identifies the second durable execution-failure block
+#[cfg(feature = "test-support")]
+const SECOND_FAILURE_EVENT_COUNT: i64 = 2;
+// numeric-bound: test - counts the commissioned turn and its two successors
+#[cfg(feature = "test-support")]
+const RECOVERY_CYCLE_TURN_COUNT: i64 = 3;
 const GOAL_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
@@ -209,6 +220,22 @@ async fn wait_for_execution_failure_block(pool: &PgPool, session: SessionId) {
         .unwrap_or(false);
         if blocked {
             return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(feature = "test-support")]
+async fn wait_for_goal_recovery_count(
+    repository: &GoalRepository,
+    session: SessionId,
+    count: fn(GoalRecoveryProgress) -> i64,
+    expected: i64,
+) -> Result<(), signalbox_persistence::goal::GoalRepositoryError> {
+    loop {
+        let progress = repository.recovery_progress(session).await?;
+        if count(progress) >= expected {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -519,11 +546,35 @@ async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dy
     Ok(())
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    allow(
+        dead_code,
+        reason = "recovery probes are read by the test-support scenario"
+    )
+)]
+struct GoalFailureFixture<Pass, Probe> {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    goal: Goal,
+    scheduler: SchedulerLoop<InProcessEligibilityWorkSource<PostgresEligibilitySweep>, Pass>,
+    operation_count: Probe,
+    nudge: signalbox_application::InProcessEligibilityNudge,
+    fatal: signalboxd::FatalExecutionSignal,
+}
+
 /// Runs an owned goal through a completed turn and unsuccessful successor, or
 /// releases its activated first turn before that turn finishes unsuccessfully.
 async fn goal_failure_block_after_success(
     ownership: signalbox_domain::SessionOwnership,
-) -> Result<(ContainerAsync<Postgres>, PgPool, Goal), Box<dyn Error>> {
+) -> Result<
+    GoalFailureFixture<
+        impl signalbox_application::EligibilityPass<Error: ClassifyOperatorFailure + Send + 'static>
+        + Send,
+        impl Fn() -> usize,
+    >,
+    Box<dyn Error>,
+> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
@@ -557,12 +608,15 @@ async fn goal_failure_block_after_success(
     assert_goal_command_applied(attached);
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let restart_nudge = nudge.clone();
     let _ = nudge.nudge(session);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let runtime = match ownership {
-        signalbox_domain::SessionOwnership::Owned => {
-            ScriptedModel::following([goal_completion_script(), goal_refusal_script()])
-        }
+        signalbox_domain::SessionOwnership::Owned => ScriptedModel::following([
+            goal_completion_script(),
+            goal_refusal_script(),
+            goal_refusal_script(),
+        ]),
         signalbox_domain::SessionOwnership::Unmonitored => {
             ScriptedModel::following([goal_refusal_script()])
         }
@@ -594,17 +648,17 @@ async fn goal_failure_block_after_success(
         nudge,
         GoalModeNumericBounds::new(None, None, None, None, None),
     );
+    let activated_pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        execution.clone(),
+    );
+    let pass = GoalAwareEligibilityPass::new(activated_pass, disposition.clone());
+    let mut scheduler = SchedulerLoop::new(work_source, pass);
     match ownership {
         signalbox_domain::SessionOwnership::Owned => {
-            let activated_pass = ActivatedTurnPass::new(
-                StartEligibleTurnService::new(
-                    UuidV7StartEligibleTurnIdGenerator,
-                    StartEligibleTurnRepository::new(pool.clone()),
-                ),
-                execution,
-            );
-            let pass = GoalAwareEligibilityPass::new(activated_pass, disposition);
-            let mut scheduler = SchedulerLoop::new(work_source, pass);
             let observation_pool = pool.clone();
             let fatal_shutdown = fatal_execution.clone();
             let shutdown = async move {
@@ -657,11 +711,10 @@ async fn goal_failure_block_after_success(
         .load_goal(session)
         .await?
         .expect("the attached goal remains readable");
-    let goal_turn_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM goal_turn WHERE session_id = $1")
-            .bind(session.into_uuid())
-            .fetch_one(&pool)
-            .await?;
+    let goal_turn_count = GoalRepository::new(pool.clone())
+        .recovery_progress(session)
+        .await?
+        .turns();
 
     match ownership {
         signalbox_domain::SessionOwnership::Owned => {
@@ -676,7 +729,15 @@ async fn goal_failure_block_after_success(
         }
     }
 
-    Ok((container, pool, goal))
+    Ok(GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        scheduler,
+        operation_count: move || runtime.received_operations().len(),
+        nudge: restart_nudge,
+        fatal: fatal_execution,
+    })
 }
 
 /// a completed goal turn is followed without user input, and an
@@ -685,9 +746,106 @@ async fn goal_failure_block_after_success(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s_goal_success_continues_and_unsuccessful_turn_blocks_without_retry()
 -> Result<(), Box<dyn Error>> {
-    let (container, pool, goal) =
-        goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        ..
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
     assert_execution_failure_blocked(&goal);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Repeated reconciliation inventories re-arm one pending block; the resumed turn
+/// blocks durably after another refusal. This exercises the reconciliation method.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repeated_reconciliation_resumes_a_blocked_goal_once() -> Result<(), Box<dyn Error>> {
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        mut scheduler,
+        operation_count,
+        nudge,
+        fatal,
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
+    let session = goal.session();
+    assert_execution_failure_blocked(&goal);
+    // The two spawned resumptions and this test release recovery together.
+    let resume_barrier = Arc::new(Barrier::new(3));
+    let reconciliation = PostgresGoalPassDisposition::new(
+        pool.clone(),
+        support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?,
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    )
+    .with_startup_resume_barrier(resume_barrier.clone());
+    let first = reconciliation
+        .reconcile_automatic_resumptions_after_restart()
+        .await?;
+    let repeated = reconciliation
+        .reconcile_automatic_resumptions_after_restart()
+        .await?;
+    assert_eq!(first, usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?);
+    assert_eq!(repeated, usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?);
+    let repository = GoalRepository::new(pool.clone());
+    assert_eq!(
+        repository.recovery_progress(session).await?.resumptions(),
+        0
+    );
+    timeout(Duration::from_secs(10), resume_barrier.wait()).await?;
+    timeout(
+        Duration::from_secs(10),
+        wait_for_goal_recovery_count(
+            &repository,
+            session,
+            GoalRecoveryProgress::resumptions,
+            FIRST_RECOVERY_EVENT_COUNT,
+        ),
+    )
+    .await??;
+
+    let observation_pool = pool.clone();
+    let fatal_shutdown = fatal.clone();
+    let shutdown = async move {
+        let observation_repository = GoalRepository::new(observation_pool);
+        tokio::select! {
+            result = wait_for_goal_recovery_count(
+                &observation_repository,
+                session,
+                GoalRecoveryProgress::execution_failure_blocks,
+                SECOND_FAILURE_EVENT_COUNT,
+            ) => { result.expect("recovery progress remains readable"); }
+            () = fatal_shutdown.wait() => {}
+        }
+    };
+    assert_eq!(
+        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+        SchedulerLoopExit::Shutdown
+    );
+
+    let recovered_goal = GoalRepository::new(pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the recovered goal remains readable");
+    let progress = repository.recovery_progress(session).await?;
+
+    assert_execution_failure_blocked(&recovered_goal);
+    assert_eq!(progress.resumptions(), FIRST_RECOVERY_EVENT_COUNT);
+    assert_eq!(
+        progress.execution_failure_blocks(),
+        SECOND_FAILURE_EVENT_COUNT
+    );
+    assert_eq!(progress.turns(), RECOVERY_CYCLE_TURN_COUNT);
+    assert_eq!(i64::try_from(operation_count())?, RECOVERY_CYCLE_TURN_COUNT);
+
     pool.close().await;
     drop(container);
     Ok(())
@@ -699,8 +857,12 @@ async fn s_goal_success_continues_and_unsuccessful_turn_blocks_without_retry()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn an_unmonitored_sessions_failure_block_schedules_no_resumption()
 -> Result<(), Box<dyn Error>> {
-    let (container, pool, goal) =
-        goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        ..
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
     let GoalState::Blocked { need, .. } = goal.current().state() else {
         panic!("the unmonitored goal must be blocked");
     };
@@ -954,8 +1116,12 @@ async fn adopt_session(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Error>> {
-    let (container, pool, goal) =
-        goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        ..
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
     let session = goal.session();
     adopt_session(&pool, session).await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
@@ -983,8 +1149,12 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn adopting_a_blocked_goal_persists_its_scheduled_need() -> Result<(), Box<dyn Error>> {
-    let (container, pool, goal) =
-        goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    let GoalFailureFixture {
+        container,
+        pool,
+        goal,
+        ..
+    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
     let session = goal.session();
     adopt_session(&pool, session).await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
