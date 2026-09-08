@@ -2834,6 +2834,7 @@ struct ProcessSessionDetailScreen: View {
   @StateObject private var viewModel: ProcessSessionDetailViewModel
   @State private var showArtifactGate = false
   @State private var showModelSettings = false
+  @State private var modelSettingsSaveTask: Task<Void, Never>?
   @State private var deniedToolRequest: SignalboxToolInvocationID?
   @State private var denialReason = ""
 
@@ -2952,6 +2953,8 @@ struct ProcessSessionDetailScreen: View {
       }
     }
     .onReceive(NotificationCenter.default.publisher(for: .processServiceChanged)) { _ in
+      modelSettingsSaveTask?.cancel()
+      modelSettingsSaveTask = nil
       showModelSettings = false
       Task {
         await viewModel.connect(replacingService: true)
@@ -2963,6 +2966,7 @@ struct ProcessSessionDetailScreen: View {
     .sheet(isPresented: $showModelSettings) {
       if let service = coordinator.processService {
         ProcessModelSettingsScreen(session: viewModel.session, perCall: $viewModel.perCallSettings,
+          saveTask: $modelSettingsSaveTask,
           service: service, adjustments: viewModel.settingsAdjustments,
           installed: viewModel.installDefaults)
       }

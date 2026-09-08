@@ -46,6 +46,29 @@ final class ModelSettingsTests: XCTestCase {
   }
 
   @MainActor
+  func testCancelledSettingsSaveDiscardsTheOldServiceReceipt() async throws {
+    let requester = try SettingsRequester(reading: .value(.high), replacement: .providerDefault,
+      suspendsReplacement: true)
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let viewModel = ProcessModelSettingsViewModel(session: try SettingsFixture.session())
+    await viewModel.load(using: service)
+    viewModel.sessionOverlay.reasoningLevel = .providerDefault
+    let save = Task { await viewModel.save(using: service) }
+    await requester.waitUntilReplacementStarted()
+
+    save.cancel()
+    await requester.resumeReplacement()
+    let installed = await save.value
+
+    XCTAssertNil(installed)
+    XCTAssertEqual(viewModel.defaults?.defaultsVersion.rawValue, 1)
+    XCTAssertEqual(viewModel.defaults?.modelSettings.precedence.session.reasoningLevel, .value(.high))
+    XCTAssertEqual(viewModel.sessionOverlay.reasoningLevel, .providerDefault)
+    XCTAssertNil(viewModel.errorMessage)
+    XCTAssertFalse(viewModel.isSaving)
+  }
+
+  @MainActor
   func testDefaultsVersionConflictRefreshesTheNextSaveAndResetsChangedModelChoices() async throws {
     for refreshedSelection in [SettingsFixture.selectionID, SettingsFixture.otherSelectionID] {
       let requester = try SettingsRequester(reading: .value(.high))
@@ -179,6 +202,9 @@ final class ModelSettingsTests: XCTestCase {
       fastMode: .inherit, serviceTier: .providerDefault)
     XCTAssertEqual(viewModel.supportedPerCallOverlay(cleared), cleared)
     XCTAssertEqual(viewModel.supportedPerCallOverlay(.inheritAll), .inheritAll)
+    let disabled = SignalboxModelSettingsOverlay(reasoningLevel: .inherit,
+      fastMode: .value(.disabled), serviceTier: .inherit)
+    XCTAssertEqual(viewModel.supportedPerCallOverlay(disabled), disabled)
   }
 
   func testCapabilityCatalogRejectsAnIncompleteSequence() async throws {
@@ -336,11 +362,16 @@ private enum SettingsFixtureError: Error { case missingDefaults, unexpectedReque
 private actor SettingsRequester: SignalboxProcessRequesting {
   private var pages: [[SignalboxProcessServerFrame]]
   private var requests: [SignalboxProcessClientRequest] = []
+  private var suspendsReplacement = false
+  private var replacementStarted: CheckedContinuation<Void, Never>?
+  private var replacementCompletion: CheckedContinuation<Void, Never>?
 
   init(pages: [[SignalboxProcessServerFrame]]) { self.pages = pages }
 
   init(reading: SignalboxSettingOverlay<SignalboxReasoningLevel>,
-    replacement: SignalboxSettingOverlay<SignalboxReasoningLevel>? = nil) throws {
+    replacement: SignalboxSettingOverlay<SignalboxReasoningLevel>? = nil,
+    suspendsReplacement: Bool = false) throws {
+    self.suspendsReplacement = suspendsReplacement
     pages = [
       [try SettingsFixture.defaults(reasoning: reading, version: "1")],
       [try SettingsFixture.frame(["type": "model_capabilities_start"]),
@@ -357,12 +388,27 @@ private actor SettingsRequester: SignalboxProcessRequesting {
 
   func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
     requests.append(request)
+    if case .replaceSessionDefaults = request, suspendsReplacement {
+      await withCheckedContinuation { continuation in
+        replacementCompletion = continuation
+        replacementStarted?.resume()
+        replacementStarted = nil
+      }
+    }
     guard !pages.isEmpty else { throw SettingsFixtureError.unexpectedRequest }
     return SettingsExchange(frames: pages.removeFirst())
   }
   func lastRequest() -> SignalboxProcessClientRequest? { requests.last }
   func openedRequests() -> [SignalboxProcessClientRequest] { requests }
   func append(pages: [[SignalboxProcessServerFrame]]) { self.pages += pages }
+  func waitUntilReplacementStarted() async {
+    if replacementCompletion != nil { return }
+    await withCheckedContinuation { replacementStarted = $0 }
+  }
+  func resumeReplacement() {
+    replacementCompletion?.resume()
+    replacementCompletion = nil
+  }
 }
 
 private actor SettingsExchange: SignalboxProcessExchange {

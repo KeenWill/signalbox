@@ -41,7 +41,7 @@ final class ProcessModelSettingsViewModel: ObservableObject {
       capabilities?.reasoningLevels.contains(level) != true {
       supported.reasoningLevel = .inherit
     }
-    if case .value = overlay.fastMode, capabilities?.fastModeSupported != true {
+    if case .value(.enabled) = overlay.fastMode, capabilities?.fastModeSupported != true {
       supported.fastMode = .inherit
     }
     if case .value(let tier) = overlay.serviceTier,
@@ -81,14 +81,17 @@ final class ProcessModelSettingsViewModel: ObservableObject {
         prepared = try await service.prepareDefaultsReplacement(defaults: defaults,
           modelSelection: selection, modelSettings: sessionOverlay)
       }
+      try Task.checkCancellation()
       unresolvedReplacement = prepared
       let installed = try await service.replaceDefaults(prepared)
+      try Task.checkCancellation()
       unresolvedReplacement = nil
       self.defaults = installed
       sessionOverlay = .inheritAll
       errorMessage = nil
       return installed
     } catch {
+      guard !Task.isCancelled else { return nil }
       if let serviceError = error as? SignalboxProcessServiceError,
         !serviceError.retainsPreparedMutationIdentity {
         unresolvedReplacement = nil
@@ -100,6 +103,7 @@ final class ProcessModelSettingsViewModel: ObservableObject {
         rejectedSessionID == sessionID {
         do {
           let refreshed = try await service.readDefaults(sessionID: sessionID)
+          try Task.checkCancellation()
           if refreshed.modelSelection != defaults.modelSelection {
             selection = refreshed.modelSelection
             sessionOverlay = .inheritAll
@@ -115,16 +119,19 @@ final class ProcessModelSettingsViewModel: ObservableObject {
 struct ProcessModelSettingsScreen: View {
   @Environment(\.dismiss) private var dismiss
   @StateObject private var viewModel: ProcessModelSettingsViewModel
+  @Binding var saveTask: Task<Void, Never>?
   @Binding var perCall: SignalboxModelSettingsOverlay
   let service: any SignalboxProcessServiceProtocol
   let adjustments: [SignalboxModelChangeAdjustment]
   let installed: (SignalboxSessionDefaultsRead) -> Void
 
   init(session: SignalboxProcessSession, perCall: Binding<SignalboxModelSettingsOverlay>,
+    saveTask: Binding<Task<Void, Never>?>,
     service: any SignalboxProcessServiceProtocol, adjustments: [SignalboxModelChangeAdjustment],
     installed: @escaping (SignalboxSessionDefaultsRead) -> Void) {
     _viewModel = StateObject(wrappedValue: ProcessModelSettingsViewModel(session: session))
     _perCall = perCall
+    _saveTask = saveTask
     self.service = service
     self.adjustments = adjustments
     self.installed = installed
@@ -148,8 +155,9 @@ struct ProcessModelSettingsScreen: View {
             ProcessSettingsOverlayFields(overlay: $viewModel.sessionOverlay,
               capabilities: viewModel.capabilities)
             Button("Save session settings") {
-              Task {
+              saveTask = Task {
                 _ = await viewModel.save(using: service)
+                guard !Task.isCancelled else { return }
                 if let defaults = viewModel.defaults { installed(defaults) }
                 perCall = viewModel.supportedPerCallOverlay(perCall)
               }
@@ -182,6 +190,7 @@ struct ProcessModelSettingsScreen: View {
       }
       .task {
         await viewModel.load(using: service)
+        guard !Task.isCancelled else { return }
         if let defaults = viewModel.defaults { installed(defaults) }
         perCall = viewModel.supportedPerCallOverlay(perCall)
       }
