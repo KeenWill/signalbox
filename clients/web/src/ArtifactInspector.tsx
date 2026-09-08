@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
 import { type Dispatch, type FormEvent, type RefObject, type SetStateAction, useMemo } from 'react'
 import type { CommandContext } from './commands'
-import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
+import { ArtifactRenderer, selectImageView } from './features/artifacts/ArtifactRenderer'
 import { selectBoundedOriginalView } from './features/artifacts/artifactScenario'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import type { WebBlobDescriptor } from './generated/web-contract.mjs'
@@ -17,6 +17,12 @@ import {
 export interface ArtifactRequest extends BlobDescriptorInput {
   sequence: number
 }
+
+export const artifactResolutionId = ({
+  digest,
+  sequence,
+}: Pick<ArtifactRequest, 'digest' | 'sequence'>): string =>
+  `product-artifact:${String(sequence)}:${digest}`
 
 export interface ArtifactInspectorState {
   digest: string
@@ -56,10 +62,11 @@ export const inspectedArtifact = (
   sequence: number,
 ): ArtifactItem => {
   const identity = {
-    id: `product-artifact:${String(sequence)}:${descriptor.digest}`,
+    id: artifactResolutionId({ digest: descriptor.digest, sequence }),
     displayName: descriptor.display_filename[0] ?? descriptor.digest,
   }
-  return descriptor.declared_media_type.toLowerCase().startsWith('image/')
+  return selectImageView(descriptor) !== undefined ||
+    selectBoundedOriginalView(descriptor) !== undefined
     ? { ...identity, kind: 'image', source: { kind: 'signalbox_blob', descriptor } }
     : { ...identity, kind: 'blob', descriptor }
 }
@@ -212,10 +219,29 @@ export function ArtifactInspector({
             <button
               type="button"
               onClick={(event) => {
-                const restoreFocus = document.activeElement === event.currentTarget
+                const opener = event.currentTarget
+                let restoreFocus = document.activeElement === opener
+                const recordBlur = () => {
+                  queueMicrotask(() => {
+                    if (opener.isConnected) restoreFocus = false
+                  })
+                }
+                const recordPointerMove = () => {
+                  restoreFocus = false
+                }
+                opener.addEventListener('blur', recordBlur)
+                document.addEventListener('pointerdown', recordPointerMove)
                 void descriptor.refetch().then((result) => {
+                  opener.removeEventListener('blur', recordBlur)
+                  document.removeEventListener('pointerdown', recordPointerMove)
                   if (result.isSuccess && restoreFocus) {
-                    requestAnimationFrame(() => digestInputRef?.current?.focus())
+                    requestAnimationFrame(() => {
+                      if (
+                        document.activeElement === opener ||
+                        (!opener.isConnected && document.activeElement === document.body)
+                      )
+                        digestInputRef?.current?.focus()
+                    })
                   }
                 })
               }}

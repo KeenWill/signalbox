@@ -22,7 +22,11 @@ import {
   useRef,
   useState,
 } from 'react'
-import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
+import {
+  ArtifactInspector,
+  artifactResolutionId,
+  emptyArtifactInspectorState,
+} from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
@@ -516,7 +520,7 @@ function SelectionInspector({
       <p>
         {surface === 'settings'
           ? 'Presentation preferences are stored locally in this browser and do not represent server evidence.'
-          : selectionEvidence === null
+          : surface !== 'sessions' || selectionEvidence === null
             ? 'Select an available operational record to inspect its server-provided evidence.'
             : 'Bounded server-provided timeline projection for the selected record.'}
       </p>
@@ -589,6 +593,13 @@ export function ProductApp({
   }, [])
   const [artifactOpen, setArtifactOpen] = useState(false)
   const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
+  const artifactRequest = artifactInspectorState.request
+  useEffect(() => {
+    if (artifactRequest === null) return
+    return () => {
+      dispatch(actions.artifactOriginalReleased(artifactResolutionId(artifactRequest)))
+    }
+  }, [artifactRequest, dispatch])
   const narrowInspector = useNarrowInspector()
   const [focusAfterBootstrapRecovery, setFocusAfterBootstrapRecovery] = useState(false)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
@@ -654,12 +665,15 @@ export function ProductApp({
     : null
   const inspectorInSheet = app.layout === 'focus' || narrowInspector
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.
+  const revalidateBootstrap = bootstrap.refetch
   const productImportApi = useMemo(
     () =>
       bootstrap.data === undefined
         ? null
-        : HttpImportApi.withAdmittedBootstrap(bootstrap.data, bootstrap.dataUpdatedAt),
-    [bootstrap.data, bootstrap.dataUpdatedAt],
+        : HttpImportApi.withAdmittedBootstrap(bootstrap.data, bootstrap.dataUpdatedAt, async () => {
+            await revalidateBootstrap({ throwOnError: true })
+          }),
+    [bootstrap.data, bootstrap.dataUpdatedAt, revalidateBootstrap],
   )
   const context = useMemo<ProductCommandContext>(() => {
     // `productCommandRegistry` already carries the `imports.*` family behind `available()` gates;
@@ -738,60 +752,72 @@ export function ProductApp({
   ])
   const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
-    productHotkeyBindings.map((binding) => ({
-      hotkey: binding.hotkey,
-      // Product surfaces own text fields, so the palette binding must never steal a keystroke the
-      // field is editing.
-      options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
-      callback: (event) => {
-        if (artifactSheetOwnsFocus) return
-        if (
-          (binding.commandId === 'palette.open' || binding.commandId === 'surface.escape') &&
-          isEditableTarget(event.target)
-        ) {
-          return
-        }
-        if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
-          if (binding.commandId === 'help.open') {
-            const activeElement = document.activeElement
-            helpOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
-          }
-          if (binding.commandId === 'palette.open') {
-            const activeElement = document.activeElement
-            paletteOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
-          }
+    productHotkeyBindings
+      .filter(
+        (binding) =>
+          !binding.commandId.startsWith('imports.') ||
+          (app.overlay === null && !navigationDisabled),
+      )
+      .map((binding) => ({
+        hotkey: binding.hotkey,
+        // Product surfaces own text fields, so the palette binding must never steal a keystroke the
+        // field is editing.
+        options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
+        callback: (event) => {
+          if (artifactSheetOwnsFocus) return
           if (
-            binding.commandId.startsWith('selection.') &&
-            productCommandAvailable(binding.commandId, context)
+            (binding.commandId === 'palette.open' || binding.commandId === 'surface.escape') &&
+            isEditableTarget(event.target)
           ) {
-            context.focusTimeline()
+            return
           }
-          if (binding.commandId === 'layout.toggle' && app.layout === 'workbench') {
-            // Focus leaves the navigation pane before the focus layout hides it.
-            mainRef.current?.focus()
+          if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
+            if (binding.commandId === 'help.open') {
+              const activeElement = document.activeElement
+              helpOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
+            }
+            if (binding.commandId === 'palette.open') {
+              const activeElement = document.activeElement
+              paletteOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
+            }
+            if (
+              binding.commandId.startsWith('selection.') &&
+              productCommandAvailable(binding.commandId, context)
+            ) {
+              context.focusTimeline()
+            }
+            if (binding.commandId === 'layout.toggle' && app.layout === 'workbench') {
+              // Focus leaves the navigation pane before the focus layout hides it.
+              mainRef.current?.focus()
+            }
+            invokeProductCommand(binding.commandId, context)
           }
-          invokeProductCommand(binding.commandId, context)
-        }
-      },
-    })),
+        },
+      })),
   )
   useHotkeySequences(
-    productHotkeySequenceBindings.map((binding) => ({
-      sequence: binding.sequence,
-      callback: (event) => {
-        if (artifactSheetOwnsFocus) return
-        if (isEditableTarget(event.target)) return
-        if (store.getState().app.overlay === null) {
-          if (
-            binding.commandId.startsWith('selection.') &&
-            productCommandAvailable(binding.commandId, context)
-          ) {
-            context.focusTimeline()
+    productHotkeySequenceBindings
+      .filter(
+        (binding) =>
+          !binding.commandId.startsWith('imports.') ||
+          (app.overlay === null && !navigationDisabled),
+      )
+      .map((binding) => ({
+        sequence: binding.sequence,
+        callback: (event) => {
+          if (artifactSheetOwnsFocus) return
+          if (isEditableTarget(event.target)) return
+          if (store.getState().app.overlay === null) {
+            if (
+              binding.commandId.startsWith('selection.') &&
+              productCommandAvailable(binding.commandId, context)
+            ) {
+              context.focusTimeline()
+            }
+            invokeProductCommand(binding.commandId, context)
           }
-          invokeProductCommand(binding.commandId, context)
-        }
-      },
-    })),
+        },
+      })),
   )
 
   useEffect(() => {
@@ -1055,10 +1081,29 @@ export function ProductApp({
               type="button"
               className="bootstrap-retry"
               onClick={(event) => {
-                const restoreFocus = document.activeElement === event.currentTarget
+                const opener = event.currentTarget
+                let restoreFocus = document.activeElement === opener
+                const recordBlur = () => {
+                  queueMicrotask(() => {
+                    if (opener.isConnected) restoreFocus = false
+                  })
+                }
+                const recordPointerMove = () => {
+                  restoreFocus = false
+                }
+                opener.addEventListener('blur', recordBlur)
+                document.addEventListener('pointerdown', recordPointerMove)
                 void bootstrap.refetch().then((result) => {
+                  opener.removeEventListener('blur', recordBlur)
+                  document.removeEventListener('pointerdown', recordPointerMove)
                   if (result.isSuccess && restoreFocus) {
-                    requestAnimationFrame(() => bootstrapStatusRef.current?.focus())
+                    requestAnimationFrame(() => {
+                      if (
+                        document.activeElement === opener ||
+                        (!opener.isConnected && document.activeElement === document.body)
+                      )
+                        bootstrapStatusRef.current?.focus()
+                    })
                   }
                 })
               }}

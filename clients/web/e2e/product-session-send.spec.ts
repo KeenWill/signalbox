@@ -1,6 +1,6 @@
-import { expect, type Page, test } from '@playwright/test'
 import type { WebSessionTimelineDetail } from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, test } from './fontTest'
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
 const turnId = '00000000-0000-0000-0000-000000000992'
@@ -355,7 +355,7 @@ for (const viewport of [
     await page
       .getByRole('textbox', { name: 'Message to session' })
       .fill('Continue with the next step.')
-    await expect(page).toHaveScreenshot(`session-read-send-${viewport.name}.png`, {
+    await expect.soft(page).toHaveScreenshot(`session-read-send-${viewport.name}.png`, {
       fullPage: true,
     })
   })

@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import {
   artifactScenario,
   fallbackDescriptor,
@@ -12,6 +10,7 @@ import {
   jpegDescriptor,
   jpegOriginalView,
 } from '../src/features/artifacts/artifactScenario'
+import { expect, type Page, type TestInfo, test } from './fontTest'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -27,9 +26,6 @@ const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.met
 const originalFixture = readFileSync(new URL('./fixtures/original.png', import.meta.url))
 const thumbnailFixture = readFileSync(new URL('./fixtures/thumbnail.png', import.meta.url))
 const jpegOriginalFixture = readFileSync(new URL('./fixtures/original.jpg', import.meta.url))
-// The owned 390 px crop is almost entirely text, so CI font rasterization accounts for 7% of its
-// pixels even when geometry is identical. Keep that measured host allowance local to this fixture.
-const MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE = 0.08
 
 const sha256Digest = (bytes: Buffer): string =>
   `sha256:${createHash('sha256').update(bytes).digest('hex')}`
@@ -207,6 +203,47 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
     thumbnailPath,
     jpegOriginalPath,
   ])
+})
+
+test('fetches fresh original bytes after browser decoding fails', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.addInitScript(() => {
+    const request = window.fetch
+    const cacheModes: (RequestCache | undefined)[] = []
+    Object.defineProperty(window, 'originalImageCacheModes', { value: cacheModes })
+    window.fetch = (input, init) => {
+      if (String(input).endsWith('/content/image-jpeg')) cacheModes.push(init?.cache)
+      return request.call(window, input, init)
+    }
+  })
+  const undecodable = Buffer.alloc(jpegOriginalFixture.byteLength)
+  undecodable.set([0xff, 0xd8, 0xff])
+  await page.route(
+    `**${jpegOriginalPath}`,
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'image/jpeg',
+        headers: { 'Cache-Control': 'public, max-age=31536000, immutable' },
+        body: undecodable,
+      }),
+    { times: 1 },
+  )
+  await page.goto('/scenario/blobs')
+  const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
+  await artifact.getByRole('button', { name: 'Load original' }).click()
+  await expect(artifact.getByRole('button', { name: 'Retry original' })).toBeVisible()
+  const freshRead = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === jpegOriginalPath,
+  )
+  await artifact.getByRole('button', { name: 'Retry original' }).click()
+  await freshRead
+  await expect(artifact.getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  expect(await page.evaluate(() => Reflect.get(window, 'originalImageCacheModes'))).toEqual([
+    'reload',
+    'reload',
+  ])
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
 test('restores a loaded original after leaving and reopening the scenario', async ({ page }) => {
@@ -409,7 +446,6 @@ test('captures mobile artifact evidence', async ({ page }, testInfo) => {
   await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
   await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
     'artifacts-mobile-dark.png',
-    { maxDiffPixelRatio: MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE },
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

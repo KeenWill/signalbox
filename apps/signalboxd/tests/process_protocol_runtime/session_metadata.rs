@@ -105,7 +105,7 @@ async fn metadata_shape_failure_is_a_malformed_frame() -> Result<(), Box<dyn Err
     runtime.stop().await
 }
 
-/// version four exposes the canonical initial metadata projection.
+/// The process protocol exposes the canonical initial metadata projection.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn reads_initial_metadata_projection() -> Result<(), Box<dyn Error>> {
