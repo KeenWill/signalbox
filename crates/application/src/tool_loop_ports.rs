@@ -226,6 +226,8 @@ impl ToolCrashClosureIdentities {
 /// Atomic continuation outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrepareToolContinuationOutcome {
+    /// Tool results committed and credential admission retained the turn.
+    CredentialWait(signalbox_domain::CredentialAvailabilityWait),
     /// The scheduling hint no longer identifies an all-resolved active batch.
     NoWork,
     /// Results, steering, and the next Prepared call committed together.

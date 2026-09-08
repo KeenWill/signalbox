@@ -1,3 +1,4 @@
+import { BROWSER_PREFERENCES_KEY, createDefaultBrowserPreferences } from '../src/preferences'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { expect, type Page, type TestInfo, test } from './fontTest'
 
@@ -228,7 +229,7 @@ test('synchronizes pagination with browser history', async ({ page }) => {
   await expect(page).not.toHaveURL(/afterAddress=/)
 })
 
-test('restores results focus when browser history changes search scope', async ({ page }) => {
+test('preserves search editing focus when browser history changes scope', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search?q=release')
   await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
@@ -241,7 +242,7 @@ test('restores results focus when browser history changes search scope', async (
   await page.goBack()
 
   await expect(page).toHaveURL(/q=release/)
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeFocused()
+  await expect(search).toBeFocused()
 })
 
 test('restores focus after a successful search retry', async ({ page }) => {
@@ -310,7 +311,7 @@ test('restores focus to validation after malformed browser history', async ({ pa
   await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
   await page.goBack()
 
-  await expect(page.getByRole('alert')).toBeFocused()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
 })
 
 test('does not request NUL-bearing search text', async ({ page }) => {
@@ -376,7 +377,7 @@ test('restores focus to validation when history restores repeated session parame
   await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
   await page.goBack()
 
-  await expect(page.getByRole('alert')).toBeFocused()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
 })
 
 // The generated bootstrap decoder requires `bounded_json === true`, so a contract that withholds
@@ -493,4 +494,163 @@ test('captures desktop dark, desktop light, and responsive search evidence', asy
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
   await expect.soft(page).toHaveScreenshot('search-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('rejects overflowing drafts instead of submitting a valid prefix', async ({ page }) => {
+  let requests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => {
+    requests += 1
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto('/search')
+  const search = page.getByRole('textbox', { name: 'Search text' })
+  const session = page.getByRole('textbox', { name: /Exact session/ })
+  await search.fill('release')
+  await session.fill(`urn:uuid:${sessionId}junk`)
+  await search.press('Enter')
+  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(page).toHaveURL(/\/search$/)
+  expect(requests).toBe(0)
+  await session.fill('')
+  await search.fill('é'.repeat(513))
+  await search.press('Enter')
+  await expect(page.getByRole('alert')).toBeVisible()
+  expect(requests).toBe(0)
+})
+
+test('rejects repeated query text without showing an empty search', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search?q=first&q=second')
+  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  await expect(
+    page.getByRole('heading', { name: 'Search durable text without loading transcripts' }),
+  ).toBeHidden()
+})
+
+test('clears a draft error when history restores a valid search', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search?q=release')
+  const search = page.getByRole('textbox', { name: 'Search text' })
+  await search.fill('different')
+  await search.press('Enter')
+  await expect(page).toHaveURL(/q=different/)
+  await page.getByRole('textbox', { name: /Exact session/ }).fill('bad')
+  await search.press('Enter')
+  await expect(page.getByRole('alert')).toBeVisible()
+  await page.goBack()
+  await expect(page.getByRole('alert')).toBeHidden()
+})
+
+test('withholds previous results after a failed refresh', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search?q=release')
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await page.route('**/api/search?**', (route) => route.abort())
+  await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
+  await expect(page.getByRole('heading', { name: 'Search could not be read' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeHidden()
+})
+
+test('applies prepaint preferences while the application bundle is pending', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.addInitScript(
+    ({ key, preferences }) => localStorage.setItem(key, JSON.stringify(preferences)),
+    {
+      key: BROWSER_PREFERENCES_KEY,
+      preferences: { ...createDefaultBrowserPreferences(), theme: 'light', density: 'comfortable' },
+    },
+  )
+  const mainReady = Promise.withResolvers<void>()
+  await page.route('**/assets/index-*.js', async (route) => {
+    await mainReady.promise
+    await route.continue()
+  })
+  try {
+    await page.goto('/settings', { waitUntil: 'commit' })
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+    await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+    await expect(page.locator('#root')).toBeEmpty()
+    const blockingScript = page.locator('script[blocking~="render"]')
+    await expect(blockingScript).toHaveCount(1)
+    await expect(blockingScript).toHaveAttribute('src', /\/assets\/prepaint-[^/]+\.js$/)
+    await expect(page.locator('script[src*="/assets/index-"]')).not.toHaveAttribute(
+      'blocking',
+      /render/,
+    )
+  } finally {
+    mainReady.resolve()
+  }
+  await expect(page.getByRole('heading', { name: 'Operator preferences' })).toBeVisible()
+})
+
+test('focuses search through its command and releases editing with Escape', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search')
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeEnabled()
+  await page.keyboard.press('Control+Shift+f')
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('main')).toBeFocused()
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Focus lexical search/ }).click()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
+})
+
+test('keeps artifact inspector inputs in their editing context on Search', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search')
+  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
+  for (const name of ['Digest', 'Declared media type', 'Display filename optional']) {
+    const input = page.getByRole('textbox', { name, exact: true })
+    await input.focus()
+    await input.press('Escape')
+    await expect(input).toBeFocused()
+    await expect(page.getByRole('button', { name: 'Close artifact inspector' })).toBeVisible()
+  }
+})
+
+test('returns palette focus to main when history removes its opener', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/settings')
+  await page.getByRole('link', { name: /^Search Global and session search/ }).click()
+  await page.getByRole('button', { name: 'Search', exact: true }).focus()
+  await page.keyboard.press('ControlOrMeta+k')
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+
+  await page.goBack()
+  await expect(page).toHaveURL(/\/settings$/)
+  await expect(
+    page.getByRole('heading', { name: 'Operator preferences', includeHidden: true }),
+  ).toBeVisible()
+  await expect(palette).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await expect(palette).toBeHidden()
+  await expect(page.getByRole('main')).toBeFocused()
+})
+
+test('restores surviving product focus when history removes a search control', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/settings')
+  await page.getByRole('link', { name: /^Search Global and session search/ }).click()
+  await page.getByRole('textbox', { name: 'Search text' }).focus()
+  await page.goBack()
+  await expect(page.getByRole('main')).toBeFocused()
+})
+
+test('sets the imports scenario title after leaving a workspace', async ({ page }) => {
+  await page.goto('/scenario/streaming')
+  await page.getByRole('link', { name: /^Million-row imports/ }).click()
+  await expect(page).toHaveTitle('Signalbox Scenario Studio — Imports')
+})
+
+test('releases the imports title when the next scenario fails to load', async ({ page }) => {
+  await page.route('**/assets/App-*.js', (route) => route.abort())
+  await page.goto('/scenario/imports')
+  await expect(page).toHaveTitle('Signalbox Scenario Studio — Imports')
+  await page.getByRole('link', { name: /^Streaming session/ }).click()
+  await expect(page.getByText('Scenario studio could not be loaded.')).toBeVisible()
+  await expect(page).not.toHaveTitle('Signalbox Scenario Studio — Imports')
 })

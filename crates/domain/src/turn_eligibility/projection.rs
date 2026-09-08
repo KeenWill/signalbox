@@ -440,6 +440,12 @@ impl AcceptedInputSchedulingProjection {
                     .map(|batch| batch.yielded_frontier)
             })
             .or(self.active_tool_recovery_frontier)
+            .or_else(|| match active.active_phase() {
+                Some(ActiveTurnPhase::AwaitingCredentialAvailability { wait }) => {
+                    Some(wait.frontier())
+                }
+                _ => None,
+            })
             .or_else(|| active.start().map(|start| start.frontier().snapshot()))
             .and_then(|frontier| self.snapshots.get(&frontier));
         Self::rendered_frontier_origins(snapshot, &self.semantic_entries)

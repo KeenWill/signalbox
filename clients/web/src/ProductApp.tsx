@@ -159,13 +159,16 @@ function CommandPalette({
   context,
   openerRef,
   helpOpenerRef,
+  fallbackRef,
 }: {
   context: ProductCommandContext
   openerRef: RefObject<HTMLElement | null>
   helpOpenerRef: RefObject<HTMLElement | null>
+  fallbackRef: RefObject<HTMLElement | null>
 }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
+  const focusSearchAfterClose = useRef(false)
   return (
     <Dialog.Root
       open={open}
@@ -180,6 +183,12 @@ function CommandPalette({
           aria-describedby="product-palette-description"
           onEscapeKeyDown={(event) => event.stopPropagation()}
           onCloseAutoFocus={(event) => {
+            if (focusSearchAfterClose.current) {
+              event.preventDefault()
+              focusSearchAfterClose.current = false
+              context.focusSearch?.()
+              return
+            }
             if (focusTimelineAfterClose.current) {
               event.preventDefault()
               focusTimelineAfterClose.current = false
@@ -189,9 +198,10 @@ function CommandPalette({
             // Hand the palette's keystroke back to the control it was invoked from, unless another
             // overlay has already taken over the surface.
             const opener = openerRef.current
-            if (context.getState().app.overlay !== null || !opener?.isConnected) return
+            if (context.getState().app.overlay !== null) return
             event.preventDefault()
-            opener.focus()
+            if (opener?.isConnected && opener.getClientRects().length > 0) opener.focus()
+            else fallbackRef.current?.focus()
           }}
         >
           <div className="dialog-heading">
@@ -220,6 +230,7 @@ function CommandPalette({
                   key={command.id}
                   type="button"
                   onClick={() => {
+                    focusSearchAfterClose.current = command.id === 'search.focus'
                     focusTimelineAfterClose.current =
                       command.id.startsWith('selection.') &&
                       productCommandAvailable(command.id, context)
@@ -471,9 +482,17 @@ export function ProductApp({
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const sessionEntryRequested = useRef(false)
+  const [catalogLifecycleFilter, setCatalogLifecycleFilter] = useState('all')
+  const [catalogPageOrder, setCatalogPageOrder] = useState('activity')
+  const catalogReturnSessionId = useRef<string | undefined>(undefined)
+  const consumeCatalogReturnFocus = useCallback(() => {
+    catalogReturnSessionId.current = undefined
+  }, [])
   const updateSessionSearch = useCallback(
     (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
       sessionEntryRequested.current = next.workspace === true
+      if (mode === 'push' && next.workspace && next.session)
+        catalogReturnSessionId.current = next.session
       if (mode === 'close') {
         currentCatalogSession.current = next.session
         if (catalogSessionOpenedHere) {
@@ -541,6 +560,11 @@ export function ProductApp({
       artifactPreviewIds: [],
       artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
+      searchAvailable:
+        surface === 'search' &&
+        bootstrap.isSuccess &&
+        bootstrap.data.capabilities.bounded_lexical_search === true,
+      focusSearch: () => document.getElementById('product-search-input')?.focus(),
       configuresTranscriptDetail: surface === 'settings',
       focusTimeline:
         surfaceContext?.focusTimeline ??
@@ -554,21 +578,21 @@ export function ProductApp({
           if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
         }),
       unwindSurface: () => {
-        if (surface === 'sessions' && sessionState.workspace) {
-          updateSessionSearch({ ...sessionState, workspace: undefined }, 'close')
-          return true
-        }
-        if (surface === 'sessions' && sessionState.session) {
-          updateSessionSearch({ ...sessionState, session: undefined }, 'close')
+        if (surface === 'sessions' && (sessionState.workspace || sessionState.session)) {
+          updateSessionSearch(
+            { ...sessionState, workspace: undefined, session: undefined },
+            'close',
+          )
           return true
         }
         return surfaceEscapeRef.current?.() ?? false
       },
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
-      loadTimelineWindow: sessionState.workspace
-        ? (anchor) =>
-            setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
-        : undefined,
+      loadTimelineWindow:
+        sessionState.workspace || sessionState.session
+          ? (anchor) =>
+              setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
+          : undefined,
       navigate: (path) => {
         // A retained exact continuation command owns the surface until it is retried or abandoned.
         if (navigationDisabled) return
@@ -594,6 +618,8 @@ export function ProductApp({
     }
   }, [
     artifactAvailable,
+    bootstrap.data,
+    bootstrap.isSuccess,
     dispatch,
     importsCommandContext,
     navigate,
@@ -604,9 +630,14 @@ export function ProductApp({
     timelineWindowAvailable,
     updateSessionSearch,
   ])
+  useEffect(() => {
+    void surface
+    if (document.activeElement === document.body) mainRef.current?.focus()
+  }, [surface])
   const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
     productHotkeyBindings
+      .filter((binding) => productCommandAvailable(binding.commandId, context))
       .filter(
         (binding) =>
           !binding.commandId.startsWith('imports.') ||
@@ -619,8 +650,13 @@ export function ProductApp({
         options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
         callback: (event) => {
           if (artifactSheetOwnsFocus) return
+          const searchFormOwnsTarget =
+            surface === 'search' &&
+            event.target instanceof HTMLElement &&
+            event.target.closest('.search-form') !== null
           if (
-            (binding.commandId === 'palette.open' || binding.commandId === 'surface.escape') &&
+            (binding.commandId === 'palette.open' ||
+              (binding.commandId === 'surface.escape' && !searchFormOwnsTarget)) &&
             isEditableTarget(event.target)
           ) {
             return
@@ -769,13 +805,16 @@ export function ProductApp({
           </div>
         </section>
       </div>
-    ) : surface === 'sessions' && bootstrap.isSuccess && sessionState.workspace ? (
+    ) : surface === 'sessions' &&
+      bootstrap.isSuccess &&
+      (sessionState.workspace || sessionState.session) ? (
       <SessionWorkspaceSurface
         key={sessionState.session ?? 'unselected'}
         onSessionOpen={(session) =>
           updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
         }
         focusEntry={sessionEntryRequested.current}
+        onReturnToCatalog={() => context.unwindSurface?.()}
         initialSessionId={sessionState.session}
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
@@ -788,6 +827,12 @@ export function ProductApp({
       />
     ) : surface === 'sessions' && bootstrap.isSuccess ? (
       <SessionCatalogSurface
+        returnSessionId={catalogReturnSessionId.current}
+        onReturnFocusConsumed={consumeCatalogReturnFocus}
+        lifecycleFilter={catalogLifecycleFilter}
+        pageOrder={catalogPageOrder}
+        onLifecycleFilterChange={setCatalogLifecycleFilter}
+        onPageOrderChange={setCatalogPageOrder}
         state={sessionState}
         onStateChange={updateSessionSearch}
         onTimelineIds={setTimelineIds}
@@ -953,6 +998,7 @@ export function ProductApp({
         context={context}
         openerRef={paletteOpenerRef}
         helpOpenerRef={helpOpenerRef}
+        fallbackRef={mainRef}
       />
       <KeyboardHelp context={context} openerRef={helpOpenerRef} fallbackRef={mainRef} />
       <Dialog.Root
@@ -969,7 +1015,7 @@ export function ProductApp({
             onCloseAutoFocus={(event) => {
               const opener = navigationOpenerRef.current
               navigationOpenerRef.current = null
-              if (opener?.isConnected) {
+              if (opener?.isConnected && opener.getClientRects().length > 0) {
                 event.preventDefault()
                 opener.focus()
               }

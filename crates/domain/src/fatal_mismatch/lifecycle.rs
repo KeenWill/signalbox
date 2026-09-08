@@ -220,7 +220,8 @@ impl PostEvidenceFatalMismatchFacts {
             ActiveTurnPhase::AwaitingApproval { .. }
             | ActiveTurnPhase::AwaitingChild { .. }
             | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-            | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+            | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+            | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
                 return Err(FatalMismatchLifecycleBindingError::new(
                     self,
                     source_phase,

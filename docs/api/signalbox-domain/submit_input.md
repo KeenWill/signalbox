@@ -20,6 +20,13 @@ impl SubmitInput {
         content: UserContent,
         configuration: PerInputConfigurationChoices,
     ) -> Self;
+    pub const fn new_program(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        run: ProgramActor,
+    ) -> Self;
     pub const fn new_core_interrupt(
         command_id: DurableCommandId,
         session: SessionId,
@@ -259,6 +266,9 @@ impl SubmitInputReconstitutionInput {
         input: SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
     ) -> Self;
     pub const fn command(&self) -> &SubmitInput;
+    pub fn reconstitute_recorded(
+        self,
+    ) -> result::Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError>;
     pub fn reconstitute(
         self,
     ) -> result::Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError>;
