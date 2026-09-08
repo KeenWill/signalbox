@@ -134,17 +134,15 @@ Grants are scoped by workspace identity, so a grant does not survive an
 unrecorded move of the directory and must be minted again under the new
 workspace.
 
+Operator workspace registration canonicalizes the root once in the daemon
+filesystem and stores its unique spelling with the registering command.
+Workspace comparisons use the resulting identity. Git remote minting records one
+HTTPS destination per workspace and name; withdrawal retires exactly one mint
+and frees its name. Neither operation changes which roots the daemon may open.
+
 ## Planned
 
 - Push by remote name, with the endpoint resolved against the durable minted
   record ahead of the call ([design](../design/git-authority-threat-model.md)).
-- Workspace minting, with the root canonicalized once at minting so later scope
-  comparisons are between identities
-  ([design](../design/git-authority-threat-model.md)).
-- The workspace writer, which records the registering command on an
-  operator-registered row and leaves a daemon-derived row as bookkeeping
-  ([design](../design/git-authority-threat-model.md)).
-- Workspace registration, recording the canonical root a person resolved at the
-  time ([design](../design/git-authority-threat-model.md)).
 - Relocation as a durable fact that preserves workspace identity
   ([design](../design/git-authority-threat-model.md)).
