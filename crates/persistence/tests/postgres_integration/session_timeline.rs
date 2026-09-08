@@ -1497,7 +1497,7 @@ async fn completed_tool_detail_continues_from_arguments_to_the_recorded_result()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _) = migrated_postgres().await?;
     let (fixture, _, _, _) =
-        super::authorize_continuation_after_completed_round(&pool, 0x995800).await?;
+        super::authorize_continuation_after_terminal_round(&pool, 0x995800, None).await?;
     let sequence: i64 = sqlx::query_scalar(
         "SELECT event_sequence::bigint FROM tool_batch_transition_outbox_event
          WHERE producing_model_call_id = $1 AND transition_kind = 'results_projected'",
@@ -1554,6 +1554,59 @@ async fn completed_tool_detail_continues_from_arguments_to_the_recorded_result()
         recorded_result
     );
     assert_eq!(result.continuation, None);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn preauthorization_rejection_commits_and_projects_its_frozen_failure()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let error = signalbox_domain::ToolExecutionError::new(
+        signalbox_domain::ToolExecutionErrorKind::PreauthorizationRejected,
+        Some(
+            signalbox_domain::ToolExecutionErrorDetail::try_new(String::from("blob_not_visible"))
+                .expect("bounded rejection detail"),
+        ),
+    );
+    let (fixture, _, _, _) =
+        super::authorize_continuation_after_terminal_round(&pool, 0x995900, Some(error)).await?;
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint FROM tool_batch_transition_outbox_event
+         WHERE producing_model_call_id = $1 AND transition_kind = 'results_projected'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let address =
+        TimelineAddress::new(NonZeroU64::new(u64::try_from(sequence)?).expect("committed address"));
+    let page = SessionTimelineRepository::new(pool.clone())
+        .read_item_details(
+            fixture.session,
+            address,
+            Some(signalbox_application::TimelineDetailCursor {
+                address,
+                field: Some(signalbox_application::TimelineBodyField::ToolFailure),
+                member_index: 0,
+                offset_bytes: 0,
+            }),
+            TimelineDetailLimits::new(1, 256).expect("bounded detail"),
+        )
+        .await?
+        .expect("failure detail");
+    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &page.items[0].body else {
+        panic!("tool body")
+    };
+    assert_eq!(
+        tools[0].cause_code.as_deref(),
+        Some("preauthorization_rejected")
+    );
+    assert_eq!(
+        tools[0].failure.as_ref().expect("failure text").text,
+        "blob_not_visible"
+    );
     pool.close().await;
     drop(container);
     Ok(())

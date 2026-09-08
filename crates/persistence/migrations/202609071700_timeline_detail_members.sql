@@ -106,6 +106,7 @@ CREATE TABLE tool_batch_transition_detail_member (
         CHECK (
             attempt_error_kind IS NULL
             OR attempt_error_kind IN (
+                'preauthorization_rejected',
                 'unknown_tool',
                 'invalid_arguments',
                 'execution_failed',

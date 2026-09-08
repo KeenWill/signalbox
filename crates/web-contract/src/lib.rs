@@ -1182,6 +1182,7 @@ pub enum WebTimelineToolSandboxPosture {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebTimelineToolFailureCause {
+    PreauthorizationRejected,
     UnknownTool,
     InvalidArguments,
     ExecutionFailed,
@@ -1227,29 +1228,9 @@ pub struct WebTimelineToolAttempt {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WebTimelineApprovalSource {
-    Policy,
-    Delegate,
-    User,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum WebTimelineApprovalDecision {
     Approve,
     Deny,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
-pub enum WebTimelineApprovalDecider {
-    User {
-        command_id: WebSessionId,
-    },
-    Delegate {
-        model_selection_id: WebSessionId,
-        model_call_id: WebSessionId,
-    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1283,17 +1264,6 @@ pub enum WebTimelineRunnerState {
     Replaced,
     WorkingDirectoryChanged,
     Abandoned,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebTimelineGoalEventKind {
-    Commissioned,
-    Blocked,
-    Resumed,
-    Achieved,
-    UserStopped,
-    Superseded,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -3766,12 +3736,12 @@ function assertTimelineDetailPage(value) {{
         }}
         if (
           item.body.actor.type === "policy" &&
-          (item.body.decision !== "approve" ||
-            (item.body.rationale !== undefined && item.body.rationale !== null))
+          item.body.decision === "approve" &&
+          item.body.rationale !== undefined && item.body.rationale !== null
         ) {{
           fail(
             `${{path}}.body.actor`,
-            "an automatic approval without a rationale for a policy actor",
+            "no rationale for an automatic policy approval",
           );
         }}
         if (item.body.rationale !== undefined && item.body.rationale !== null) {{

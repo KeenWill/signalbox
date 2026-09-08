@@ -6183,6 +6183,7 @@ const schemas = {
       },
       "WebTimelineToolFailureCause": {
         "enum": [
+          "preauthorization_rejected",
           "unknown_tool",
           "invalid_arguments",
           "execution_failed",
@@ -7655,12 +7656,12 @@ function assertTimelineDetailPage(value) {
         }
         if (
           item.body.actor.type === "policy" &&
-          (item.body.decision !== "approve" ||
-            (item.body.rationale !== undefined && item.body.rationale !== null))
+          item.body.decision === "approve" &&
+          item.body.rationale !== undefined && item.body.rationale !== null
         ) {
           fail(
             `${path}.body.actor`,
-            "an automatic approval without a rationale for a policy actor",
+            "no rationale for an automatic policy approval",
           );
         }
         if (item.body.rationale !== undefined && item.body.rationale !== null) {

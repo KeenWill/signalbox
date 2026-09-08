@@ -3092,3 +3092,20 @@ test("rates retain the disposition of a session closed with a live goal", async 
   const fixture = JSON.parse(await readFile(new URL("./fixtures/session-closed-rates.json", import.meta.url), "utf8"));
   assert.equal(decodeWebSessionRates(fixture).sessions[0].goal_disposition, "session_closed");
 });
+
+
+test("policy denials decode with runtime-safety rationale or lifecycle closure", () => {
+  for (const text of [null, "runtime safety denial"]) {
+    const page = userInputDetailPage();
+    const rationale = text === null ? null : { text, offset_bytes: "0", total_bytes: String(text.length), continuation: null };
+    page.items[0].kind = "tool_approval_decided";
+    page.items[0].body = {
+      type: "tool_approval_decision", turn_id: page.session_id, request_id: page.session_id,
+      tool_name: "exec_command", decision: "deny", actor: { type: "policy" },
+      rationale, approval_judge_escalated: false,
+    };
+    page.items[0].projected_body_bytes = 128 + (text?.length ?? 0);
+    page.projected_body_bytes = page.items[0].projected_body_bytes;
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+});

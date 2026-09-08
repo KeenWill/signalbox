@@ -1393,6 +1393,9 @@ fn tool_attempt_dto(
                 },
                 cause: match cause {
                     None => None,
+                    Some("preauthorization_rejected") => {
+                        Some(WebTimelineToolFailureCause::PreauthorizationRejected)
+                    }
                     Some("unknown_tool") => Some(WebTimelineToolFailureCause::UnknownTool),
                     Some("invalid_arguments") => {
                         Some(WebTimelineToolFailureCause::InvalidArguments)
@@ -1599,5 +1602,40 @@ fn ownership_detail_dto(value: TimelineOwnershipTransition) -> WebTimelineOwners
         }
         TimelineOwnershipTransition::Adopted => WebTimelineOwnershipTransition::Adopted,
         TimelineOwnershipTransition::Released => WebTimelineOwnershipTransition::Released,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use signalbox_domain::{ToolAttemptId, ToolName, ToolRequestId};
+    use uuid::Uuid;
+
+    #[test]
+    fn detail_preserves_the_preauthorization_failure_cause() {
+        let dto = tool_attempt_dto(TimelineToolAttempt {
+            request_id: ToolRequestId::from_uuid(Uuid::from_u128(0x991)),
+            attempt_id: Some(ToolAttemptId::from_uuid(Uuid::from_u128(0x992))),
+            tool_name: ToolName::try_new(String::from("read_blob")).expect("valid tool name"),
+            arguments: None,
+            result: None,
+            failure: None,
+            has_result: false,
+            has_failure: true,
+            approval_posture: TimelineToolApprovalPosture::Auto,
+            approval_judge_escalated: false,
+            effect_posture: Some(TimelineToolEffectPosture::EffectFree),
+            sandbox_posture: None,
+            state: Some(TimelineToolState::KnownFailed),
+            cause_code: Some(String::from("preauthorization_rejected")),
+        })
+        .expect("the durable failure cause is a web-contract cause");
+        assert!(matches!(
+            dto.evidence,
+            WebTimelineToolAttemptEvidence::PhysicalAttempt {
+                cause: Some(WebTimelineToolFailureCause::PreauthorizationRejected),
+                ..
+            }
+        ));
     }
 }
