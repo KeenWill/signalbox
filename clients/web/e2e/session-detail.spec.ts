@@ -213,8 +213,8 @@ async function openDetails(
     })
   })
   await page.goto('/sessions?workspace=true')
-  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(detailSessionId)
-  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await page.getByRole('textbox', { name: 'Session ID' }).fill(detailSessionId)
+  await page.getByRole('button', { name: 'Open', exact: true }).click()
   await expect(page.getByRole('heading', { name: detailSessionId })).toBeVisible()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   return reads
