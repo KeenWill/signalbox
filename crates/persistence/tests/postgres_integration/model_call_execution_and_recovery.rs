@@ -501,6 +501,7 @@ async fn model_call_writers_guard_credential_before_outbox() -> Result<(), Box<d
     )
     .await?;
 
+    let expected_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 11));
     let allocator_holder = lock_outbox_sequence_allocator(&pool).await?;
     let preparation = tokio::spawn({
         let repository = repository.clone();
@@ -508,7 +509,7 @@ async fn model_call_writers_guard_credential_before_outbox() -> Result<(), Box<d
             repository
                 .prepare_initial_call(
                     session,
-                    ModelCallId::from_uuid(Uuid::from_u128(seed + 11)),
+                    expected_call,
                     FailedModelCallTurnIdentities::new(
                         SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
                         ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
@@ -531,10 +532,7 @@ async fn model_call_writers_guard_credential_before_outbox() -> Result<(), Box<d
     let PrepareInitialModelCallOutcome::Checkpointed(prepared_call) = preparation.await?? else {
         panic!("the released preparation must checkpoint");
     };
-    assert_eq!(
-        prepared_call,
-        ModelCallId::from_uuid(Uuid::from_u128(seed + 11))
-    );
+    assert_eq!(prepared_call, expected_call);
 
     let PrepareInitialModelCallOutcome::Ready { request, .. } = repository
         .prepare_initial_call(
