@@ -78,13 +78,19 @@ impl InvocationProcessObserver for CredentialInvocationProcesses {
     fn finished(
         &self,
         call: ModelCallId,
+        process_group: Option<u32>,
         proven_unsent: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             let result = async {
-                let group = credential_invocations::process_group(&self.pool, call).await?;
+                let group = match process_group {
+                    Some(group) => Some(group),
+                    None => credential_invocations::process_group(&self.pool, call).await?,
+                };
                 if group.is_some_and(group_absent) || (group.is_none() && proven_unsent) {
                     credential_invocations::release(&self.pool, call).await?;
+                } else if let Some(group) = group {
+                    credential_invocations::register_process(&self.pool, call, group).await?;
                 }
                 Ok::<_, ModelCallRepositoryError>(())
             }

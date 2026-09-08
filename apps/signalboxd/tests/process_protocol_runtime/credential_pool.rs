@@ -240,7 +240,7 @@ async fn pool_projection_capacity_recovery_retains_live_groups_and_releases_ende
     let group = child.id().expect("spawned child has an identity");
     let observer = CredentialInvocationProcesses::new(runtime.pool.clone());
     assert!(observer.register(call, group).await);
-    observer.finished(call, true).await;
+    observer.finished(call, None, true).await;
     observer.recover().await?;
     assert_eq!(
         credential_invocations::process_group(&runtime.pool, call).await?,

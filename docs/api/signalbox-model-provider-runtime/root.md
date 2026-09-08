@@ -310,6 +310,7 @@ pub trait InvocationProcessObserver: marker::Send + marker::Sync {
     fn finished(
         &self,
         call: signalbox_domain::ModelCallId,
+        process_group: option::Option<u32>,
         proven_unsent: bool,
     ) -> pin::Pin<boxed::Box<dyn future::Future<Output = ()> + marker::Send + '_>>;
 }
