@@ -312,35 +312,38 @@ where
     }
     match request {
         ClientRequest::RegisterWorkspace { command_id, root } => {
-            let root = match tokio::fs::canonicalize(root).await {
-                Ok(path)
-                    if tokio::fs::metadata(&path)
-                        .await
-                        .is_ok_and(|metadata| metadata.is_dir()) =>
-                {
-                    path.to_str()
-                        .map(str::to_owned)
-                        .and_then(|root| signalbox_domain::WorkspaceRootPath::try_new(root).ok())
-                }
-                Ok(_) | Err(_) => None,
-            };
-            let Some(root) = root else {
-                return write_error(
+            Box::pin(async move {
+                let root = match tokio::fs::canonicalize(root).await {
+                    Ok(path)
+                        if tokio::fs::metadata(&path)
+                            .await
+                            .is_ok_and(|metadata| metadata.is_dir()) =>
+                    {
+                        path.to_str().map(str::to_owned).and_then(|root| {
+                            signalbox_domain::WorkspaceRootPath::try_new(root).ok()
+                        })
+                    }
+                    Ok(_) | Err(_) => None,
+                };
+                let Some(root) = root else {
+                    return write_error(
+                        writer,
+                        version,
+                        request_id,
+                        ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                    )
+                    .await;
+                };
+                handle_workspace(
                     writer,
                     version,
                     request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                    command_id,
+                    signalbox_domain::WorkspaceOperation::Register { root },
+                    &services.pool,
                 )
-                .await;
-            };
-            handle_workspace(
-                writer,
-                version,
-                request_id,
-                command_id,
-                signalbox_domain::WorkspaceOperation::Register { root },
-                &services.pool,
-            )
+                .await
+            })
             .await
         }
         ClientRequest::MintGitRemote {
@@ -349,119 +352,152 @@ where
             name,
             url,
         } => {
-            let (Ok(name), Ok(url)) = (
-                signalbox_domain::GitRemoteName::try_new(name),
-                signalbox_domain::GitRemoteUrl::try_new(url),
-            ) else {
-                return write_error(
+            Box::pin(async move {
+                let (Ok(name), Ok(url)) = (
+                    signalbox_domain::GitRemoteName::try_new(name),
+                    signalbox_domain::GitRemoteUrl::try_new(url),
+                ) else {
+                    return write_error(
+                        writer,
+                        version,
+                        request_id,
+                        ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                    )
+                    .await;
+                };
+                handle_workspace(
                     writer,
                     version,
                     request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                    command_id,
+                    signalbox_domain::WorkspaceOperation::MintRemote {
+                        workspace: signalbox_domain::WorkspaceId::from_uuid(
+                            workspace_id.into_uuid(),
+                        ),
+                        name,
+                        url,
+                    },
+                    &services.pool,
                 )
-                .await;
-            };
-            handle_workspace(
-                writer,
-                version,
-                request_id,
-                command_id,
-                signalbox_domain::WorkspaceOperation::MintRemote {
-                    workspace: signalbox_domain::WorkspaceId::from_uuid(workspace_id.into_uuid()),
-                    name,
-                    url,
-                },
-                &services.pool,
-            )
+                .await
+            })
             .await
         }
         ClientRequest::WithdrawGitRemote {
             command_id,
             mint_id,
         } => {
-            handle_workspace(
-                writer,
-                version,
-                request_id,
-                command_id,
-                signalbox_domain::WorkspaceOperation::WithdrawRemote {
-                    mint: signalbox_domain::GitRemoteMintId::from_uuid(mint_id.into_uuid()),
-                },
-                &services.pool,
-            )
+            Box::pin(async move {
+                handle_workspace(
+                    writer,
+                    version,
+                    request_id,
+                    command_id,
+                    signalbox_domain::WorkspaceOperation::WithdrawRemote {
+                        mint: signalbox_domain::GitRemoteMintId::from_uuid(mint_id.into_uuid()),
+                    },
+                    &services.pool,
+                )
+                .await
+            })
             .await
         }
 
         ClientRequest::ReloadConfiguration { command_id } => {
-            super::reload::handle_reload(writer, version, request_id, command_id, services).await
+            Box::pin(async move {
+                super::reload::handle_reload(writer, version, request_id, command_id, services)
+                    .await
+            })
+            .await
         }
         request @ (ClientRequest::ReplaceLostRunner { .. }
         | ClientRequest::AbandonLostRunner { .. }
         | ClientRequest::PromotePendingRunner { .. }) => {
-            runner_recovery::handle_runner_recovery(
-                reader, writer, version, request_id, request, services, shutdown,
-            )
+            Box::pin(async move {
+                runner_recovery::handle_runner_recovery(
+                    reader, writer, version, request_id, request, services, shutdown,
+                )
+                .await
+            })
             .await
         }
         ClientRequest::ProvisionOauthCredential {
             command_id,
             profile,
         } => {
-            handle_oauth_credential(
-                writer,
-                version,
-                request_id,
-                command_id,
-                profile,
-                signalbox_persistence::oauth_credential::OauthCredentialOperation::Provision,
-                services,
-            )
+            Box::pin(async move {
+                handle_oauth_credential(
+                    writer,
+                    version,
+                    request_id,
+                    command_id,
+                    profile,
+                    signalbox_persistence::oauth_credential::OauthCredentialOperation::Provision,
+                    services,
+                )
+                .await
+            })
             .await
         }
         ClientRequest::ReprovisionOauthCredential {
             command_id,
             profile,
         } => {
-            handle_oauth_credential(
-                writer,
-                version,
-                request_id,
-                command_id,
-                profile,
-                signalbox_persistence::oauth_credential::OauthCredentialOperation::Reprovision,
-                services,
-            )
+            Box::pin(async move {
+                handle_oauth_credential(
+                    writer,
+                    version,
+                    request_id,
+                    command_id,
+                    profile,
+                    signalbox_persistence::oauth_credential::OauthCredentialOperation::Reprovision,
+                    services,
+                )
+                .await
+            })
             .await
         }
         ClientRequest::DeleteOauthCredential {
             command_id,
             profile,
         } => {
-            handle_oauth_credential(
-                writer,
-                version,
-                request_id,
-                command_id,
-                profile,
-                signalbox_persistence::oauth_credential::OauthCredentialOperation::Delete,
-                services,
-            )
+            Box::pin(async move {
+                handle_oauth_credential(
+                    writer,
+                    version,
+                    request_id,
+                    command_id,
+                    profile,
+                    signalbox_persistence::oauth_credential::OauthCredentialOperation::Delete,
+                    services,
+                )
+                .await
+            })
             .await
         }
         ClientRequest::CancelProgramRun { command_id, run_id } => {
-            handle_cancel_program_run(writer, version, request_id, command_id, run_id, services)
-                .await
+            Box::pin(async move {
+                handle_cancel_program_run(writer, version, request_id, command_id, run_id, services)
+                    .await
+            })
+            .await
         }
         ClientRequest::ListCredentialExclusions { page_size, after } => {
-            handle_list_credential_exclusions(
-                writer, version, request_id, page_size, after, services,
-            )
+            Box::pin(async move {
+                handle_list_credential_exclusions(
+                    writer, version, request_id, page_size, after, services,
+                )
+                .await
+            })
             .await
         }
         ClientRequest::ClearCredentialExclusion { command_id, target } => {
-            handle_clear_credential_exclusion(
-                writer, version, request_id, command_id, target, services,
-            )
+            Box::pin(async move {
+                handle_clear_credential_exclusion(
+                    writer, version, request_id, command_id, target, services,
+                )
+                .await
+            })
             .await
         }
         ClientRequest::CreateSession {
@@ -1640,17 +1676,20 @@ where
             task,
             relationship,
         } => {
-            handle_spawn_session(
-                writer,
-                version,
-                request_id,
-                session_id,
-                turn_id,
-                tool_request_id,
-                task,
-                relationship,
-                services,
-            )
+            Box::pin(async move {
+                handle_spawn_session(
+                    writer,
+                    version,
+                    request_id,
+                    session_id,
+                    turn_id,
+                    tool_request_id,
+                    task,
+                    relationship,
+                    services,
+                )
+                .await
+            })
             .await
         }
         ClientRequest::AwaitSession {
