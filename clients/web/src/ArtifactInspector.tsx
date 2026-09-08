@@ -1,13 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import {
-  type Dispatch,
-  type FormEvent,
-  type RefObject,
-  type SetStateAction,
-  useEffect,
-  useMemo,
-} from 'react'
+import { type Dispatch, type FormEvent, type RefObject, type SetStateAction, useMemo } from 'react'
 import type { CommandContext } from './commands'
 import { ArtifactRenderer, selectImageView } from './features/artifacts/ArtifactRenderer'
 import { selectBoundedOriginalView } from './features/artifacts/artifactScenario'
@@ -20,11 +13,16 @@ import {
   ProductTransportError,
   productTransport,
 } from './product'
-import { actions, useAppDispatch } from './state'
 
 export interface ArtifactRequest extends BlobDescriptorInput {
   sequence: number
 }
+
+export const artifactResolutionId = ({
+  digest,
+  sequence,
+}: Pick<ArtifactRequest, 'digest' | 'sequence'>): string =>
+  `product-artifact:${String(sequence)}:${digest}`
 
 export interface ArtifactInspectorState {
   digest: string
@@ -64,7 +62,7 @@ export const inspectedArtifact = (
   sequence: number,
 ): ArtifactItem => {
   const identity = {
-    id: `product-artifact:${String(sequence)}:${descriptor.digest}`,
+    id: artifactResolutionId({ digest: descriptor.digest, sequence }),
     displayName: descriptor.display_filename[0] ?? descriptor.digest,
   }
   return selectImageView(descriptor) !== undefined ||
@@ -97,7 +95,6 @@ export function ArtifactInspector({
   state: ArtifactInspectorState
   onStateChange: Dispatch<SetStateAction<ArtifactInspectorState>>
 }) {
-  const dispatch = useAppDispatch()
   const queryClient = useQueryClient()
   const { digest, mediaType, displayFilename, request } = state
   const descriptor = useQuery({
@@ -118,13 +115,6 @@ export function ArtifactInspector({
     () => (resolved === undefined ? null : inspectedArtifact(resolved, sequence)),
     [resolved, sequence],
   )
-  const artifactId = artifact?.id
-  useEffect(() => {
-    if (artifactId === undefined) return
-    return () => {
-      dispatch(actions.artifactOriginalReleased(artifactId))
-    }
-  }, [artifactId, dispatch])
   // The registry gates original loading on the invoking context, so the inspector admits exactly
   // the artifact it resolved, and only when the descriptor proves a bounded original.
   const rendererContext = useMemo<CommandContext>(

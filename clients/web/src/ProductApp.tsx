@@ -22,7 +22,11 @@ import {
   useRef,
   useState,
 } from 'react'
-import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
+import {
+  ArtifactInspector,
+  artifactResolutionId,
+  emptyArtifactInspectorState,
+} from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
@@ -589,6 +593,13 @@ export function ProductApp({
   }, [])
   const [artifactOpen, setArtifactOpen] = useState(false)
   const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
+  const artifactRequest = artifactInspectorState.request
+  useEffect(() => {
+    if (artifactRequest === null) return
+    return () => {
+      dispatch(actions.artifactOriginalReleased(artifactResolutionId(artifactRequest)))
+    }
+  }, [artifactRequest, dispatch])
   const narrowInspector = useNarrowInspector()
   const [focusAfterBootstrapRecovery, setFocusAfterBootstrapRecovery] = useState(false)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
