@@ -50,6 +50,7 @@ pub(crate) async fn goal(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
     command: GoalCommand,
+    stdin: &mut dyn Read,
 ) -> Result<(), ClientError> {
     match command {
         GoalCommand::Attach {
@@ -75,7 +76,7 @@ pub(crate) async fn goal(
         } => {
             let guidance = match guidance {
                 Some(guidance) => Some(read_goal_text_argument(guidance).await?),
-                None => None,
+                None => read_optional_resume_guidance(stdin)?,
             };
             goal_mutation(client, output, session_id, command_id, |command_id| {
                 ClientRequest::ResumeGoal {
@@ -463,4 +464,49 @@ async fn goal_show(
         line.clear();
     }
     Ok(())
+}
+
+fn read_optional_resume_guidance(stdin: &mut dyn Read) -> Result<Option<String>, ClientError> {
+    let mut bytes = Vec::new();
+    stdin
+        .take((MAX_CONTENT_FRAGMENT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| ClientError::Input("goal text must be valid UTF-8"))?;
+    validate_goal_text_input(text).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn piped_resume_guidance_is_preserved() {
+        let guidance = "Keep the requested scope.\n";
+        assert_eq!(
+            read_optional_resume_guidance(&mut guidance.as_bytes()).unwrap(),
+            Some(guidance.to_owned())
+        );
+    }
+
+    #[test]
+    fn empty_resume_input_preserves_absent_guidance() {
+        assert_eq!(
+            read_optional_resume_guidance(&mut std::io::empty()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn piped_resume_guidance_keeps_the_goal_byte_bound() {
+        let oversized = vec![b'x'; MAX_CONTENT_FRAGMENT_BYTES + 1];
+        let error = read_optional_resume_guidance(&mut oversized.as_slice()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "goal text exceeds the 1 MiB UTF-8 byte limit"
+        );
+    }
 }
