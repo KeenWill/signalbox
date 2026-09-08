@@ -1006,6 +1006,8 @@ test('compacts the scenario toolbar at its pane width', async ({ page }, testInf
   await expect(toolbar).toBeVisible()
   await expect(page.getByRole('group', { name: 'Transcript detail' })).toBeHidden()
   expect(await toolbar.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  const toolbarBox = await toolbar.boundingBox()
+  expect((toolbarBox?.x ?? 0) + (toolbarBox?.width ?? 0)).toBeLessThanOrEqual(780)
   await page.screenshot({ path: testInfo.outputPath('scenario-pane.png') })
   await page.setViewportSize({ width: 1440, height: 900 })
   await expect(page.getByRole('group', { name: 'Transcript detail' })).toBeVisible()

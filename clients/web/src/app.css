@@ -1572,6 +1572,7 @@ kbd {
   display: grid;
   min-width: 0;
   container: scenario-workspace / inline-size;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 49px minmax(0, 1fr);
   background: var(--surface-2);
 }
