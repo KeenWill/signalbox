@@ -3035,6 +3035,14 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let submittedCommandIDs = await service.submittedCommandIDs
     XCTAssertEqual(submittedCommandIDs, [ProcessSubmissionFixture.commandID])
 
+    viewModel.composerText = ProcessSubmissionFixture.content + " edited"
+    XCTAssertFalse(viewModel.canReconcileAndSend)
+    await viewModel.reconcileAndSendSuccessor()
+    let submittedAfterEdit = await service.submittedCommandIDs
+    XCTAssertEqual(submittedAfterEdit, submittedCommandIDs)
+    viewModel.composerText = ProcessSubmissionFixture.content
+    XCTAssertTrue(viewModel.canReconcileAndSend)
+
     XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessDriverFixture.turn)
     viewModel.apply(.event(try ProcessProjectionFixture.successorActivatedEvent()))
     XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessSubmissionFixture.acceptedTurnID)

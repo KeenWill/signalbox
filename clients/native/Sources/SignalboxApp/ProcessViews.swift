@@ -1855,6 +1855,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   var canReconcileAndSend: Bool {
     canSubmit && showsReconciliation
+      && (unresolvedReconciliation == nil || hasRetryableReconciliation)
   }
 
   var canStopAndSend: Bool {
