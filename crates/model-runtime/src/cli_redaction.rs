@@ -919,7 +919,7 @@ pub fn redact_json(raw: &str) -> String {
 }
 
 fn redact_json_for_tool_arguments(raw: &str) -> ToolArgumentRedaction {
-    let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
+    let Ok(mut value) = crate::provider_json::parse_json_value(raw) else {
         return ToolArgumentRedaction::Admitted(redact_text(raw));
     };
     let changed = redact_value(&mut value);
@@ -3850,6 +3850,19 @@ mod tests {
 
         assert!(output.contains(NUMERIC_LEXEME));
         assert!(output.contains(REDACTED));
+    }
+
+    #[test]
+    fn credential_json_redaction_preserves_reserved_number_key_objects() {
+        let fixture =
+            r#"{"nested":{"$serde_json::private::Number":"1"},"api_key":"synthetic-secret"}"#;
+
+        let output = redact_json(fixture);
+
+        assert_eq!(
+            output,
+            r#"{"api_key":"[redacted]","nested":{"$serde_json::private::Number":"1"}}"#
+        );
     }
 
     /// Credential redaction: quoted credential-shaped values are removed as one value.

@@ -66,6 +66,8 @@ export function ImportedEntries({
     if (selectedIndex >= 0) virtualizer.scrollToIndex(selectedIndex, { align: 'auto' })
   }, [selectedIndex, virtualizer])
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!commandContext.canSelectImportEntry || commandContext.getState().app.overlay !== null)
+      return
     const command = {
       ArrowDown: 'imports.entry.next',
       ArrowUp: 'imports.entry.previous',
@@ -87,6 +89,7 @@ export function ImportedEntries({
       className="import-entry-scroll"
       role="listbox"
       aria-label="Imported source entries"
+      aria-disabled={!commandContext.canSelectImportEntry}
       aria-activedescendant={selected ? `import-entry-${selected.imported_entry_id}` : undefined}
       tabIndex={0}
       onKeyDown={onKeyDown}
@@ -104,6 +107,7 @@ export function ImportedEntries({
               id={`import-entry-${entry.frontier.imported_entry_id}`}
               role="option"
               aria-selected={isSelected}
+              aria-disabled={!commandContext.canSelectImportEntry}
               aria-posinset={entry.frontier.position}
               aria-setsize={logicalEntryCount}
               className="import-entry-row"

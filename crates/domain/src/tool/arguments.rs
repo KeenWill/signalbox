@@ -51,7 +51,8 @@ impl NormalizedToolArguments {
                 value,
             });
         }
-        let mut deserializer = serde_json::Deserializer::from_str(&value);
+        let protected = protect_object_keys(&value);
+        let mut deserializer = serde_json::Deserializer::from_str(&protected);
         deserializer.disable_recursion_limit();
         let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
         let decoded = match serde_json::Value::deserialize(deserializer) {
@@ -155,12 +156,40 @@ impl Serialize for LexicallyOrderedJson<'_> {
                 entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
                 let mut map = serializer.serialize_map(Some(entries.len()))?;
                 for (key, value) in entries {
-                    map.serialize_entry(key, &Self(value))?;
+                    map.serialize_entry(&key[1..], &Self(value))?;
                 }
                 map.end()
             }
         }
     }
+}
+
+/// Prefixes every actual object key before serde_json sees it, so its private
+/// arbitrary-precision number discriminator cannot consume ordinary object data.
+/// The serializer removes the one-byte prefix; numeric lexemes remain untouched.
+fn protect_object_keys(value: &str) -> String {
+    let mut protected = String::with_capacity(value.len());
+    let mut copied_through = 0;
+    let mut opening_quote = None;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        match opening_quote {
+            None if character == '"' => opening_quote = Some(index),
+            Some(_) if escaped => escaped = false,
+            Some(_) if character == '\\' => escaped = true,
+            Some(start) if character == '"' => {
+                if value[index + 1..].trim_start().starts_with(':') {
+                    protected.push_str(&value[copied_through..start + 1]);
+                    protected.push(' ');
+                    copied_through = start + 1;
+                }
+                opening_quote = None;
+            }
+            _ => {}
+        }
+    }
+    protected.push_str(&value[copied_through..]);
+    protected
 }
 
 fn is_complete_json(value: &str) -> bool {

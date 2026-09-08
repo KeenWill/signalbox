@@ -1787,3 +1787,23 @@ fn reader_declaration_with_probe(
     })
     .expect("fixture reader declaration is nonempty")
 }
+
+#[test]
+fn invalid_reader_validation_envelopes_name_validation_bounds() {
+    for validation in [
+        ValidationDeclaration::new(0, 1),
+        ValidationDeclaration::new(1, 0),
+        ValidationDeclaration::new(MAX_VALIDATION_SOURCE_BYTES + 1, 1),
+        ValidationDeclaration::new(1, MAX_VALIDATION_RANGES + 1),
+    ] {
+        let outcome = registry_with_view_validation_and_ceilings(
+            text_view(),
+            validation,
+            FileMediaCeilings::version_one(),
+        );
+        assert!(matches!(
+            outcome,
+            Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ValidationBounds)
+        ));
+    }
+}

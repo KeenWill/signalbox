@@ -4127,7 +4127,7 @@ async fn create_connection_failure_is_definitely_uncommitted() -> Result<(), Box
     )
     .await;
 
-    assert!(matches!(result, Err(ClientError::Io(_))));
+    assert!(matches!(result, Err(ClientError::DaemonIo(_))));
     Ok(())
 }
 
@@ -4344,7 +4344,7 @@ async fn submit_connection_failure_is_definitely_uncommitted() -> Result<(), Box
     )
     .await;
 
-    assert!(matches!(result, Err(ClientError::Io(_))));
+    assert!(matches!(result, Err(ClientError::DaemonIo(_))));
     Ok(())
 }
 

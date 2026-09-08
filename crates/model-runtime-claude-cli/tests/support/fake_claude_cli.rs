@@ -259,6 +259,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_result(fixtures::TOOL_ID)?;
             success("tool_use", Some(fixtures::TOOL_ARGUMENTS))?;
         }
+        "reserved_key_tool_arguments" => {
+            assistant_tool_with_raw_arguments(
+                fixtures::TOOL_ID,
+                fixtures::TOOL_NAME,
+                fixtures::RESERVED_KEY_TOOL_ARGUMENTS,
+            )?;
+            tool_result(fixtures::TOOL_ID)?;
+            success("tool_use", Some(fixtures::RESERVED_KEY_TOOL_ARGUMENTS))?;
+        }
         "noncanonical_tool_arguments" => {
             assistant_tool_with_raw_arguments(
                 fixtures::TOOL_ID,
