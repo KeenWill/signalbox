@@ -1961,6 +1961,80 @@ async fn blob_reads_admit_loopback_host_authorities() {
     }
 }
 
+#[tokio::test]
+async fn blob_reads_reject_cross_site_fetch_metadata_before_storage_access() {
+    for path in BLOB_READ_PATHS {
+        for method in [axum::http::Method::GET, axum::http::Method::HEAD] {
+            let request = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::HOST, "localhost")
+                .header("sec-fetch-site", "cross-site")
+                .body(Body::empty())
+                .expect("request constructs");
+            let response = production_router(None, None, None, None, None)
+                .oneshot(request)
+                .await
+                .expect("router responds");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn blob_reads_admit_fetch_metadata_that_is_not_cross_site() {
+    use axum::http::Method;
+
+    for (path, method, expected) in [
+        (
+            BLOB_READ_PATHS[0],
+            Method::GET,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            BLOB_READ_PATHS[0],
+            Method::HEAD,
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            BLOB_READ_PATHS[1],
+            Method::GET,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            BLOB_READ_PATHS[1],
+            Method::HEAD,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            BLOB_READ_PATHS[2],
+            Method::GET,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            BLOB_READ_PATHS[2],
+            Method::HEAD,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        for site in ["same-origin", "same-site", "none"] {
+            let request = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::HOST, "localhost")
+                .header("sec-fetch-site", site)
+                .body(Body::empty())
+                .expect("request constructs");
+            let response = production_router(None, None, None, None, None)
+                .oneshot(request)
+                .await
+                .expect("router responds");
+            // Preserve each handler's response: descriptor HEAD is unsupported; storage is unconfigured.
+            assert_eq!(response.status(), expected, "{site} {method} {path}");
+        }
+    }
+}
+
 #[test]
 fn detail_cursors_require_closed_fields_and_canonical_addresses() {
     let query = TimelineDetailQuery {

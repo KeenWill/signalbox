@@ -630,6 +630,7 @@ fn production_router_with_budget(
             "/blobs/{digest}/download",
             get(blob_download).head(blob_download),
         )
+        .route_layer(middleware::from_fn(origin::validate_blob_fetch_site))
         .route_layer(middleware::from_fn(validate_loopback_host))
         .with_state(http_state.clone());
     let api = Router::new()

@@ -14,6 +14,21 @@ pub(super) async fn validate_loopback_host(request: Request, next: Next) -> Resp
     next.run(request).await
 }
 
+pub(super) async fn validate_blob_fetch_site(request: Request, next: Next) -> Response {
+    if request
+        .headers()
+        .get("sec-fetch-site")
+        .is_some_and(|site| site == "cross-site")
+    {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "cross_site_blob_request_rejected",
+            "cross-site browser requests cannot read blobs",
+        );
+    }
+    next.run(request).await
+}
+
 pub(super) fn has_loopback_host(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
     headers
         .get(HOST)
