@@ -14,6 +14,7 @@ import {
   productSurfaceStates,
   readProductRouteState,
   readProductSearchState,
+  readProductSessionState,
   SameOriginProductTransport,
 } from './product'
 import { webContractBootstrapFixture } from './product.fixture'
@@ -1687,6 +1688,18 @@ describe('readProductSearchState', () => {
 })
 
 describe('readProductRouteState', () => {
+  it('preserves catalog queries through their own byte limit', () => {
+    const q = 'é'.repeat(512)
+    expect(readProductRouteState({ q }).q).toBe(q)
+    expect(readProductSessionState({ ...readProductRouteState({ q }) }).q).toBe(q)
+    expect(readProductSearchState({ q }).queryParameterIsValid).toBe(false)
+  })
+
+  it('does not admit the bounded prefix of an oversized catalog query', () => {
+    const state = readProductRouteState({ q: 'é'.repeat(10_000) })
+    expect(readProductSessionState({ ...state }).q).toBeUndefined()
+  })
+
   it('retains catalog continuation fields beside search route state', () => {
     expect(
       readProductRouteState({

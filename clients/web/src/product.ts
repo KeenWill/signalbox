@@ -247,7 +247,7 @@ export const readProductSessionState = (value: Record<string, unknown>): Product
       ? afterSession !== undefined && value.afterActivity === undefined
       : afterSession !== undefined && afterActivity !== undefined
   return {
-    q: admittedSessionSearch(value.q),
+    q: value.queryParameterIsValid === false ? undefined : admittedSessionSearch(value.q),
     sort,
     archived: value.archived === true ? true : undefined,
     afterSession: validContinuation ? afterSession : undefined,
@@ -780,7 +780,10 @@ export const boundedSearchText = (
   return { text, overflow: false }
 }
 
-export const readProductSearchState = (value: Record<string, unknown>): ProductSearchState => {
+export const readProductSearchState = (
+  value: Record<string, unknown>,
+  maximumQueryBytes = MAX_SEARCH_QUERY_BYTES,
+): ProductSearchState => {
   const text = (key: keyof ProductSearchState) =>
     typeof value[key] === 'string' && value[key].length > 0 ? value[key] : undefined
   const cursorText = (key: 'afterAddress' | 'afterProjection') => {
@@ -795,7 +798,7 @@ export const readProductSearchState = (value: Record<string, unknown>): ProductS
       : typeof query === 'number' || typeof query === 'boolean' || query === null
         ? String(query)
         : undefined
-  const boundedQuery = boundedSearchText(q ?? '', MAX_SEARCH_QUERY_BYTES)
+  const boundedQuery = boundedSearchText(q ?? '', maximumQueryBytes)
   const session = text('session')
   return {
     q: boundedQuery.text || undefined,
@@ -820,7 +823,7 @@ export const readProductRouteState = (value: Record<string, unknown>): ProductRo
   const catalog = readProductSessionState(value)
   return {
     ...catalog,
-    ...readProductSearchState(value),
+    ...readProductSearchState(value, MAX_SESSION_SEARCH_BYTES),
   }
 }
 
