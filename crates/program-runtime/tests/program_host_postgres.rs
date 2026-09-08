@@ -879,7 +879,7 @@ async fn registered_run(
         .register_user(
             signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
             ProgramRegistrationRequest {
-                name: "effect-fixture".into(),
+                name: Uuid::now_v7().to_string(),
                 revision: "fixture-revision".into(),
                 source: artifact.source().as_bytes().to_vec(),
                 artifact: artifact.source().into(),
@@ -1340,6 +1340,66 @@ async fn a_cancellation_after_the_initial_load_outranks_successful_completion()
             .len(),
         1
     );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn malformed_registration_requests_are_durably_rejected() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        EffectRequest, ProgramCapability, RejectReason, program_registration::ProgramGrants,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let malformed: &[&[u8]] = &[
+        b"{",
+        br#"{"id":"invalid","name":"child","revision":"one","source":[],"artifact":"","grants":[]}"#,
+    ];
+    for input in malformed {
+        for recovered in [false, true] {
+            let artifact = register_artifact(input, "reject");
+            let run = registered_run(
+                &pool,
+                &artifact,
+                ProgramGrants::new([ProgramCapability::Register]),
+            )
+            .await?;
+            let journal = ProgramJournalRepository::new(pool.clone());
+            if recovered {
+                journal
+                    .append_request(
+                        run,
+                        None,
+                        RequestKind::Effect(EffectRequest::new(
+                            ProgramCapability::Register,
+                            "register".into(),
+                            InlineFramePayload::new(*input),
+                        )),
+                    )
+                    .await?;
+            }
+            let mut effects = EffectProbe {
+                policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+                adopted: None,
+                executions: 0,
+                adoptions: 0,
+            };
+            let host = ProgramHost::new(journal.clone());
+            host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+                .await?;
+            let loaded = journal.load(run).await?.expect("registered journal exists");
+            assert!(
+                matches!(loaded.entries().last().expect("rejection exists").frame(),
+                JournalFrame::Delivery(delivery) if matches!(delivery.kind(),
+                    DeliveryKind::Reject { reason: RejectReason::UnsupportedOperation, .. }))
+            );
+            host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+                .await?;
+            let replayed = journal.load(run).await?.expect("replayed journal exists");
+            assert_eq!(replayed.entries(), loaded.entries());
+            assert_eq!(effects.executions, 0);
+        }
+    }
     pool.close().await;
     Ok(())
 }
