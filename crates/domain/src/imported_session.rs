@@ -723,6 +723,11 @@ pub enum ImportedSessionSeedReconstitutionFailure {
     ImportedConversationMismatch,
     /// The ancestry boundary is not a member of the supplied aggregate.
     ImportedFrontierNotFound,
+    /// One imported-entry identity occurred more than once in the prefix.
+    DuplicateImportedEntry {
+        /// The repeated imported-entry identity.
+        entry: ImportedTranscriptEntryId,
+    },
     /// No one-to-one seed record was supplied.
     MissingSeedRecord,
     /// More than one seed record was supplied.
@@ -954,12 +959,20 @@ fn validate_normalized_imported_seed_projection(
         return Err(ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound);
     }
     let mut expected_position = ImportedTranscriptPosition::first();
+    let mut identities = BTreeSet::new();
     for (index, imported) in imported_entries.iter().enumerate() {
         if imported.conversation() != source_frontier.conversation() {
             return Err(ImportedSessionSeedReconstitutionFailure::ImportedConversationMismatch);
         }
         if imported.position() != expected_position {
             return Err(ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound);
+        }
+        if !identities.insert(imported.identity()) {
+            return Err(
+                ImportedSessionSeedReconstitutionFailure::DuplicateImportedEntry {
+                    entry: imported.identity(),
+                },
+            );
         }
         if index + 1 < imported_entries.len() {
             expected_position = expected_position
@@ -2077,6 +2090,94 @@ mod tests {
             snapshots,
             semantic_entries,
         )
+    }
+
+    fn normalized_input(
+        conversation: &ImportedConversation,
+        prepared: &PreparedCreateSessionFromImportedFrontier,
+    ) -> ImportedSessionNormalizedReconstitutionInput {
+        let current = current_input(conversation, prepared);
+        ImportedSessionNormalizedReconstitutionInput::new(
+            current.requested_session,
+            current.stored_session,
+            current.provenance,
+            current.current_defaults_session,
+            current.current_defaults_version,
+            current.defaults_session,
+            current.defaults_version,
+            current.defaults,
+            current.placement,
+            conversation
+                .entries()
+                .iter()
+                .map(|entry| {
+                    ImportedTranscriptEntryInput::new(
+                        entry.identity(),
+                        entry.conversation(),
+                        entry.position(),
+                        entry.raw_record_position(),
+                        entry.record_entry_position(),
+                        entry.source_speaker().clone(),
+                        entry.content().clone(),
+                        entry.source().clone(),
+                    )
+                })
+                .collect(),
+            current.seed_records,
+            current.seed_snapshots,
+            current.semantic_entries,
+        )
+    }
+
+    #[test]
+    fn normalized_seed_rejects_a_repeated_imported_frontier_identity_unchanged() {
+        let (conversation, _, prepared) = prepared_fixture();
+        let mut input = normalized_input(&conversation, &prepared);
+        let repeated = input.imported_entries[1].identity();
+        let first = &input.imported_entries[0];
+        input.imported_entries[0] = ImportedTranscriptEntryInput::new(
+            repeated,
+            first.conversation(),
+            first.position(),
+            first.raw_record_position(),
+            first.record_entry_position(),
+            first.source_speaker().clone(),
+            first.content().clone(),
+            first.source().clone(),
+        );
+        let semantic = &input.semantic_entries[0];
+        input.semantic_entries[0] = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic.identity(),
+            semantic.source_session(),
+            SemanticTranscriptEntryPayload::Imported {
+                imported_entry: repeated,
+                source_speaker: input.imported_entries[0].source_speaker().clone(),
+                content: input.imported_entries[0].content().clone(),
+            },
+        );
+        let original = input.clone();
+        let error = input
+            .reconstitute()
+            .expect_err("a repeated imported identity is not an exact prefix");
+        assert_eq!(error.input(), &original);
+        assert_eq!(
+            error.failure(),
+            ImportedSessionReconstitutionFailure::Seed(
+                ImportedSessionSeedReconstitutionFailure::DuplicateImportedEntry {
+                    entry: repeated
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn normalized_seed_preserves_distinct_imported_sources() {
+        let (conversation, _, prepared) = prepared_fixture();
+        let input = normalized_input(&conversation, &prepared);
+        let restored = input
+            .reconstitute()
+            .expect("distinct imported prefix reconstitutes");
+        assert_eq!(restored.semantic_entries(), prepared.semantic_entries());
     }
 
     fn bounded_input(
