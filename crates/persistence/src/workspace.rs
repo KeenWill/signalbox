@@ -27,6 +27,9 @@ pub enum WorkspaceError {
     /// Commit failed without establishing whether the fact was stored.
     #[error("workspace commit outcome is ambiguous: {field_0}")]
     CommitAmbiguous(#[source] sqlx::Error),
+    /// The request violates a workspace or remote state constraint.
+    #[error("workspace request rejected")]
+    Rejected,
     /// Stored values cannot reconstruct the recorded request.
     #[error("invalid workspace record: {field_0}")]
     Corruption(&'static str),
@@ -34,7 +37,19 @@ pub enum WorkspaceError {
 
 impl From<sqlx::Error> for WorkspaceError {
     fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
+        match error
+            .as_database_error()
+            .and_then(|error| error.constraint())
+        {
+            Some(
+                "workspace_root_path_key"
+                | "configured_git_remote_mint_workspace_fk"
+                | "configured_git_remote_live_pk"
+                | "configured_git_remote_withdrawal_mint_fk"
+                | "configured_git_remote_withdrawal_mint_key",
+            ) => Self::Rejected,
+            _ => Self::Database(error),
+        }
     }
 }
 
@@ -50,10 +65,66 @@ impl WorkspaceRepository {
         Self { pool }
     }
 
+    /// Recovers an original registration request without resolving its path again.
+    pub async fn registration_replay(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+        requested_root: &str,
+    ) -> Result<Option<WorkspaceOutcome>, WorkspaceError> {
+        let mut connection = self.pool.acquire().await?;
+        let Some(row) = sqlx::query(
+            "SELECT root_path, registration_request_root FROM workspace WHERE command_id = $1",
+        )
+        .bind(command_id.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let original: Option<String> = row.try_get("registration_request_root")?;
+        let original = original.ok_or(WorkspaceError::Corruption("registration request root"))?;
+        if original != requested_root {
+            return Ok(None);
+        }
+        let root = WorkspaceRootPath::try_new(row.try_get("root_path")?)
+            .map_err(|_| WorkspaceError::Corruption("workspace root"))?;
+        let command = WorkspaceCommand::new(command_id, WorkspaceOperation::Register { root });
+        replay(&mut connection, &command)
+            .await?
+            .map(Some)
+            .ok_or(WorkspaceError::Corruption("registration registry claim"))
+    }
+
+    /// Retains the original request spelling with a newly resolved registration.
+    pub async fn register(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+        requested_root: &str,
+        root: WorkspaceRootPath,
+        ids: &mut impl WorkspaceIdentityGenerator,
+    ) -> Result<WorkspaceOutcome, WorkspaceError> {
+        self.handle_with_registration_request(
+            WorkspaceCommand::new(command_id, WorkspaceOperation::Register { root }),
+            Some(requested_root),
+            ids,
+        )
+        .await
+    }
+
     /// Records one operator command, or returns its exact recorded result.
     pub async fn handle(
         &self,
         command: WorkspaceCommand,
+        ids: &mut impl WorkspaceIdentityGenerator,
+    ) -> Result<WorkspaceOutcome, WorkspaceError> {
+        self.handle_with_registration_request(command, None, ids)
+            .await
+    }
+
+    async fn handle_with_registration_request(
+        &self,
+        command: WorkspaceCommand,
+        registration_request_root: Option<&str>,
         ids: &mut impl WorkspaceIdentityGenerator,
     ) -> Result<WorkspaceOutcome, WorkspaceError> {
         let mut tx = self.pool.begin().await?;
@@ -76,8 +147,8 @@ impl WorkspaceRepository {
                     root.clone(),
                     WorkspaceOrigin::OperatorRegistered,
                 );
-                sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1)")
-                    .bind(record.id().into_uuid()).bind(record.root().as_str()).bind(command.command_id().into_uuid()).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version, registration_request_root) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1, $4)")
+                    .bind(record.id().into_uuid()).bind(record.root().as_str()).bind(command.command_id().into_uuid()).bind(registration_request_root.unwrap_or(root.as_str())).execute(&mut *tx).await?;
                 WorkspaceCommandResult::Registered(record.id())
             }
             WorkspaceOperation::MintRemote {
@@ -106,7 +177,7 @@ impl WorkspaceRepository {
             if crate::commit_failure_is_ambiguous(&error) {
                 WorkspaceError::CommitAmbiguous(error)
             } else {
-                WorkspaceError::Database(error)
+                WorkspaceError::from(error)
             }
         })?;
         Ok(WorkspaceOutcome::Applied(result))

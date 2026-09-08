@@ -482,7 +482,10 @@ Workspace operator commands are `register_workspace`, `mint_git_remote`, and
 corresponding immutable workspace, mint, or withdrawal identity. Registration
 resolves the supplied root once in the daemon filesystem before constructing the
 canonical payload. The client exposes them as `workspace register`,
-`workspace mint-remote`, and `workspace withdraw-remote`.
+`workspace mint-remote`, and `workspace withdraw-remote`. Registration retains
+the original request path for settled replay without filesystem access.
+Workspace and remote state-constraint rejections return `invalid_request`;
+stored corruption returns `internal`.
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
