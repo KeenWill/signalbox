@@ -571,6 +571,9 @@ belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
 version-1 encoding, and the closed receipt algebra belong here, and a later
 incompatible shape requires a new protocol version.
 
+If counted-activation revalidation selects pre-call exhaustion failure,
+activation and terminalization commit together before execution resumes.
+
 When no pool member is admissible, pre-call exhaustion projects
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
 as a `transcript_turn` state variant,

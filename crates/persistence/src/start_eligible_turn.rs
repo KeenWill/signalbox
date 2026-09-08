@@ -182,6 +182,8 @@ pub struct PreparedActivationPreview {
 pub enum CommitActivationPreviewOutcome {
     /// The exact preview still matched and was atomically activated.
     Activated(Box<ActivatedTurn>),
+    /// The counted preview activated and terminalized with no admissible pool member.
+    PoolExhausted(TurnId),
     /// Authoritative state changed after preview; the caller must restart the pass.
     Stale,
 }
@@ -278,13 +280,14 @@ impl StartEligibleTurnRepository {
         )))
     }
 
-    /// Revalidates one counted preview and atomically commits both its
-    /// activation and exact no-steering Prepared initial call.
+    /// Revalidates one counted preview and atomically commits its activation
+    /// with the prepared initial call, credential wait, or pool-exhaustion closure.
     pub async fn commit_counted_preview(
         &self,
         preview: PreparedActivationPreview,
         prospective: crate::model_execution::ProspectiveModelCall,
         model_calls: &crate::model_execution::PostgresModelCallRepository,
+        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
         instruction_evidence: Option<CountedActivationInstructionEvidence<'_>>,
     ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
         let session = preview.prepared.turn().session();
@@ -294,6 +297,9 @@ impl StartEligibleTurnRepository {
             .await
             .map_err(StartEligibleTurnRepositoryError::from)
             .map_err(CommitActivationPreviewError::Activation)?;
+        lock_delegated_child_endpoint_sessions(&mut transaction, session)
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
         let session_uuid = session_id_to_uuid(session);
         let (session_exists, scheduler_session) =
             sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
@@ -349,7 +355,7 @@ impl StartEligibleTurnRepository {
             .await
             .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
         }
-        let _ = model_calls
+        let checkpoint = model_calls
             .checkpoint_counted_activation_in_transaction(
                 &mut transaction,
                 &activated,
@@ -358,15 +364,31 @@ impl StartEligibleTurnRepository {
             )
             .await
             .map_err(CommitActivationPreviewError::ModelCall)?;
+        let outcome = match checkpoint {
+            crate::model_execution::CountedActivationCheckpointOutcome::Prepared
+            | crate::model_execution::CountedActivationCheckpointOutcome::CredentialWait => {
+                CommitActivationPreviewOutcome::Activated(Box::new(activated))
+            }
+            crate::model_execution::CountedActivationCheckpointOutcome::PoolExhausted(policy) => {
+                model_calls
+                    .fail_counted_pool_exhaustion_in_transaction(
+                        &mut transaction,
+                        &activated,
+                        &policy,
+                        failure_identities,
+                    )
+                    .await
+                    .map_err(CommitActivationPreviewError::ModelCall)?;
+                CommitActivationPreviewOutcome::PoolExhausted(activated.turn())
+            }
+        };
         transaction.commit().await.map_err(|error| {
             let commit_ambiguous = commit_failure_is_ambiguous(&error);
             CommitActivationPreviewError::Activation(
                 StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous),
             )
         })?;
-        Ok(CommitActivationPreviewOutcome::Activated(Box::new(
-            activated,
-        )))
+        Ok(outcome)
     }
 
     /// Revalidates counted activation and commits either its credential wait

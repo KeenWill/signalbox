@@ -3289,6 +3289,10 @@ async fn counted_activation_checkpoints_exact_call_before_steering() -> Result<(
             preview,
             prospective,
             &model_calls,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
             Some(instruction_evidence),
         )
         .await?;
@@ -3576,7 +3580,16 @@ async fn stale_counted_preview_retains_no_instruction_evidence() -> Result<(), B
         .await?
         .expect("an admitted credential previews the activation operation");
     let stale = activation
-        .commit_counted_preview(preview, prospective, &model_calls, Some(evidence))
+        .commit_counted_preview(
+            preview,
+            prospective,
+            &model_calls,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            Some(evidence),
+        )
         .await?;
     let discovery_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM instruction_discovery WHERE session_id = $1 AND turn_id = $2",
