@@ -13,6 +13,7 @@ working directory.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,9 @@ CHECKER = Path(__file__).resolve().parent / "check_migration_versions.py"
 
 
 def check_migrations(
-    *names: str, base_names: tuple[str, ...] = ()
+    *names: str,
+    base_names: tuple[str, ...] = (),
+    parent_names: tuple[str, ...] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the checker over a synthetic migrations tree, outside test bodies.
 
@@ -48,17 +51,45 @@ def check_migrations(
             "commit", "--allow-empty", "-qm", "Base migrations",
         )
         git("update-ref", "refs/remotes/origin/main", "HEAD")
+        if parent_names is not None:
+            for name in parent_names:
+                (directory / name).write_text("-- parent\n")
+            git("add", ".")
+            git(
+                "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "--allow-empty", "-qm", "Parent migrations",
+            )
+            git("update-ref", "refs/remotes/origin/stack-parent", "HEAD")
         for name in names:
             (directory / name).write_text("-- synthetic\n")
         return subprocess.run(
             [sys.executable, str(CHECKER)],
             cwd=root,
+            env={
+                **os.environ,
+                "GITHUB_BASE_REF": "stack-parent" if parent_names is not None else "",
+            },
             capture_output=True,
             text=True,
         )
 
 
 class MigrationVersionCheckerTests(unittest.TestCase):
+    def test_stacked_child_below_parent_is_rejected(self) -> None:
+        result = check_migrations(
+            "3_child.sql", base_names=("1_main.sql",), parent_names=("4_parent.sql",)
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("origin/stack-parent, origin/main version 4", result.stdout)
+
+    def test_stacked_child_after_parent_is_accepted(self) -> None:
+        result = check_migrations(
+            "5_child.sql", base_names=("1_main.sql",), parent_names=("4_parent.sql",)
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_new_migration_below_main_is_rejected(self) -> None:
         result = check_migrations("2_new.sql", base_names=("3_main.sql",))
 

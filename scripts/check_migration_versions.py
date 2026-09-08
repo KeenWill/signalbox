@@ -8,7 +8,7 @@ in the same directory make every migration run fail at apply time with a
 duplicate `_sqlx_migrations` key — but only once BOTH are present, which is
 exactly the state a merge of two independently green pull requests produces.
 Git does not conflict, because the filenames differ. Pull-request CI checks
-out the merge of the branch into `main` and so does see both files, but only
+out the merge of the branch into its base branch and so does see both files, but only
 as of the run: a branch whose last run predates the other branch's merge
 stays green, and the collision lands on the default branch.
 
@@ -21,13 +21,15 @@ The check fails when
    followed by an underscore — an unparseable name would silently escape
    rule 1, so it fails loudly instead, or
 3. a branch-added migration does not sort after the highest version in its
-   directory at `--base` (default `origin/main`).
+   directory on `origin/main` or `--base` (defaulting to the pull request
+   base branch from `GITHUB_BASE_REF`, otherwise `origin/main`).
 
 Run from the repository root; exits nonzero with a per-collision report
 naming every file involved.
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -39,17 +41,22 @@ MIGRATION_NAME = re.compile(r"^(\d+)_.+\.sql$")
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", default="origin/main")
-    args = parser.parse_args()
-    base = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", args.base, "--", "crates"],
-        capture_output=True,
-        text=True,
+    parser.add_argument(
+        "--base", default=f"origin/{os.environ.get('GITHUB_BASE_REF') or 'main'}"
     )
-    if base.returncode:
-        print(f"cannot read migration base {args.base}: {base.stderr.strip()}")
-        return 1
-    base_files = set(base.stdout.splitlines())
+    args = parser.parse_args()
+    baseline_refs = list(dict.fromkeys([args.base, "origin/main"]))
+    base_files = set()
+    for reference in baseline_refs:
+        base = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", reference, "--", "crates"],
+            capture_output=True,
+            text=True,
+        )
+        if base.returncode:
+            print(f"cannot read migration base {reference}: {base.stderr.strip()}")
+            return 1
+        base_files.update(base.stdout.splitlines())
     failures = []
     for directory in sorted(Path("crates").glob("*/migrations")):
         by_version = defaultdict(list)
@@ -76,7 +83,7 @@ def main() -> int:
                 and version <= max(base_versions)
             ):
                 failures.append(
-                    f"new migration {entry} must sort after {args.base} version {max(base_versions)}"
+                    f"new migration {entry} must sort after {', '.join(baseline_refs)} version {max(base_versions)}"
                 )
         for version, names in sorted(by_version.items()):
             if len(names) > 1:
