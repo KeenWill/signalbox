@@ -280,6 +280,7 @@ enum BodyToken {
     Open,
     Close,
     Comma,
+    Star,
     Other,
 }
 
@@ -365,11 +366,12 @@ fn body_tokens(source: &str, keywords: &BTreeMap<String, KeywordUse>) -> Vec<Bod
                     keyword,
                 });
             }
-            punctuation @ (b'(' | b')' | b',' | b'.') => {
+            punctuation @ (b'(' | b')' | b',' | b'.' | b'*') => {
                 tokens.push(match punctuation {
                     b'(' => BodyToken::Open,
                     b')' => BodyToken::Close,
                     b'.' => BodyToken::Dot,
+                    b'*' => BodyToken::Star,
                     _ => BodyToken::Comma,
                 });
                 cursor += 1;
@@ -384,6 +386,9 @@ fn body_tokens(source: &str, keywords: &BTreeMap<String, KeywordUse>) -> Vec<Bod
 }
 
 fn follows_relation_name(tokens: &[BodyToken], mut index: usize) -> bool {
+    if index > 0 && tokens[index - 1] == BodyToken::Star {
+        index -= 1;
+    }
     while index > 0
         && (tokens[index - 1].is_relation_name()
             || (index > 1
@@ -807,6 +812,10 @@ fn column_alias_lists_do_not_add_call_edges() {
 fn table_alias_column_lists_do_not_add_call_edges() {
     for source in [
         "SELECT restore_probe_tail() FROM records restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM records * restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM public.records * restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM first, records * restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM first JOIN public.records * restore_probe_head(value) ON true",
         "SELECT restore_probe_tail() FROM ONLY records restore_probe_head(value)",
         "SELECT restore_probe_tail() FROM ONLY public.records restore_probe_head(value)",
         "SELECT restore_probe_tail() FROM records JOIN ONLY public.records restore_probe_head(value) ON true",
@@ -911,6 +920,8 @@ fn expression_keywords_do_not_turn_calls_into_relation_aliases() {
         "SELECT 1, CASE WHEN restore_probe_tail() THEN true ELSE false END",
         "SELECT 1, CASE restore_probe_tail() WHEN true THEN true ELSE false END",
         "SELECT CASE true WHEN true THEN restore_probe_tail() ELSE false END",
+        "SELECT 1 * restore_probe_tail()",
+        "SELECT value * restore_probe_tail() FROM records",
     ] {
         assert_eq!(
             fixture_body_call_names(source),
