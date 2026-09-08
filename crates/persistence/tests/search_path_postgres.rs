@@ -251,6 +251,7 @@ enum BodyToken {
     Materialized,
     From,
     Join,
+    Lateral,
     Dot,
     Open,
     Close,
@@ -304,6 +305,7 @@ fn body_tokens(source: &str) -> Vec<BodyToken> {
                     "materialized" => BodyToken::Materialized,
                     "from" => BodyToken::From,
                     "join" => BodyToken::Join,
+                    "lateral" => BodyToken::Lateral,
                     _ => BodyToken::Identifier(identifier),
                 });
             }
@@ -332,7 +334,7 @@ fn follows_relation_name(tokens: &[BodyToken], mut index: usize) -> bool {
             return false;
         }
         match tokens[index - 1] {
-            BodyToken::From | BodyToken::Join => return true,
+            BodyToken::From | BodyToken::Join | BodyToken::Comma => return true,
             BodyToken::Dot => index -= 1,
             _ => return false,
         }
@@ -713,6 +715,8 @@ fn column_alias_lists_do_not_add_call_edges() {
 fn table_alias_column_lists_do_not_add_call_edges() {
     for source in [
         "SELECT restore_probe_tail() FROM records restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM first, second restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM first, public.second restore_probe_head(value)",
         "SELECT restore_probe_tail() FROM public.records restore_probe_head(value)",
         "SELECT restore_probe_tail() FROM records JOIN public.records restore_probe_head(value) ON true",
     ] {
@@ -726,10 +730,18 @@ fn table_alias_column_lists_do_not_add_call_edges() {
 
 #[test]
 fn function_sources_remain_call_edges() {
-    assert_eq!(
-        body_call_names("SELECT * FROM public.restore_probe_tail()"),
-        BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
-    );
+    for source in [
+        "SELECT * FROM public.restore_probe_tail()",
+        "SELECT * FROM LATERAL restore_probe_tail()",
+        "SELECT * FROM records CROSS JOIN LATERAL restore_probe_tail()",
+        "SELECT * FROM records, LATERAL restore_probe_tail()",
+    ] {
+        assert_eq!(
+            body_call_names(source),
+            BTreeSet::from([String::from(RESTORE_PROBE_TAIL)]),
+            "{source}",
+        );
+    }
 }
 
 #[test]
