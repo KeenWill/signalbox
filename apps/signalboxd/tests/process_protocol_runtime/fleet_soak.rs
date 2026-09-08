@@ -202,7 +202,14 @@ impl ModelRuntime<ModelCallId> for FleetScriptedModel {
 
 #[derive(Debug)]
 pub(crate) struct CommissionedFleet {
+    requested_session_count: usize,
     pub(crate) sessions: Vec<CanonicalUuid>,
+}
+
+impl CommissionedFleet {
+    fn requested_session_count(&self) -> usize {
+        self.requested_session_count
+    }
 }
 
 pub(crate) async fn commission_fleet(
@@ -235,7 +242,10 @@ pub(crate) async fn commission_fleet(
         };
         sessions.push(session_id);
     }
-    Ok(CommissionedFleet { sessions })
+    Ok(CommissionedFleet {
+        sessions,
+        requested_session_count: session_count,
+    })
 }
 
 pub(crate) struct FleetRuntimeTasks {
@@ -702,12 +712,12 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
         let model_calls = census_repository.model_call_ids().await?;
         assert_eq!(
             baseline_fleet.sessions.len(),
-            FLEET_SESSION_COUNT - 1,
+            baseline_fleet.requested_session_count(),
             "baseline fleet session cardinality mismatch"
         );
         assert_eq!(
             fault_fleet.sessions.len(),
-            1,
+            fault_fleet.requested_session_count(),
             "fault fleet session cardinality mismatch"
         );
         assert_eq!(
