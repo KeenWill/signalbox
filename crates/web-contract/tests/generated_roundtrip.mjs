@@ -3138,3 +3138,59 @@ test("override approval retains the command and overridden denial", () => {
   delete page.items[0].body.actor.denied_request_id;
   assert.throws(() => decodeWebSessionTimelineDetailPage(page));
 });
+
+test("goal closure rejects achievement outcomes but terminal sessions retain them", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "goal_changed";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  for (const outcome of ["failed_retryable", "failed_structural", "failed_unknown", "stopped", "superseded", "abandoned", "retired"]) {
+    page.items[0].body = { type: "goal_event", session_id: page.session_id,
+      event: { type: "session_closed", generation: "1", outcome } };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+  for (const outcome of ["achieved_verified", "achieved_declared"]) {
+    page.items[0].kind = "goal_changed";
+    page.items[0].body = { type: "goal_event", session_id: page.session_id,
+      event: { type: "session_closed", generation: "1", outcome } };
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a session closure outcome/);
+    page.items[0].kind = "session_terminal";
+    page.items[0].body = { type: "session_terminal", outcome };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+});
+
+test("tool batches accept only tool-produced goal events", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "tool_batch_transition";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  const text = { text: "", offset_bytes: "0", total_bytes: "0", continuation: null };
+  const event = { generation: "1", text };
+  const body = { type: "tool_batch", turn_id: page.session_id,
+    producing_model_call_id: page.session_id,
+    state: { type: "results_projected", frontier_id: page.session_id },
+    projected_member_index: 0, tools: [], goal_events: [] };
+  page.items[0].body = body;
+  for (const goal of [
+    { ...event, type: "achieved" },
+    ...["user_input_required", "external_change_required", "authorization_required", "finish_check_failed"]
+      .map(reason => ({ ...event, type: "blocked", reason })),
+  ]) {
+    body.goal_events = [goal];
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  }
+  for (const goal of [
+    { ...event, type: "commissioned" },
+    { ...event, type: "resumed" },
+    { generation: "1", type: "user_stopped" },
+    { ...event, type: "superseded" },
+    { generation: "1", type: "session_closed", outcome: "stopped" },
+    { ...event, type: "blocked", reason: "execution_failure" },
+  ]) {
+    body.goal_events = [goal];
+    assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a tool-produced blocked or achieved goal event/);
+    const direct = structuredClone(page);
+    direct.items[0].kind = "goal_changed";
+    direct.items[0].body = { type: "goal_event", session_id: page.session_id, event: goal };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(direct), direct);
+  }
+});
