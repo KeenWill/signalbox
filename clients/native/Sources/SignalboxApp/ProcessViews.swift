@@ -1900,7 +1900,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         activeTurnID = activeTurnID(in: snapshot)
         recoverableTurnID = snapshot.records.compactMap { record -> SignalboxCanonicalUUID? in
           guard case .turn(let turn) = record,
-            case .activeAwaitingModelCallRecovery = turn.state
+            case .activeAwaitingModelCallRecovery(_, _, _, true) = turn.state
           else { return nil }
           return turn.turnID
         }.first
@@ -1934,7 +1934,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         let wasMutationBlocked = !mutationBlocksByTurnID.isEmpty
         recoverableTurnID = snapshot.records.compactMap { record -> SignalboxCanonicalUUID? in
           guard case .turn(let turn) = record,
-            case .activeAwaitingModelCallRecovery = turn.state
+            case .activeAwaitingModelCallRecovery(_, _, _, true) = turn.state
           else { return nil }
           return turn.turnID
         }.first

@@ -2962,7 +2962,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     viewModel.composerText = ProcessSubmissionFixture.content
     await viewModel.send()
     viewModel.apply(.authoritativeSnapshot(
-      try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0, turnID: ProcessSubmissionFixture.acceptedTurnID)))
+      try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0, turnID: ProcessSubmissionFixture.acceptedTurnID,
+        operatorActionRequired: true)))
     viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
 
     XCTAssertFalse(viewModel.showsReconciliation)
@@ -2975,6 +2976,25 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
     XCTAssertEqual(viewModel.composerText, "")
     XCTAssertTrue(viewModel.canReconcileAndSend)
+  }
+
+  @MainActor
+  func testAutomaticModelRecoveryDoesNotPrepareOperatorReconciliation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingReconciliationProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0)))
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    XCTAssertFalse(viewModel.showsReconciliation)
+    XCTAssertFalse(viewModel.canReconcileAndSend)
+    await viewModel.reconcileAndSendSuccessor()
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
   }
 
   @MainActor
@@ -3005,7 +3025,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
     await viewModel.connect()
     viewModel.apply(.authoritativeSnapshot(
-      try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0)))
+      try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0, operatorActionRequired: true)))
     viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
     XCTAssertTrue(viewModel.canReconcileAndSend)
     XCTAssertFalse(viewModel.canStopAndSend)
@@ -7372,7 +7392,8 @@ private enum ProcessProjectionFixture {
   }
 
   static func snapshotWithKnownRecoveryTurn(
-    cursor: UInt64, turnID: String = ProcessDriverFixture.turn
+    cursor: UInt64, turnID: String = ProcessDriverFixture.turn,
+    operatorActionRequired: Bool = false
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -7394,7 +7415,7 @@ private enum ProcessProjectionFixture {
             "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
             "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)",
             "automatic_reconciliation_attempts":"0",
-            "operator_action_required":false
+            "operator_action_required":\(operatorActionRequired)
           }
         }
         """,
