@@ -60,7 +60,7 @@ final class ModelSettingsTests: XCTestCase {
           "detail": ["type": "defaults_version_mismatch", "session_id": SettingsFixture.sessionID.rawValue,
             "expected": "1", "current": "2"]])],
         [try SettingsFixture.defaults(reasoning: .value(.low), version: "2", selectionID: refreshedSelection)],
-        [try SettingsFixture.defaults(reasoning: nextReasoning, version: "3",
+        [try SettingsFixture.defaults(reasoning: modelChanged ? .value(.low) : nextReasoning, version: "3",
           type: "session_defaults_replaced", selectionID: refreshedSelection)],
       ])
 
@@ -84,6 +84,56 @@ final class ModelSettingsTests: XCTestCase {
       }
       XCTAssertEqual(replacements.map { $0.1 }, [1, 2])
       XCTAssertNotEqual(replacements.first?.0, replacements.last?.0)
+    }
+  }
+
+  func testDefaultsReplacementRejectsSettingsThatDoNotMatchTheRequest() async throws {
+    guard case .sessionDefaults(let prior) = try SettingsFixture.defaults(
+      reasoning: .value(.high), version: "1").message else { return XCTFail("Expected defaults.") }
+    let invalidReceipts = [
+      try SettingsFixture.defaults(reasoning: .value(.low), version: "2", type: "session_defaults_replaced"),
+      try SettingsFixture.defaults(reasoning: .inherit, version: "2", type: "session_defaults_replaced"),
+      try SettingsFixture.defaults(reasoning: .value(.high), version: "2", type: "session_defaults_replaced",
+        fastMode: .value(.disabled)),
+      try SettingsFixture.defaults(reasoning: .value(.high), version: "2", type: "session_defaults_replaced",
+        serviceTier: .value(.openAI(.priority))),
+    ]
+    for receipt in invalidReceipts {
+      let service = SignalboxProcessService(requester: SettingsRequester(pages: [[receipt]]), policy: .nativeDefault)
+      let prepared = try await service.prepareDefaultsReplacement(defaults: prior,
+        modelSelection: prior.modelSelection, modelSettings: .inheritAll)
+      do {
+        _ = try await service.replaceDefaults(prepared)
+        XCTFail("A replacement receipt must preserve the requested settings and provenance.")
+      } catch let error as SignalboxProcessServiceError {
+        XCTAssertEqual(error, .unexpectedMessage("The defaults receipt did not match the replacement."))
+      }
+    }
+  }
+
+  func testDefaultsReplacementAllowsModelAdjustmentsOnlyForInheritedSettings() async throws {
+    guard case .sessionDefaults(let prior) = try SettingsFixture.defaults(reasoning: .value(.high), version: "1",
+      fastMode: .value(.enabled), serviceTier: .value(.openAI(.priority))).message else {
+      return XCTFail("Expected defaults.")
+    }
+    let receipt = try SettingsFixture.defaults(reasoning: .value(.low), version: "2",
+      type: "session_defaults_replaced", selectionID: SettingsFixture.otherSelectionID,
+      fastMode: .value(.disabled), serviceTier: .providerDefault)
+    let service = SignalboxProcessService(requester: SettingsRequester(pages: [[receipt], [receipt]]), policy: .nativeDefault)
+    let inherited = try await service.prepareDefaultsReplacement(defaults: prior,
+      modelSelection: .direct(selectionID: SettingsFixture.otherSelectionID), modelSettings: .inheritAll)
+
+    let installed = try await service.replaceDefaults(inherited)
+
+    XCTAssertEqual(installed.modelSettings.precedence.session,
+      .init(reasoningLevel: .value(.low), fastMode: .value(.disabled), serviceTier: .providerDefault))
+    let explicit = try await service.prepareDefaultsReplacement(defaults: prior,
+      modelSelection: inherited.modelSelection, modelSettings: prior.modelSettings.precedence.session)
+    do {
+      _ = try await service.replaceDefaults(explicit)
+      XCTFail("Model changes must not adjust explicit caller settings.")
+    } catch let error as SignalboxProcessServiceError {
+      XCTAssertEqual(error, .unexpectedMessage("The defaults receipt did not match the replacement."))
     }
   }
 
@@ -234,15 +284,26 @@ private enum SettingsFixture {
 
   static func defaults(reasoning: SignalboxSettingOverlay<SignalboxReasoningLevel>, version: String,
     type: String = "session_defaults", selectionID: SignalboxCanonicalUUID = SettingsFixture.selectionID,
-    aliasID: SignalboxCanonicalUUID? = nil) throws -> SignalboxProcessServerFrame {
+    aliasID: SignalboxCanonicalUUID? = nil, fastMode: SignalboxFastModeOverlay = .inherit,
+    serviceTier: SignalboxSettingOverlay<SignalboxServiceTier> = .inherit) throws -> SignalboxProcessServerFrame {
     let inherit: [String: Any] = ["kind": "inherit"]
     let inheritedLayer: [String: Any] = ["reasoning_level": inherit, "fast_mode": inherit, "service_tier": inherit]
     let sessionLayer = try JSONSerialization.jsonObject(with: SignalboxJSONCoding.encoder().encode(
-      SignalboxModelSettingsOverlay(reasoningLevel: reasoning, fastMode: .inherit, serviceTier: .inherit)))
+      SignalboxModelSettingsOverlay(reasoningLevel: reasoning, fastMode: fastMode, serviceTier: serviceTier)))
     let effective: Any
     switch reasoning {
     case .value(let level): effective = level.rawValue
     case .inherit, .providerDefault: effective = NSNull()
+    }
+    let effectiveFastMode: SignalboxFastMode
+    switch fastMode {
+    case .inherit: effectiveFastMode = .disabled
+    case .value(let value): effectiveFastMode = value
+    }
+    let effectiveTier: Any
+    switch serviceTier {
+    case .inherit, .providerDefault: effectiveTier = NSNull()
+    case .value(let tier): effectiveTier = try JSONSerialization.jsonObject(with: SignalboxJSONCoding.encoder().encode(tier))
     }
     return try frame([
       "type": type, "session_id": sessionID.rawValue, "defaults_version": version,
@@ -252,9 +313,10 @@ private enum SettingsFixture {
       "model_settings": [
         "precedence": ["per_call": inheritedLayer, "session": sessionLayer,
           "profile": inheritedLayer, "global_default": inheritedLayer],
-        "effective": ["reasoning_level": effective, "fast_mode": "disabled", "service_tier": NSNull()],
+        "effective": ["reasoning_level": effective, "fast_mode": effectiveFastMode.rawValue, "service_tier": effectiveTier],
         "reasoning_source": reasoning == .inherit ? NSNull() : "session",
-        "fast_mode_source": NSNull(), "service_tier_source": NSNull(),
+        "fast_mode_source": fastMode == .inherit ? NSNull() : "session",
+        "service_tier_source": serviceTier == .inherit ? NSNull() : "session",
         "validated_for_selection_id": selectionID.rawValue,
       ],
     ])

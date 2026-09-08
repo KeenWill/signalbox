@@ -116,8 +116,6 @@ Reasoning-level mappings are exhaustive per-adapter tables, evaluated during
 preparation, in which every adapter answers every level with a provider value or
 a typed refusal.
 
-## Native client
-
 The Swift session settings screen reads defaults and the capability catalog,
 offers only the selected direct model's declared values, and resolves aliases
 through the current alias catalog. Every setting offers inherit; reasoning and
@@ -125,3 +123,7 @@ service tier also offer provider default. Untouched members remain inherit in
 session-defaults replacements and per-call overlays on input, reconciliation,
 and stop commands. The screen distinguishes inherited and explicit settings and
 shows automatic adjustments only from recorded settings events.
+
+## Planned
+
+None.

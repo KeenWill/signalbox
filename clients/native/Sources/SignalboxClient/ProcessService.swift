@@ -685,7 +685,9 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       !nextVersion.overflow, installed.defaultsVersion.rawValue == nextVersion.partialValue,
       installed.modelSelection == prepared.modelSelection,
       installed.dangerousToolAutoApproval == prepared.defaults.dangerousToolAutoApproval,
-      installed.systemPrompt == prepared.defaults.systemPrompt
+      installed.systemPrompt == prepared.defaults.systemPrompt,
+      installed.modelSettings.matchesReplacement(from: prepared.defaults.modelSettings,
+        callerOverride: prepared.modelSettings)
     else {
       throw SignalboxProcessServiceError.unexpectedMessage("The defaults receipt did not match the replacement.")
     }

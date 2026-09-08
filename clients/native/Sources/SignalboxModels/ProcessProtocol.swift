@@ -1426,13 +1426,40 @@ public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
     callerOverride: SignalboxModelSettingsOverlay,
     adjustments: [SignalboxModelChangeAdjustment]
   ) -> Bool {
-    let unadjusted = SignalboxModelSettingsPrecedence(
+    changePrecedence(from: prior, callerOverride: callerOverride).applying(adjustments) == precedence
+  }
+
+  func matchesReplacement(from prior: Self, callerOverride: SignalboxModelSettingsOverlay) -> Bool {
+    let unadjusted = changePrecedence(from: prior, callerOverride: callerOverride).resolve().effective
+    var adjustments: [SignalboxModelChangeAdjustment] = []
+    if unadjusted.reasoningLevel != effective.reasoningLevel {
+      guard let from = unadjusted.reasoningLevel else { return false }
+      if let to = effective.reasoningLevel {
+        adjustments.append(.reasoningLevelClamped(from: from, to: to))
+      } else {
+        adjustments.append(.reasoningLevelCleared(from: from))
+      }
+    }
+    if unadjusted.fastMode != effective.fastMode { adjustments.append(.fastModeDisabled) }
+    if unadjusted.serviceTier != effective.serviceTier {
+      guard let from = unadjusted.serviceTier else { return false }
+      adjustments.append(.serviceTierCleared(from: from))
+    }
+    return (adjustments.isEmpty || validationIdentityDiffers(from: prior))
+      && callerOverride.admitsAutomaticAdjustments(adjustments)
+      && admits(adjustments)
+      && preservesChangeProvenance(from: prior, callerOverride: callerOverride, adjustments: adjustments)
+  }
+
+  private func changePrecedence(
+    from prior: Self, callerOverride: SignalboxModelSettingsOverlay
+  ) -> SignalboxModelSettingsPrecedence {
+    SignalboxModelSettingsPrecedence(
       perCall: prior.precedence.perCall,
       session: callerOverride.inheriting(from: prior.precedence.session),
       profile: precedence.profile,
       globalDefault: precedence.globalDefault
     )
-    return unadjusted.applying(adjustments) == precedence
   }
 }
 
