@@ -332,7 +332,7 @@ pub(super) async fn load_durable_pool_exclusions(
         .collect::<Vec<_>>();
     let (observed_at, transient_exclusions): (sqlx::types::time::OffsetDateTime, Vec<String>) =
         sqlx::query_as(
-            "WITH observation AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
+            "WITH observation AS MATERIALIZED (SELECT transaction_timestamp() AS observed_at)
              SELECT observation.observed_at,
                     ARRAY(SELECT DISTINCT credential_reference
                           FROM credential_pool_transient_exclusion

@@ -195,10 +195,18 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
       turnID = turn.turnID
       evidence = captured
     case .sessionEvent(let event):
-      guard case .turnCredentialPoolExhausted(let turn, let captured) = event.event else { return }
-      turnID = turn
-      evidence = captured
-      try await validatePoolEvent(event, turnID: turn, evidence: captured)
+      switch event.event {
+      case .turnCredentialPoolExhausted(let turn, let captured):
+        turnID = turn
+        evidence = captured
+        _ = try await validatePoolEvent(event, turnID: turn, evidence: captured)
+      case .turnFailed(let turn, _, _):
+        guard let captured = try await validatePoolEvent(event, turnID: turn, evidence: nil)
+        else { return }
+        turnID = turn
+        evidence = captured
+      default: return
+      }
     default: return
     }
     let exchange = try await requester.open(.readCredentialPoolPolicy(sessionID: sessionID, turnID: turnID, poolPolicyID: evidence.poolPolicyID))
@@ -219,8 +227,8 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
   private func validatePoolEvent(
     _ event: SignalboxFollowedSessionEvent,
     turnID: SignalboxCanonicalUUID,
-    evidence: SignalboxCredentialPoolExhaustion
-  ) async throws {
+    evidence: SignalboxCredentialPoolExhaustion?
+  ) async throws -> SignalboxCredentialPoolExhaustion? {
     let mismatch = SignalboxProcessServiceError.unexpectedMessage(
       "Pool exhaustion event disagrees with its authoritative transcript."
     )
@@ -237,16 +245,34 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
         switch accumulator.ingest(frame.message, expectedSessionID: sessionID) {
         case .accepted, .diagnostic(_, nil): continue
         case .completed(let snapshot):
-          guard snapshot.records.contains(where: { record in
-            guard case .turn(let turn) = record, turn.turnID == turnID,
-              case .failedCredentialPoolExhausted(let actual) = turn.state
-            else { return false }
-            return actual == evidence
-              && actual.policyMembers.map({ Data($0.utf8) })
-                == evidence.policyMembers.map({ Data($0.utf8) })
-          }) else { throw mismatch }
-          await exchange.close()
-          return
+          for record in snapshot.records {
+            guard case .turn(let turn) = record, turn.turnID == turnID else { continue }
+            switch turn.state {
+            case .failedCredentialPoolExhausted(let actual):
+              if let evidence {
+                guard actual == evidence,
+                  actual.policyMembers.map({ Data($0.utf8) })
+                    == evidence.policyMembers.map({ Data($0.utf8) })
+                else { throw mismatch }
+              } else {
+                guard case .turnFailed(_, let failureEntryID, let terminalFrontierID) = event.event,
+                  actual.failureEntryID == failureEntryID,
+                  actual.terminalFrontierID == terminalFrontierID
+                else { throw mismatch }
+              }
+              await exchange.close()
+              return actual
+            case .failed(let terminalFrontierID, _, _):
+              guard evidence == nil,
+                case .turnFailed(_, _, let eventFrontierID) = event.event,
+                terminalFrontierID == eventFrontierID
+              else { throw mismatch }
+              await exchange.close()
+              return nil
+            default: throw mismatch
+            }
+          }
+          throw mismatch
         case .diagnostic, .remoteFailure, .invalid: throw mismatch
         }
       }
