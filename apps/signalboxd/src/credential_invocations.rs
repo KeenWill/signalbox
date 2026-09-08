@@ -2,7 +2,11 @@
 use signalbox_domain::ModelCallId;
 use signalbox_model_provider_runtime::InvocationProcessObserver;
 use signalbox_persistence::{credential_invocations, model_execution::ModelCallRepositoryError};
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, time::Duration};
+use tokio::sync::watch;
+
+// Process-group absence is polled once per second until shutdown.
+const PROCESS_GROUP_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct CredentialInvocationProcesses {
@@ -12,6 +16,27 @@ pub struct CredentialInvocationProcesses {
 impl CredentialInvocationProcesses {
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self { pool }
+    }
+
+    pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
+        if *shutdown.borrow() {
+            return;
+        }
+        loop {
+            tokio::select! {
+                biased;
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(PROCESS_GROUP_RECHECK_INTERVAL) => {
+                    if let Err(error) = self.recover().await {
+                        tracing::error!(%error, "invocation reservation reconciliation failed");
+                    }
+                }
+            }
+        }
     }
 
     pub async fn recover(&self) -> Result<(), ModelCallRepositoryError> {

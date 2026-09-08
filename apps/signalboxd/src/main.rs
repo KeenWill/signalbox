@@ -514,6 +514,7 @@ enum RuntimeDrainOutcome {
 enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     FencedPoolFloor,
+    CredentialInvocations,
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
@@ -977,6 +978,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
         | Ok(RuntimeTaskExit::FencedPoolFloor)
+        | Ok(RuntimeTaskExit::CredentialInvocations)
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
@@ -2246,6 +2248,13 @@ async fn run_hub(
             )
         });
     }
+    let invocation_processes =
+        signalboxd::credential_invocations::CredentialInvocationProcesses::new(pool.clone());
+    let invocation_shutdown = turn_liveness_shutdown_receiver.clone();
+    runtime_tasks.spawn(async move {
+        invocation_processes.run(invocation_shutdown).await;
+        RuntimeTaskExit::CredentialInvocations
+    });
     runtime_tasks.spawn(async move {
         turn_liveness_runtime
             .run(turn_liveness_shutdown_receiver)
@@ -2331,6 +2340,10 @@ async fn run_hub(
                         report_runtime_task_defect(
                             RuntimeTaskDefect::LifecycleMetricsCompletedBeforeShutdown,
                         );
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::CredentialInvocations)) => {
+                        tracing::error!("invocation reservation reconciliation completed before shutdown");
                         RuntimeStopCause::RuntimeDefect
                     }
                     Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
