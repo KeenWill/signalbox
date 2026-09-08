@@ -37,6 +37,7 @@ pub mod operator_status;
 pub mod outbox;
 pub mod plan;
 pub mod process_read;
+pub mod program_cancellation;
 pub mod program_journal;
 pub mod replace_session_defaults;
 pub mod repo_watch_command;

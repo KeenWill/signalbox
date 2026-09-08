@@ -59,6 +59,7 @@ pub(crate) enum Command {
     Runner(RunnerCommand),
 
     Credential(CredentialCommand),
+    Program(ProgramCommand),
     Create {
         selection: Option<ModelSelection>,
         template: Option<String>,
@@ -462,8 +463,28 @@ fn parse_exclusion_target(
     serde_json::from_str(text).map_err(|error| error.to_string())
 }
 
+#[derive(Debug, ClapArgs)]
+struct ProgramArguments {
+    #[command(subcommand)]
+    command: ProgramCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProgramCommand {
+    /// Cancel a retained program run.
+    Cancel {
+        #[arg(value_name = "RUN_ID", value_parser = canonical_uuid)]
+        run_id: CanonicalUuid,
+        #[arg(long, value_parser = command_id)]
+        command_id: Option<CommandId>,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Operate retained program runs.
+    Program(ProgramArguments),
+
     /// Re-read and validate the daemon configuration and reload its catalogs.
     ReloadConfiguration {
         /// Reuse an exact non-reserved durable command identity.
@@ -2014,6 +2035,7 @@ pub(crate) fn parse(
                 content: delegation_text_argument(arguments.content, arguments.content_file)?,
             },
         }),
+        CliCommand::Program(arguments) => Command::Program(arguments.command),
         CliCommand::Credential(arguments) => Command::Credential(arguments.command),
         CliCommand::Goal(arguments) => Command::Goal(match arguments.command {
             GoalSubcommand::Attach(arguments) => GoalCommand::Attach {

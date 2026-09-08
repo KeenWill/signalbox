@@ -155,6 +155,12 @@ pub fn validate_oauth_authorization(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+    /// The stored result of one program cancellation command.
+    ProgramRunCancellationReceipt {
+        command_id: crate::CommandId,
+        run_id: CanonicalUuid,
+        outcome: crate::ProgramRunCancellationOutcome,
+    },
     /// The retained replacement configuration is installed.
     ConfigurationReloaded {
         /// Durable reload identity.

@@ -367,6 +367,10 @@ where
             )
             .await
         }
+        ClientRequest::CancelProgramRun { command_id, run_id } => {
+            handle_cancel_program_run(writer, version, request_id, command_id, run_id, services)
+                .await
+        }
         ClientRequest::ListCredentialExclusions { page_size, after } => {
             handle_list_credential_exclusions(
                 writer, version, request_id, page_size, after, services,

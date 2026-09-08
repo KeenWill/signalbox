@@ -59,14 +59,6 @@ inside one turn is out of contract: the turn is the model's autonomy zone,
 governed by the same approval judge as every session
 ([tool loop](../spec/tool-loop.md)).
 
-Cancel authority is user authority. Cancel is a command with ordinary durable
-command identity ([identity and commands](../spec/identity-and-commands.md)),
-and its wire message pair belongs to
-[process protocol](../spec/process-protocol.md). An applied cancel is journaled
-as one `run_cancel` delivery that carries the command identity and no request
-ordinal, so a cancelled run replays to its cancellation however many requests
-were outstanding.
-
 Credentials never enter the isolate. Sessions, model calls, clones, and stage
 executions happen host-side under the credential machinery in
 [configuration and credentials](../spec/configuration-and-credentials.md); the
@@ -109,7 +101,5 @@ isolate receives only journaled answers.
   digest, and the loaded frame carries the exact bytes.
 - A journaled session outcome contains identities and a digest and no transcript
   bytes.
-- An applied cancel appears as one `run_cancel` delivery carrying the command
-  identity, and replay of that journal ends at the cancellation.
 - No code path passes a credential value, path, or reference into the isolate;
   every credentialed operation runs host-side.

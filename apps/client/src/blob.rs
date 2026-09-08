@@ -150,6 +150,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
         | ServerMessage::CredentialExclusionEnd { .. }

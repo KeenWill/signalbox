@@ -264,7 +264,8 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
-                | CommandKind::ClearCredentialExclusion,
+                | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun,
             ) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
@@ -326,7 +327,8 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::ProvisionOauthCredential
                     | CommandKind::ReprovisionOauthCredential
                     | CommandKind::DeleteOauthCredential
-                    | CommandKind::ClearCredentialExclusion,
+                    | CommandKind::ClearCredentialExclusion
+                    | CommandKind::CancelProgramRun,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -447,7 +449,8 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
-                | CommandKind::ClearCredentialExclusion,
+                | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }
     }

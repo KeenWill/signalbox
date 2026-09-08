@@ -60,6 +60,11 @@ pub fn validate_oauth_authorization(
 
 ```rust
 pub enum ServerMessage {
+    ProgramRunCancellationReceipt {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+        outcome: ProgramRunCancellationOutcome,
+    },
     ConfigurationReloaded {
         command_id: CommandId,
         reloaded_sections: vec::Vec<ReloadedSection>,

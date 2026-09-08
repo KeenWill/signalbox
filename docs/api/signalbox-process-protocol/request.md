@@ -6,6 +6,10 @@
 
 ```rust
 pub enum ClientRequest {
+    CancelProgramRun {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+    },
     ReloadConfiguration {
         command_id: CommandId,
     },
