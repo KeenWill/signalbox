@@ -1145,6 +1145,7 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
 })
 
 test('shares expired Imports admission failure with the shell retry state', async ({ page }) => {
+  const problems = watchBrowser(page)
   await page.clock.install()
   await useDeterministicBootstrap(page)
   await useDeterministicImportApi(page)
@@ -1160,6 +1161,7 @@ test('shares expired Imports admission failure with the shell retry state', asyn
   await useDeterministicBootstrap(page)
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
 test('mounts Imports after the daemon contract recovers', async ({ page }) => {
