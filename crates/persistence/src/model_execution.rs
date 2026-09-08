@@ -24,7 +24,6 @@ mod reread;
 mod transaction_impls;
 
 pub(crate) use credential_pool::acquire_model_call_outbox_order_guard;
-pub(crate) use credential_pool::prepared_serving_evidence;
 pub(crate) use delegation_lock::lock_delegated_child_endpoint_sessions;
 pub(crate) use delegation_lock::lock_delegated_turn_terminal_frontier;
 pub(crate) use live_turn::load_call_snapshot;
@@ -36,8 +35,6 @@ pub(crate) use persist_terminal::persist_automatic_reconciliation;
 pub(crate) use persist_terminal::persist_stop_requested;
 pub(crate) use persist_terminal::persist_terminal_outcome;
 pub(crate) use persist_terminal::persist_tool_reconciliation_required;
-
-pub(crate) use prepared::insert_prepared_call;
 
 pub(crate) use persist_disposition::SnapshotAppend;
 pub(crate) use persist_disposition::SnapshotAppendError;
@@ -973,3 +970,26 @@ where
 
 #[cfg(test)]
 mod tests;
+
+/// Serializes colliding initial/continuation frontier candidates before their
+/// writers take the global credential/outbox guard.
+pub(crate) async fn reserve_frontier_write_identities(
+    connection: &mut PgConnection,
+    identities: impl IntoIterator<Item = Uuid>,
+) -> Result<(), ModelCallRepositoryError> {
+    let identities = identities.into_iter().collect::<Vec<_>>();
+    if identities.is_empty() {
+        return Ok(());
+    }
+    let keys: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT hashtextextended('model_call_frontier_write:' || identity::text, 0) AS lock_key
+           FROM unnest($1::uuid[]) AS identity ORDER BY lock_key",
+    ).bind(&identities).fetch_all(&mut *connection).await?;
+    for key in keys {
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(key)
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
+}

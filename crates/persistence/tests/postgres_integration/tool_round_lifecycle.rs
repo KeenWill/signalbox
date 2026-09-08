@@ -404,14 +404,90 @@ async fn lock_tool_continuation_outbox_allocator(
     Ok(transaction)
 }
 
-async fn lock_tool_continuation_result_writes(
+async fn lock_tool_continuation_frontier_reads(
     pool: &sqlx::PgPool,
-) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, Box<dyn Error>> {
-    let mut transaction = pool.begin().await?;
-    sqlx::query("LOCK TABLE semantic_transcript_entry IN SHARE MODE")
-        .execute(&mut *transaction)
+    frontier: ContextFrontierId,
+) -> Result<
+    (
+        sqlx::Transaction<'_, sqlx::Postgres>,
+        sqlx::Transaction<'_, sqlx::Postgres>,
+    ),
+    Box<dyn Error>,
+> {
+    for function in [
+        "assert_context_frontier_complete_membership",
+        "resolve_context_frontier_members",
+    ] {
+        let definition: String =
+            sqlx::query_scalar("SELECT pg_get_functiondef(to_regprocedure($1))")
+                .bind(format!("{function}(uuid,uuid)"))
+                .fetch_one(pool)
+                .await?;
+        let copy =
+            definition.replacen(&format!("{function}("), &format!("unprobed_{function}("), 1);
+        sqlx::raw_sql(sqlx::AssertSqlSafe(copy.as_str()))
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query("CREATE TABLE tool_continuation_probe (frontier uuid NOT NULL)")
+        .execute(pool)
         .await?;
-    Ok(transaction)
+    sqlx::query("INSERT INTO tool_continuation_probe VALUES ($1)")
+        .bind(frontier.into_uuid())
+        .execute(pool)
+        .await?;
+    sqlx::raw_sql(r#"
+        CREATE OR REPLACE FUNCTION assert_context_frontier_complete_membership(checked_owning_session_id uuid, checked_context_frontier_id uuid)
+        RETURNS void LANGUAGE plpgsql AS $$
+        BEGIN
+            PERFORM set_config('signalbox.test_validating_frontier', 'on', true);
+            IF checked_context_frontier_id = (SELECT frontier FROM tool_continuation_probe) THEN
+                PERFORM pg_advisory_xact_lock(137501);
+            END IF;
+            PERFORM unprobed_assert_context_frontier_complete_membership(checked_owning_session_id, checked_context_frontier_id);
+            IF checked_context_frontier_id = (SELECT frontier FROM tool_continuation_probe) THEN
+                PERFORM set_config('signalbox.test_result_validated', 'on', true);
+            END IF;
+            PERFORM set_config('signalbox.test_validating_frontier', 'off', true);
+        END;
+        $$;
+        CREATE OR REPLACE FUNCTION resolve_context_frontier_members(requested_owning_session_id uuid, requested_context_frontier_id uuid)
+        RETURNS TABLE(owning_session_id uuid, context_frontier_id uuid, member_position numeric, source_session_id uuid, semantic_entry_id uuid)
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF current_setting('signalbox.test_result_validated', true) = 'on'
+               AND current_setting('signalbox.test_validating_frontier', true) IS DISTINCT FROM 'on' THEN
+                PERFORM pg_advisory_xact_lock(137502);
+            END IF;
+            RETURN QUERY SELECT * FROM unprobed_resolve_context_frontier_members(requested_owning_session_id, requested_context_frontier_id);
+        END;
+        $$;
+    "#).execute(pool).await?;
+    let mut validation = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(137501)")
+        .execute(&mut *validation)
+        .await?;
+    let mut reconstruction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(137502)")
+        .execute(&mut *reconstruction)
+        .await?;
+    Ok((validation, reconstruction))
+}
+
+async fn frontier_probe_reached(pool: &PgPool, key: i64) -> Result<bool, Box<dyn Error>> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = 0 AND objid::bigint = $1)",
+        ).bind(key).fetch_one(pool).await?;
+        if waiting {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 }
 
 async fn tool_continuation_order_guard_is_available(
@@ -510,6 +586,53 @@ async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn E
     let targets =
         ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
             .expect("one continuation target forms a catalog");
+    let initial_session = SessionId::from_uuid(Uuid::from_u128(seed + 0x102));
+    let initial_turn = TurnId::from_uuid(Uuid::from_u128(seed + 0x104));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed + 0x101, seed + 0x102, direct(seed + 5)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x103,
+                seed + 0x102,
+                "initial origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x105)),
+            Some(initial_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: initial_session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x106),
+            starting_frontier: Uuid::from_u128(seed + 0x107),
+            initial_attempt: Uuid::from_u128(seed + 0x108),
+        },
+    )
+    .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x110)),
+                initial_session,
+                UserContent::try_text("pending steering".to_owned()).expect("fixture text"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: initial_turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x111)),
+            None,
+        )
+        .await?;
+    let initial_repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        model_credential_reference(),
+    );
     let continuing_repository = PostgresToolLoopRepository::with_model_calls(
         pool.clone(),
         targets,
@@ -519,7 +642,11 @@ async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn E
     let turn = fixture.turn;
     let producing_call = fixture.call;
     let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
-    let result_holder = lock_tool_continuation_result_writes(&pool).await?;
+    let (validation_holder, reconstruction_holder) = lock_tool_continuation_frontier_reads(
+        &pool,
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+    )
+    .await?;
     let allocator_holder = lock_tool_continuation_outbox_allocator(&pool).await?;
     let continuation = tokio::spawn(async move {
         continuing_repository
@@ -543,10 +670,42 @@ async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn E
             )
             .await
     });
-    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(
+        frontier_probe_reached(&pool, 137501).await?,
+        "result-frontier validation must run before the ordering guard"
+    );
     assert!(tool_continuation_order_guard_is_available(&pool).await?);
-    result_holder.rollback().await?;
-    assert!(blocked_backends_reached(&pool, 1).await?);
+    validation_holder.rollback().await?;
+    assert!(
+        frontier_probe_reached(&pool, 137502).await?,
+        "reconstruction reaches its own probe"
+    );
+    let initial = tokio::spawn(async move {
+        initial_repository
+            .prepare_initial_call(
+                initial_session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x114)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x115)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x116)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x112)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 0x113)),
+                    )
+                },
+            )
+            .await
+    });
+    assert!(blocked_backends_reached(&pool, 2).await?);
+    assert!(
+        tool_continuation_order_guard_is_available(&pool).await?,
+        "a colliding initial writer must wait before the global guard"
+    );
+    reconstruction_holder.rollback().await?;
+    assert!(blocked_backends_reached(&pool, 2).await?);
     assert!(!tool_continuation_order_guard_is_available(&pool).await?);
     allocator_holder.rollback().await?;
     assert_eq!(
@@ -554,6 +713,13 @@ async fn tool_continuation_guards_before_result_outbox() -> Result<(), Box<dyn E
         signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation_call)
     );
 
+    assert!(
+        matches!(
+            initial.await?,
+            Err(ModelCallRepositoryError::IdentityCollision(_))
+        ),
+        "the colliding initial frontier must report an identity collision"
+    );
     pool.close().await;
     drop(container);
     Ok(())

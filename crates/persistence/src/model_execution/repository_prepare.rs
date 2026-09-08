@@ -170,6 +170,18 @@ impl PostgresModelCallRepository {
                 ));
             }
             let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
+            super::reserve_frontier_write_identities(
+                &mut transaction,
+                steering_entries
+                    .iter()
+                    .map(|entry| entry.into_uuid())
+                    .chain(steering_snapshot.map(|frontier| frontier.into_uuid()))
+                    .chain([
+                        failure_identities.failure_entry().into_uuid(),
+                        failure_identities.terminal_frontier().into_uuid(),
+                    ]),
+            )
+            .await?;
             let fast_mode = execution
                 .configuration()
                 .effective()
