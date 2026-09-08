@@ -409,6 +409,81 @@ async fn checkpoint_model_call(
     Ok(call)
 }
 
+/// A checked-out connection can remain busy beyond the checkout deadline; all three
+/// liveness entry points must let transaction startup finish instead of cancelling it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn acquisition_deadline_does_not_cancel_liveness_transactions() -> Result<(), Box<dyn Error>>
+{
+    use std::future::Future;
+
+    let (container, pool, database_url) = migrated_postgres().await?;
+    // Supplies distinct identities only; the configured checkout deadline is the behavior under test.
+    const ARBITRARY_SEED: u128 = 0x1210_0000;
+    const ACQUIRE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+    let fixture = activated_watchdog_session(&pool, ARBITRARY_SEED).await?;
+    let inventory = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidate = inventory.quiescent_active_turns(None).await?.candidates()[0];
+    let single = PgPoolOptions::new()
+        .max_connections(1)
+        .test_before_acquire(false)
+        .before_acquire(|connection, _| {
+            Box::pin(async move {
+                // Leave a one-second server operation pending after checkout. BEGIN must drain it.
+                let mut busy = Box::pin(sqlx::raw_sql("SELECT pg_sleep(1)").execute(connection));
+                std::future::poll_fn(|context| {
+                    assert!(busy.as_mut().poll(context).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                Ok(true)
+            })
+        })
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let repository = PostgresTurnLivenessRepository::new(
+        single.clone(),
+        TurnLivenessPersistenceBounds::new(None, Some(ACQUIRE_WAIT), None),
+    );
+    let identities = AcceptedInputTurnFailureIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(ARBITRARY_SEED + 20)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(ARBITRARY_SEED + 21)),
+    );
+
+    let started = std::time::Instant::now();
+    let terminalized = repository
+        .terminalize_stale_turn(
+            candidate,
+            identities.clone(),
+            &mut UuidV7StartupScanIdGenerator,
+        )
+        .await?;
+    assert_eq!(terminalized, StaleTurnOutcome::Terminalized);
+    assert!(started.elapsed() >= ACQUIRE_WAIT);
+    let recovered = repository
+        .recover_observed_slot_held_turn(candidate, identities, &mut UuidV7StartupScanIdGenerator)
+        .await?;
+    assert!(
+        recovered.is_none(),
+        "the completed turn supersedes the observation"
+    );
+    let compaction = repository
+        .recover_abandoned_compaction(
+            fixture.session,
+            ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_SEED + 22)),
+        )
+        .await?;
+    assert!(
+        compaction.is_none(),
+        "the fixture has no abandoned compaction"
+    );
+
+    single.close().await;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// An active turn with no operation outstanding reaches the inventory, and the
 /// shared failed-turn transition ends it without any new terminal machinery,
 /// recording the watchdog's own cause rather than the startup scan's.

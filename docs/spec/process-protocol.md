@@ -428,6 +428,44 @@ no control characters. A pending reload returns `unavailable` with the message
 `reload-configuration` with optional `--command-id` for retries and prints the
 installed sections or failure phase and reason.
 
+Runner placement inspection is `read_runner_status { page_size, after }`, with
+`page_size` 1 through 100; other sizes reject the request. Each page opens with
+`runner_status_start`, returns `runner_status`, then `runner_operation_failure`
+and `runner_workspace_leak` in that order, and closes with
+`runner_status_end { runner_count, failure_count, leak_count, next_after }`. The
+counts name messages on this page; `page_size` bounds runner facts, failures,
+and leaks together. `after` and `next_after` are null or one tagged cursor
+naming the last emitted fact, exclusive on continuation; `next_after` is null at
+the end.
+
+`runner_status` carries one enrollment or current session placement. Enrollment
+facts include the runner, its enrollment-request identity, current authority
+(`pending`, `active`, or `revoked`), and nullable connection health. Session
+placement facts carry the snapshot's complete runner object. Enrollment facts
+sort by runner UUID before placements sorted by session UUID, with
+`enrollment { runner_id }` and `placement { session_id }` cursors respectively.
+A pending provisioning-only successor is visible by the identity
+`promote_pending_runner` accepts. The terminal client exposes
+`runner status [--page-size N] [--after JSON]` and verifies fact ordering,
+counts, and continuation before rendering the page.
+
+The failure projection's `operation_kind` selects the refused operation's
+complete correlation arm, including its runner. Its category set is exactly the
+runner wire's closed daemon-actionable set. The detail carries bounded `code`,
+`message`, and structured `payload`; storage retains the runner-authored text
+unchanged. The diagnostic projection replaces the message with `[redacted]` and
+payload strings with empty strings, preserving the checked code and nontext
+structure. A workspace leak carries runner, fact kind, relative locator, entry
+digest, and nullable session and placement revision. No retained leak producer
+exists, so the read returns no leak messages and `leak_count` is zero. Retained
+failure traversal belongs to [persistence-protocol](persistence-protocol.md).
+
+`runner_state_transition` notifies followers of live transitions above the
+snapshot cursor; reconnect snapshots and session summaries carry the current
+runner object, with connection health present exactly for a pinned placement. A
+new runner fact extends this event kind with its state and members rather than
+adding another kind.
+
 `replace_lost_runner` and `abandon_lost_runner` carry the command and session
 identities; replacement also carries a nullable complete checkout revision.
 `promote_pending_runner` carries the command identity and pending enrollment

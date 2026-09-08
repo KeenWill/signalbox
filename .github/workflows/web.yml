@@ -79,7 +79,7 @@ jobs:
           bazelisk-version: 1.29.0
       - name: Capture Chromium snapshot updates
         run: |
-          bazel test --jobs=2 --local_resources=cpu=2 --local_resources=memory=4096 --local_test_jobs=1 --nocache_test_results --test_output=errors //clients/web:browser_tests --test_arg=--project=chromium --test_arg=--retries=0 --test_arg=--update-snapshots=all --test_arg=--grep --test_arg='captures|uses bundled sans'
+          bazel test --jobs=2 --local_resources=cpu=2 --local_resources=memory=4096 --local_test_jobs=1 --nocache_test_results --test_output=errors //clients/web:browser_tests --test_arg=--project=chromium --test_arg=--retries=0 --test_arg=--update-snapshots=all --test_arg=--grep --test_arg='captures|uses bundled sans|read and send workspace|shows bounded provider drafts'
       - name: Upload snapshot update evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
