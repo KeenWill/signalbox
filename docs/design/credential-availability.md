@@ -82,15 +82,13 @@ failure attempt, and terminalizes the turn as wait-transition fail (no call) or
 (after call). Lock order is
 [persistence protocol](../spec/persistence-protocol.md)'s.
 
-Wire: a parked turn projects an active transcript turn state that retains the
-turn and its slot, never a terminal one, and no rejection detail.
-Wait-transition fail (no call) projects a turn state naming pool exhaustion, the
-live event `turn_failed`, and a typed `turn_credential_pool_exhausted` live
-event. The ending owns no call, so its evidence uses the frozen pool-policy
-revision. The read's rejection detail for a revision it cannot resolve names the
-session, turn and policy. Which member served an ordinary selection, and whether
-a completed successor chain is shown to a client, stay undecided in
-[open questions](../open-questions.md).
+Wire: Wait-transition fail (no call) projects a turn state naming pool
+exhaustion, the live event `turn_failed`, and a typed
+`turn_credential_pool_exhausted` live event. The ending owns no call, so its
+evidence uses the frozen pool-policy revision. The read's rejection detail for a
+revision it cannot resolve names the session, turn and policy. Which member
+served an ordinary selection, and whether a completed successor chain is shown
+to a client, stay undecided in [open questions](../open-questions.md).
 
 ## Compatibility constraints
 

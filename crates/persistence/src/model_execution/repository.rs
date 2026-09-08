@@ -853,6 +853,12 @@ impl PostgresModelCallRepository {
             &self.credential_pools,
         )
         .await?;
+        if selected.wait.is_some() {
+            let execution =
+                require_live_execution(connection, activated.session(), &self.targets).await?;
+            super::credential_wait::park_initial(connection, &execution, Some(&selected)).await?;
+            return Ok(CountedActivationCheckpointOutcome::CredentialWait);
+        }
         outbox::lock_sequence_allocator(connection).await?;
         let Some(credential_reference) = selected.reference.as_ref() else {
             // The activated turn remains call-free. The ordinary counted path
@@ -884,8 +890,8 @@ impl PostgresModelCallRepository {
         Ok(CountedActivationCheckpointOutcome::Prepared)
     }
 
-    /// Checkpoints and closes the exact prospective call after attachment
-    /// verification found a definitive failure during provider-native counting.
+    /// Preserves a credential wait or closes the prospective call after
+    /// definitive attachment failure during provider-native counting.
     pub(crate) async fn fail_counted_attachment_in_transaction(
         &self,
         connection: &mut PgConnection,
@@ -894,7 +900,7 @@ impl PostgresModelCallRepository {
         failure: AttachmentPreparationFailure,
         identities: FailedModelCallTurnIdentities,
         outbox_order_guard: ModelCallOutboxOrderGuard,
-    ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
+    ) -> Result<Option<FailedModelCallTurn>, ModelCallRepositoryError> {
         let checkpoint = self
             .checkpoint_counted_activation_in_transaction(
                 connection,
@@ -903,6 +909,12 @@ impl PostgresModelCallRepository {
                 outbox_order_guard,
             )
             .await?;
+        if matches!(
+            checkpoint,
+            CountedActivationCheckpointOutcome::CredentialWait
+        ) {
+            return Ok(None);
+        }
         if let CountedActivationCheckpointOutcome::PoolExhausted(policy) = checkpoint {
             let execution =
                 require_live_execution(connection, activated.session(), &self.targets).await?;
@@ -914,7 +926,7 @@ impl PostgresModelCallRepository {
                     )
                 })?;
             persist_credential_pool_exhaustion(connection, &exhausted).await?;
-            return Ok(exhausted.into_failed());
+            return Ok(Some(exhausted.into_failed()));
         }
         let call = prospective.prepared().call().id();
         let execution = require_exact_call(
@@ -935,6 +947,6 @@ impl PostgresModelCallRepository {
             Some(failure),
         )
         .await?;
-        Ok(failed)
+        Ok(Some(failed))
     }
 }

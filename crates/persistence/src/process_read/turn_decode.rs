@@ -173,6 +173,7 @@ pub(super) fn decode_transcript_turn(
                 | "awaiting_child"
                 | "awaiting_tool_recovery"
                 | "awaiting_runner_recovery"
+                | "awaiting_credential_availability"
         )
     {
         return Err(ProcessReadCorruption::Unsupported {
@@ -282,6 +283,53 @@ pub(super) fn decode_transcript_turn(
     };
     let recovery_model_call_frontier =
         recovery_model_call_frontier.map(ContextFrontierId::from_uuid);
+
+    if matches!(
+        active_phase.as_deref(),
+        Some("awaiting_credential_availability")
+    ) {
+        if state_kind != "active"
+            || current_attempt.is_some()
+            || current_model_call.is_some()
+            || terminal_frontier.is_some()
+            || terminal_attempt.is_some()
+            || terminal_call.is_some()
+            || terminal_disposition.is_some()
+            || starting_frontier.is_none()
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("credential availability wait shape").into(),
+            );
+        }
+        let attempt = TurnAttemptId::from_uuid(required(row, "credential_wait_attempt_id")?);
+        let frontier = ContextFrontierId::from_uuid(required(row, "credential_wait_frontier_id")?);
+        let cause = match required::<String>(row, "credential_wait_cause")?.as_str() {
+            "exhausted" => signalbox_domain::CredentialAvailabilityWaitCause::Exhausted,
+            _ => {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "credential availability wait cause",
+                )
+                .into());
+            }
+        };
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    model_settings,
+                    state: ProcessTurnState::ActiveAwaitingCredentialAvailability {
+                        wait: signalbox_domain::CredentialAvailabilityWait::new(
+                            attempt, frontier, cause,
+                        ),
+                    },
+                },
+                start_lineage,
+                latest_frontier: Some(frontier),
+            },
+            logical_terminal,
+        );
+    }
 
     if matches!(active_phase.as_deref(), Some("awaiting_runner_recovery")) {
         let (Some(starting_frontier), Some(runner), Some(revision)) = (

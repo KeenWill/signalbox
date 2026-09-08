@@ -566,6 +566,11 @@ and order, the snapshot state and the live event carry identical `members`, the
 policy read returns the same inventory, and the client exposes the terminal
 state only after those checks pass.
 
+Credential admission waits project the active turn state
+`active_awaiting_credential_availability`, carrying the call-free ended
+`wait_attempt_id` and the closed `exhausted` cause. The terminal client keeps
+following that turn.
+
 ## Planned
 
 - Runner creation and status requests, and the status read's failure evidence:

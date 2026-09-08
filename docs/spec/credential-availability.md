@@ -188,6 +188,10 @@ operator clear grants eligibility to waits naming that member in the same
 transaction. Eligibility prepares no call and consumes no wait. Startup alone
 leaves exhausted waits unchanged; deadline-free waits have no timer.
 
+A parked turn projects `active_awaiting_credential_availability` with its ended
+wait attempt and closed cause. Transcript reads and initial follow snapshots
+retain the active turn and its slot without rejection detail.
+
 ## Planned
 
 - Contention and capacity reservations, their startup re-evaluation, and the
