@@ -134,6 +134,7 @@ function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
         value={bounded.content}
       />
       <BoundedFooter
+        sourceComplete={artifact.sourceComplete}
         omittedCharacters={bounded.omittedCharacters}
         canExpand={canExpand}
         expanded={expanded}
@@ -189,11 +190,13 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
 }
 
 function BoundedFooter({
+  sourceComplete = true,
   omittedCharacters,
   canExpand,
   expanded,
   onToggle,
 }: {
+  sourceComplete?: boolean
   omittedCharacters: number
   canExpand: boolean
   expanded: boolean
@@ -202,9 +205,11 @@ function BoundedFooter({
   return (
     <footer className="artifact-bounded-footer">
       <span>
-        {omittedCharacters > 0
-          ? `${omittedCharacters.toLocaleString()} characters remain outside this bounded view`
-          : 'Complete bounded content shown'}
+        {!sourceComplete
+          ? 'Server-truncated source prefix shown; additional source content is not loaded.'
+          : omittedCharacters > 0
+            ? `${omittedCharacters.toLocaleString()} characters remain outside this bounded view`
+            : 'Complete bounded content shown'}
       </span>
       {(canExpand || expanded) && (
         <button type="button" onClick={onToggle}>
