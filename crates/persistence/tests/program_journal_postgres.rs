@@ -860,3 +860,227 @@ async fn cancellation_receipt_requires_its_own_command_in_the_terminal_delivery(
     drop(container);
     Ok(())
 }
+
+/// Arbitrary name/revision and exact bytes shared by registration tests.
+fn registration_request(
+    name: &str,
+) -> signalbox_domain::program_registration::ProgramRegistrationRequest {
+    use signalbox_domain::program_registration::{ProgramGrants, ProgramRegistrationRequest};
+    ProgramRegistrationRequest {
+        name: name.into(),
+        revision: "fixture-revision".into(),
+        source: b"// source\nexport {};".to_vec(),
+        artifact: "export {};".into(),
+        grants: ProgramGrants::new([ProgramCapability::Session]),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn registrations_distinguish_names_and_grants_and_pin_run_authority()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::program_registration::ProgramGrants;
+    use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramRegistrationRepository::new(pool.clone());
+    let first = repository
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            registration_request("first"),
+        )
+        .await?;
+    let renamed = repository
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            registration_request("second"),
+        )
+        .await?;
+    let mut changed_grants = registration_request(&first.content.name);
+    changed_grants.revision = "distinct-revision".into();
+    changed_grants.grants = ProgramGrants::new([ProgramCapability::Register]);
+    let different_grants = repository
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            changed_grants,
+        )
+        .await?;
+    assert_ne!(first.id, renamed.id);
+    assert_ne!(first.id, different_grants.id);
+    assert_ne!(first.content.source_digest, first.artifact_digest);
+    assert_eq!(first.artifact_digest, renamed.artifact_digest);
+    assert_eq!(first.content.source_digest, renamed.content.source_digest);
+    let run = repository
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            first.id,
+        )
+        .await?;
+    assert_eq!(repository.for_run(run).await?, Some(first.clone()));
+    assert!(
+        sqlx::query(
+            "UPDATE program_registration SET grants = ARRAY['register'] WHERE registration_id = $1"
+        )
+        .bind(first.id.into_uuid())
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE program_run_registration SET registration_id = $1 WHERE run_id = $2")
+            .bind(different_grants.id.into_uuid())
+            .bind(run.into_uuid())
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn child_registration_refuses_widening_without_creating_a_registration()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::program_registration::ProgramGrants;
+    use signalbox_persistence::program_registration::{
+        ProgramRegistrationError, ProgramRegistrationRepository,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramRegistrationRepository::new(pool.clone());
+    let mut parent_request = registration_request("parent");
+    parent_request.grants =
+        ProgramGrants::new([ProgramCapability::Register, ProgramCapability::Session]);
+    let parent = repository
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            parent_request,
+        )
+        .await?;
+    let run = repository
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            parent.id,
+        )
+        .await?;
+    let mut child_request = registration_request("child");
+    child_request.grants = ProgramGrants::new([ProgramCapability::Judge]);
+    assert!(matches!(
+        repository
+            .register_child(
+                run,
+                signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                child_request.clone()
+            )
+            .await,
+        Err(ProgramRegistrationError::GrantsDenied)
+    ));
+    child_request.grants = ProgramGrants::new([ProgramCapability::Session]);
+    let child = repository
+        .register_child(
+            run,
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            child_request,
+        )
+        .await?;
+    let child_run = repository
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            child.id,
+        )
+        .await?;
+    let grandchild = registration_request("grandchild");
+    assert!(matches!(
+        repository
+            .register_child(
+                child_run,
+                signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                grandchild
+            )
+            .await,
+        Err(ProgramRegistrationError::GrantsDenied)
+    ));
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn run_creation_retries_preserve_the_binding_and_journal() -> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::program_registration::{
+        ProgramRegistrationError, ProgramRegistrationRepository,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let registrations = ProgramRegistrationRepository::new(pool.clone());
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let first = registrations
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            registration_request("first"),
+        )
+        .await?;
+    let other = registrations
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            registration_request("other"),
+        )
+        .await?;
+    let run = ProgramRunId::from_uuid(Uuid::now_v7());
+    assert_eq!(registrations.start_run(run, first.id).await?, run);
+    journal
+        .append_request(run, None, RequestKind::Now(payload(b"retained request")))
+        .await?;
+    assert_eq!(registrations.start_run(run, first.id).await?, run);
+    assert!(
+        matches!(registrations.start_run(run, other.id).await, Err(ProgramRegistrationError::RunConflict { run: conflict }) if conflict == run)
+    );
+    assert_eq!(registrations.for_run(run).await?, Some(first.clone()));
+    assert_eq!(
+        journal
+            .load(run)
+            .await?
+            .expect("retained run")
+            .entries()
+            .len(),
+        1
+    );
+    let bare = ProgramRunId::from_uuid(Uuid::now_v7());
+    journal.create_stream(bare).await?;
+    assert!(
+        matches!(registrations.start_run(bare, first.id).await, Err(ProgramRegistrationError::RunConflict { run: conflict }) if conflict == bare)
+    );
+    assert!(registrations.for_run(bare).await?.is_none());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn registration_creation_reconciles_equal_retries_and_refuses_changed_content()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::ProgramRegistrationId;
+    use signalbox_persistence::program_registration::{
+        ProgramRegistrationError, ProgramRegistrationRepository,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramRegistrationRepository::new(pool.clone());
+    let id = ProgramRegistrationId::from_uuid(Uuid::now_v7());
+    let request = registration_request("retry-registration");
+    let first = repository.register_user(id, request.clone()).await?;
+    assert_eq!(repository.register_user(id, request.clone()).await?, first);
+    let mut changed = request.clone();
+    changed.source.push(b' ');
+    assert!(
+        matches!(repository.register_user(id, changed).await, Err(ProgramRegistrationError::RegistrationConflict { registration }) if registration == id)
+    );
+    let other = ProgramRegistrationId::from_uuid(Uuid::now_v7());
+    assert!(
+        matches!(repository.register_user(other, request.clone()).await, Err(ProgramRegistrationError::RegistrationConflict { registration }) if registration == other)
+    );
+    assert_eq!(repository.register_user(id, request).await?, first);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM program_registration")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 1);
+    pool.close().await;
+    Ok(())
+}

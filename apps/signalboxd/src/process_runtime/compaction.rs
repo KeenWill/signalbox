@@ -243,7 +243,15 @@ where
             }
         }
     };
-    let rendered_range = match load_context_compaction_range(&services.pool, &prepared).await {
+    let rendered_range = match retry_prepared_context_compaction_range(|| {
+        load_context_compaction_range(
+            &services.pool,
+            &prepared,
+            services.blob_store_registry.as_deref(),
+        )
+    })
+    .await
+    {
         Ok(rendered) => rendered,
         Err(error) => {
             return fail_context_compaction_before_response(
@@ -378,6 +386,7 @@ pub(crate) enum AutomaticContextCompactionError {
     Credential(ModelCallRepositoryError),
     Repository(ContextCompactionRepositoryError),
     Model,
+    AttachmentUnavailable,
     Configuration,
     InputDoesNotFit,
     State,
@@ -398,7 +407,9 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
         match self {
             Self::Credential(error) => error.operator_failure_class(),
             Self::Repository(error) => error.operator_failure_class(),
-            Self::Read(ProcessReadError::Database(_)) | Self::Model => {
+            Self::Read(ProcessReadError::Database(_))
+            | Self::Model
+            | Self::AttachmentUnavailable => {
                 signalbox_application::OperatorFailureClass::Infrastructure {
                     commit_ambiguous: false,
                 }
@@ -430,6 +441,7 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
                 "context_compaction_repository_corruption"
             }
             Self::Model => "context_compaction_model",
+            Self::AttachmentUnavailable => "context_compaction_attachment_unavailable",
             Self::Configuration => "context_compaction_configuration",
             Self::InputDoesNotFit => "context_compaction_input_does_not_fit",
             Self::State => "context_compaction_state",
@@ -463,8 +475,9 @@ pub(super) async fn automatic_context_compaction_boundary(
                 ContextCompactionRangeLoadError::Read(error) => {
                     AutomaticContextCompactionError::Read(error)
                 }
-                ContextCompactionRangeLoadError::CatalogUnavailable => {
-                    AutomaticContextCompactionError::Model
+                ContextCompactionRangeLoadError::CatalogUnavailable
+                | ContextCompactionRangeLoadError::AttachmentUnavailable => {
+                    AutomaticContextCompactionError::AttachmentUnavailable
                 }
                 ContextCompactionRangeLoadError::Integrity => {
                     AutomaticContextCompactionError::Integrity
@@ -552,6 +565,10 @@ pub(super) fn bounded_rendered_compaction_boundary(
     latest_safe
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "compaction composition includes its attachment authority and occupancy observer"
+)]
 pub(crate) async fn compact_automatically(
     model_calls: &PostgresModelCallRepository,
     model_configuration: &HubModelConfiguration,
@@ -560,6 +577,7 @@ pub(crate) async fn compact_automatically(
     turn: TurnId,
     frozen_selection: Option<DirectModelSelection>,
     observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
+    blob_registry: Option<&BlobStoreRegistry>,
 ) -> Result<AppliedContextCompaction, AutomaticContextCompactionError> {
     let repository = ContextCompactionRepository::new(model_calls.pool().clone());
     let compaction_prompt = model_configuration.compaction_prompt();
@@ -689,8 +707,8 @@ pub(crate) async fn compact_automatically(
             Err(error) => return Err(AutomaticContextCompactionError::Repository(error)),
         }
     };
-    let rendered_range = match retry_context_compaction_range_database_reads(|| {
-        load_context_compaction_range(model_calls.pool(), &prepared)
+    let rendered_range = match retry_prepared_context_compaction_range(|| {
+        load_context_compaction_range(model_calls.pool(), &prepared, blob_registry)
     })
     .await
     {
@@ -705,8 +723,11 @@ pub(crate) async fn compact_automatically(
             .map_err(AutomaticContextCompactionError::Repository)?;
             return Err(AutomaticContextCompactionError::Read(error));
         }
-        Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
-            return Err(AutomaticContextCompactionError::Model);
+        Err(
+            ContextCompactionRangeLoadError::CatalogUnavailable
+            | ContextCompactionRangeLoadError::AttachmentUnavailable,
+        ) => {
+            return Err(AutomaticContextCompactionError::AttachmentUnavailable);
         }
         Err(ContextCompactionRangeLoadError::Integrity) => {
             fail_context_compaction_until_resolved(
@@ -770,6 +791,7 @@ pub(crate) async fn compact_automatically(
 pub(super) async fn load_context_compaction_range(
     pool: &PgPool,
     prepared: &PreparedContextCompaction,
+    blob_registry: Option<&BlobStoreRegistry>,
 ) -> Result<String, ContextCompactionRangeLoadError> {
     let entries = ProcessReadRepository::new(pool.clone())
         .read_selected_transcript_entries(
@@ -789,11 +811,62 @@ pub(super) async fn load_context_compaction_range(
         return Err(ContextCompactionRangeLoadError::Integrity);
     }
     let catalog = BlobCatalogRepository::new(pool.clone());
+    let digests = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ProcessTranscriptEntry::User { content, .. } => Some(content),
+            _ => None,
+        })
+        .flat_map(|content| content.parts())
+        .filter_map(|part| match part {
+            signalbox_domain::UserContentPart::Attachment { digest, .. } => Some(*digest),
+            _ => None,
+        })
+        .collect();
+    crate::attachment_preparation_runtime::verify_attachments(
+        &catalog,
+        blob_registry,
+        None,
+        digests,
+    )
+    .await
+    .map_err(attachment_verification_range_error)?;
     let mut values = Vec::with_capacity(entries.len());
     for entry in &entries {
         values.push(context_compaction_entry_value(entry, &catalog).await?);
     }
     serde_json::to_string(&values).map_err(|_| ContextCompactionRangeLoadError::Integrity)
+}
+
+pub(super) fn attachment_verification_range_error(
+    failure: signalbox_application::AttachmentPreparationFailure,
+) -> ContextCompactionRangeLoadError {
+    match failure {
+        signalbox_application::AttachmentPreparationFailure::Unavailable => {
+            ContextCompactionRangeLoadError::AttachmentUnavailable
+        }
+        _ => ContextCompactionRangeLoadError::Integrity,
+    }
+}
+
+pub(super) async fn retry_prepared_context_compaction_range<Load, LoadFuture>(
+    mut load: Load,
+) -> Result<String, ContextCompactionRangeLoadError>
+where
+    Load: FnMut() -> LoadFuture,
+    LoadFuture: Future<Output = Result<String, ContextCompactionRangeLoadError>>,
+{
+    signalbox_application::with_scheduler_slot_released(async {
+        loop {
+            match retry_context_compaction_range_database_reads(&mut load).await {
+                Err(ContextCompactionRangeLoadError::AttachmentUnavailable) => {
+                    sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
+                }
+                result => return result,
+            }
+        }
+    })
+    .await
 }
 
 pub(super) async fn retry_context_compaction_range_database_reads<Load, LoadFuture>(
@@ -1430,7 +1503,8 @@ where
     Writer: AsyncWrite + Unpin,
 {
     match error {
-        ContextCompactionRangeLoadError::CatalogUnavailable => {
+        ContextCompactionRangeLoadError::CatalogUnavailable
+        | ContextCompactionRangeLoadError::AttachmentUnavailable => {
             write_error(
                 writer,
                 version,
@@ -1594,6 +1668,7 @@ where
 pub(super) enum ContextCompactionRangeLoadError {
     Read(ProcessReadError),
     CatalogUnavailable,
+    AttachmentUnavailable,
     Integrity,
 }
 

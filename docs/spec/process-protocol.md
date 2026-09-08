@@ -78,7 +78,9 @@ an event kind with no projection advances that cursor and reaches no follower. A
 database-scoped advisory guard and a generation fence in
 `crates/persistence/src/hub_fence.rs` enforce one active daemon process per
 database, and therefore one dispatcher and its fan-outs. The guard is taken on a
-dedicated connection before migrations run and held until shutdown.
+dedicated connection before migrations run and held until shutdown. A committed
+credential-wait change sends `resync_required` to that session's followers; the
+database notification listener reconnecting requires all followers to resync.
 
 ## Design decisions
 
@@ -220,6 +222,10 @@ The session named by `decide_tool_request` is a routing precondition and not
 part of the canonical decision payload; the session named by
 `override_denied_tool_request` is part of its canonical payload because the
 recorded override is a session-scoped standing fact.
+
+A decision on the earliest delegated request without terminal judge evidence
+records an `awaiting_approval_judge` rejection and returns
+`tool_request_awaiting_approval_judge`.
 
 A one-segment root path is legal only under the `root_global_read` placement,
 which records the explicit intent that the session gains global conversation
@@ -578,6 +584,9 @@ belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
 version-1 encoding, and the closed receipt algebra belong here, and a later
 incompatible shape requires a new protocol version.
 
+Transcript snapshot starts include nullable `repository_watch` provenance
+resolved from the retained dispatch ledger.
+
 If counted-activation revalidation selects pre-call exhaustion failure,
 activation and terminalization commit together before execution resumes.
 
@@ -610,10 +619,11 @@ is then the latest of them. The snapshot and event carry no credential bytes,
 path, provider prose, or current-configuration lookup, and the projection is
 never paginated or truncated; configuration admission bounds each profile and
 pool name to 256 UTF-8 bytes and each pool to 1,024 members so the duplicated
-evidence fits one frame under worst-case JSON escaping. A null
-`record_generation` identifies an active action without a projection generation.
-OAuth quarantine writes retain a profile-quarantine exclusion tied to the
-authorization generation; reauthorization retires its active state.
+evidence fits one frame under worst-case JSON escaping. The non-null
+`record_generation` is zero, the oldest generation, for an active action without
+a projection generation. OAuth quarantine writes retain a profile-quarantine
+exclusion tied to the authorization generation; reauthorization retires its
+active state.
 
 In the exhaustion projection, `members` and `policy_members` are equal in length
 and order, the snapshot state and the live event carry identical `members`, the
@@ -622,10 +632,14 @@ state only after those checks pass.
 
 Credential admission waits project the active turn state
 `active_awaiting_credential_availability`, carrying the call-free ended
-`wait_attempt_id` and the closed `exhausted` cause. The terminal client keeps
-following that turn.
+`wait_attempt_id` and the closed `contended` or `exhausted` cause. The terminal
+client keeps following that turn.
+
+A terminal credential wait release after a provider call projects
+`failed_after_credential_wait`, naming the fresh call-free terminal attempt and
+its known-failed predecessor with the retained provider cause. Its live terminal
+event is `turn_failed`; it emits no pool-exhaustion event.
 
 ## Planned
 
-- Runner creation and status requests, and the status read's failure evidence:
-  [design](../design/process-protocol.md).
+None.

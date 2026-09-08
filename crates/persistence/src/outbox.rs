@@ -61,8 +61,8 @@ use crate::{
 use crate::runner_protocol::RunnerConnectionEpoch;
 
 const STORAGE_VERSION: i16 = 1;
-/// `session_created` advanced when its record gained lifecycle provenance.
-const SESSION_CREATED_STORAGE_VERSION: i16 = 2;
+/// Session creation records include workflow provenance.
+const SESSION_CREATED_STORAGE_VERSION: i16 = 3;
 
 const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
     match discriminator {
@@ -1060,7 +1060,10 @@ pub(crate) async fn load_event_header(
     }
     let discriminator = outbox_event_discriminator_from_str(&event_kind)
         .ok_or(OutboxCorruption::UnsupportedEventKind)?;
-    if storage_version != storage_version_for(discriminator) {
+    if storage_version != storage_version_for(discriminator)
+        && !(matches!(discriminator, OutboxEventDiscriminator::SessionCreated)
+            && storage_version == 2)
+    {
         return Err(OutboxCorruption::UnsupportedStorageVersion.into());
     }
     if stored_session.is_none() && discriminator != OutboxEventDiscriminator::CommandSettled {
@@ -1854,8 +1857,9 @@ async fn load_session_created(
     stored_session: Uuid,
 ) -> Result<DispatchedOutboxEventKind, OutboxDispatchError> {
     let row = sqlx::query(
-        "SELECT event.creation_cause, event.dispatching_module, event.dispatch_ref,
-                event.spawning_tool_request_id, event.owned,
+        "SELECT event.storage_version, event.creation_cause, event.dispatching_module, event.dispatch_ref,
+                event.spawning_tool_request_id, event.owned, event.creating_program_run_id,
+                (SELECT run_id FROM program_run_registration WHERE run_id = event.creating_program_run_id) AS verified_program_run,
                 EXISTS (
                     SELECT 1
                       FROM session
@@ -1865,6 +1869,7 @@ async fn load_session_created(
                        AND journal.owned_after = event.owned
                      WHERE session.session_id = event.session_id
                        AND session.creation_cause = event.creation_cause
+                       AND session.creating_program_run_id IS NOT DISTINCT FROM event.creating_program_run_id
                        AND session.dispatching_module
                            IS NOT DISTINCT FROM event.dispatching_module
                        AND session.dispatch_ref IS NOT DISTINCT FROM event.dispatch_ref
@@ -1888,12 +1893,30 @@ async fn load_session_created(
     let dispatch: Option<Uuid> = row.try_get("dispatch_ref")?;
     let spawning_request: Option<Uuid> = row.try_get("spawning_tool_request_id")?;
     let owned: bool = row.try_get("owned")?;
+    let program = crate::program_session::recorded_capability(
+        row.try_get("creating_program_run_id")?,
+        row.try_get("verified_program_run")?,
+    )
+    .await
+    .map_err(|()| OutboxCorruption::InvalidLifecycleEvent)?;
+    if program.is_some() != (cause == "workflow")
+        || program.is_some()
+            && row.try_get::<i16, _>("storage_version")? != SESSION_CREATED_STORAGE_VERSION
+    {
+        return Err(OutboxCorruption::InvalidLifecycleEvent.into());
+    }
     let cause = match (
         session_creation_cause_from_str(&cause),
         module,
         dispatch,
         spawning_request,
     ) {
+        (Some(crate::mapping::SessionCreationCauseStorageKind::Workflow), None, None, None) => {
+            signalbox_domain::SessionCreationProvenance::workflow(
+                program.ok_or(OutboxCorruption::InvalidLifecycleEvent)?,
+            )
+            .cause()
+        }
         (Some(crate::mapping::SessionCreationCauseStorageKind::Interactive), None, None, None) => {
             SessionCreationCause::Interactive
         }
@@ -4038,7 +4061,9 @@ async fn append_session_created(
     ownership: SessionOwnership,
 ) -> Result<(), sqlx::Error> {
     let (module, dispatch, spawning_request) = match cause {
-        SessionCreationCause::Interactive => (None, None, None),
+        SessionCreationCause::Interactive | SessionCreationCause::Workflow { .. } => {
+            (None, None, None)
+        }
         SessionCreationCause::ModuleDispatched { dispatch } => (
             Some(dispatching_module_to_str(dispatch.module())),
             Some(match dispatch {
@@ -4061,9 +4086,9 @@ async fn append_session_created(
          INSERT INTO session_created_outbox_event
             (event_sequence, event_kind, storage_version, session_id,
              creation_cause, dispatching_module, dispatch_ref,
-             spawning_tool_request_id, owned)
+             spawning_tool_request_id, owned, creating_program_run_id)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                $4, $5, $6, $7, $8
+                $4, $5, $6, $7, $8, $9
            FROM header",
     )
     .bind(SESSION_CREATED)
@@ -4074,6 +4099,7 @@ async fn append_session_created(
     .bind(dispatch)
     .bind(spawning_request)
     .bind(ownership.is_owned())
+    .bind(crate::create_session::creating_program_run(*cause))
     .execute(connection)
     .await?;
 

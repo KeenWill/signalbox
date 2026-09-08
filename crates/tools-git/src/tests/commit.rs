@@ -120,7 +120,7 @@ fn commit_revalidates_the_injected_root_before_reference_publication() {
         .add_new_mempack_backend(1000)
         .expect("fixture memory pack attaches");
     repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .expect("fixture object database installs");
     let mut replacement_head = None;
 

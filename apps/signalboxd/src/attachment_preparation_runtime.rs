@@ -21,6 +21,9 @@ use tokio::io::AsyncReadExt as _;
 
 use crate::BlobStoreRegistry;
 
+// The attachment-preparation admission bound is independent of direct reads.
+static PREPARATION_BUDGET: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+
 const VERIFICATION_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Provider wrapper that verifies every rendered attachment before capability
@@ -191,9 +194,39 @@ async fn prepare_attachments(
     request: &PreparedModelCallRequest,
     digests: BTreeSet<BlobDigest>,
 ) -> Result<(), AttachmentPreparationFailure> {
-    within_attachment_deadline(prepare_attachments_within_deadline(
-        catalog, registry, request, digests,
-    ))
+    verify_attachments(catalog, registry, Some(request), digests).await
+}
+
+pub(crate) async fn verify_attachments(
+    catalog: &BlobCatalogRepository,
+    registry: Option<&BlobStoreRegistry>,
+    request: Option<&PreparedModelCallRequest>,
+    digests: BTreeSet<BlobDigest>,
+) -> Result<(), AttachmentPreparationFailure> {
+    if digests.is_empty() {
+        return Ok(());
+    }
+    bounded_attachment_preparation(
+        &PREPARATION_BUDGET,
+        prepare_attachments_inner(catalog, registry, request, digests),
+    )
+    .await
+}
+
+async fn bounded_attachment_preparation<F>(
+    budget: &tokio::sync::Semaphore,
+    traversal: F,
+) -> Result<(), AttachmentPreparationFailure>
+where
+    F: Future<Output = Result<(), AttachmentPreparationFailure>>,
+{
+    let _permit = budget
+        .try_acquire()
+        .map_err(|_| AttachmentPreparationFailure::Unavailable)?;
+    signalbox_application::with_scheduler_slot_released(async move {
+        let _permit = _permit;
+        within_attachment_deadline(traversal).await
+    })
     .await
 }
 
@@ -205,10 +238,10 @@ async fn within_attachment_deadline(
         .unwrap_or(Err(AttachmentPreparationFailure::Unavailable))
 }
 
-async fn prepare_attachments_within_deadline(
+async fn prepare_attachments_inner(
     catalog: &BlobCatalogRepository,
     registry: Option<&BlobStoreRegistry>,
-    request: &PreparedModelCallRequest,
+    request: Option<&PreparedModelCallRequest>,
     digests: BTreeSet<BlobDigest>,
 ) -> Result<(), AttachmentPreparationFailure> {
     let Some(registry) = registry else {
@@ -223,11 +256,12 @@ async fn prepare_attachments_within_deadline(
             .map_err(map_catalog_failure)?
             .ok_or(AttachmentPreparationFailure::Missing)?;
         let expected = entry.expected();
-        if request
-            .attachment_byte_length(digest)
-            .map(|length| length.get())
-            != Some(expected.byte_length())
-        {
+        if request.is_some_and(|request| {
+            request
+                .attachment_byte_length(digest)
+                .map(|length| length.get())
+                != Some(expected.byte_length())
+        }) {
             return Err(AttachmentPreparationFailure::Corrupt);
         }
         total = total.checked_add(expected.byte_length()).ok_or(
@@ -349,6 +383,20 @@ mod tests {
     use signalbox_application::{AttachmentPreparationFailure, ModelCallInputTokenCount};
 
     use super::{StreamVerificationFailure, attachment_count_failure, verify_stream};
+
+    #[tokio::test(start_paused = true)]
+    async fn preparation_rejects_immediately_when_all_eight_traversals_are_active() {
+        let budget = tokio::sync::Semaphore::new(8);
+        let held = budget.try_acquire_many(8).expect("eight preparations fit");
+        assert_eq!(
+            super::bounded_attachment_preparation(&budget, async {
+                panic!("a ninth traversal must not start")
+            })
+            .await,
+            Err(AttachmentPreparationFailure::Unavailable)
+        );
+        drop(held);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn attachment_candidates_share_one_aggregate_deadline() {

@@ -606,6 +606,7 @@ pub struct WebSessionWorkFacts {
 
 ```rust
 pub struct WebSessionTimelineDescriptor {
+    pub repository_watch: option::Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     pub sizes: WebSessionTimelineSizeFacts,
     pub first_address: WebTimelineAddress,
@@ -1179,6 +1180,7 @@ pub enum WebTimelineCreationCause {
     Interactive {},
     RepositoryWatch { dispatch_id: WebSessionId },
     Commissioned { dispatch_id: WebSessionId },
+    Workflow { program_run_id: WebSessionId },
     Delegated { spawning_request_id: WebSessionId },
 }
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize

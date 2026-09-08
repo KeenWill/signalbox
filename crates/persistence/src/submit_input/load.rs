@@ -66,6 +66,7 @@ pub(super) async fn load_complete_rows(
             registry.command_id AS registry_command_id,
             registry.command_kind AS registry_kind,
             registry.storage_version AS registry_version,
+            registry.issuer_kind AS registry_issuer_kind,
             typed.command_id AS typed_command_id,
             typed.command_kind AS typed_kind,
             typed.storage_version AS typed_version,

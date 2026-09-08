@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashSet},
     ffi::{OsStr, OsString},
     fmt, fs,
@@ -10,7 +11,7 @@ use std::{
         unix::fs::FileExt,
     },
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use flate2::read::ZlibDecoder;
@@ -39,6 +40,7 @@ use crate::limits::{
     MAX_PACK_FILE_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
 };
 use crate::pack_install::OBJECT_PUBLICATION_LOCK;
+use crate::pack_read_bounds::collect_unreadable_objects;
 
 pub(super) struct PinnedRepository {
     root_path: PathBuf,
@@ -69,6 +71,7 @@ pub(super) struct RepositoryOperationGuard {
 pub(super) struct RepositoryShell {
     repository: Repository,
     _directory: tempfile::TempDir,
+    unreadable_objects: RefCell<Option<Arc<HashSet<git2::Oid>>>>,
 }
 
 pub(super) struct PinnedObjectDatabase {
@@ -78,6 +81,36 @@ pub(super) struct PinnedObjectDatabase {
     pack: OwnedFd,
     objects_identity: FileIdentity,
     bindings: Vec<ObjectChildBinding>,
+    unreadable_objects: Arc<HashSet<git2::Oid>>,
+}
+
+impl RepositoryShell {
+    pub(super) fn set_odb(
+        &self,
+        database: &Odb<'_>,
+        snapshot: &PinnedObjectDatabase,
+    ) -> Result<(), git2::Error> {
+        self.repository.set_odb(database)?;
+        *self.unreadable_objects.borrow_mut() = Some(Arc::clone(&snapshot.unreadable_objects));
+        Ok(())
+    }
+
+    pub(super) fn read_object_header(
+        &self,
+        oid: git2::Oid,
+    ) -> Result<(usize, git2::ObjectType), git2::Error> {
+        if self
+            .unreadable_objects
+            .borrow()
+            .as_ref()
+            .is_none_or(|objects| objects.contains(&oid))
+        {
+            return Err(git2::Error::from_str(
+                "object read exceeds captured content bounds",
+            ));
+        }
+        self.repository.odb()?.read_header(oid)
+    }
 }
 
 struct ObjectChildBinding {
@@ -589,15 +622,17 @@ impl PinnedObjectDatabase {
             });
         }
         after_scan();
-        let snapshot = Self {
+        let mut snapshot = Self {
             directory,
             compressed_bytes: captured_bytes,
             objects: dup(&objects).map_err(|_| LocalGitFailure::Repository)?,
             pack: pinned_pack.ok_or(LocalGitFailure::Repository)?,
             objects_identity,
             bindings: pinned_children,
+            unreadable_objects: Arc::default(),
         };
-        snapshot.validate_object_sizes(authority.object_format)?;
+        snapshot.unreadable_objects =
+            Arc::new(snapshot.validate_object_inventory(authority.object_format)?);
         validate_owned_directory_binding(
             &authority.git_directory,
             OsStr::new("objects"),
@@ -678,40 +713,12 @@ impl PinnedObjectDatabase {
         validate_retained_object_child_bindings(&objects, &self.bindings)
     }
 
-    fn validate_object_sizes(&self, object_format: ObjectFormat) -> Result<(), LocalGitFailure> {
-        let object_database =
-            Odb::new_ext(object_format).map_err(|_| LocalGitFailure::Repository)?;
-        self.add_to(&object_database)?;
-        let object_ids = self.snapshot_object_ids(object_format)?;
-        let mut decoded_total = 0_usize;
-        for object_id in object_ids {
-            let (decoded_bytes, object_type) = object_database
-                .read_header(object_id)
-                .map_err(|_| LocalGitFailure::Repository)?;
-            decoded_total = decoded_total
-                .checked_add(decoded_bytes)
-                .filter(|total| *total <= MAX_OBJECT_DATABASE_BYTES)
-                .ok_or(LocalGitFailure::Repository)?;
-            if decoded_bytes > MAX_OBJECT_BYTES {
-                return Err(LocalGitFailure::Repository);
-            }
-            let object = object_database
-                .read(object_id)
-                .map_err(|_| LocalGitFailure::Repository)?;
-            let verified_id = git2::Oid::hash_object_ext(object_type, object.data(), object_format)
-                .map_err(|_| LocalGitFailure::Repository)?;
-            if object.data().len() != decoded_bytes || verified_id != object_id {
-                return Err(LocalGitFailure::Repository);
-            }
-        }
-        Ok(())
-    }
-
-    fn snapshot_object_ids(
+    fn validate_object_inventory(
         &self,
         object_format: ObjectFormat,
-    ) -> Result<Vec<git2::Oid>, LocalGitFailure> {
+    ) -> Result<HashSet<git2::Oid>, LocalGitFailure> {
         let mut object_ids = HashSet::new();
+        let mut unreadable_objects = HashSet::new();
         for binding in &self.bindings {
             if binding.name == OsStr::new("pack") {
                 collect_packed_object_ids(
@@ -719,6 +726,7 @@ impl PinnedObjectDatabase {
                     &binding.leaves,
                     object_format,
                     &mut object_ids,
+                    &mut unreadable_objects,
                 )?;
             } else {
                 for leaf in &binding.leaves {
@@ -730,7 +738,7 @@ impl PinnedObjectDatabase {
                 }
             }
         }
-        Ok(object_ids.into_iter().collect())
+        Ok(unreadable_objects)
     }
 }
 
@@ -745,6 +753,7 @@ fn collect_packed_object_ids(
     leaves: &[ObjectLeafBinding],
     object_format: ObjectFormat,
     object_ids: &mut HashSet<git2::Oid>,
+    unreadable_objects: &mut HashSet<git2::Oid>,
 ) -> Result<(), LocalGitFailure> {
     let mut pairs = BTreeMap::<Vec<u8>, PackPair<'_>>::new();
     for leaf in leaves {
@@ -792,7 +801,9 @@ fn collect_packed_object_ids(
         if indexed.len() != packed_object_count {
             return Err(LocalGitFailure::Repository);
         }
-        for object_id in indexed {
+        let content_end = pack_bytes.len() - object_id_bytes(object_format);
+        collect_unreadable_objects(&pack_bytes[..content_end], &indexed, unreadable_objects);
+        for (object_id, _) in indexed {
             insert_bounded_object_id(object_ids, object_id)?;
         }
     }
@@ -853,7 +864,7 @@ pub(super) fn parse_pack_index(
     bytes: &[u8],
     expected_pack_checksum: git2::Oid,
     object_format: ObjectFormat,
-) -> Result<Vec<git2::Oid>, LocalGitFailure> {
+) -> Result<Vec<(git2::Oid, usize)>, LocalGitFailure> {
     const HEADER_BYTES: usize = 8;
     const FANOUT_BYTES: usize = 256 * 4;
     let object_id_bytes = object_id_bytes(object_format);
@@ -926,12 +937,30 @@ pub(super) fn parse_pack_index(
     let mut object_ids = Vec::with_capacity(count);
     let mut previous = None;
     let mut observed_fanout = [0_u32; 256];
-    for raw in object_table.chunks_exact(object_id_bytes) {
+    for (position, raw) in object_table.chunks_exact(object_id_bytes).enumerate() {
         if previous.is_some_and(|previous: &[u8]| previous >= raw) {
             return Err(LocalGitFailure::Repository);
         }
         observed_fanout[raw[0] as usize] = observed_fanout[raw[0] as usize].saturating_add(1);
-        object_ids.push(git2::Oid::from_bytes(raw).map_err(|_| LocalGitFailure::Repository)?);
+        let offset = read_be_u32(offsets, position * 4)?;
+        let offset = if offset & 0x8000_0000 == 0 {
+            u64::from(offset)
+        } else {
+            let position = (offset & 0x7fff_ffff) as usize;
+            if position >= large_offsets {
+                return Err(LocalGitFailure::Repository);
+            }
+            let start = offset_end + position * 8;
+            u64::from_be_bytes(
+                bytes[start..start + 8]
+                    .try_into()
+                    .map_err(|_| LocalGitFailure::Repository)?,
+            )
+        };
+        object_ids.push((
+            git2::Oid::from_bytes(raw).map_err(|_| LocalGitFailure::Repository)?,
+            usize::try_from(offset).map_err(|_| LocalGitFailure::Repository)?,
+        ));
         previous = Some(raw);
     }
     let mut cumulative = 0_u32;
@@ -1233,21 +1262,12 @@ fn validate_loose_object(
         .metadata()
         .map_err(|_| LocalGitFailure::Repository)?
         .len();
-    let decoded_limit = MAX_LOOSE_OBJECT_HEADER_BYTES
-        .saturating_add(MAX_OBJECT_BYTES)
-        .saturating_add(1);
-    let mut decoded = Vec::with_capacity(decoded_limit);
+    let mut decoded = Vec::with_capacity(MAX_LOOSE_OBJECT_HEADER_BYTES + 1);
     let mut decoder = ZlibDecoder::new(&mut *file);
     Read::by_ref(&mut decoder)
-        .take((decoded_limit + 1) as u64)
+        .take((MAX_LOOSE_OBJECT_HEADER_BYTES + 1) as u64)
         .read_to_end(&mut decoded)
         .map_err(|_| LocalGitFailure::Repository)?;
-    let consumed = decoder.total_in();
-    drop(decoder);
-    file.rewind().map_err(|_| LocalGitFailure::Repository)?;
-    if decoded.len() > decoded_limit || consumed != compressed_length {
-        return Err(LocalGitFailure::Repository);
-    }
     let header_end = decoded
         .iter()
         .position(|byte| *byte == 0)
@@ -1263,12 +1283,8 @@ fn validate_loose_object(
     }
     let declared_bytes = declared_text
         .parse::<usize>()
-        .ok()
-        .filter(|bytes| *bytes <= MAX_OBJECT_BYTES)
-        .ok_or(LocalGitFailure::Repository)?;
-    if declared_bytes.to_string() != declared_text
-        || decoded.len() != header_end.saturating_add(1).saturating_add(declared_bytes)
-    {
+        .map_err(|_| LocalGitFailure::Repository)?;
+    if declared_bytes.to_string() != declared_text {
         return Err(LocalGitFailure::Repository);
     }
     let object_type = match kind {
@@ -1278,6 +1294,25 @@ fn validate_loose_object(
         "tag" => git2::ObjectType::Tag,
         _ => return Err(LocalGitFailure::Repository),
     };
+    // Content above the operation read bound can exist in the snapshot. The
+    // operation's object-header check rejects it only if that object is used.
+    if declared_bytes > MAX_OBJECT_BYTES {
+        return Ok(());
+    }
+    let expected_length = header_end + 1 + declared_bytes;
+    let remaining = expected_length
+        .saturating_add(1)
+        .saturating_sub(decoded.len());
+    Read::by_ref(&mut decoder)
+        .take(remaining as u64)
+        .read_to_end(&mut decoded)
+        .map_err(|_| LocalGitFailure::Repository)?;
+    let consumed = decoder.total_in();
+    drop(decoder);
+    file.rewind().map_err(|_| LocalGitFailure::Repository)?;
+    if decoded.len() != expected_length || consumed != compressed_length {
+        return Err(LocalGitFailure::Repository);
+    }
     let object_id =
         git2::Oid::hash_object_ext(object_type, &decoded[header_end + 1..], object_format)
             .map_err(|_| LocalGitFailure::Repository)?;
@@ -1308,6 +1343,7 @@ pub(super) fn open_pinned_repository(
     Ok(RepositoryShell {
         repository,
         _directory: directory,
+        unreadable_objects: RefCell::new(None),
     })
 }
 

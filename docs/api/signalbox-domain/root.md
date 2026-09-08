@@ -242,6 +242,18 @@ impl RunnerProvisioningAuthorizationId {
 }
 ```
 
+## ProgramRegistrationId
+
+```rust
+pub struct ProgramRegistrationId(/* private */);
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::Ord, cmp::PartialEq, cmp::PartialOrd
+impl ProgramRegistrationId {
+    pub const fn from_uuid(value: uuid::Uuid) -> Self;
+    pub const fn as_uuid(&self) -> &uuid::Uuid;
+    pub const fn into_uuid(self) -> uuid::Uuid;
+}
+```
+
 ## ProgramRunId
 
 ```rust

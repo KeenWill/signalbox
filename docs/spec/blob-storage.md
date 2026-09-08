@@ -192,8 +192,11 @@ aggregate deadline across its whole ordered traversal of digests and replica
 candidates; moving to another candidate never restarts it. Direct blob reads and
 checked imported-aggregate loads share a process-wide bound of 16 active
 traversals, and a request that cannot acquire one returns unavailable at once.
-How a model-originated read or a preparation pass hands off its scheduler slot
-around store I/O is owned by
+Attachment preparation admits at most eight process-wide traversals without
+waiting; explicit and automatic compaction verify the distinct rendered
+attachments and their aggregate byte budget before authorization. How a
+model-originated read or a preparation pass hands off its scheduler slot around
+store I/O is owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 A model-call attachment check binds its cancellation to the call's authoritative

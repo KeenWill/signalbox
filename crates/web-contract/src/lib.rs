@@ -908,6 +908,9 @@ pub struct WebSessionWorkFacts {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub repository_watch: Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     pub sizes: WebSessionTimelineSizeFacts,
     pub first_address: WebTimelineAddress,
@@ -1439,6 +1442,7 @@ pub enum WebTimelineCreationCause {
     Interactive {},
     RepositoryWatch { dispatch_id: WebSessionId },
     Commissioned { dispatch_id: WebSessionId },
+    Workflow { program_run_id: WebSessionId },
     Delegated { spawning_request_id: WebSessionId },
 }
 
@@ -2759,6 +2763,13 @@ struct ContractSchema {
 }
 
 fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
+    let mut descriptor_schema =
+        canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
+    make_pointer_nullable(
+        &mut descriptor_schema,
+        "/properties/repository_watch/properties/pull_request",
+    )?;
+    make_property_nullable(&mut descriptor_schema, "repository_watch")?;
     let mut timeline_window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
     make_property_nullable(&mut timeline_window_schema, "continuation_before")?;
@@ -2868,9 +2879,7 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         ContractSchema {
             name: "WebSessionTimelineDescriptor",
             decoder: "decodeWebSessionTimelineDescriptor",
-            schema: canonical_schema(
-                schemars::schema_for!(WebSessionTimelineDescriptor).to_value(),
-            ),
+            schema: descriptor_schema,
         },
         ContractSchema {
             name: "WebSessionTimelineWindow",
@@ -5221,6 +5230,66 @@ fn typescript_object(
     }
     output.push('}');
     Ok(output)
+}
+
+/// Retained repository-watch creation origin, resolved from its dispatch ledger.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepositoryWatchProvenance {
+    /// Exact retained dispatch.
+    pub dispatch_id: WebLiveResourceId,
+    /// Position in the dispatch's action batch.
+    pub action_ordinal: WebPositiveU64,
+    /// Watched repository.
+    pub repository: String,
+    /// Retained rule identity.
+    pub rule_id: String,
+    /// Retained rule revision.
+    pub rule_revision: WebPositiveU64,
+    /// Triggering immutable event.
+    pub event_id: WebLiveResourceId,
+    /// Triggering event category.
+    pub event_kind: WebRepositoryWatchEventKind,
+    /// Triggering pull request, absent for branch events.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub pull_request: Option<WebPositiveU64>,
+}
+
+/// Closed repository-watch event categories.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepositoryWatchEventKind {
+    /// The `pull_request_opened` event.
+    PullRequestOpened,
+    /// The `pull_request_closed` event.
+    PullRequestClosed,
+    /// The `pull_request_merged` event.
+    PullRequestMerged,
+    /// The `head_changed` event.
+    HeadChanged,
+    /// The `mergeable_state_changed` event.
+    MergeableStateChanged,
+    /// The `checks_completed` event.
+    ChecksCompleted,
+    /// The `check_run_completed` event.
+    CheckRunCompleted,
+    /// The `branch_workflow_run_completed` event.
+    BranchWorkflowRunCompleted,
+    /// The `review_submitted` event.
+    ReviewSubmitted,
+    /// The `thread_opened` event.
+    ThreadOpened,
+    /// The `thread_resolved` event.
+    ThreadResolved,
+    /// The `labeled` event.
+    Labeled,
+    /// The `unlabeled` event.
+    Unlabeled,
+    /// The `base_advanced` event.
+    BaseAdvanced,
+    /// The `reaction_changed` event.
+    ReactionChanged,
 }
 
 #[cfg(test)]

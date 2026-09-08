@@ -7,8 +7,7 @@ use std::{
 };
 
 use git2::{
-    CheckoutNotificationType, Index, IndexEntry, IndexTime, Mempack, Odb, Repository,
-    build::CheckoutBuilder,
+    CheckoutNotificationType, Index, IndexEntry, IndexTime, Mempack, Odb, build::CheckoutBuilder,
 };
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, openat, renameat_with, statat};
 use rustix::io::dup;
@@ -46,7 +45,8 @@ use crate::limits::{
 use crate::log::log;
 use crate::objects::{PackRoot, persist_objects};
 use crate::pinning::{
-    PinnedObjectDatabase, PinnedRepository, repository_filemode, repository_ignorecase,
+    PinnedObjectDatabase, PinnedRepository, RepositoryShell, repository_filemode,
+    repository_ignorecase,
 };
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain_from;
@@ -157,7 +157,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .add_new_mempack_backend(1000)
             .map_err(|_| LocalGitFailure::Operation)?;
         repository
-            .set_odb(&object_database)
+            .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
         let revalidate_captured_objects = matches!(
             &operation,
@@ -272,7 +272,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     #[cfg(test)]
     pub(super) fn stage(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
         arguments: GitStageArguments,
     ) -> Result<StageResult, LocalGitFailure> {
         self.stage_with_publish_hooks(repository, arguments, || {}, || {})
@@ -281,7 +281,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     #[cfg(test)]
     pub(super) fn stage_with_publish_hooks<BeforePublish, AfterPublish>(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
         arguments: GitStageArguments,
         before_publish: BeforePublish,
         after_publish: AfterPublish,
@@ -294,7 +294,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&persistent_object_database)?;
-        let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
+        let object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&object_database)?;
+        repository
+            .set_odb(&object_database, &pinned_objects)
+            .map_err(|_| LocalGitFailure::Operation)?;
         let mempack = object_database
             .add_new_mempack_backend(1000)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -314,7 +319,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
 
     fn stage_with_pinned_objects<BeforePublish, AfterPublish>(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
         object_databases: (&Odb<'_>, &Odb<'_>, &Mempack<'_>, &PinnedObjectDatabase),
         arguments: GitStageArguments,
         before_publish: BeforePublish,
@@ -492,7 +497,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
         repository
-            .set_odb(&object_database)
+            .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
         validate_index_objects(&repository, index)?;
         pinned_objects.validate_live(&self.repository_authority)
@@ -500,7 +505,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
 
     pub(super) fn bind_locked_index(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
     ) -> Result<IndexLock, LocalGitFailure> {
         let (index_lock, mut index) =
             IndexLock::acquire_for_repository(&self.repository_authority)?;
@@ -512,7 +517,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
 
     fn bind_index_snapshot(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
     ) -> Result<IndexSnapshot, LocalGitFailure> {
         let (snapshot, mut index) =
             IndexSnapshot::acquire_for_repository(&self.repository_authority)?;
@@ -524,7 +529,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
 
     fn discover_untracked_paths(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
     ) -> Result<Vec<PathBuf>, LocalGitFailure> {
         let index = repository.index().map_err(|_| LocalGitFailure::Operation)?;
         if index.len() > MAX_WORKTREE_INSPECTIONS {
@@ -826,7 +831,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
 
     fn quarantine_checkout_directories<BeforeSnapshot: FnMut()>(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
         checkout_paths: &BTreeSet<PathBuf>,
         current_index: &Index,
         target_tree: &git2::Tree<'_>,
@@ -1074,7 +1079,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     #[cfg(test)]
     pub(super) fn branch_switch(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
         arguments: GitBranchSwitchArguments,
     ) -> Result<BranchResult, LocalGitFailure> {
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
@@ -1096,7 +1101,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
 
     fn branch_switch_with_pinned_objects(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
         pinned_objects: &PinnedObjectDatabase,
         arguments: GitBranchSwitchArguments,
     ) -> Result<BranchResult, LocalGitFailure> {
@@ -1129,7 +1134,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
         repository
-            .set_odb(&object_database)
+            .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
         self.branch_switch_with_hooks(
             &repository,
@@ -1160,7 +1165,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
         repository
-            .set_odb(&object_database)
+            .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
         self.branch_switch_with_hooks(
             &repository,
@@ -1191,7 +1196,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
         repository
-            .set_odb(&object_database)
+            .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
         self.branch_switch_with_hooks(
             &repository,
@@ -1222,7 +1227,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
         repository
-            .set_odb(&object_database)
+            .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
         self.branch_switch_with_hooks(
             &repository,
@@ -1243,7 +1248,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     #[cfg(test)]
     pub(super) fn branch_switch_with_reference_lock_hook<Hook: FnOnce()>(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
         arguments: GitBranchSwitchArguments,
         before_reference_locks: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
@@ -1277,7 +1282,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .map_err(|_| LocalGitFailure::Operation)?;
         pinned_objects.add_to(&object_database)?;
         repository
-            .set_odb(&object_database)
+            .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
         self.branch_switch_with_hooks(
             &repository,
@@ -1305,7 +1310,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         BeforeHeadPublish: FnOnce(),
     >(
         &self,
-        repository: &Repository,
+        repository: &RepositoryShell,
         pinned_objects: &PinnedObjectDatabase,
         arguments: GitBranchSwitchArguments,
         hooks: BranchSwitchHooks<
