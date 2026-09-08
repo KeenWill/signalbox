@@ -581,6 +581,12 @@ export function ProductApp({
   const sessionState = useMemo(() => readProductSessionState({ ...search }), [search])
   const catalogSessionOpenedHere = useRef(false)
   const currentCatalogSession = useRef(sessionState.session)
+  useEffect(() => {
+    if (currentCatalogSession.current !== sessionState.session || surface !== 'sessions') {
+      currentCatalogSession.current = sessionState.session
+      catalogSessionOpenedHere.current = false
+    }
+  }, [sessionState.session, surface])
   const artifactSideWasOpen = useRef(false)
   const inspectorWasInSheet = useRef(false)
   const surfaceEscapeRef = useRef<(() => boolean) | null>(null)
@@ -611,7 +617,7 @@ export function ProductApp({
   )
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const updateSessionSearch = useCallback(
-    (next: ProductSessionState, mode: 'push' | 'close' = 'push') => {
+    (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
       if (mode === 'close') {
         currentCatalogSession.current = next.session
         if (catalogSessionOpenedHere.current) {
@@ -623,7 +629,8 @@ export function ProductApp({
         return
       }
       const previousSession = currentCatalogSession.current
-      if (!previousSession && next.session) catalogSessionOpenedHere.current = true
+      if (mode === 'push' && !previousSession && next.session)
+        catalogSessionOpenedHere.current = true
       const switchesSelectedSession =
         previousSession !== undefined &&
         next.session !== undefined &&
@@ -633,7 +640,7 @@ export function ProductApp({
         to: '/$surface',
         params: { surface },
         search: next,
-        replace: switchesSelectedSession,
+        replace: mode === 'replace' || switchesSelectedSession,
       })
     },
     [navigate, surface],
@@ -899,6 +906,10 @@ export function ProductApp({
       </div>
     ) : surface === 'sessions' && bootstrap.isSuccess && sessionState.workspace ? (
       <SessionWorkspaceSurface
+        key={sessionState.session ?? 'unselected'}
+        onSessionOpen={(session) =>
+          updateSessionSearch({ ...sessionState, session, workspace: true }, 'replace')
+        }
         initialSessionId={sessionState.session}
         onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}

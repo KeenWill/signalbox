@@ -401,6 +401,7 @@ test('opens the selected catalog row in the landed timeline workspace', async ({
 
   await expect.poll(() => new URL(page.url()).searchParams.get('workspace')).toBe('true')
   await expect(page.getByRole('textbox', { name: 'Exact session ID' })).toHaveValue(firstSessionId)
+  await expect(page.getByRole('textbox', { name: 'Exact session ID' })).toBeFocused()
   await expect(page.getByText(`Session workspace loaded for ${firstSessionId}.`)).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -681,4 +682,76 @@ test('filters out an inspected row and keeps lifecycle chip styling consistent',
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await expect(page).not.toHaveURL(/session=/)
   await expect(page.getByRole('heading', { name: '48 sessions', exact: true })).toBeFocused()
+})
+
+test('resynchronizes inspector history after Back before opening another session', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: 'Sessions' }).click()
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+  await page.goBack()
+  await expect(page).not.toHaveURL(/session=/)
+  await page.getByRole('button', { name: firstPage.summaries[1].title_summary }).click()
+  await page.getByRole('button', { name: 'Close session inspector' }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
+  await page.goBack()
+  await expect(page).toHaveURL(/\/attention$/)
+})
+
+test('replaces catalog continuation history instead of accumulating visited pages', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: 'Sessions' }).click()
+  await page.getByRole('button', { name: 'Next page' }).click()
+  await expect(page).toHaveURL(/afterSession=/)
+  await page.goBack()
+  await expect(page).toHaveURL(/\/attention$/)
+})
+
+test('keeps opened workspace identities in the URL and restores them on reload', async ({
+  page,
+}) => {
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: 'Open workspace by ID' }).click()
+  const input = page.getByRole('textbox', { name: 'Exact session ID' })
+  await expect(input).toBeFocused()
+  await input.fill(firstSessionId)
+  await input.press('Enter')
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
+  await expect(page.getByText(`Session workspace loaded for ${firstSessionId}.`)).toBeVisible()
+  await input.fill(secondSessionId)
+  await input.press('Enter')
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(secondSessionId)
+  await expect(page.getByText(`Session workspace loaded for ${secondSessionId}.`)).toBeVisible()
+  await page.reload()
+  await expect(input).toHaveValue(secondSessionId)
+  await expect(page.getByText(`Session workspace loaded for ${secondSessionId}.`)).toBeVisible()
+})
+
+test('classifies a catalog connection failure as transport unavailability', async ({ page }) => {
+  await useCatalogFixture(page)
+  await page.route('**/api/sessions?**', (route) => route.abort())
+  await page.goto('/sessions')
+  await expect(page.getByRole('heading', { name: 'Sessions could not be read' })).toBeVisible()
+  await expect(page.getByRole('alert')).not.toContainText('generated web contract')
+  await expect(page.getByRole('alert')).toContainText('The Signalbox daemon could not be reached.')
+})
+
+test('restores the page heading when a refresh removes the inspected row', async ({ page }) => {
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+  await page.route('**/api/sessions?**', (route) =>
+    route.fulfill({
+      json: { ...firstPage, continuation: null, summaries: [firstPage.summaries[1]], total: '1' },
+    }),
+  )
+  await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')))
+  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeHidden()
+  await expect(page.getByRole('heading', { name: '1 sessions', exact: true })).toBeFocused()
 })
