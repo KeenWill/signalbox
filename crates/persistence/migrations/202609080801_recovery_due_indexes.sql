@@ -1,5 +1,3 @@
-DROP INDEX automatic_reconciliation_due;
-
 CREATE INDEX automatic_reconciliation_scheduled_due
     ON automatic_reconciliation (next_attempt_at, turn_id)
     WHERE state_kind = 'scheduled';
