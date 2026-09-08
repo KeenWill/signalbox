@@ -837,6 +837,40 @@ test('captures the pinned narrow responsive shell', async ({ page }, testInfo) =
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('clears selection when its search page is evicted and preserves shared-address projections', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.goto(searchUsageFixture.searchPath)
+  const results = page.getByRole('listbox', { name: 'Lexical search results' })
+  await expect(results).toHaveAttribute('aria-activedescendant', 'search-result-0')
+  const firstAddress = await results.getByRole('option').first().textContent()
+  for (let read = 2; read <= 7; read += 1) {
+    await page.getByRole('button', { name: 'Load next bounded page' }).click()
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.__SIGNALBOX_SEARCH_USAGE_DIAGNOSTICS__?.()?.searchReads),
+      )
+      .toBe(read)
+    await expect(results).toHaveAttribute('data-total-loaded', String(Math.min(read, 6) * 72))
+  }
+  await expect(results).not.toHaveAttribute('aria-activedescendant')
+  expect(await results.getByRole('option').first().textContent()).not.toBe(firstAddress)
+  await results.press('Enter')
+  expect(
+    await page.evaluate(
+      () => window.__SIGNALBOX_SEARCH_USAGE_DIAGNOSTICS__?.()?.transcriptRevealReads,
+    ),
+  ).toBe(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not advertise search focus while the usage view owns the surface', async ({ page }) => {
+  await page.goto(searchUsageFixture.usagePath)
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
+})
+
 test('retains an ambiguous import continuation and accepts only its exact replay', async ({
   page,
 }) => {

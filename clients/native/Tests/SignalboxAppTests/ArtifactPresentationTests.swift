@@ -14,11 +14,11 @@ final class ArtifactPresentationTests: XCTestCase {
         XCTAssertTrue(artifact.isPromptContextArtifact)
         XCTAssertEqual(artifact.presentationTitle, "Prompt Context")
         XCTAssertEqual(artifact.presentationKindLabel, "Prompt context")
-        XCTAssertEqual(artifact.presentationSubtitle, "Prompt context  text/markdown")
+        XCTAssertEqual(artifact.presentationSubtitle, "Prompt context, text/markdown")
         XCTAssertEqual(artifact.presentationSystemImageName, "brain.head.profile")
         XCTAssertEqual(
             artifact.presentationAccessibilityLabel,
-            "Prompt Context, Prompt context  text/markdown"
+            "Prompt Context, Prompt context, text/markdown"
         )
         XCTAssertEqual(artifact.previewNavigationTitle, "Prompt Context")
         XCTAssertTrue(artifact.prefersMonospacedPreview)
@@ -36,7 +36,7 @@ final class ArtifactPresentationTests: XCTestCase {
         XCTAssertFalse(artifact.isPromptContextArtifact)
         XCTAssertEqual(artifact.presentationTitle, "runner-status.md")
         XCTAssertEqual(artifact.presentationKindLabel, "Report")
-        XCTAssertEqual(artifact.presentationSubtitle, "Report  text/markdown")
+        XCTAssertEqual(artifact.presentationSubtitle, "Report, text/markdown")
         XCTAssertEqual(artifact.presentationSystemImageName, "doc.text")
         XCTAssertEqual(artifact.previewNavigationTitle, "Artifact")
         XCTAssertFalse(artifact.prefersMonospacedPreview)
@@ -95,7 +95,7 @@ final class ArtifactPresentationTests: XCTestCase {
         )
 
         XCTAssertEqual(artifact.presentationTitle, "status_report")
-        XCTAssertEqual(artifact.presentationSubtitle, "Status Report  unknown type")
+        XCTAssertEqual(artifact.presentationSubtitle, "Status Report, unknown type")
     }
 
     private func makeArtifact(
