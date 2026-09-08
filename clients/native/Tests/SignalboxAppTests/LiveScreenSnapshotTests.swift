@@ -58,10 +58,8 @@ extension Set where Element == SnapshotCanvas {
 /// One test prunes a canvas, for a reason stated on it and because the
 /// rendering would be wrong rather than redundant: the Templates gate skips
 /// both phone canvases, having no compact destination to enter it through.
-/// Nothing else is pruned. The presented creation sheet was the other, until
-/// the arithmetic on its note showed it was recording the application's own
-/// clipping rather than the canvas's; a near-duplicate of one screen across two
-/// canvases is a reference, not a saving, and so is an unflattering one.
+/// Nothing else is pruned. The presented creation sheet is covered on every
+/// canvas, including portrait phones where its content must fit the width.
 ///
 /// Every one of these is a change detector, which is what a golden is. They
 /// catch an unintended visual change to a screen no assertion describes; they
