@@ -17,6 +17,7 @@ async function openDetails(
   override = false,
   creation?: WebTimelineCreationCause,
   outcome?: 'reconciliation' | 'retired',
+  partialResult = false,
 ) {
   const items = detailItems.map((item, index) =>
     creation && index === 0
@@ -112,13 +113,48 @@ async function openDetails(
     if (url.pathname.endsWith('/timeline-detail')) {
       reads.push(url)
       if (url.searchParams.get('first') !== url.searchParams.get('through')) {
-        if (url.searchParams.get('cursor_field') === 'tool_result')
+        if (url.searchParams.get('cursor_field') === 'tool_result') {
+          let item = toolResultItem()
+          const prefix = '{"status":"ok"}'
+          const fullText = `${prefix}${' '.repeat(40)}`
+          const offset = Number(url.searchParams.get('cursor_offset'))
+          const next = {
+            ...resultCursor.body,
+            offset_bytes: String(prefix.length),
+          }
+          if (partialResult && item.body.type === 'tool_batch') {
+            item = {
+              ...item,
+              projected_body_bytes: 128 + (offset === 0 ? prefix.length : fullText.length - offset),
+              body: {
+                ...item.body,
+                tools: item.body.tools.map((tool) => ({
+                  ...tool,
+                  evidence:
+                    tool.evidence.type === 'physical_attempt'
+                      ? {
+                          ...tool.evidence,
+                          result: {
+                            text: offset === 0 ? prefix : fullText.slice(offset),
+                            offset_bytes: String(offset),
+                            total_bytes: String(fullText.length),
+                            continuation: offset === 0 ? next : null,
+                          },
+                        }
+                      : tool.evidence,
+                })),
+              },
+            }
+          }
           return route.fulfill({
-            json: detailPage([toolResultItem()], {
-              type: 'more_at',
-              address: { event_sequence: '3' },
-            }),
+            json: detailPage(
+              [item],
+              partialResult && offset === 0
+                ? { type: 'more_body', body: next }
+                : { type: 'more_at', address: { event_sequence: '3' } },
+            ),
           })
+        }
         if (url.searchParams.get('cursor_address') === '3')
           return route.fulfill({ json: detailPage(items.slice(2)) })
         return route.fulfill({ json: detailPage(items.slice(0, 2), resultCursor) })
@@ -336,4 +372,18 @@ test('shows retired goal turns in conversation order with events hidden', async 
     )
     .toEqual(['1', '2', '2', '4', '5'])
   await page.screenshot({ path: test.info().outputPath('retired-outcome.png') })
+})
+
+test('labels partial tool payloads and the final continued chunk', async ({ page }) => {
+  await openDetails(page, false, false, undefined, undefined, true)
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
+  const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+  const output = conversation.getByRole('region', { name: 'Output', exact: true })
+  await expect(output).toContainText('Text excerpt · byte 0 of 55')
+  await expect(output).toContainText('"status": "ok"')
+  await expect(
+    conversation.getByRole('region', { name: 'Arguments', exact: true }),
+  ).not.toContainText('Text excerpt')
+  await page.getByRole('button', { name: 'Next text page', exact: true }).click()
+  await expect(output).toContainText('Text excerpt · byte 15 of 55')
 })

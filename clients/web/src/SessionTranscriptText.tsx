@@ -3,6 +3,7 @@ import { type RefObject, useRef, useState } from 'react'
 import type {
   WebSessionTimelineDetailBody,
   WebTimelineDetailContinuation,
+  WebTimelineTextExcerpt,
 } from './generated/web-contract.mjs'
 import {
   type HeldSessionTranscript,
@@ -11,10 +12,10 @@ import {
 } from './product'
 import { conversationEntryKey } from './session-timeline/conversation'
 
-function ToolText({ label, text }: { label: string; text: string }) {
-  let content = text
+function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextExcerpt }) {
+  let content = excerpt.text
   try {
-    content = JSON.stringify(JSON.parse(text), null, 2)
+    content = JSON.stringify(JSON.parse(excerpt.text), null, 2)
   } catch {
     // Plain text and partial JSON remain readable as supplied.
   }
@@ -22,6 +23,11 @@ function ToolText({ label, text }: { label: string; text: string }) {
     <section className="session-tool-text" aria-label={label}>
       <strong>{label}</strong>
       <pre>{content}</pre>
+      {(excerpt.offset_bytes !== '0' || excerpt.continuation != null) && (
+        <small>
+          Text excerpt · byte {excerpt.offset_bytes} of {excerpt.total_bytes}
+        </small>
+      )}
     </section>
   )
 }
@@ -35,9 +41,9 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
           return (
             <div key={tool.request_id} className="session-tool-entry">
               <strong>{tool.tool_name}</strong>
-              {tool.arguments && <ToolText label="Arguments" text={tool.arguments.text} />}
-              {physical?.result && <ToolText label="Output" text={physical.result.text} />}
-              {physical?.failure && <ToolText label="Failure" text={physical.failure.text} />}
+              {tool.arguments && <ToolText label="Arguments" excerpt={tool.arguments} />}
+              {physical?.result && <ToolText label="Output" excerpt={physical.result} />}
+              {physical?.failure && <ToolText label="Failure" excerpt={physical.failure} />}
             </div>
           )
         })}
