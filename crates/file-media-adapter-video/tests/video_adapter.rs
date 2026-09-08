@@ -674,6 +674,15 @@ async fn unrecognized_visual_entry_does_not_conflict_with_supported_video()
 }
 
 #[tokio::test]
+async fn clear_audio_entry_conflicts_with_video_in_the_same_track() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_video_track_with_clear_audio_entry(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn duplicate_mp4_sample_descriptions_are_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_with_duplicate_sample_descriptions(),

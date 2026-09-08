@@ -769,6 +769,28 @@ impl VideoFixture {
         Self::new(FixtureKind::Mp4, bytes)
     }
 
+    pub fn mp4_video_track_with_clear_audio_entry() -> Self {
+        let mut audio = vec![0_u8; 28];
+        audio[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        audio[16..18].copy_from_slice(&2_u16.to_be_bytes());
+        audio[18..20].copy_from_slice(&16_u16.to_be_bytes());
+        audio[24..28].copy_from_slice(&(48_000_u32 << 16).to_be_bytes());
+        // AAC-LC, 48 kHz stereo, with decoder and SL configuration descriptors.
+        audio.extend_from_slice(&mp4_box(
+            *b"esds",
+            &[
+                0, 0, 0, 0, 0x03, 25, 0, 1, 0, 0x04, 17, 0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0x05, 2, 0x11, 0x90, 0x06, 1, 2,
+            ],
+        ));
+        let entries = [avc1_sample_entry(), mp4_box(*b"mp4a", &audio)].concat();
+        let mut bytes = mp4_bytes_with_sample_entry(MP4_TIMESCALE, MP4_DURATION_UNITS, entries);
+        if let Some(offset) = bytes.windows(4).position(|kind| kind == b"stsd") {
+            bytes[offset + 8..offset + 12].copy_from_slice(&2_u32.to_be_bytes());
+        }
+        Self::new(FixtureKind::Mp4, bytes)
+    }
+
     pub fn mp4_with_duplicate_sample_descriptions() -> Self {
         let mut sample_description = vec![0_u8; 8];
         sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());

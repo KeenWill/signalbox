@@ -1309,6 +1309,11 @@ fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<Mp4SampleDescripti
             non_video_sample_entry_seen = true;
             parse_encrypted_audio_sample_entry(entry_payload, state)?;
             encrypted_sample_entry_seen = true;
+        } else if matches!(
+            &box_type,
+            b"mp4a" | b"ac-3" | b"ac-4" | b"ec-3" | b"Opus" | b"fLaC" | b"alac"
+        ) {
+            non_video_sample_entry_seen = true;
         } else if visual_sample_entry_configuration(box_type).is_some() {
             parse_visual_sample_entry(entry_payload, box_type, state)?;
             video_sample_entry_seen = true;
