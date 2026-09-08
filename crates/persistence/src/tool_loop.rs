@@ -4143,6 +4143,18 @@ pub(crate) async fn load_foreground_delegation_outcome(
     .ok_or_else(|| ToolLoopCorruption::Missing("foreground child result").into())
 }
 
+#[derive(sqlx::FromRow)]
+struct ForegroundOutcomeRow {
+    outcome_kind: Option<String>,
+    content_text: Option<String>,
+    reason_kind: Option<String>,
+    provenance_kind: Option<String>,
+    provenance_session_id: Option<Uuid>,
+    provenance_turn_id: Option<Uuid>,
+    provenance_goal_generation: Option<Decimal>,
+    provenance_command_id: Option<Uuid>,
+}
+
 pub(crate) async fn load_optional_foreground_delegation_outcome(
     connection: &mut PgConnection,
     parent: SessionId,
@@ -4150,17 +4162,6 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
     spawning_request: ToolRequestId,
     child: SessionId,
 ) -> Result<Option<DelegationOutcome>, ToolLoopRepositoryError> {
-    #[derive(sqlx::FromRow)]
-    struct ForegroundOutcomeRow {
-        outcome_kind: String,
-        content_text: Option<String>,
-        reason_kind: String,
-        provenance_kind: String,
-        provenance_session_id: Uuid,
-        provenance_turn_id: Option<Uuid>,
-        provenance_goal_generation: Option<Decimal>,
-        provenance_command_id: Option<Uuid>,
-    }
     let row = sqlx::query_as::<_, ForegroundOutcomeRow>(
         "SELECT result.outcome_kind, result.content_text,
                 event.reason_kind, event.provenance_kind,
@@ -4193,7 +4194,25 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
     let Some(row) = row else {
         return Ok(None);
     };
-    let kind = crate::mapping::delegation_outcome_kind_from_str(&row.outcome_kind)
+    decode_foreground_outcome(row).map(Some)
+}
+
+fn decode_foreground_outcome(
+    row: ForegroundOutcomeRow,
+) -> Result<DelegationOutcome, ToolLoopRepositoryError> {
+    let outcome_kind = row
+        .outcome_kind
+        .ok_or(ToolLoopCorruption::Missing("outcome_kind"))?;
+    let reason_kind = row
+        .reason_kind
+        .ok_or(ToolLoopCorruption::Missing("reason_kind"))?;
+    let provenance_kind = row
+        .provenance_kind
+        .ok_or(ToolLoopCorruption::Missing("provenance_kind"))?;
+    let provenance_session_id = row
+        .provenance_session_id
+        .ok_or(ToolLoopCorruption::Missing("provenance_session_id"))?;
+    let kind = crate::mapping::delegation_outcome_kind_from_str(&outcome_kind)
         .filter(|kind| match kind {
             DelegationOutcomeKind::ResultReturned
             | DelegationOutcomeKind::ChildFailed
@@ -4205,7 +4224,7 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
         })
         .ok_or_else(|| ToolLoopCorruption::Unsupported {
             field: "delegation outcome",
-            value: row.outcome_kind.clone(),
+            value: outcome_kind.clone(),
         })?;
     let content = row
         .content_text
@@ -4213,15 +4232,15 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
         .transpose()
         .map_err(|_| ToolLoopCorruption::Inconsistent("delegation result content"))?;
     let reason =
-        crate::mapping::delegation_outcome_reason_from_str(&row.reason_kind).ok_or_else(|| {
+        crate::mapping::delegation_outcome_reason_from_str(&reason_kind).ok_or_else(|| {
             ToolLoopCorruption::Unsupported {
                 field: "delegation outcome reason",
-                value: row.reason_kind.clone(),
+                value: reason_kind.clone(),
             }
         })?;
-    let provenance_session = session_id_from_uuid(row.provenance_session_id);
+    let provenance_session = session_id_from_uuid(provenance_session_id);
     let provenance = match (
-        row.provenance_kind.as_str(),
+        provenance_kind.as_str(),
         row.provenance_turn_id,
         row.provenance_goal_generation,
         row.provenance_command_id,
@@ -4269,7 +4288,6 @@ pub(crate) async fn load_optional_foreground_delegation_outcome(
         }
     };
     DelegationOutcome::reconstitute(kind, content, reason, provenance)
-        .map(Some)
         .ok_or_else(|| ToolLoopCorruption::Inconsistent("delegation result outcome").into())
 }
 
@@ -4593,5 +4611,29 @@ mod blob_read_budget_tests {
             ),
             BlobReadAdmission::TurnReadCountExceeded
         );
+    }
+}
+
+#[cfg(test)]
+mod foreground_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn missing_foreground_reason_is_typed_corruption() {
+        let error = decode_foreground_outcome(ForegroundOutcomeRow {
+            outcome_kind: Some("result_returned".to_owned()),
+            content_text: Some("child result".to_owned()),
+            reason_kind: None,
+            provenance_kind: Some("child_turn".to_owned()),
+            provenance_session_id: Some(Uuid::from_u128(1)),
+            provenance_turn_id: Some(Uuid::from_u128(2)),
+            provenance_goal_generation: None,
+            provenance_command_id: None,
+        })
+        .expect_err("missing reason must fail closed as corruption");
+        assert!(matches!(
+            error,
+            ToolLoopRepositoryError::Corruption(ToolLoopCorruption::Missing("reason_kind"))
+        ));
     }
 }
