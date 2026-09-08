@@ -737,3 +737,22 @@ async fn stale_loaded_tail_cannot_append_or_mutate_the_journal() -> Result<(), B
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_capability_requires_a_retained_program_run() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let journal = ProgramJournalRepository::new(pool);
+    let host = ProgramHost::new(journal.clone());
+    let run = ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID));
+    assert!(host.session_capability(run).await?.is_none());
+    journal.create_stream(run).await?;
+    let capability = host
+        .session_capability(run)
+        .await?
+        .expect("run is retained");
+    assert!(
+        matches!(capability.actor(), signalbox_domain::Actor::Program { run: reference } if reference.run() == run)
+    );
+    Ok(())
+}

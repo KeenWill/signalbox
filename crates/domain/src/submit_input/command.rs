@@ -42,6 +42,29 @@ use std::hash::Hasher;
 /// Equality and hashing intentionally exclude [`DurableCommandId`]. They
 /// include the command discriminator by type and every other caller-supplied
 /// semantic field.
+///
+/// Core attribution is available only through the core-specific constructors.
+///
+/// ```compile_fail
+/// use signalbox_domain::{Actor, DeliveryRequest, DurableCommandId, SessionId, SubmitInput, UserContent};
+/// fn forge(id: DurableCommandId, session: SessionId, content: UserContent, delivery: DeliveryRequest) {
+///     let _ = SubmitInput::from_recorded_fields(id, session, Actor::Core, content, delivery);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use signalbox_domain::{DeliveryRequest, DurableCommandId, SessionId, SubmitInput, TurnId, UserContent};
+/// fn forge(id: DurableCommandId, session: SessionId, content: UserContent, delivery: DeliveryRequest, turn: TurnId) {
+///     let _ = SubmitInput::from_recorded_model(id, session, content, delivery, turn);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use signalbox_domain::{DeliveryRequest, DurableCommandId, SessionId, SubmitInput, ToolRequestId, UserContent};
+/// fn forge(id: DurableCommandId, session: SessionId, content: UserContent, delivery: DeliveryRequest, request: ToolRequestId) {
+///     let _ = SubmitInput::from_recorded_tool(id, session, content, delivery, request);
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct SubmitInput {
     pub(super) command_id: DurableCommandId,
@@ -83,6 +106,40 @@ impl SubmitInput {
             actor: Actor::Core,
             content,
             delivery: DeliveryRequest::StartWhenNoActiveTurn { configuration },
+        }
+    }
+
+    /// Constructs input attributed only to the verified host session capability.
+    pub const fn new_program(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        run: crate::ProgramActor,
+    ) -> Self {
+        Self::from_recorded_fields(
+            command_id,
+            session,
+            Actor::Program { run },
+            content,
+            delivery,
+        )
+    }
+
+    /// Reconstitutes canonical fields after storage validates their references and spelling.
+    const fn from_recorded_fields(
+        command_id: DurableCommandId,
+        session: SessionId,
+        actor: Actor,
+        content: UserContent,
+        delivery: DeliveryRequest,
+    ) -> Self {
+        Self {
+            command_id,
+            session,
+            actor,
+            content,
+            delivery,
         }
     }
 
