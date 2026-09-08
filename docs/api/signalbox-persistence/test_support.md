@@ -54,6 +54,28 @@ pub async fn inject_deadline_diagnostic_failure(
 ) -> result::Result<(), error::Error>;
 ```
 
+## seed_failed_goal_turn
+
+```rust
+#[cfg(feature = "test-support")]
+pub async fn seed_failed_goal_turn(
+    pool: &sqlx_postgres::PgPool,
+    session: signalbox_domain::SessionId,
+    turn: signalbox_domain::TurnId,
+) -> result::Result<(), error::Error>;
+```
+
+## restore_module_park
+
+```rust
+#[cfg(feature = "test-support")]
+pub async fn restore_module_park(
+    pool: &sqlx_postgres::PgPool,
+    session: signalbox_domain::SessionId,
+    module: signalbox_domain::DispatchingModule,
+) -> result::Result<bool, session_lifecycle::SessionLifecycleRepositoryError>;
+```
+
 ## goal_resumption_input
 
 ```rust

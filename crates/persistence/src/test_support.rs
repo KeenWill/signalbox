@@ -5,7 +5,7 @@
 //! vocabulary and leave the table and column names here, so a schema change is
 //! contained in — and exercised by — the crate that owns the schema.
 
-use signalbox_domain::{ModelCallId, SessionId};
+use signalbox_domain::{DispatchingModule, ModelCallId, SessionId, TurnId};
 use sqlx::{FromRow, PgPool, types::Uuid};
 
 #[derive(signalbox_derive::Accessors)]
@@ -175,6 +175,56 @@ pub async fn inject_deadline_diagnostic_failure(pool: &PgPool) -> Result<(), sql
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Seeds an attached goal's failed turn without executing a model provider.
+///
+/// Trigger changes and the synthetic terminal boundary are confined to one
+/// transaction in the isolated test database.
+pub async fn seed_failed_goal_turn(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal', start_lineage_kind = 'first_in_session',
+                immediate_predecessor_turn_id = NULL, starting_frontier_id = $3,
+                terminal_frontier_id = $4, terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'unclassified_failure'
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await
+}
+
+/// Releases a matching module park through the production lifecycle projection.
+pub async fn restore_module_park(
+    pool: &PgPool,
+    session: SessionId,
+    module: DispatchingModule,
+) -> Result<bool, crate::session_lifecycle::SessionLifecycleRepositoryError> {
+    let mut transaction = pool.begin().await?;
+    let restored = crate::session_lifecycle::restore_module_park_in_transaction(
+        &mut transaction,
+        session,
+        module,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(restored)
 }
 
 /// Reads the complete accepted input queued by one exact goal resumption event.

@@ -573,7 +573,7 @@ impl IndexLock {
                                 self.committed = true;
                                 return Ok(published_index);
                             }
-                            return Err(LocalGitFailure::Operation);
+                            return Err(LocalGitFailure::Ambiguous);
                         }
                     };
                 let publication_is_owned =
@@ -585,15 +585,17 @@ impl IndexLock {
                 let layout_is_current = self.validate_supported_layout().is_ok();
                 if !publication_is_owned || !displaced_is_current || !layout_is_current {
                     if publication_is_owned {
-                        let _ = rollback_index_exchange_if_current(
-                            &self.parent,
-                            &self.index_name,
-                            &self.lock_name,
-                            displaced_after_exchange,
-                            prepared_index,
-                        );
+                        return Err(LocalGitFailure::Operation.after_rollback(
+                            rollback_index_exchange_if_current(
+                                &self.parent,
+                                &self.index_name,
+                                &self.lock_name,
+                                displaced_after_exchange,
+                                prepared_index,
+                            ),
+                        ));
                     }
-                    return Err(LocalGitFailure::Operation);
+                    return Err(LocalGitFailure::Ambiguous);
                 }
                 before_cleanup();
                 let final_preconditions_hold = self.validate_supported_layout().is_ok()
@@ -606,15 +608,17 @@ impl IndexLock {
                         index_snapshot_identity_at(&self.parent, &self.index_name)
                             == Ok(Some(prepared_index));
                     if publication_is_owned {
-                        let _ = rollback_index_exchange_if_current(
-                            &self.parent,
-                            &self.index_name,
-                            &self.lock_name,
-                            displaced_after_exchange,
-                            prepared_index,
-                        );
+                        return Err(LocalGitFailure::Operation.after_rollback(
+                            rollback_index_exchange_if_current(
+                                &self.parent,
+                                &self.index_name,
+                                &self.lock_name,
+                                displaced_after_exchange,
+                                prepared_index,
+                            ),
+                        ));
                     }
-                    return Err(LocalGitFailure::Operation);
+                    return Err(LocalGitFailure::Ambiguous);
                 }
                 if remove_displaced_index_if_current(
                     &self.parent,
@@ -624,7 +628,7 @@ impl IndexLock {
                 )
                 .is_err()
                 {
-                    return Err(LocalGitFailure::Operation);
+                    return Err(LocalGitFailure::Ambiguous);
                 }
             }
             None => {
@@ -651,14 +655,16 @@ impl IndexLock {
                         == Ok(Some(prepared_index));
                 if !publication_was_owned || !layout_is_current || !publication_is_owned {
                     if publication_is_owned {
-                        let _ = remove_displaced_index_if_current(
-                            &self.parent,
-                            &self.index_name,
-                            prepared_index,
-                            || {},
-                        );
+                        return Err(LocalGitFailure::Operation.after_rollback(
+                            remove_displaced_index_if_current(
+                                &self.parent,
+                                &self.index_name,
+                                prepared_index,
+                                || {},
+                            ),
+                        ));
                     }
-                    return Err(LocalGitFailure::Operation);
+                    return Err(LocalGitFailure::Ambiguous);
                 }
             }
         }

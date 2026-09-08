@@ -36,6 +36,29 @@ whole-source path produces, with the same identity, raw records, entries, and
 frontiers for the same bytes. The terminal single-file path and the chunked
 socket path keep their bounded whole-source conversion.
 
+## Sidecar and subagent grouping
+
+Sidecar and subagent transcripts nest under their parent as delegated sessions:
+they represent work performed on behalf of an attested parent turn. The grouping
+uses source-attested lineage and preserves each transcript's raw records,
+normalized entries, and addressable frontiers. A grouping relationship does not
+fabricate native execution evidence or start a session, turn, or delegated task.
+
+A row whose lineage is explicitly null becomes its own imported conversation.
+Its import receipt records the null-lineage fallback. Omitted lineage remains
+not attested; it is not converted to an attested null, and paths, filenames, or
+adjacency supply no missing relationship.
+
+Historical archive imports are held until the first production version exists
+and this design is implemented. Importers also cover conversations produced
+outside Signalbox after that point. No historical archives are imported into
+seed data before that gate.
+
+Synthetic acceptance cases cover a parent with multiple delegated children and a
+null-lineage standalone conversation with its fallback receipt. Grouping must
+preserve the source snapshots and their frontier identities, retain sidecar
+content, and produce no native execution transitions.
+
 ## Compatibility constraints
 
 No present surface supplies a blob-backed source to a converter, and no imported
