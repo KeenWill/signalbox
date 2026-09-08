@@ -1001,6 +1001,17 @@ fn repository_watch_webhook_accepts_a_configured_socket_address() {
 }
 
 #[test]
+fn repository_watch_webhook_rejects_port_zero() {
+    let configured = configuration_with_repository_watch_webhook()
+        .replace(WATCH_WEBHOOK_BIND_ADDRESS, "127.0.0.1:0");
+
+    assert!(matches!(
+        HubModelConfiguration::parse(&configured),
+        Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+    ));
+}
+
+#[test]
 fn repository_watch_webhook_associates_hook_and_secret_with_repository() {
     let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_webhook())
         .expect("repository-watch webhook fixture is valid");
