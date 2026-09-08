@@ -975,6 +975,9 @@ async fn persist_headless_escalation(
     )
     .await
     .map_err(map_snapshot_append_error)?;
+    crate::model_execution::retire_terminal_batch_replacement(connection, session, turn)
+        .await
+        .map_err(map_model_error)?;
     let terminalized = sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal', terminal_frontier_id = $1,

@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use ring::rand::{SecureRandom, SystemRandom};
 use signalbox_application::{
-    EligibilityNudge, InProcessEligibilityNudge, InProcessToolDispatchGate,
+    EligibilityNudgeOutcome, InProcessEligibilityNudge, InProcessToolDispatchGate,
 };
 use signalbox_domain::RepositorySlug;
 use signalbox_module_repo_watch_v2::{
@@ -32,6 +32,7 @@ use crate::{
 
 /// Core capabilities remain in daemon-owned adapters; the module receives its own pool.
 pub struct RepositoryWatchServices {
+    pub checkout_runner: Option<signalbox_tools_exec::TokioProcessRunner>,
     pub core_pool: PgPool,
     pub models: Arc<HubModelConfiguration>,
     pub templates: Arc<SessionTemplateConfiguration>,
@@ -169,6 +170,7 @@ impl RepositoryWatchRuntime {
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
                 factory: RepositoryWatchCommandFactory(services.templates),
                 sink: RepositoryWatchCommandSink {
+                    checkout_runner: services.checkout_runner,
                     pool: services.core_pool,
                     models: services.models,
                     eligibility_nudge: services.eligibility_nudge,
@@ -246,10 +248,29 @@ impl RepositoryWatchRuntime {
     }
 
     pub(crate) async fn nudge_restored(&self, sessions: Vec<signalbox_domain::SessionId>) {
-        let state = self.state.lock().await;
-        for session in sessions {
-            let _ = state.eligibility_nudge.nudge(session);
-        }
+        let (nudge, store) = {
+            let state = self.state.lock().await;
+            (
+                state.eligibility_nudge.clone(),
+                signalbox_persistence::convergence_sweep::PostgresConvergenceSweepStore::new(
+                    state.core_pool.clone(),
+                ),
+            )
+        };
+        // Startup recovery hands off before the scheduler drains the buffer.
+        // The target references remain durable if this task stops with the process.
+        tokio::spawn(async move {
+            for session in sessions {
+                if nudge.nudge_waiting_for_capacity(session).await
+                    == EligibilityNudgeOutcome::WorkSourceClosed
+                {
+                    break;
+                }
+                if let Err(error) = store.acknowledge_removed_target_nudge(session).await {
+                    tracing::error!(cause = %error, "removed-target nudge acknowledgement failed; handoff remains pending");
+                }
+            }
+        });
     }
 
     pub(crate) async fn activate_startup(
@@ -446,7 +467,7 @@ impl RepositoryWatchRuntime {
         }
     }
 
-    /// Supervises configured workers and retains only idle control while disabled.
+    /// Supervises configured workers and checkout cleanup while disabled.
     pub async fn run(
         self,
         mut shutdown: watch::Receiver<bool>,
@@ -458,10 +479,7 @@ impl RepositoryWatchRuntime {
             }
             let (active, changed) = {
                 let state = self.state.lock().await;
-                (
-                    !state.paused && state.configuration.as_ref().is_some_and(|c| c.enabled()),
-                    state.changed.clone(),
-                )
+                (!state.paused, state.changed.clone())
             };
             if !active {
                 tokio::select! {
@@ -511,14 +529,8 @@ impl RuntimeState {
     }
 
     fn start_commands(&mut self, runtime: RepositoryWatchRuntime) {
-        if self
-            .configuration
-            .as_ref()
-            .is_some_and(|configuration| configuration.enabled())
-        {
-            let (shutdown, receiver) = watch::channel(false);
-            self.commands = Some((shutdown, tokio::spawn(runtime.run_commands(receiver))));
-        }
+        let (shutdown, receiver) = watch::channel(false);
+        self.commands = Some((shutdown, tokio::spawn(runtime.run_commands(receiver))));
     }
 
     fn health(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
@@ -597,6 +609,9 @@ impl RuntimeState {
         if self.paused {
             return Ok(());
         }
+        crate::repo_watch_dispatch::scavenge_checkouts(&self.store, &self.sink.pool)
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Dispatch)?;
         let Some(configuration) = self
             .configuration
             .as_ref()
@@ -651,6 +666,74 @@ impl RuntimeState {
 mod tests {
     use super::*;
 
+    struct EmptySweep;
+
+    impl signalbox_application::EligibilitySweep for EmptySweep {
+        type Error = std::convert::Infallible;
+
+        async fn find_sessions(
+            &mut self,
+        ) -> Result<signalbox_application::EligibilitySweepBatch, Self::Error> {
+            Ok(signalbox_application::EligibilitySweepBatch::new(
+                Vec::new(),
+                false,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn restored_sessions_survive_full_capacity_before_the_scheduler_starts() {
+        use signalbox_application::{EligibilityNudge, EligibilityWorkSource};
+        use signalbox_domain::SessionId;
+        use std::{num::NonZeroUsize, time::Duration};
+
+        const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
+        let filler = SessionId::from_uuid(uuid::Uuid::from_u128(0x58_300));
+        let restored = SessionId::from_uuid(uuid::Uuid::from_u128(0x58_301));
+        let next_restored = SessionId::from_uuid(uuid::Uuid::from_u128(0x58_302));
+        let (nudge, mut source) =
+            signalbox_application::InProcessEligibilityWorkSource::with_options(
+                EmptySweep,
+                None,
+                NonZeroUsize::new(1),
+            );
+        assert_eq!(nudge.nudge(filler), EligibilityNudgeOutcome::Enqueued);
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .expect("lazy pool");
+        pool.close().await;
+        let runtime = RepositoryWatchRuntime::unstarted(
+            pool.clone(),
+            RepositoryWatchServices {
+                core_pool: pool,
+                models: Arc::new(
+                    crate::configuration::checked_in_example_configuration().expect("models"),
+                ),
+                templates: Arc::new(SessionTemplateConfiguration::default()),
+                eligibility_nudge: nudge,
+                tool_dispatch_gate: InProcessToolDispatchGate::default(),
+            },
+        );
+        tokio::time::timeout(
+            DELIVERY_TIMEOUT,
+            runtime.nudge_restored(vec![restored, next_restored]),
+        )
+        .await
+        .expect("recovery returns before scheduler consumption starts");
+        assert_eq!(
+            tokio::time::timeout(DELIVERY_TIMEOUT, source.next()).await,
+            Ok(Ok(filler))
+        );
+        assert_eq!(
+            tokio::time::timeout(DELIVERY_TIMEOUT, source.next()).await,
+            Ok(Ok(restored))
+        );
+        assert_eq!(
+            tokio::time::timeout(DELIVERY_TIMEOUT, source.next()).await,
+            Ok(Ok(next_restored))
+        );
+    }
+
     #[tokio::test]
     async fn health_rejects_a_finished_convergence_sweep() {
         let pool = PgPoolOptions::new()
@@ -662,6 +745,7 @@ mod tests {
         let runtime = RepositoryWatchRuntime::unstarted(
             pool.clone(),
             RepositoryWatchServices {
+                checkout_runner: None,
                 core_pool: pool,
                 models: Arc::new(
                     crate::configuration::checked_in_example_configuration().expect("models"),

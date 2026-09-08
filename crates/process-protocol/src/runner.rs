@@ -21,6 +21,8 @@ pub enum RunnerRecoveryRejection {
     PlacementNotLost,
     /// An active turn needs its ordinary control flow.
     ExistingControlRequired,
+    /// The active batch terminalized before replacement installed.
+    TurnTerminalized,
     /// The pending enrollment request does not identify a pending candidate.
     PendingRunnerNotFound,
     /// The predecessor is not lost or the candidate is not connected.

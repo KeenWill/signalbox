@@ -2,8 +2,7 @@
 
 This design is not built; it extends
 [credential availability](../spec/credential-availability.md) with the wait
-endings a pool configured to park reaches, their release, and three smaller
-items the built pre-call exhaustion ending owes.
+endings a pool configured to park reaches and their release.
 
 ## Goal
 
@@ -11,8 +10,7 @@ A turn whose pool admits no member and is configured to park waits durably for a
 member to become admissible instead of failing, keeps its session slot, and
 resumes the chain that parked when a wake arrives. Capacity reservation bounds
 concurrent invocations per member and makes contention a wait distinct from
-exhaustion. The pre-call exhaustion ending gains a typed live event and
-per-member evidence rows.
+exhaustion.
 
 ## Design
 
@@ -154,20 +152,14 @@ failure attempt, and terminalizes the turn as wait-transition fail (no call) or
 [persistence protocol](../spec/persistence-protocol.md)'s.
 
 Wire: a parked turn projects an active transcript turn state that retains the
-turn and its slot, never a terminal one, and no rejection detail. Pre-call fail
-and wait-transition fail (no call) project a turn state naming pool exhaustion,
-the live event `turn_failed`, and a typed `turn_credential_pool_exhausted` live
-event. Neither ending owns a call, so the member evidence is read through the
-pool-policy revision the admission resolved, which the failure or wait record
-carries. The read's rejection detail for a revision it cannot resolve names the
+turn and its slot, never a terminal one, and no rejection detail.
+Wait-transition fail (no call) projects a turn state naming pool exhaustion, the
+live event `turn_failed`, and a typed `turn_credential_pool_exhausted` live
+event. The ending owns no call, so its evidence uses the frozen pool-policy
+revision. The read's rejection detail for a revision it cannot resolve names the
 session, turn and policy. Which member served an ordinary selection, and whether
 a completed successor chain is shown to a client, stay undecided in
 [open questions](../open-questions.md).
-
-Per-member evidence: the pre-call exhaustion record names the pool-policy
-revision the admission resolved and carries contiguous member rows in policy
-order, each naming the member's exclusion, widest scope first. Partial, foreign
-or stale evidence fails reconstitution closed.
 
 Park on the pre-call path: a fresh admission that finds the pool exhausted
 consults the exhaustion value of the pool-policy revision it resolved. `park`
@@ -187,9 +179,6 @@ spec page states.
   completed tool-bearing calls and runner-recovery waits already write; the wait
   row, not the disposition, identifies a credential-availability park, and no
   reader may infer one from the disposition alone.
-- The pre-call exhaustion header row gains the resolved pool-policy identity and
-  otherwise keeps its present shape; member evidence rows attach to it in a new
-  table rather than replacing it.
 - The pre-call producer's commit shape, a `TurnFailed` appended after the ended
   attempt's starting frontier in the terminalizing transaction, is reused
   unchanged by wait-transition fail (no call).
@@ -240,6 +229,3 @@ spec page states.
   against current registrations at startup.
 - A deadline-free exhausted wait is released only by a durable
   member-availability update or an operator clear.
-- The pre-call exhaustion ending emits the typed
-  `turn_credential_pool_exhausted` event and stores per-member exclusion rows,
-  and an integration test asserts the pre-call shape.
