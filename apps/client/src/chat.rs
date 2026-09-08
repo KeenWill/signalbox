@@ -24,8 +24,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    ClientDeploymentLimits, MAX_INPUT_CONTENT_FRAME_BYTES, ObservedSessionDefaults,
-    SubmitInputReceipt, child_lifecycle_terminalization, command_identity,
+    MAX_INPUT_CONTENT_FRAME_BYTES, ObservedSessionDefaults, SubmitInputReceipt,
+    child_lifecycle_terminalization, command_identity,
     connection::ProcessClient,
     error::ClientError,
     presentation::{ChatTurnStatus, Output},
@@ -560,20 +560,25 @@ pub(crate) async fn run<R>(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
     session_id: CanonicalUuid,
-    input: R,
-    initial_follow: (ClientDeploymentLimits, crate::connection::Connection),
+    make_input: impl FnOnce(Option<usize>) -> io::Result<R>,
 ) -> Result<(), ClientError>
 where
     R: AsyncBufRead + Unpin,
 {
-    let (deployment_limits, initial_connection) = initial_follow;
+    let mut retry = crate::connection::FollowRetry::default();
+    let (deployment_limits, initial_connection) = loop {
+        match crate::deployment_limits::follow_with_deployment_limits(client, session_id).await {
+            Ok(follow) => break follow,
+            Err(error) => tokio::time::sleep(retry.next_delay(error)?).await,
+        }
+    };
+    let input = make_input(deployment_limits.terminal_input_channel_capacity)?;
     let mut initial_connection = Some(initial_connection);
     let mut lines = BoundedLines::new(input);
     let mut displayed_entries = SnapshotIdentitySet::new()?;
     let mut interrupts = ChatInterrupts::listen()?;
     let mut turns = ChatTurns::default();
 
-    let mut retry = crate::connection::FollowRetry::default();
     loop {
         let result: Result<(), ClientError> = async {
         let mut connection = match await_request(

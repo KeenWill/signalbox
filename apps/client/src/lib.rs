@@ -240,10 +240,7 @@ pub async fn run_terminal(
         let mut stdout = std::io::stdout().lock();
         let mut stderr = std::io::stderr().lock();
         let mut output = Output::new(&mut stdout, &mut stderr, raw_output);
-        let initial_follow =
-            deployment_limits::follow_with_deployment_limits(&mut client, session_id).await?;
-        let input = chat::terminal_input(initial_follow.0.terminal_input_channel_capacity)?;
-        chat::run(&mut client, &mut output, session_id, input, initial_follow).await
+        chat::run(&mut client, &mut output, session_id, chat::terminal_input).await
     }
     .await;
     match result {

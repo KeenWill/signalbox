@@ -211,17 +211,11 @@ async fn chat_reconnects_after_snapshot_loss_with_unrelated_limit_changes()
     let mut stderr = Vec::new();
     let mut output = Output::new(&mut stdout, &mut stderr, false);
     let mut client = ProcessClient::new(socket);
-    let initial_follow =
-        crate::deployment_limits::follow_with_deployment_limits(&mut client, session).await?;
     timeout(
         Duration::from_secs(5),
-        chat::run(
-            &mut client,
-            &mut output,
-            session,
-            BufReader::new(input),
-            initial_follow,
-        ),
+        chat::run(&mut client, &mut output, session, |_| {
+            Ok(BufReader::new(input))
+        }),
     )
     .await??;
     let _ = done.send(());
@@ -268,17 +262,11 @@ async fn chat_rejects_changed_limits_on_reconnect(
     let mut stderr = Vec::new();
     let mut output = Output::new(&mut stdout, &mut stderr, false);
     let mut client = ProcessClient::new(socket);
-    let initial_follow =
-        crate::deployment_limits::follow_with_deployment_limits(&mut client, session).await?;
     let error = timeout(
         Duration::from_secs(5),
-        chat::run(
-            &mut client,
-            &mut output,
-            session,
-            BufReader::new(input),
-            initial_follow,
-        ),
+        chat::run(&mut client, &mut output, session, |_| {
+            Ok(BufReader::new(input))
+        }),
     )
     .await?
     .expect_err("changed policy requires a fresh input queue");
@@ -286,6 +274,113 @@ async fn chat_rejects_changed_limits_on_reconnect(
         error.to_string(),
         "daemon deployment limits changed; restart chat to apply them"
     );
+    server.await??;
+    Ok(())
+}
+
+async fn disconnect_after_chat_limits(listener: &UnixListener) -> io::Result<()> {
+    let stream = listener.accept().await?.0.into_std()?;
+    let shutdown = stream.try_clone()?;
+    let mut stream = BufReader::new(tokio::net::UnixStream::from_std(stream)?);
+    let mut line = Vec::new();
+    stream.read_until(b'\n', &mut line).await?;
+    let request = decode_client_line(&line).map_err(io::Error::other)?;
+    assert_eq!(request.request(), &ClientRequest::ReadDeploymentLimits {});
+    // Reject FollowSession writes even though the complete limits response is readable.
+    shutdown.shutdown(std::net::Shutdown::Read)?;
+    let response = ServerFrame::try_new_for_version(
+        request.version(),
+        request.request_id(),
+        ServerMessage::DeploymentLimits {
+            max_message_utf8_bytes: None,
+            max_system_prompt_utf8_bytes: None,
+            terminal_input_channel_capacity: Some(CanonicalU64::new(0)),
+            min_metadata_page_size: None,
+            max_metadata_page_size: None,
+            max_review_findings_per_run: None,
+        },
+    )
+    .map_err(io::Error::other)?;
+    stream
+        .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+        .await
+}
+
+#[tokio::test]
+async fn chat_retries_initial_follow_before_creating_input() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let (input, mut input_writer) = tokio::io::duplex(64);
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        disconnect_after_chat_limits(&listener).await?;
+        let (request, mut writer) = receive_chat_follow(
+            &listener,
+            session,
+            ClientDeploymentLimits {
+                terminal_input_channel_capacity: Some(1),
+                ..ClientDeploymentLimits::unbounded()
+            },
+        )
+        .await?;
+        writer
+            .write_all(&snapshot(&request, session, None)?)
+            .await?;
+        input_writer.write_all(b":quit\n").await?;
+        let _ = finished.await;
+        Ok::<_, io::Error>(())
+    });
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut output = Output::new(&mut stdout, &mut stderr, false);
+    let mut client = ProcessClient::new(socket);
+    timeout(
+        Duration::from_secs(5),
+        chat::run(&mut client, &mut output, session, |capacity| {
+            assert_eq!(
+                capacity,
+                Some(1),
+                "input uses the first successful follow's limits"
+            );
+            Ok(BufReader::new(input))
+        }),
+    )
+    .await??;
+    let _ = done.send(());
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_startup_disconnects_share_the_follow_retry_budget() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let server = tokio::spawn(async move {
+        for _ in 0..3 {
+            disconnect_after_chat_limits(&listener).await?;
+        }
+        let (_, writer) =
+            receive_chat_follow(&listener, session, ClientDeploymentLimits::unbounded()).await?;
+        drop(writer);
+        Ok::<_, io::Error>(())
+    });
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut output = Output::new(&mut stdout, &mut stderr, false);
+    let mut client = ProcessClient::new(socket);
+    let error = timeout(
+        Duration::from_secs(5),
+        chat::run(&mut client, &mut output, session, |_| {
+            Ok(BufReader::new(tokio::io::empty()))
+        }),
+    )
+    .await?
+    .expect_err("startup failures must consume the same three follow retries");
+    assert!(matches!(error, crate::ClientError::ConnectionClosed));
     server.await??;
     Ok(())
 }
