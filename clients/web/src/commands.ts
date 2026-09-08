@@ -63,7 +63,9 @@ const hasSelectedArtifactPreview = (context: CommandContext) => {
 }
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const transcriptDetail = (context: CommandContext) =>
-  context.timelineIds.length > 0 || context.configuresTranscriptDetail === true
+  context.timelineIds.length > 0 ||
+  context.timelineWindowAvailable === true ||
+  context.configuresTranscriptDetail === true
 const paneSizeProvided = (context: CommandContext) => context.paneSize !== undefined
 const setLayout = (layout: LayoutMode) => (context: CommandContext) =>
   context.dispatch(actions.layoutSet(layout))

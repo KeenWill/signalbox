@@ -812,7 +812,10 @@ test('captures the pinned imports workstation', async ({ page }, testInfo) => {
   const problems = watchBrowser(page)
   await page.goto(importsFixture.path)
   await expect(page.getByRole('heading', { name: 'Imported conversations' })).toBeVisible()
-  await expect(page).toHaveScreenshot('imports-dark.png', { animations: 'disabled' })
+  await expect(page).toHaveScreenshot('imports-dark.png', {
+    animations: 'disabled',
+    maxDiffPixelRatio: 0,
+  })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -821,7 +824,10 @@ test('captures the pinned dark workbench', async ({ page }, testInfo) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/approval')
   await expect(page.getByRole('heading', { name: 'Bounded timeline' })).toBeVisible()
-  await expect(page).toHaveScreenshot('workbench-dark.png', { animations: 'disabled' })
+  await expect(page).toHaveScreenshot('workbench-dark.png', {
+    animations: 'disabled',
+    maxDiffPixelRatio: 0,
+  })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

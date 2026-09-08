@@ -934,7 +934,7 @@ test('shows transcript-detail commands only on Settings among product routes', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('keeps Settings single-column when a vertical scrollbar reduces content width', async ({
+test('keeps Settings within the pane when a vertical scrollbar reduces content width', async ({
   page,
 }) => {
   const problems = watchBrowser(page)
@@ -947,12 +947,6 @@ test('keeps Settings single-column when a vertical scrollbar reduces content wid
     .nth(0)
   await navigationWidth.fill('360')
 
-  const settingsGrid = page.locator('.settings-grid')
-  expect(
-    await settingsGrid.evaluate(
-      (element) => getComputedStyle(element).gridTemplateColumns.split(' ').length,
-    ),
-  ).toBe(1)
   const settingsSurface = page.locator('.settings-surface')
   expect(
     await settingsSurface.evaluate((element) => element.scrollWidth <= element.clientWidth),
@@ -976,6 +970,45 @@ test('applies saved pane widths to the scenario workspace', async ({ page }) => 
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toBeHidden()
   await page.setViewportSize({ width: 1440, height: 900 })
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toHaveCSS('width', '400px')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('fits Settings inside a narrow primary pane with maximum saved side panes', async ({
+  page,
+}, testInfo) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/settings')
+  const sliders = page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider')
+  await sliders.nth(0).fill('360')
+  await sliders.nth(1).fill('480')
+
+  const settings = page.locator('.settings-surface')
+  await expect(settings).toBeVisible()
+  expect(await settings.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
+  const layoutBox = await page.getByRole('group', { name: 'Workspace layout' }).boundingBox()
+  const densityBox = await page.getByRole('group', { name: 'Visual density' }).boundingBox()
+  expect(densityBox?.y).toBeGreaterThan((layoutBox?.y ?? 0) + (layoutBox?.height ?? 0))
+  await page.screenshot({ path: testInfo.outputPath('settings-pane.png') })
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('compacts the scenario toolbar at its pane width', async ({ page }, testInfo) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 780, height: 720 })
+  await page.goto('/settings')
+  await page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider').nth(0).fill('360')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+
+  const toolbar = page.getByRole('toolbar', { name: 'Workspace controls' })
+  await expect(toolbar).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Transcript detail' })).toBeHidden()
+  expect(await toolbar.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('scenario-pane.png') })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect(page.getByRole('group', { name: 'Transcript detail' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
