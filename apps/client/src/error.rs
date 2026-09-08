@@ -553,6 +553,10 @@ impl fmt::Display for RejectionDisplay {
                     "tool_request_not_found request={tool_request_id}"
                 )
             }
+            RejectionDetail::ToolRequestAwaitingApprovalJudge { tool_request_id } => write!(
+                formatter,
+                "tool_request_awaiting_approval_judge request={tool_request_id}"
+            ),
             RejectionDetail::ToolRequestAlreadyResolved { tool_request_id } => write!(
                 formatter,
                 "tool_request_already_resolved request={tool_request_id}"
