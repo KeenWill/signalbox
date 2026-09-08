@@ -168,6 +168,12 @@ choice that field records: such a record reconstructs with the field's defined
 default value, and any other stored value is corruption. An older reader rejects
 a newer record instead of discarding a decision it cannot represent.
 
+Imported-creation payloads from storage version 6 and create-session payloads
+from storage version 8 retain the optional runner placement; earlier supported
+versions reconstitute it absent. Placement participates in replay equality and
+hashing, including template-derived creation. Imported-creation version 4 and
+create-session version 5 remain unsupported and unwritten.
+
 Each single-transaction application service calls its atomic transaction port
 exactly once, returns no applied result before that transaction commits, and
 surfaces infrastructure failure to its caller without retry or receipt
@@ -229,9 +235,5 @@ receipt.
 
 - A production generator for `ProviderTargetEvidenceId`:
   [design](../design/identity-and-commands.md).
-- The optional runner placement in the imported-creation and create-session
-  payloads: [design](../design/identity-and-commands.md).
-- Imported-creation storage version 4 and create-session storage version 5,
-  reserved and unwritten: [design](../design/identity-and-commands.md).
 - A program arm of `Actor` and a program admissibility path for submit-input:
   [design](../design/identity-and-commands.md).
