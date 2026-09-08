@@ -7,9 +7,9 @@ This design is not built; it extends
 
 Complete the durable storage that built subsystems already reserve space for:
 general runner operation-failure evidence; retirement of an unacknowledged
-workspace release; runner placement in imported-create command records; the
+workspace release; imported-create placement authentication on replay; the
 instruction admitted set; credential-pool state and availability waits; and
-daemon-owned OAuth material.
+OAuth member-availability wakeups.
 
 ## Design
 
@@ -25,9 +25,8 @@ head retires. The record keeps the bounded code, message, and exact payload of
 the admitted detail, so runner status inspection reproduces the failure. Equal
 retransmission rereads the equal record; unequal reuse is a correlation error.
 
-Imported-create command records at storage version 4 carry the complete
-placement request, and replay compares it with the created session's
-revision-one placement.
+Imported-create replay compares the stored placement request with the created
+session's revision-one placement.
 
 The instruction admitted set is one durable table with one repository operation
 that writes it, beside the immutable append-only admission record
@@ -48,8 +47,7 @@ scheduler row and the admitted-set head, in profile-reference byte order, FOR
 SHARE for a member it only reads and FOR UPDATE for a member whose exclusion
 state it writes. It takes a capacity or cursor row FOR UPDATE only after every
 action head, and multiple capacity rows in profile-reference byte order before
-any cursor row. A pool-selected call pins an interned immutable pool-policy
-identity, so a fresh availability chain resolves the policy the call was
+any cursor row. A fresh availability chain resolves the policy the call was
 authorized under rather than the current document. A chain-exclusion row holds a
 separately clearable state beside its insert-only turn-local fact. Exhaustion
 evidence carries contiguous per-member rows in policy order beside its failure
@@ -59,9 +57,6 @@ machine they serve is owned by
 fixes their transitions.
 
 ## Compatibility constraints
-
-No writer produces imported-create storage version 4, and the version gate keeps
-rejecting it until a record at that version carries placement.
 
 Failure detail is never acknowledged before it is stored, because a restart
 would forget evidence operators must inspect; the operation transition is never
@@ -82,8 +77,8 @@ runners stay pending.
 Every acknowledged operation failure is readable after restart, and an equal
 retransmission returns the recorded receipt.
 
-An imported-create record at storage version 4 stores placement, and an older
-reader rejects it as unsupported.
+Imported-create replay rejects a stored placement request that differs from the
+created session's revision-one placement.
 
 The admitted set has a table, a repository operation, and inventory-recorded
 locks.

@@ -124,19 +124,6 @@ async fn nonterminal_system_events_do_not_mask_the_initialized_exchange() {
     assert_eq!(result.spawns, 1);
 }
 
-/// a credential marker in a discarded lifecycle event remains part of
-/// the redaction lookbehind, so retained assistant output cannot disclose its
-/// otherwise opaque continuation.
-#[tokio::test]
-async fn dropped_system_lifecycle_event_seeds_output_redaction() {
-    let result = execute_scenario("system_lifecycle_event_redaction", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::FRAGMENTED_SECRET_CONTINUATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
 /// A lifecycle `session_id` is dropped as a repeated identity only where it is
 /// one. A differing value contradicts the correlation `system/init`
 /// established, exactly as it does on a `result` event.
@@ -151,19 +138,6 @@ async fn lifecycle_session_contradicting_init_is_a_protocol_violation() {
     assert_eq!(result.spawns, 1);
 }
 
-/// an uncorrelated lifecycle `session_id` is provider content, not a
-/// repeated identity, so it seeds the redaction lookbehind rather than being
-/// discarded unexamined.
-#[tokio::test]
-async fn uncorrelated_lifecycle_session_seeds_output_redaction() {
-    let result = execute_scenario("lifecycle_session_precedes_init", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::FRAGMENTED_SECRET_CONTINUATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
 #[tokio::test]
 async fn assistant_resolved_model_may_differ_from_the_selected_init_alias() {
     let result = execute_scenario("resolved_assistant_model", OperationShape::Text).await;
@@ -172,46 +146,9 @@ async fn assistant_resolved_model_may_differ_from_the_selected_init_alias() {
     assert_eq!(result.spawns, 1);
 }
 
-/// the provider-resolved model an assistant event newly accepts is
-/// stored for the contradiction check and then discarded, so it reaches no
-/// record and this ambient-delivery runtime holds no exact value to redact
-/// downstream. A marker prefix ending that model must still seed the redaction
-/// lookbehind, or its own first text block completes the credential across the
-/// two fields and is emitted verbatim.
-///
-/// The init model here is the clean selected alias, so the resolved model is
-/// the only source of the marker — no other chain can account for the
-/// suppression.
+/// Repeated model metadata preserves the assistant text.
 #[tokio::test]
-async fn resolved_model_prefix_is_held_into_the_first_text_block() {
-    let result = execute_scenario("resolved_model_prefix_redaction", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::MODEL_CREDENTIAL_CONTINUATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// every assistant envelope repeats and discards the resolved model,
-/// so each one re-seeds the redaction lookbehind ahead of its own content. A
-/// first event whose clean text spends that lookbehind must not leave a second
-/// event's text free to continue the marker the model ends in.
-#[tokio::test]
-async fn repeated_model_prefix_is_held_into_each_events_text() {
-    let result = execute_scenario("repeated_model_prefix_redaction", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::MODEL_CREDENTIAL_CONTINUATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a repeat of the discarded resolved model is the same field, not a
-/// second one. Classifying it as new would spend the discarded-field slot and
-/// fail the exchange closed, destroying ordinary output that the held marker
-/// legitimately releases once its candidate resolves clean.
-#[tokio::test]
-async fn repeated_resolved_model_does_not_over_redact_an_ordinary_exchange() {
+async fn repeated_resolved_model_preserves_assistant_text() {
     let result = execute_scenario("repeated_model_prefix_release", OperationShape::Text).await;
     let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
 
@@ -437,74 +374,11 @@ async fn tool_arguments_preserve_reserved_number_key_objects() {
     );
 }
 
-/// A whole-object credential suppression remains typed and never emits an
-/// executable tool proposal or argument delta.
-#[tokio::test]
-async fn fully_suppressed_tool_arguments_are_non_executable() {
-    let result = execute_scenario("suppressed_tool_arguments", OperationShape::Tool).await;
-    let completion = completed(&result.evidence);
-
-    assert_eq!(
-        completion.content,
-        vec![AssistantPart::SuppressedToolCall(
-            signalbox_model_runtime::ToolName::new(fixtures::TOOL_NAME),
-        )]
-    );
-    assert!(!result.observations.iter().any(|observation| matches!(
-        observation.fact,
-        signalbox_model_runtime::ObservationFact::ToolCallProposed(_)
-            | signalbox_model_runtime::ObservationFact::ToolArgumentsDelta { .. }
-    )));
-    assert_eq!(result.spawns, 1);
-}
-
 #[tokio::test]
 async fn named_tool_choice_rejects_an_extra_declared_proposal() {
     let result = execute_scenario("named_choice_extra_tool", OperationShape::NamedTool).await;
     let loss = boundary_loss(&result.evidence);
 
-    assert!(response_unintelligible(&loss.cause).contains(fixtures::TOOL_NAME));
-    assert_eq!(loss.finish_reported, Some(FinishReason::ToolUse));
-    assert_eq!(result.spawns, 1);
-}
-
-/// The credential boundary withholds a proposal's arguments, never its tool
-/// identity, so a suppressed foreign proposal still violates a named choice.
-#[tokio::test]
-async fn named_tool_choice_rejects_a_suppressed_extra_declared_proposal() {
-    let result = execute_scenario(
-        "named_choice_suppressed_extra_tool",
-        OperationShape::NamedTool,
-    )
-    .await;
-    let loss = boundary_loss(&result.evidence);
-    let proposed: Vec<&str> = result
-        .observations
-        .iter()
-        .filter_map(|observation| match &observation.fact {
-            signalbox_model_runtime::ObservationFact::ToolCallProposed(proposal) => {
-                Some(proposal.name.as_str())
-            }
-            _ => None,
-        })
-        .collect();
-    let argument_deltas = result
-        .observations
-        .iter()
-        .filter(|observation| {
-            matches!(
-                observation.fact,
-                signalbox_model_runtime::ObservationFact::ToolArgumentsDelta { .. }
-            )
-        })
-        .count();
-
-    // Named-tool validation rejects an admitted foreign proposal and a
-    // suppressed one alike, so only the emitted proposals prove which form the
-    // credential boundary produced before validation saw it: the required tool
-    // proposes and streams its arguments, the suppressed one does neither.
-    assert_eq!(proposed, vec![fixtures::TOOL_NAME]);
-    assert_eq!(argument_deltas, 1);
     assert!(response_unintelligible(&loss.cause).contains(fixtures::TOOL_NAME));
     assert_eq!(loss.finish_reported, Some(FinishReason::ToolUse));
     assert_eq!(result.spawns, 1);
@@ -524,119 +398,6 @@ async fn refusal_requires_the_typed_refusal_stop_reason() {
         vec![AssistantPart::Text(fixtures::REFUSAL.to_string())]
     );
     assert_eq!(refusal.usage, expected_usage());
-    assert_eq!(result.spawns, 1);
-}
-#[tokio::test]
-async fn credential_shaped_cli_text_is_redacted_from_all_evidence() {
-    let result = execute_scenario("credential_redaction", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_TEXT));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn fragmented_credential_is_redacted_from_observations_and_terminal_content() {
-    let result = execute_scenario("fragmented_credential_redaction", OperationShape::Text).await;
-    let observed = observation_text(&result.observations);
-    let terminal = completion_text(&result.evidence);
-
-    assert!(!observed.contains(fixtures::FRAGMENTED_SECRET));
-    assert!(!terminal.contains(fixtures::FRAGMENTED_SECRET));
-    assert!(observed.contains("[redacted]"));
-    assert!(terminal.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn control_sequence_cannot_obfuscate_a_streamed_credential() {
-    let result = execute_scenario(
-        "control_sequence_credential_redaction",
-        OperationShape::Text,
-    )
-    .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::CONTROL_SEQUENCE_SECRET));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn redacted_provider_identities_still_compare_by_native_value() {
-    let result = execute_scenario("redacted_native_identity", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert_eq!(
-        completed(&result.evidence).finish,
-        CompletionFinish::EndTurn
-    );
-    assert!(!diagnostic.contains(fixtures::CREDENTIAL_SHAPED_SESSION_ID));
-    assert!(!diagnostic.contains(fixtures::CREDENTIAL_SHAPED_MODEL));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn model_identifier_prefix_is_held_into_the_first_text_block() {
-    let result = execute_scenario("model_prefix_redaction", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::MODEL_CREDENTIAL_CONTINUATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// an assistant message id ending in a credential marker prefix seeds
-/// the emitted-context lookbehind, so the first text block of that same message
-/// cannot complete the marker across the two retained completion fields.
-///
-/// The assertion joins the fields rather than searching the debug rendering:
-/// the rendering puts punctuation between `message_id` and `content`, so a
-/// `contains` over it would pass even with the seam removed. The continuation
-/// value carries no credential indicator of its own, so a pass proves the id
-/// seeded the lookbehind rather than proving the value looked secret-shaped.
-#[tokio::test]
-async fn message_id_credential_prefix_is_held_into_the_first_text_block() {
-    let result = execute_scenario("message_id_prefix_redaction", OperationShape::Text).await;
-    let completion = completed(&result.evidence);
-    let message_id = completion
-        .message_id
-        .as_ref()
-        .map_or(String::new(), |id| id.as_str().to_string());
-    let joined = format!("{message_id}{}", completion_text(&result.evidence));
-
-    assert!(!joined.contains(fixtures::MESSAGE_ID_RECONSTRUCTED_CREDENTIAL));
-    assert!(
-        !observation_text(&result.observations).contains(fixtures::OPAQUE_CREDENTIAL_CONTINUATION)
-    );
-    assert_eq!(result.spawns, 1);
-}
-
-/// a tool proposal id ending in a credential marker prefix seeds the
-/// same lookbehind, so a following text block cannot complete the marker across
-/// the emitted proposal and the emitted text.
-#[tokio::test]
-async fn tool_proposal_id_credential_prefix_is_held_into_following_text() {
-    let result = execute_scenario("tool_id_prefix_redaction", OperationShape::Tool).await;
-    let completion = completed(&result.evidence);
-    let [
-        AssistantPart::ToolCall(proposal),
-        AssistantPart::Text(following_text),
-    ] = completion.content.as_slice()
-    else {
-        panic!(
-            "expected a proposal then text, got {:?}",
-            completion.content
-        )
-    };
-    let joined = format!("{}{following_text}", proposal.id.as_str());
-
-    assert!(!joined.contains(fixtures::TOOL_ID_RECONSTRUCTED_CREDENTIAL));
-    assert!(
-        !observation_text(&result.observations).contains(fixtures::OPAQUE_CREDENTIAL_CONTINUATION)
-    );
     assert_eq!(result.spawns, 1);
 }
 
@@ -674,48 +435,6 @@ async fn reported_usage_precedes_the_finish_fact_from_the_same_result() {
                 .iter()
                 .position(|kind| *kind == "FinishReported")
     );
-}
-
-/// fail-closed suppression is absorbing for the sink's lifetime. The
-/// usage barrier flushes held text, but it must not re-enable
-/// provider-controlled bytes: a terminal error whose message continues a marker
-/// that began in suppressed content would otherwise be judged by the stateless
-/// scan alone, which cannot see that marker, and the continuation would reach
-/// `NativeErrorFacts`.
-///
-/// This is the ordering the usage fix makes reachable on the common path —
-/// `UsageReported` is now emitted as the `result` event is processed, ahead of
-/// the error branch that sanitizes the native facts.
-#[tokio::test]
-async fn suppression_survives_the_usage_barrier_into_terminal_error_facts() {
-    let result = execute_scenario(
-        "suppressed_state_survives_the_usage_barrier",
-        OperationShape::Text,
-    )
-    .await;
-    let failure = provider_error(&result.evidence);
-    let native = format!(
-        "{:?}{:?}",
-        failure.native.message, failure.native.error_token
-    );
-
-    assert!(!native.contains(fixtures::OPAQUE_CREDENTIAL_CONTINUATION));
-    assert!(native.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn credential_shaped_tool_ids_receive_distinct_safe_surrogates() {
-    let result = execute_scenario("redacted_tool_ids", OperationShape::Tool).await;
-    let completion = completed(&result.evidence);
-    let (first, second) = two_tool_calls(&completion.content);
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert_eq!(completion.finish, CompletionFinish::ToolUse);
-    assert_ne!(first.id, second.id);
-    assert!(!diagnostic.contains(fixtures::CREDENTIAL_TOOL_ID_ONE));
-    assert!(!diagnostic.contains(fixtures::CREDENTIAL_TOOL_ID_TWO));
-    assert_eq!(result.spawns, 1);
 }
 
 #[tokio::test]
@@ -788,50 +507,6 @@ async fn api_error_status_classifies_a_generic_terminal_error() {
     let failure = provider_error(&result.evidence);
 
     assert_eq!(failure.kind, ProviderErrorKind::RateLimited);
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn credential_shaped_finish_tokens_are_redacted_from_typed_evidence() {
-    let result = execute_scenario("credential_finish_token", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::FINISH_TOKEN_SECRET));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn credential_shaped_error_tokens_are_redacted_from_typed_evidence() {
-    let result = execute_scenario("credential_error_token", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::ERROR_TOKEN_SECRET));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn reasoning_metadata_cannot_complete_a_streamed_credential() {
-    let result = execute_scenario("reasoning_metadata_credential", OperationShape::Text).await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::REASONING_SECRET));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn redacted_reasoning_metadata_cannot_complete_a_streamed_credential() {
-    let result = execute_scenario(
-        "redacted_reasoning_metadata_credential",
-        OperationShape::Text,
-    )
-    .await;
-    let diagnostic = format!("{:?}{:?}", result.evidence, result.observations);
-
-    assert!(!diagnostic.contains(fixtures::REASONING_SECRET));
-    assert!(diagnostic.contains("[redacted]"));
     assert_eq!(result.spawns, 1);
 }
 
@@ -1468,22 +1143,6 @@ fn completion_text(evidence: &TerminalEvidence) -> String {
         .collect()
 }
 
-fn two_tool_calls(
-    content: &[AssistantPart],
-) -> (
-    &signalbox_model_runtime::ToolCallProposal,
-    &signalbox_model_runtime::ToolCallProposal,
-) {
-    let [
-        AssistantPart::ToolCall(first),
-        AssistantPart::ToolCall(second),
-    ] = content
-    else {
-        panic!("expected two tool calls, got {content:?}")
-    };
-    (first, second)
-}
-
 fn tool_call(content: &[AssistantPart]) -> &signalbox_model_runtime::ToolCallProposal {
     let [AssistantPart::ToolCall(value)] = content else {
         panic!("expected one tool call, got {content:?}")
@@ -1520,4 +1179,28 @@ fn fake_cli() -> std::path::PathBuf {
 
 fn bridge_cli() -> std::path::PathBuf {
     test_bin_path!("signalbox-claude-mcp-bridge")
+}
+
+#[tokio::test]
+async fn ambient_cli_preserves_fragmented_credential_shaped_text() {
+    let result = execute_scenario("fragmented_credential_redaction", OperationShape::Text).await;
+    assert_eq!(
+        observation_text(&result.observations),
+        fixtures::FRAGMENTED_SECRET
+    );
+    assert_eq!(
+        completion_text(&result.evidence),
+        fixtures::FRAGMENTED_SECRET
+    );
+}
+
+#[tokio::test]
+async fn ambient_cli_preserves_credential_shaped_tool_json() {
+    let result = execute_scenario("suppressed_tool_arguments", OperationShape::Tool).await;
+    let completion = completed(&result.evidence);
+    assert_eq!(
+        tool_call(&completion.content).arguments_json,
+        fixtures::SUPPRESSED_TOOL_ARGUMENTS
+    );
+    assert!(result.observations.iter().any(|observation| matches!(&observation.fact, signalbox_model_runtime::ObservationFact::ToolCallProposed(call) if call.arguments_json == fixtures::SUPPRESSED_TOOL_ARGUMENTS)));
 }

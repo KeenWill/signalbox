@@ -198,6 +198,26 @@ pub(crate) async fn load_phase(
     ))
 }
 
+pub(super) async fn retained_mapped_target(
+    connection: &mut PgConnection,
+    attempt: TurnAttemptId,
+) -> Result<Option<ResolvedProviderTarget>, ModelCallRepositoryError> {
+    let target: Option<Uuid> = sqlx::query_scalar(
+        "SELECT waiting.effective_target_id
+         FROM credential_availability_wait_release release
+         JOIN credential_availability_wait waiting USING (wait_attempt_id)
+         JOIN model_call predecessor ON predecessor.model_call_id = waiting.predecessor_model_call_id
+         WHERE release.turn_attempt_id = $1
+           AND waiting.effective_target_id <> predecessor.resolved_provider_model_identity_id",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_optional(connection)
+    .await?;
+    Ok(target.map(|target| {
+        ResolvedProviderTarget::naming(signalbox_domain::ProviderModelIdentity::from_uuid(target))
+    }))
+}
+
 pub(super) async fn retain_serving_target<'a>(
     connection: &mut PgConnection,
     attempt: TurnAttemptId,

@@ -12,7 +12,7 @@ final class ViewModelTests: XCTestCase {
             ),
             policy: .nativeDefault
         )
-        let conversations = try await service.listConversations(includeArchived: true)
+        let conversations = try await service.listConversations(includeArchived: true).conversations
         let imported = try XCTUnwrap(
             conversations.first {
                 $0.conversationID.rawValue == MockProcessProtocolFixtures.importedConversationID
@@ -48,7 +48,7 @@ final class ViewModelTests: XCTestCase {
             ),
             policy: .nativeDefault
         )
-        let conversations = try await service.listConversations(includeArchived: true)
+        let conversations = try await service.listConversations(includeArchived: true).conversations
         let imported = try XCTUnwrap(
             conversations.first {
                 $0.conversationID.rawValue == MockProcessProtocolFixtures.importedConversationID
@@ -750,7 +750,7 @@ private enum ImportedContinuationRetryFixture {
             ),
             policy: .nativeDefault
         )
-        let conversations = try await service.listConversations(includeArchived: true)
+        let conversations = try await service.listConversations(includeArchived: true).conversations
         return try XCTUnwrap(
             conversations.first {
                 $0.conversationID.rawValue == MockProcessProtocolFixtures.importedConversationID

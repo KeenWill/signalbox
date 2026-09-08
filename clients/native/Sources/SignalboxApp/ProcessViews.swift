@@ -18,17 +18,39 @@ let importedContinuationEndpointChangedMessage =
 /// operation identity, so a replaced socket cannot update the new endpoint's UI.
 final class ProcessSessionListViewModel: ObservableObject {
   @Published private(set) var conversations: [SignalboxProcessConversation] = []
-  @Published var showArchived = false
+  @Published private(set) var pageAfter: SignalboxConversationCursor?
+  @Published private(set) var nextAfter: SignalboxConversationCursor?
+  @Published var showArchived = false {
+    didSet {
+      guard oldValue != showArchived else { return }
+      pageAfter = nil
+      nextAfter = nil
+      hasEarlierConversations = false
+      conversations = []
+      activeRefreshID = UUID()
+      publicationGeneration &+= 1
+      isLoading = false
+    }
+  }
   @Published var searchText = ""
   @Published var errorMessage: String?
   @Published private(set) var isLoading = false
+  @Published private(set) var isUpdatingArchive = false
 
+  private let maximumMetadataPages: UInt
+  private var hasEarlierConversations = false
+  private var requestedConversation: SignalboxProcessConversation?
+  private var activeRevealID = UUID()
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
   private var activeRefreshID = UUID()
   private var serviceGeneration: UInt64 = 0
   private var publicationGeneration: UInt64 = 0
 
-  init(serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?) {
+  init(
+    policy: SignalboxProcessApplicationPolicy = .nativeDefault,
+    serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?
+  ) {
+    maximumMetadataPages = policy.maximumMetadataPages
     self.serviceProvider = serviceProvider
   }
 
@@ -40,8 +62,13 @@ final class ProcessSessionListViewModel: ObservableObject {
     publicationGeneration &+= 1
     activeRefreshID = UUID()
     conversations = []
+    requestedConversation = nil
+    hasEarlierConversations = false
+    pageAfter = nil
+    nextAfter = nil
     errorMessage = nil
     isLoading = false
+    isUpdatingArchive = false
   }
 
   var visibleConversations: [SignalboxProcessConversation] {
@@ -57,12 +84,49 @@ final class ProcessSessionListViewModel: ObservableObject {
     }
   }
 
-  func conversation(id: String) -> SignalboxProcessConversation? {
-    conversations.first { $0.id == id }
+  var emptyState: (title: String, message: String) {
+    if nextAfter != nil {
+      return ("No matching conversations on these pages", "Choose Next page to continue looking.")
+    }
+    if hasEarlierConversations {
+      return (
+        showArchived ? "No more archived sessions" : "No more active sessions",
+        "Choose Start over to return to earlier conversations."
+      )
+    }
+    return (
+      showArchived ? "No archived sessions" : "No active sessions",
+      "Refresh after connecting to a local signalboxd Unix socket."
+    )
   }
 
-  func conversation(conversationID: SignalboxCanonicalUUID) -> SignalboxProcessConversation? {
-    conversations.first { $0.conversationID == conversationID }
+  func conversation(id: String) -> SignalboxProcessConversation? {
+    conversations.first { $0.id == id }
+      ?? requestedConversation.flatMap { $0.id == id ? $0 : nil }
+  }
+
+  func nativeConversation(sessionID: SignalboxCanonicalUUID) -> SignalboxProcessConversation? {
+    conversations.first { $0.origin == .native && $0.conversationID == sessionID }
+      ?? requestedConversation.flatMap {
+        $0.origin == .native && $0.conversationID == sessionID ? $0 : nil
+      }
+  }
+
+  func revealSession(_ sessionID: SignalboxCanonicalUUID) async {
+    let revealID = UUID()
+    activeRevealID = revealID
+    let generation = serviceGeneration
+    guard let service = serviceProvider() else { return }
+    do {
+      let session = try await service.readSession(sessionID: sessionID)
+      guard generation == serviceGeneration, activeRevealID == revealID else { return }
+      requestedConversation = SignalboxProcessConversation(summary: .native(.init(
+        sessionID: session.id, title: session.title, archived: session.archived,
+        defaultsVersion: session.defaultsVersion)))
+    } catch {
+      guard generation == serviceGeneration, activeRevealID == revealID else { return }
+      errorMessage = error.localizedDescription
+    }
   }
 
   func refresh() async {
@@ -83,13 +147,28 @@ final class ProcessSessionListViewModel: ObservableObject {
       }
     }
     do {
-      let refreshedConversations = try await service.listConversations(includeArchived: true)
-      guard activeRefreshID == refreshID, serviceGeneration == generation,
-        publicationGeneration == publication
-      else {
-        return
+      let archived = showArchived
+      var cursor = pageAfter
+      var pageCount: UInt = 0
+      while true {
+        guard pageCount < maximumMetadataPages else {
+          throw SignalboxProcessServiceError.invalidPage(
+            "The native conversation-list page cap was reached.")
+        }
+        let page = try await service.listConversations(includeArchived: archived, after: cursor)
+        guard activeRefreshID == refreshID, serviceGeneration == generation,
+          publicationGeneration == publication else { return }
+        let matching = page.conversations.filter { $0.archived == archived }
+        pageCount += 1
+        if !matching.isEmpty || page.nextAfter == nil || pageCount == maximumMetadataPages {
+          conversations = matching
+          pageAfter = cursor
+          nextAfter = page.nextAfter
+          break
+        }
+        // The wire filter excludes archived rows but has no archived-only arm.
+        cursor = page.nextAfter
       }
-      conversations = refreshedConversations
       errorMessage = nil
     } catch {
       guard activeRefreshID == refreshID, serviceGeneration == generation,
@@ -101,12 +180,33 @@ final class ProcessSessionListViewModel: ObservableObject {
     }
   }
 
+  func nextPage() async {
+    guard !isLoading, let nextAfter else { return }
+    hasEarlierConversations = hasEarlierConversations || !conversations.isEmpty
+    pageAfter = nextAfter
+    await refresh()
+  }
+
+  func firstPage() async {
+    guard !isLoading else { return }
+    hasEarlierConversations = false
+    pageAfter = nil
+    await refresh()
+  }
+
   func toggleArchive(_ conversation: SignalboxProcessConversation) async {
-    guard conversation.origin == .native else {
+    guard conversation.origin == .native, !isUpdatingArchive else {
       return
     }
     let generation = serviceGeneration
+    isUpdatingArchive = true
+    defer {
+      if serviceGeneration == generation {
+        isUpdatingArchive = false
+      }
+    }
     publicationGeneration &+= 1
+    let publication = publicationGeneration
     activeRefreshID = UUID()
     isLoading = false
     guard let service = serviceProvider() else {
@@ -118,7 +218,7 @@ final class ProcessSessionListViewModel: ObservableObject {
         !conversation.archived,
         conversation: conversation
       )
-      guard serviceGeneration == generation else {
+      guard serviceGeneration == generation, publicationGeneration == publication else {
         return
       }
       publicationGeneration &+= 1
@@ -130,7 +230,7 @@ final class ProcessSessionListViewModel: ObservableObject {
       conversations[index] = replacement
       errorMessage = nil
     } catch {
-      guard serviceGeneration == generation else {
+      guard serviceGeneration == generation, publicationGeneration == publication else {
         return
       }
       publicationGeneration &+= 1
@@ -169,11 +269,11 @@ struct ProcessSessionsScreen: View {
             }
           }
         }
-        .searchable(text: $viewModel.searchText, prompt: "Search sessions")
+        .searchable(text: $viewModel.searchText, prompt: "Filter this page")
         .sheet(isPresented: $showCreationSheet) {
           ProcessSessionCreationSheet {
             await viewModel.refresh()
-            applyRequestedSelection()
+            await applyRequestedSelection()
           }
           .environmentObject(coordinator)
         }
@@ -195,7 +295,7 @@ struct ProcessSessionsScreen: View {
             if requestedLocalSessionID != nil {
               Task {
                 await viewModel.refresh()
-                applyRequestedSelection()
+                await applyRequestedSelection()
               }
             }
           }
@@ -203,7 +303,7 @@ struct ProcessSessionsScreen: View {
         .task {
           viewModel.replaceServiceProvider { coordinator.processService }
           await viewModel.refresh()
-          applyRequestedSelection()
+          await applyRequestedSelection()
           if coordinator.screenshotScenario == .newSession {
             showCreationSheet = true
           }
@@ -211,7 +311,7 @@ struct ProcessSessionsScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: .refreshRequested)) { _ in
           Task {
             await viewModel.refresh()
-            applyRequestedSelection()
+            await applyRequestedSelection()
           }
         }
         .onReceive(NotificationCenter.default.publisher(for: .processServiceChanged)) { _ in
@@ -220,7 +320,7 @@ struct ProcessSessionsScreen: View {
           viewModel.replaceServiceProvider { coordinator.processService }
           Task {
             await viewModel.refresh()
-            applyRequestedSelection()
+            await applyRequestedSelection()
           }
         }
     }
@@ -239,6 +339,9 @@ struct ProcessSessionsScreen: View {
         .pickerStyle(.segmented)
         .padding([.horizontal, .top])
         .accessibilityIdentifier("session-state-picker")
+        .onChange(of: viewModel.showArchived) { _, _ in
+          Task { await viewModel.refresh() }
+        }
 
         if let errorMessage = viewModel.errorMessage {
           ErrorBanner(message: errorMessage)
@@ -246,11 +349,23 @@ struct ProcessSessionsScreen: View {
             .padding(.top, 8)
         }
 
+        HStack {
+          Button("Start over") { Task { await viewModel.firstPage() } }
+            .disabled(viewModel.pageAfter == nil || viewModel.isLoading)
+          Spacer()
+          Text("\(viewModel.conversations.count) conversations on this page")
+            .font(.caption).foregroundStyle(.secondary)
+          Button("Next page") { Task { await viewModel.nextPage() } }
+            .disabled(viewModel.nextAfter == nil || viewModel.isLoading)
+            .accessibilityIdentifier("next-conversation-page")
+        }
+        .padding(.horizontal)
+
         if viewModel.visibleConversations.isEmpty && !viewModel.isLoading {
           EmptyStateView(
             systemImage: viewModel.showArchived ? "archivebox" : "bubble.left.and.bubble.right",
-            title: viewModel.showArchived ? "No archived sessions" : "No active sessions",
-            message: "Refresh after connecting to a local signalboxd Unix socket."
+            title: viewModel.emptyState.title,
+            message: viewModel.emptyState.message
           )
         } else {
           List(viewModel.visibleConversations) { conversation in
@@ -270,6 +385,7 @@ struct ProcessSessionsScreen: View {
                     systemImage: conversation.archived ? "tray.and.arrow.up" : "archivebox"
                   )
                 }
+                .disabled(viewModel.isUpdatingArchive)
               }
             }
             .accessibilityIdentifier("session-row-\(conversation.conversationID.rawValue)")
@@ -281,13 +397,17 @@ struct ProcessSessionsScreen: View {
     }
   }
 
-  private func applyRequestedSelection() {
+  private func applyRequestedSelection() async {
     guard selectedConversationID == nil,
-      let requested = requestedLocalSessionID ?? coordinator.selectedProcessSessionID,
-      let conversation = viewModel.conversation(conversationID: requested)
-    else {
-      return
+      let requested = requestedLocalSessionID ?? coordinator.selectedProcessSessionID
+    else { return }
+    if viewModel.nativeConversation(sessionID: requested) == nil {
+      await viewModel.revealSession(requested)
     }
+    guard selectedConversationID == nil,
+      (requestedLocalSessionID ?? coordinator.selectedProcessSessionID) == requested,
+      let conversation = viewModel.nativeConversation(sessionID: requested)
+    else { return }
     if requestedLocalSessionID == requested {
       requestedLocalSessionID = nil
     } else if coordinator.selectedProcessSessionID == requested {
@@ -295,6 +415,7 @@ struct ProcessSessionsScreen: View {
     }
     selectedConversationID = conversation.id
   }
+
 }
 
 struct ProcessSessionCreationRetryState {
@@ -375,15 +496,38 @@ struct ProcessSessionCreationSheet: View {
         if isLoading {
           ProgressView("Reading model aliases")
         } else {
-          Picker("Model alias", selection: $selectedAliasID) {
-            ForEach(aliases) { alias in
-              Text(
-                "\(alias.aliasID.rawValue) → \(alias.selectionID.rawValue.prefix(8))"
-              )
-              .tag(Optional(alias.aliasID))
+          VStack(alignment: .leading, spacing: 8) {
+            Text("Model alias")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            Menu {
+              Picker("Model alias", selection: $selectedAliasID) {
+                ForEach(aliases) { alias in
+                  Text("\(alias.aliasID.rawValue) → \(alias.selectionID.rawValue.prefix(8))")
+                    .tag(Optional(alias.aliasID))
+                }
+              }
+            } label: {
+              VStack(alignment: .leading, spacing: 4) {
+                Text(selectedAliasID?.rawValue ?? "Choose model alias")
+                  .multilineTextAlignment(.leading)
+                  .fixedSize(horizontal: false, vertical: true)
+                if let alias = aliases.first(where: { $0.aliasID == selectedAliasID }) {
+                  Text("Selection \(alias.selectionID.rawValue.prefix(8))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+              }
+              .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .accessibilityLabel("Model alias")
+            .accessibilityValue(
+              aliases.first(where: { $0.aliasID == selectedAliasID }).map { alias in
+                "\(alias.aliasID.rawValue), selection \(alias.selectionID.rawValue)"
+              } ?? "None selected"
+            )
+            .accessibilityIdentifier("model-alias-picker")
           }
-          .accessibilityIdentifier("model-alias-picker")
           TextField("Optional system prompt", text: $systemPrompt, axis: .vertical)
             .lineLimit(3...10)
             .accessibilityIdentifier("system-prompt-field")
@@ -418,7 +562,10 @@ struct ProcessSessionCreationSheet: View {
         await loadAliases()
       }
     }
-    .frame(minWidth: 520, minHeight: 320)
+    .frame(minHeight: 320)
+    #if os(macOS)
+    .frame(minWidth: 520)
+    #endif
     .interactiveDismissDisabled(isCreating)
   }
 
@@ -882,7 +1029,34 @@ private extension SignalboxProcessRequestOpenError {
 
 @MainActor
 final class ProcessImportedConversationViewModel: ObservableObject {
+  @Published private(set) var entryPageErrorMessage: String?
   @Published private(set) var transcript: SignalboxImportedConversationTranscript?
+  @Published private(set) var entryOffset = 0
+  @Published private(set) var totalEntryCount = 0
+  private var inventory: SignalboxImportedConversationInventory?
+  private let entryPageSize = Int(SignalboxProcessApplicationPolicy.nativeDefault.metadataPageSize.rawValue)
+
+  var defaultContinuationPosition: SignalboxCanonicalUInt64? {
+    guard let inventory, inventory.entryCount > 0 else { return nil }
+    // The service validates contiguous, one-based positions through the end marker.
+    return SignalboxCanonicalUInt64(rawValue: UInt64(inventory.entryCount))
+  }
+
+  var hasNextPage: Bool { entryOffset + (transcript?.entries.count ?? 0) < totalEntryCount }
+
+  func showEntryPage(offset: Int) {
+    guard let inventory else { return }
+    do {
+      let entries = try inventory.entries(in: offset..<min(offset + entryPageSize, inventory.entryCount))
+      transcript = SignalboxImportedConversationTranscript(
+        importedConversationID: inventory.importedConversationID, entries: entries)
+      entryOffset = offset
+      entryPageErrorMessage = nil
+    } catch { entryPageErrorMessage = error.localizedDescription }
+  }
+
+  func nextEntryPage() { if hasNextPage { showEntryPage(offset: entryOffset + entryPageSize) } }
+  func previousEntryPage() { showEntryPage(offset: max(0, entryOffset - entryPageSize)) }
   @Published private(set) var aliases: [SignalboxModelAliasSummary] = []
   @Published private(set) var isLoading = false
   @Published private(set) var isContinuing = false
@@ -916,6 +1090,10 @@ final class ProcessImportedConversationViewModel: ObservableObject {
     serviceProvider = provider
     generation &+= 1
     transcript = nil
+    entryPageErrorMessage = nil
+    inventory = nil
+    entryOffset = 0
+    totalEntryCount = 0
     aliases = []
     isLoading = false
     isContinuing = false
@@ -935,11 +1113,13 @@ final class ProcessImportedConversationViewModel: ObservableObject {
       }
     }
     do {
-      let transcript = try await service.readImportedConversation(conversation: conversation)
+      let inventory = try await service.readImportedConversation(conversation: conversation)
       guard generation == activeGeneration else {
         return
       }
-      self.transcript = transcript
+      self.inventory = inventory
+      totalEntryCount = inventory.entryCount
+      showEntryPage(offset: 0)
       errorMessage = nil
     } catch {
       guard generation == activeGeneration else {
@@ -1080,9 +1260,9 @@ private struct ProcessImportedConversationScreen: View {
         List {
           Section {
             LabeledContent("Source", value: sourceFormatLabel)
-            LabeledContent("Entries", value: "\(transcript.entryCount.rawValue)")
+            LabeledContent("Entries", value: "\(viewModel.totalEntryCount)")
           }
-          if let errorMessage = viewModel.errorMessage {
+          if let errorMessage = viewModel.errorMessage ?? viewModel.entryPageErrorMessage {
             Section {
               Text(errorMessage)
                 .foregroundStyle(.red)
@@ -1092,6 +1272,17 @@ private struct ProcessImportedConversationScreen: View {
             Section {
               Text("The daemon configuration contains no model aliases for continuation.")
                 .foregroundStyle(.secondary)
+            }
+          }
+          Section {
+            HStack {
+              Button("Previous entries") { viewModel.previousEntryPage() }
+                .disabled(viewModel.entryOffset == 0)
+              Spacer()
+              Text("Entries \(viewModel.totalEntryCount == 0 ? 0 : viewModel.entryOffset + 1)–\(viewModel.entryOffset + transcript.entries.count)")
+              Button("Next entries") { viewModel.nextEntryPage() }
+                .disabled(!viewModel.hasNextPage)
+                .accessibilityIdentifier("next-imported-entry-page")
             }
           }
           Section("Read-only transcript") {
@@ -1144,7 +1335,7 @@ private struct ProcessImportedConversationScreen: View {
     .task(id: conversation.id) {
       viewModel.replaceServiceProvider { coordinator.processService }
       await viewModel.load(conversation: conversation)
-      selectedPosition = viewModel.transcript?.entries.last?.position
+      selectedPosition = viewModel.defaultContinuationPosition
     }
   }
 
@@ -1254,7 +1445,10 @@ private struct ProcessImportedContinuationSheet: View {
         selectedAliasID = viewModel.aliases.first?.aliasID
       }
     }
-    .frame(minWidth: 520, minHeight: 320)
+    .frame(minHeight: 320)
+    #if os(macOS)
+    .frame(minWidth: 520)
+    #endif
     .interactiveDismissDisabled(viewModel.isContinuing)
   }
 
@@ -1348,6 +1542,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   @Published private(set) var runnerTransition: ProcessRunnerTransition?
   @Published private(set) var isSubmitting = false
   @Published private(set) var isDecidingTool = false
+  @Published private(set) var armedToolDenials: Set<String> = []
+  @Published private(set) var retiredToolDenials: Set<String> = []
   @Published var composerText = ""
   @Published var errorMessage: String?
 
@@ -1359,6 +1555,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var serviceGeneration: UInt64 = 0
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var unresolvedToolDecision: SignalboxPreparedToolRequestDecision?
+  private var unresolvedToolOverride: SignalboxPreparedToolDenialOverride?
+  private var recoverableTurnID: SignalboxCanonicalUUID?
+  private var unresolvedReconciliation: SignalboxPreparedTurnReconciliation?
   private var unresolvedTurnStop: SignalboxPreparedTurnStop?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var terminalTurnIDs: Set<SignalboxCanonicalUUID> = []
@@ -1569,6 +1768,93 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  func isTerminalDelegateDenied(_ invocationID: SignalboxToolInvocationID) -> Bool {
+    guard let requestID = try? SignalboxCanonicalUUID(validating: invocationID.rawValue),
+      let approval = toolApprovalDecisionsByRequestID[invocationID.rawValue],
+      case .deny = approval.decision,
+      case .delegate = approval.decider
+    else {
+      return false
+    }
+    return normalizer.records.contains { record in
+      guard case .processTool(let tool) = record.event else {
+        return false
+      }
+      return tool.toolRequestID.rawValue == invocationID.rawValue && tool.status == .denied
+        && tool.sessionToolRequestPositions?[requestID] != nil
+    }
+  }
+
+  func overrideToolDenial(_ invocationID: SignalboxToolInvocationID) async {
+    guard
+      !isDecidingTool,
+      isTerminalDelegateDenied(invocationID),
+      !armedToolDenials.contains(invocationID.rawValue),
+      !retiredToolDenials.contains(invocationID.rawValue),
+      mutationBlocksByTurnID.isEmpty,
+      let service = connectedService
+    else {
+      return
+    }
+    let generation = serviceGeneration
+    isDecidingTool = true
+    defer {
+      if serviceGeneration == generation {
+        isDecidingTool = false
+      }
+    }
+    var preparedForAttempt: SignalboxPreparedToolDenialOverride?
+    var reusedUnresolvedOverride = false
+    do {
+      let requestID = try SignalboxCanonicalUUID(validating: invocationID.rawValue)
+      let prepared: SignalboxPreparedToolDenialOverride
+      if let unresolvedToolOverride,
+        unresolvedToolOverride.sessionID == session.id,
+        unresolvedToolOverride.toolRequestID == requestID
+      {
+        prepared = unresolvedToolOverride
+        reusedUnresolvedOverride = true
+      } else {
+        unresolvedToolOverride = nil
+        prepared = try await service.prepareToolDenialOverride(
+          sessionID: session.id,
+          toolRequestID: requestID
+        )
+      }
+      preparedForAttempt = prepared
+      guard serviceGeneration == generation else {
+        return
+      }
+      _ = try await service.overrideToolDenial(prepared)
+      guard serviceGeneration == generation else {
+        return
+      }
+      unresolvedToolOverride = nil
+      armedToolDenials.insert(invocationID.rawValue)
+      retireConsumedToolOverrides()
+      errorMessage = nil
+    } catch {
+      guard serviceGeneration == generation else {
+        return
+      }
+      if error is CancellationError {
+        unresolvedToolOverride = preparedForAttempt
+      } else if let serviceError = error as? SignalboxProcessServiceError,
+        serviceError.retainsPreparedMutationIdentity
+      {
+        unresolvedToolOverride = preparedForAttempt
+      } else if let openError = error as? SignalboxProcessRequestOpenError,
+        case .definitelyUnsent = openError,
+        reusedUnresolvedOverride
+      {
+        unresolvedToolOverride = preparedForAttempt
+      } else {
+        unresolvedToolOverride = nil
+      }
+      errorMessage = error.localizedDescription
+    }
+  }
+
   func decideToolRequest(
     _ invocationID: SignalboxToolInvocationID,
     decision: SignalboxProcessToolDecision
@@ -1634,6 +1920,105 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         unresolvedToolDecision = preparedForAttempt
       } else {
         unresolvedToolDecision = nil
+      }
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  func reconcileAndSendSuccessor() async {
+    let content = composerText
+    guard
+      !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      !isSubmitting,
+      canReconcileAndSend,
+      let activeTurnID = hasRetryableReconciliation
+        ? unresolvedReconciliation?.activeTurnID : recoverableTurnID,
+      let service = connectedService
+    else {
+      return
+    }
+    let generation = serviceGeneration
+    isSubmitting = true
+    defer {
+      if serviceGeneration == generation {
+        isSubmitting = false
+      }
+    }
+    var preparedForAttempt: SignalboxPreparedTurnReconciliation?
+    var reusedUnresolvedReconciliation = false
+    do {
+      let prepared: SignalboxPreparedTurnReconciliation
+      if let unresolvedReconciliation,
+        unresolvedReconciliation.sessionID == session.id,
+        hasExactUTF8(unresolvedReconciliation.content, content)
+      {
+        prepared = unresolvedReconciliation
+        reusedUnresolvedReconciliation = true
+      } else {
+        unresolvedReconciliation = nil
+        prepared = try await service.prepareTurnReconciliation(
+          session: session,
+          activeTurnID: activeTurnID,
+          content: content
+        )
+      }
+      preparedForAttempt = prepared
+      guard serviceGeneration == generation else {
+        return
+      }
+      let submitted = try await service.reconcileTurn(prepared)
+      guard serviceGeneration == generation else {
+        return
+      }
+      let acceptedInput = SignalboxProcessPendingInput(
+        id: submitted.acceptedInputID,
+        turnID: submitted.turnID,
+        acceptancePosition: submitted.acceptancePosition,
+        content: prepared.content
+      )
+      pendingInputs.removeAll { $0.id == submitted.acceptedInputID }
+      acceptedInputsAwaitingTranscript.removeAll { $0.id == submitted.acceptedInputID }
+      if !materializedAcceptedInputIDs.contains(submitted.acceptedInputID) {
+        if terminalTurnIDs.contains(submitted.turnID) {
+          retainAcceptedInputAwaitingTranscript(acceptedInput)
+        } else {
+          pendingInputs.append(acceptedInput)
+          pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
+        }
+      }
+      unresolvedReconciliation = nil
+      if recoverableTurnID == prepared.activeTurnID {
+        recoverableTurnID = nil
+      }
+      if hasExactUTF8(composerText, prepared.content) {
+        composerText = ""
+      }
+      errorMessage = nil
+    } catch {
+      guard serviceGeneration == generation else {
+        return
+      }
+      await refreshSessionDefaultsIfNeeded(
+        after: error,
+        using: service,
+        generation: generation
+      )
+      guard serviceGeneration == generation else {
+        return
+      }
+      if error is CancellationError {
+        unresolvedReconciliation = preparedForAttempt
+      } else if let serviceError = error as? SignalboxProcessServiceError,
+        serviceError.retainsPreparedMutationIdentity
+      {
+        unresolvedReconciliation = preparedForAttempt
+      } else if let openError = error as? SignalboxProcessRequestOpenError,
+        case .definitelyUnsent = openError,
+        reusedUnresolvedReconciliation
+      {
+        unresolvedReconciliation = preparedForAttempt
+      } else {
+        unresolvedReconciliation = nil
       }
       errorMessage = error.localizedDescription
     }
@@ -1745,7 +2130,28 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   var canSend: Bool {
-    canSubmit && activeTurnID == nil
+    canSubmit && (activeTurnID == nil || hasRetryableSubmission) && !hasRetryableReconciliation
+  }
+
+  private var hasRetryableSubmission: Bool {
+    unresolvedSubmission.map {
+      $0.sessionID == session.id && hasExactUTF8($0.content, composerText)
+    } ?? false
+  }
+
+  private var hasRetryableReconciliation: Bool {
+    unresolvedReconciliation.map {
+      $0.sessionID == session.id && hasExactUTF8($0.content, composerText)
+    } ?? false
+  }
+
+  var showsReconciliation: Bool {
+    unresolvedSubmission == nil && (recoverableTurnID != nil || hasRetryableReconciliation)
+  }
+
+  var canReconcileAndSend: Bool {
+    canSubmit && showsReconciliation
+      && (unresolvedReconciliation == nil || hasRetryableReconciliation)
   }
 
   var canStopAndSend: Bool {
@@ -1779,6 +2185,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         toolApprovalDecisionsByRequestID = retainedToolApprovalDecisions(
           projection.toolApprovalDecisionsByRequestID
         )
+        retireConsumedToolOverrides()
         refreshTimeline()
         pendingInputs = projection.pendingInputs
         acceptedInputsAwaitingTranscript.removeAll {
@@ -1790,6 +2197,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         materializedAcceptedInputIDs = projection.materializedAcceptedInputIDs
         terminalTurnIDs = terminalTurnIDs(in: snapshot)
         activeTurnID = activeTurnID(in: snapshot)
+        recoverableTurnID = snapshot.records.compactMap { record -> SignalboxCanonicalUUID? in
+          guard case .turn(let turn) = record,
+            case .activeAwaitingModelCallRecovery(_, _, _, true) = turn.state
+          else { return nil }
+          return turn.turnID
+        }.first
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = [:]
         activity = projection.activity
@@ -1807,6 +2220,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           retainedToolApprovalDecisions(projection.toolApprovalDecisionsByRequestID),
           uniquingKeysWith: { _, latest in latest }
         )
+        retireConsumedToolOverrides()
         refreshTimeline()
         let snapshotTerminalTurnIDs = terminalTurnIDs(in: snapshot)
         let snapshotActiveTurnID = activeTurnID(in: snapshot)
@@ -1818,6 +2232,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           self.activeTurnID = nil
         }
         let wasMutationBlocked = !mutationBlocksByTurnID.isEmpty
+        recoverableTurnID = snapshot.records.compactMap { record -> SignalboxCanonicalUUID? in
+          guard case .turn(let turn) = record,
+            case .activeAwaitingModelCallRecovery(_, _, _, true) = turn.state
+          else { return nil }
+          return turn.turnID
+        }.first
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = Dictionary(
           snapshot.records.compactMap { record in
@@ -2012,6 +2432,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     acceptedInputTimelineOffsets = [:]
     activity = .unavailable
     activeTurnID = nil
+    recoverableTurnID = nil
+    unresolvedReconciliation = nil
     runner = nil
     runnerTransition = nil
     mutationBlocksByTurnID = [:]
@@ -2030,6 +2452,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     errorMessage = nil
     unresolvedSubmission = nil
     unresolvedToolDecision = nil
+    unresolvedToolOverride = nil
+    armedToolDenials = []
+    retiredToolDenials = []
     streamedText = nil
     materializedAcceptedInputIDs = []
     terminalTurnIDs = []
@@ -2087,6 +2512,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       guard admitsActivation else {
         return
       }
+      recoverableTurnID = nil
       mutationBlocksByTurnID.removeValue(forKey: turnID)
       guard mutationBlocksByTurnID.isEmpty else {
         return
@@ -2147,6 +2573,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         decider: decider,
         rationale: rationale
       )
+      retireConsumedToolOverrides()
       refreshTimeline()
     case .turnCompleted(let turnID, _, _, _):
       applyTerminalTurn(
@@ -2252,6 +2679,76 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     unrecognizedLiveTimelineUTF8Bytes += retainedBytes
     timelinePresentationOrder.append(.unrecognized(cursor.rawValue))
     refreshTimeline()
+  }
+
+  private func retireConsumedToolOverrides() {
+    for approval in toolApprovalDecisionsByRequestID.values {
+      if case .userOverride(_, let deniedRequestID) = approval.decider {
+        retiredToolDenials.insert(deniedRequestID.rawValue)
+        armedToolDenials.remove(deniedRequestID.rawValue)
+      }
+    }
+    let tools = normalizer.records.compactMap { record -> SignalboxProcessToolEvent? in
+      guard case .processTool(let tool) = record.event else {
+        return nil
+      }
+      return tool
+    }
+    for tool in tools where tool.overrideRecorded == true {
+      if !retiredToolDenials.contains(tool.toolRequestID.rawValue) {
+        armedToolDenials.insert(tool.toolRequestID.rawValue)
+      }
+    }
+    for denied in tools where armedToolDenials.contains(denied.toolRequestID.rawValue) {
+      for later in tools {
+        guard toolRetiresMatchingOverride(later),
+          later.toolName == denied.toolName,
+          let arguments = denied.arguments,
+          later.arguments == arguments,
+          approvalFollowsDenial(later, denied)
+        else {
+          continue
+        }
+        retiredToolDenials.insert(denied.toolRequestID.rawValue)
+        armedToolDenials.remove(denied.toolRequestID.rawValue)
+        break
+      }
+    }
+  }
+
+  private func toolRetiresMatchingOverride(_ tool: SignalboxProcessToolEvent) -> Bool {
+    if let approval = toolApprovalDecisionsByRequestID[tool.toolRequestID.rawValue],
+      case .approve = approval.decision
+    {
+      return true
+    }
+    return tool.status == .completed
+      || (tool.status == .closed && tool.approvedBeforeClose == true)
+  }
+
+  private func approvalFollowsDenial(
+    _ later: SignalboxProcessToolEvent,
+    _ denied: SignalboxProcessToolEvent
+  ) -> Bool {
+    guard let laterID = try? SignalboxCanonicalUUID(validating: later.toolRequestID.rawValue),
+      let deniedID = try? SignalboxCanonicalUUID(validating: denied.toolRequestID.rawValue),
+      let laterPosition = later.sessionToolRequestPositions?[laterID],
+      let deniedPosition = later.sessionToolRequestPositions?[deniedID]
+        ?? denied.sessionToolRequestPositions?[deniedID]
+    else {
+      return false
+    }
+    if laterPosition.turnID == deniedPosition.turnID {
+      return laterPosition.modelCallID != deniedPosition.modelCallID
+        && laterPosition.entryIndex.rawValue > deniedPosition.entryIndex.rawValue
+    }
+    guard let laterAcceptance = later.sessionTurnAcceptancePositions?[laterPosition.turnID],
+      let deniedAcceptance = later.sessionTurnAcceptancePositions?[deniedPosition.turnID]
+        ?? denied.sessionTurnAcceptancePositions?[deniedPosition.turnID]
+    else {
+      return false
+    }
+    return laterAcceptance.rawValue > deniedAcceptance.rawValue
   }
 
   private func retainedToolApprovalDecisions(
@@ -2484,6 +2981,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   ) {
     let admitsTerminalState = admitsStateTransition(for: turnID, at: cursor)
     terminalTurnIDs.insert(turnID)
+    if recoverableTurnID == turnID { recoverableTurnID = nil }
     if admitsTerminalState {
       mutationBlocksByTurnID.removeValue(forKey: turnID)
     }
@@ -2853,7 +3351,18 @@ struct ProcessSessionDetailScreen: View {
       )
       .accessibilityLabel("Send")
       .accessibilityIdentifier("send-message-button")
-      if viewModel.activeTurnID != nil {
+      if viewModel.showsReconciliation {
+        Button("Reconcile & Send") {
+          Task { await viewModel.reconcileAndSendSuccessor() }
+        }
+        .buttonStyle(.bordered)
+        .disabled(
+          viewModel.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || viewModel.isSubmitting || !viewModel.canReconcileAndSend
+        )
+        .help("Resolve the interrupted model call and send the composer text as its successor.")
+        .accessibilityIdentifier("reconcile-turn-button")
+      } else if viewModel.activeTurnID != nil {
         Button(role: .destructive) {
           Task { await viewModel.stopAndSendSuccessor() }
         } label: {
@@ -2896,18 +3405,37 @@ struct ProcessSessionDetailScreen: View {
     case .message(let message):
       MessageBubble(message: message)
     case .tool(let tool):
-      ToolInvocationCard(
-        tool: tool,
-        decisionAvailable: tool.decisionAvailable && viewModel.canDecideToolRequest,
-        onApprove: {
-          Task {
-            await viewModel.decideToolRequest(tool.invocationID, decision: .approve)
+      VStack(alignment: .leading, spacing: 8) {
+        ToolInvocationCard(
+          tool: tool,
+          decisionAvailable: tool.decisionAvailable && viewModel.canDecideToolRequest,
+          onApprove: {
+            Task {
+              await viewModel.decideToolRequest(tool.invocationID, decision: .approve)
+            }
+          },
+          onDeny: {
+            deniedToolRequest = tool.invocationID
           }
-        },
-        onDeny: {
-          deniedToolRequest = tool.invocationID
+        )
+        if viewModel.isTerminalDelegateDenied(tool.invocationID) {
+          if viewModel.armedToolDenials.contains(tool.invocationID.rawValue) {
+            Text("One-shot override armed")
+          } else if viewModel.retiredToolDenials.contains(tool.invocationID.rawValue) {
+            Text("One-shot override retired")
+          } else {
+            Button("Arm one-shot override") {
+              Task { await viewModel.overrideToolDenial(tool.invocationID) }
+            }
+            .buttonStyle(.bordered)
+            .disabled(!viewModel.canDecideToolRequest)
+            .accessibilityIdentifier("override-tool-denial-button")
+          }
+          Text("Applies to a later matching proposal after one extra model round.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
-      )
+      }
     case .processEvidence(let notice):
       ProcessNoticeCard(notice: notice)
     case .turnFailure(let failure):

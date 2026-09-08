@@ -5758,7 +5758,7 @@ reasoning_replay_family = "shared"
     let (effective, _) = catalog
         .resolve(&selected)
         .expect("selected target")
-        .effective_target(&selected, signalbox_model_runtime::FastMode::Enabled)
+        .effective_target(&selected, signalbox_model_runtime::FastMode::Enabled, None)
         .expect("fast target");
     assert_eq!(
         catalog
@@ -5816,4 +5816,70 @@ reasoning_replay_family = "shared"
             .reasoning_replay_family(),
         Some("shared")
     );
+}
+
+#[test]
+fn review_findings_policy_cannot_exceed_domain_admission() {
+    for replacement in ["33", "\"none\""] {
+        let document = CONFIGURATION.replace(
+            "max_review_findings_per_run = 32",
+            &format!("max_review_findings_per_run = {replacement}"),
+        );
+        assert!(matches!(
+            HubModelConfiguration::parse(&document),
+            Err(HubModelConfigurationError::InvalidNumericBound {
+                field: "max_review_findings_per_run"
+            })
+        ));
+    }
+}
+
+#[test]
+fn imported_title_projection_admits_zero_unbounded_and_above_domain_limits() {
+    for (replacement, expected) in [("0", Some(0)), ("257", Some(257)), ("\"none\"", None)] {
+        let document = CONFIGURATION.replace(
+            "max_imported_conversation_display_title_scalars = 256",
+            &format!("max_imported_conversation_display_title_scalars = {replacement}"),
+        );
+        let configuration =
+            HubModelConfiguration::parse(&document).expect("valid projection limit");
+        assert_eq!(
+            configuration
+                .numeric_bounds()
+                .integer("max_imported_conversation_display_title_scalars"),
+            Some(expected),
+            "{replacement}",
+        );
+    }
+}
+
+#[test]
+fn replica_read_policy_must_admit_the_catalog_write_bound() {
+    let document =
+        CONFIGURATION.replace("max_blob_replica_count = 32", "max_blob_replica_count = 31");
+    assert!(matches!(
+        HubModelConfiguration::parse(&document),
+        Err(HubModelConfigurationError::InvalidNumericBound {
+            field: "max_blob_replica_count"
+        })
+    ));
+}
+
+#[test]
+fn disabling_reconciliation_requires_lossless_nudge_handoff() {
+    let document = CONFIGURATION.replace(
+        "reconciliation_sweep_interval = \"1s\"",
+        "reconciliation_sweep_interval = \"none\"",
+    );
+    assert!(matches!(
+        HubModelConfiguration::parse(&document),
+        Err(HubModelConfigurationError::InvalidNumericBound {
+            field: "nudge_buffer_capacity"
+        })
+    ));
+    let lossless = document.replace(
+        "nudge_buffer_capacity = 1024",
+        "nudge_buffer_capacity = \"none\"",
+    );
+    assert!(HubModelConfiguration::parse(&lossless).is_ok());
 }

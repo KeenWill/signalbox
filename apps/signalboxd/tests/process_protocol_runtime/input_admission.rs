@@ -557,7 +557,7 @@ async fn queued_input_survives_process_restart_and_startup_scan() -> Result<(), 
 /// compacts that queued turn before activating it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn reported_usage_preflight_counts_the_queued_input() -> Result<(), Box<dyn Error>> {
+async fn reported_usage_preflight_counts_queued_input_framing() -> Result<(), Box<dyn Error>> {
     let configuration_text = reported_usage_preflight_configuration_text();
     let mut runtime = RunningRuntime::start_with_model_configuration(&configuration_text).await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -593,11 +593,10 @@ async fn reported_usage_preflight_counts_the_queued_input() -> Result<(), Box<dy
     .await?;
     assert_eq!(first_probe.received_operations().len(), 1);
 
-    // 103 ASCII characters: under the byte-per-token allowance the queued input
-    // alone exceeds the remaining headroom.
-    let queued_input = String::from(
-        "queued input preflight suffix long enough on its own to exhaust the remaining declared context headroom",
-    );
+    // The 63 content bytes fit the remaining 80 tokens; the actual OpenAI
+    // message envelope makes this uncommitted input exceed that headroom.
+    let queued_input =
+        String::from("queued input whose bytes fit but whose rendered framing does not");
     connection
         .request_version(
             ProtocolVersion::One,

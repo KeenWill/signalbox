@@ -271,8 +271,8 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
   )
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
+  await expect(page.getByText('Sessions unavailable')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -288,8 +288,8 @@ test('gates Sessions on valid timeline limits', async ({ page }) => {
   )
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
+  await expect(page.getByText('Sessions unavailable')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -315,7 +315,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
   scenario.recover()
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
 
-  await expect(page.getByText('Timeline reads available')).toBeVisible()
+  await expect(page.getByText('Session ID required')).toBeVisible()
   await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
@@ -470,11 +470,11 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
-  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
   await expect(page.getByRole('form', { name: 'Message composer' })).toBeVisible()
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
@@ -543,7 +543,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
@@ -552,8 +552,8 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await page.getByRole('link', { name: /Settings/ }).click()
   await page.getByRole('radio', { name: 'Full' }).check()
   await page.getByRole('link', { name: /Sessions/ }).click()
-  await page.getByRole('button', { name: 'Open workspace by ID' }).click()
-  const reopenedSessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await page.getByRole('button', { name: 'Open by ID' }).click()
+  const reopenedSessionId = page.getByRole('textbox', { name: 'Session ID' })
   await reopenedSessionId.fill(sessionWorkspaceFixture.id)
   await reopenedSessionId.press('Enter')
 
@@ -567,7 +567,7 @@ test('keeps palette selection commands focused on the Session timeline', async (
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
@@ -591,7 +591,7 @@ test('preserves the saved row when reopening the current Session fails', async (
   await useDeterministicSession(page, () => failTimeline)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await page.getByRole('option', { name: /43 turn completed/ }).click()
@@ -629,7 +629,7 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
   )
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await page.getByRole('option', { name: /43 turn completed/ }).click()
@@ -668,7 +668,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   await useDeterministicSession(page, () => failTimeline)
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
@@ -676,9 +676,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   failTimeline = true
   await page.getByRole('button', { name: /Latest/ }).click()
 
-  await expect(page.getByRole('alert')).toContainText(
-    'The daemon could not provide this bounded session window',
-  )
+  await expect(page.getByRole('alert')).toContainText('Session unavailable')
   await expect(page.getByRole('listbox', { name: 'Session timeline' })).toHaveCount(0)
   await expect(page.getByLabel('Inspector').getByText(sessionWorkspaceFixture.id)).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
@@ -701,7 +699,7 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
   )
   await page.goto('/sessions?workspace=true')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await expect(page.getByRole('option', { name: /43 turn completed/ })).toBeVisible()
@@ -827,10 +825,8 @@ test('runs product navigation sequences but leaves Mod+K to an editing field', a
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
   await expect(search).toHaveAttribute('data-mod-k-default-prevented', 'false')
 
-  // The landed shell keeps `surface.escape` away from every editable product control, so Escape
-  // does not release the field and the sequence stays ordinary text input. Narrowing that guard is
-  // deferred on KeenWill/signalbox#1316.
-  await search.press('Escape')
+  // Navigation sequences remain ordinary text while the search field owns focus.
+  await expect(search).toBeFocused()
   await page.keyboard.press('g')
   await page.keyboard.press('a')
   await expect(page).toHaveURL(/\/search$/)
@@ -953,7 +949,7 @@ test('shows transcript-detail commands only on Settings among product routes', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('keeps Settings single-column when a vertical scrollbar reduces content width', async ({
+test('keeps Settings within the pane when a vertical scrollbar reduces content width', async ({
   page,
 }) => {
   const problems = watchBrowser(page)
@@ -966,12 +962,6 @@ test('keeps Settings single-column when a vertical scrollbar reduces content wid
     .nth(0)
   await navigationWidth.fill('360')
 
-  const settingsGrid = page.locator('.settings-grid')
-  expect(
-    await settingsGrid.evaluate(
-      (element) => getComputedStyle(element).gridTemplateColumns.split(' ').length,
-    ),
-  ).toBe(1)
   const settingsSurface = page.locator('.settings-surface')
   expect(
     await settingsSurface.evaluate((element) => element.scrollWidth <= element.clientWidth),
@@ -995,6 +985,47 @@ test('applies saved pane widths to the scenario workspace', async ({ page }) => 
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toBeHidden()
   await page.setViewportSize({ width: 1440, height: 900 })
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toHaveCSS('width', '400px')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('fits Settings inside a narrow primary pane with maximum saved side panes', async ({
+  page,
+}, testInfo) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/settings')
+  const sliders = page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider')
+  await sliders.nth(0).fill('360')
+  await sliders.nth(1).fill('480')
+
+  const settings = page.locator('.settings-surface')
+  await expect(settings).toBeVisible()
+  expect(await settings.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
+  const layoutBox = await page.getByRole('group', { name: 'Workspace layout' }).boundingBox()
+  const densityBox = await page.getByRole('group', { name: 'Visual density' }).boundingBox()
+  expect(densityBox?.y).toBeGreaterThan((layoutBox?.y ?? 0) + (layoutBox?.height ?? 0))
+  await page.screenshot({ path: testInfo.outputPath('settings-pane.png') })
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('compacts the scenario toolbar at its pane width', async ({ page }, testInfo) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 780, height: 720 })
+  await page.goto('/settings')
+  await page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider').nth(0).fill('360')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+
+  const toolbar = page.getByRole('toolbar', { name: 'Workspace controls' })
+  await expect(toolbar).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Transcript detail' })).toBeHidden()
+  expect(await toolbar.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  const toolbarBox = await toolbar.boundingBox()
+  expect((toolbarBox?.x ?? 0) + (toolbarBox?.width ?? 0)).toBeLessThanOrEqual(780)
+  await page.screenshot({ path: testInfo.outputPath('scenario-pane.png') })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect(page.getByRole('group', { name: 'Transcript detail' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -1181,6 +1212,61 @@ test('shares expired Imports admission failure with the shell retry state', asyn
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('withholds Search focus after cached bootstrap refetch failure and restores it on retry', async ({
+  page,
+}) => {
+  await page.clock.install()
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.clock.fastForward(30_001)
+  await page
+    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
+    .fill('expired-admission')
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await page.getByRole('link', { name: /^Search Global and session search/ }).click()
+  await expect(
+    page.getByRole('heading', { name: 'Search availability could not be checked' }),
+  ).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await page.evaluate(() => {
+    let shortcutEvent: KeyboardEvent | undefined
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.shiftKey && event.key.toLowerCase() === 'f') {
+          shortcutEvent = event
+        }
+      },
+      true,
+    )
+    document.addEventListener('keyup', (event) => {
+      if (event.key.toLowerCase() === 'f' && shortcutEvent) {
+        document.body.dataset.searchFocusDefaultPrevented = String(shortcutEvent.defaultPrevented)
+      }
+    })
+  })
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+Shift+f`)
+  await expect(page.locator('body')).toHaveAttribute('data-search-focus-default-prevented', 'false')
+
+  await useDeterministicBootstrap(page)
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeVisible()
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Focus lexical search/ }).click()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await page.keyboard.press(`${modifier}+Shift+f`)
+  await expect(page.locator('body')).toHaveAttribute('data-search-focus-default-prevented', 'true')
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
 })
 
 test('mounts Imports after the daemon contract recovers', async ({ page }) => {
@@ -1608,9 +1694,9 @@ test('retains window control focus while loading and after the new window arrive
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
-  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionWorkspaceFixture.id)
-  await page.getByRole('button', { name: 'Open workspace' }).click()
-  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await page.getByRole('textbox', { name: 'Session ID' }).fill(sessionWorkspaceFixture.id)
+  await page.getByRole('button', { name: 'Open', exact: true }).click()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   let releaseWindow = () => {}
   const windowReady = new Promise<void>((resolve) => {
     releaseWindow = resolve
@@ -1627,11 +1713,11 @@ test('retains window control focus while loading and after the new window arrive
   await expect.poll(() => requested).toBe(true)
   await expect(first).toBeFocused()
   releaseWindow()
-  await expect(page.getByText('Active · opened at first')).toBeVisible()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   await expect(first).toBeFocused()
   const latest = page.getByRole('button', { name: /Latest/ })
   await latest.click()
-  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   await expect(latest).toBeFocused()
 })
 
@@ -1639,7 +1725,7 @@ test('trims the session identity before native form validation', async ({ page }
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
   await page.goto('/sessions?workspace=true')
-  const input = page.getByRole('textbox', { name: 'Exact session ID' })
+  const input = page.getByRole('textbox', { name: 'Session ID' })
   await input.fill(`  ${sessionWorkspaceFixture.id}  `)
   await expect(input).toHaveValue(sessionWorkspaceFixture.id)
   await input.press('Enter')

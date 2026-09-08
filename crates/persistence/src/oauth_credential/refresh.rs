@@ -133,12 +133,11 @@ impl OauthCredentialRepository {
             .execute(&mut *transaction)
             .await?;
         provisioning::read_catalog(&mut transaction).await?;
-        let generation: Option<i64> = sqlx::query_scalar(
-            "SELECT generation FROM oauth_credential_profile WHERE profile = $1 FOR UPDATE",
-        )
-        .bind(profile)
-        .fetch_optional(&mut *transaction)
-        .await?;
+        let generation: Option<i64> =
+            sqlx::query_scalar(crate::lock_inventory::OAUTH_CREDENTIAL_PROFILE_GENERATION)
+                .bind(profile)
+                .fetch_optional(&mut *transaction)
+                .await?;
         if generation.is_none() {
             return Ok(None);
         }
@@ -185,15 +184,11 @@ pub(crate) async fn quarantined_profiles(
         .map(|member| member.credential_reference())
         .collect::<Vec<_>>();
     provisioning::read_catalog(connection).await?;
-    let profiles: Vec<String> = sqlx::query_scalar(
-        "SELECT p.profile FROM oauth_credential_profile p
-         JOIN oauth_credential_registration r USING (profile)
-         WHERE p.profile = ANY($1) ORDER BY p.profile COLLATE \"C\"
-         FOR UPDATE OF p",
-    )
-    .bind(members)
-    .fetch_all(&mut *connection)
-    .await?;
+    let profiles: Vec<String> =
+        sqlx::query_scalar(crate::lock_inventory::OAUTH_REGISTERED_CREDENTIAL_PROFILES)
+            .bind(members)
+            .fetch_all(&mut *connection)
+            .await?;
     if profiles.is_empty() {
         return Ok(Vec::new());
     }
@@ -281,11 +276,10 @@ mod tests {
             .execute(&pool)
             .await?;
         let mut blocked_ambient = pool.begin().await?;
-        sqlx::query(
-            "SELECT profile FROM oauth_credential_profile WHERE profile = 'ambient' FOR UPDATE",
-        )
-        .execute(&mut *blocked_ambient)
-        .await?;
+        sqlx::query(crate::lock_inventory::OAUTH_CREDENTIAL_PROFILE)
+            .bind("ambient")
+            .execute(&mut *blocked_ambient)
+            .await?;
         for (members, expected) in [
             (vec!["ambient", "api-key"], vec![]),
             (vec!["ambient", "api-key", "oauth"], vec!["oauth"]),

@@ -27,9 +27,9 @@ the two machines never disagree.
 Waiting carries a typed kind and the party expected to end the wait. Only an
 owned session carries a deadline, and its state sets the kind: admission covers
 created and dispatched, active stall covers active and recovering, and waiting
-covers waiting, each of those states with exactly one deadline; blocked and
-parked carry none. The admission and waiting bounds come from configuration. A
-parked session, reached only by an expired waiting deadline or a module park,
+covers waiting, each of those states with exactly one deadline record; blocked
+and parked carry none. The admission and waiting bounds come from configuration.
+A parked session, reached only by an expired waiting deadline or a module park,
 carries a machine-readable cause and the responder who must act, the operator
 queue or one module. The operator queue is every parked session; the recorded
 responder does not filter it.
@@ -81,6 +81,12 @@ The admission deadline is the one deadline whose expiry terminalizes: it retires
 the session, because before first activity nothing live is guarded and no human
 attention is owed. Every other implemented deadline expiry, the waiting
 deadline, parks; active-stall expiry is planned.
+
+An admission deadline that expires after a turn has started is superseded: the
+deadline pass marks its retained record settled and clears its expiry without
+retiring the session or changing its turns, and logs the supersession at INFO.
+Settled deadlines are excluded from expiry passes and deadline violations.
+Admission is not rearmed after activity, including when a module park is lifted.
 
 The lifecycle actor classifies the domain actor rather than replacing it; the
 domain actor algebra, its wire projection, and its replay-equality rule are
@@ -140,7 +146,9 @@ An absent configured bound leaves a deadline unbounded. An owned session in a
 deadline-bearing state with no deadline row is a violation.
 
 A park takes effect at the next scheduler admission. Work already in flight
-completes; any further pass waits for resume. A stop ends the active turn.
+completes; any further pass waits for resume. A stop ends the active turn. A
+park defers an armed automatic goal-resume attempt without spending it; the
+attempt rereads the goal and lifecycle before retrying.
 
 Verified achievement is recorded only when the declared finish check passes.
 
@@ -169,6 +177,7 @@ that records the cause.
 
 A lifecycle command carries no domain actor: its lifecycle actor derives from
 the authenticated principal, and a module principal classifies as that module.
+Program domain agency has no lifecycle classification.
 
 Message injection (operator text, coordinator guidance, steering) is legal in
 every non-terminal state regardless of ownership, except while a terminal

@@ -9,7 +9,7 @@ use reqwest::{Client, Url};
 
 use signalbox_model_runtime::{
     BoundaryLossEvidence, CancellationSignal, CredentialRedactingSink, DeliveryMode, ExchangeFacts,
-    InputTokenCountOutcome, LossCause,
+    InputTokenCountFailure, InputTokenCountOutcome, LossCause,
     MAX_BUFFERED_PROVIDER_RESPONSE_BYTES as MAX_BUFFERED_RESPONSE_BYTES,
     MAX_STREAMED_PROVIDER_RESPONSE_BYTES as MAX_STREAMED_RESPONSE_BYTES, MessagePart,
     ModelInputTokenCounter, ModelOperation, ModelRuntime, NativeErrorFacts, ObservationFact,
@@ -184,8 +184,11 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .model_capabilities
             .validate_explicit(&operation.resolved_target, &operation.settings)?;
         if let Some(capabilities) = capabilities {
-            let (target, effective_request_fast_mode) = capabilities
-                .effective_target(&operation.resolved_target, operation.settings.fast_mode)?;
+            let (target, effective_request_fast_mode) = capabilities.effective_target(
+                &operation.resolved_target,
+                operation.settings.fast_mode,
+                operation.retained_mapped_target.as_ref(),
+            )?;
             operation.resolved_target = target.clone();
             request_fast_mode = effective_request_fast_mode;
         }
@@ -707,7 +710,12 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
         let correlation = operation.correlation.clone();
         let request_fast_mode = match self.apply_model_capabilities(&mut operation) {
             Ok(request_fast_mode) => request_fast_mode,
-            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+            Err(_) => {
+                return InputTokenCountOutcome::Failed {
+                    correlation,
+                    failure: InputTokenCountFailure::Capability,
+                };
+            }
         };
         let provider_compaction_supported = operation.provider_compaction_supported;
         let server_compaction = operation.provider_compaction == ProviderCompactionMode::Allowed
@@ -723,22 +731,42 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             provider_compaction_supported,
         ) {
             Ok(request) => CountTokensRequest::from(request),
-            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+            Err(_) => {
+                return InputTokenCountOutcome::Failed {
+                    correlation,
+                    failure: InputTokenCountFailure::Translation,
+                };
+            }
         };
         let body = match serialize_request(&wire_request) {
             Ok(body) => body,
-            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+            Err(_) => {
+                return InputTokenCountOutcome::Failed {
+                    correlation,
+                    failure: InputTokenCountFailure::Serialization,
+                };
+            }
         };
         let credential = match cancellation
             .run_until_cancelled(self.credentials.resolve(&operation.credential_reference))
             .await
         {
             None => return InputTokenCountOutcome::Cancelled { correlation },
-            Some(Err(_)) => return InputTokenCountOutcome::Failed { correlation },
+            Some(Err(error)) => {
+                return InputTokenCountOutcome::Failed {
+                    correlation,
+                    failure: InputTokenCountFailure::CredentialAccess {
+                        failure: error.failure,
+                    },
+                };
+            }
             Some(Ok(credential)) => credential,
         };
         let Some(api_key_header) = sensitive_header(&credential) else {
-            return InputTokenCountOutcome::Failed { correlation };
+            return InputTokenCountOutcome::Failed {
+                correlation,
+                failure: InputTokenCountFailure::CredentialHeader,
+            };
         };
         let mut builder = self
             .client
@@ -754,31 +782,58 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
         }
         let request = match build_http_request(builder) {
             Ok(request) => request,
-            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+            Err(_) => {
+                return InputTokenCountOutcome::Failed {
+                    correlation,
+                    failure: InputTokenCountFailure::Request,
+                };
+            }
         };
         let response = match cancellation
             .run_until_cancelled(self.client.execute(request))
             .await
         {
             None => return InputTokenCountOutcome::Cancelled { correlation },
-            Some(Err(_)) => return InputTokenCountOutcome::Failed { correlation },
+            Some(Err(_)) => {
+                return InputTokenCountOutcome::Failed {
+                    correlation,
+                    failure: InputTokenCountFailure::Transport,
+                };
+            }
             Some(Ok(response)) => response,
         };
         if !response.status().is_success() {
+            let status = response.status().as_u16();
             let _ = collect_response_body(response, &mut cancellation).await;
-            return InputTokenCountOutcome::Failed { correlation };
+            return InputTokenCountOutcome::Failed {
+                correlation,
+                failure: InputTokenCountFailure::HttpStatus { status },
+            };
         }
         let body = match collect_response_body(response, &mut cancellation).await {
             None => return InputTokenCountOutcome::Cancelled { correlation },
-            Some(Err(_)) => return InputTokenCountOutcome::Failed { correlation },
+            Some(Err(_)) => {
+                return InputTokenCountOutcome::Failed {
+                    correlation,
+                    failure: InputTokenCountFailure::ResponseBody,
+                };
+            }
             Some(Ok(body)) => body,
         };
         if validate_provider_json_nesting(&body).is_err() {
-            return InputTokenCountOutcome::Failed { correlation };
+            return InputTokenCountOutcome::Failed {
+                correlation,
+                failure: InputTokenCountFailure::ResponseNesting,
+            };
         }
         let response: CountTokensResponse = match serde_json::from_slice(&body) {
             Ok(response) => response,
-            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+            Err(_) => {
+                return InputTokenCountOutcome::Failed {
+                    correlation,
+                    failure: InputTokenCountFailure::ResponseDecode,
+                };
+            }
         };
         InputTokenCountOutcome::Counted {
             correlation,

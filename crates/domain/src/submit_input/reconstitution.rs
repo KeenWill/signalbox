@@ -103,6 +103,7 @@ pub(super) enum SubmitInputReconstitutionFacts {
     RejectedAttachmentBlobNotFound {
         result_session: SessionId,
         result_digest: BlobDigest,
+        verified_prefix: Option<Box<[BlobDigest]>>,
     },
     RejectedAttachmentByteBudgetExceeded {
         result_session: SessionId,
@@ -289,6 +290,7 @@ impl SubmitInputReconstitutionInput {
             stored_actor,
             result_session,
             result_digest,
+            verified_prefix,
         } = input;
         Self {
             command,
@@ -296,6 +298,7 @@ impl SubmitInputReconstitutionInput {
             facts: SubmitInputReconstitutionFacts::RejectedAttachmentBlobNotFound {
                 result_session,
                 result_digest,
+                verified_prefix,
             },
         }
     }
@@ -558,6 +561,22 @@ impl SubmitInputReconstitutionInput {
     /// Borrows the reconstructed canonical command.
     pub const fn command(&self) -> &SubmitInput {
         &self.command
+    }
+
+    /// Reconstructs stored non-core agency through complete receipt validation.
+    /// Core and program attribution must already be fixed by their construction paths.
+    pub fn reconstitute_recorded(
+        mut self,
+    ) -> Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError> {
+        if self.command.actor == Actor::User
+            && matches!(
+                self.stored_actor,
+                Actor::Model { .. } | Actor::Tool { .. } | Actor::Recovery
+            )
+        {
+            self.command.actor = self.stored_actor;
+        }
+        self.reconstitute()
     }
 
     /// Reconstructs the complete recorded handling without authorizing an
@@ -890,19 +909,33 @@ impl SubmitInputReconstitutionInput {
             SubmitInputReconstitutionFacts::RejectedAttachmentBlobNotFound {
                 result_session,
                 result_digest,
+                verified_prefix,
             } => {
                 if result_session != self.command.session {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::ResultSessionMismatch,
                     ));
                 }
-                if !self.command.content.parts().iter().any(|part| {
-                    matches!(
-                        part,
-                        crate::UserContentPart::Attachment { digest, .. }
-                            if *digest == result_digest
-                    )
-                }) {
+                let digests = self
+                    .command
+                    .content
+                    .parts()
+                    .iter()
+                    .filter_map(|part| match part {
+                        crate::UserContentPart::Attachment { digest, .. } => Some(*digest),
+                        crate::UserContentPart::Text { .. } => None,
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                let expected_prefix = digests
+                    .iter()
+                    .copied()
+                    .take_while(|digest| *digest < result_digest)
+                    .collect::<Vec<_>>();
+                if !digests.contains(&result_digest)
+                    || verified_prefix
+                        .as_ref()
+                        .is_some_and(|prefix| expected_prefix.as_slice() != prefix.as_ref())
+                {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::AttachmentDigestMismatch,
                     ));

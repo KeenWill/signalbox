@@ -1228,6 +1228,7 @@ fn tool_reconciliation_reread_uses_its_terminal_turn_batch() {
                 entry: TranscriptEntry::ToolClosed {
                     tool_request_id: selected_request,
                     content: String::from("selected result"),
+                    approved_before_close: false,
                 },
             },
             ServerMessage::TranscriptEntry {
@@ -1250,6 +1251,7 @@ fn tool_reconciliation_reread_uses_its_terminal_turn_batch() {
                 entry: TranscriptEntry::ToolClosed {
                     tool_request_id: later_request,
                     content: String::from("later result"),
+                    approved_before_close: false,
                 },
             },
         ],

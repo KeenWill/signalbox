@@ -4393,3 +4393,52 @@ mod tests {
         );
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AttachmentRejectionStorageKind {
+    BlobNotFound,
+    ByteBudgetExceeded,
+}
+
+pub(crate) const fn attachment_rejection_kind_to_str(
+    kind: AttachmentRejectionStorageKind,
+) -> &'static str {
+    match kind {
+        AttachmentRejectionStorageKind::BlobNotFound => "attachment_blob_not_found",
+        AttachmentRejectionStorageKind::ByteBudgetExceeded => "attachment_byte_budget_exceeded",
+    }
+}
+
+pub(crate) fn attachment_rejection_kind_from_str(
+    value: &str,
+) -> Option<AttachmentRejectionStorageKind> {
+    match value {
+        "attachment_blob_not_found" => Some(AttachmentRejectionStorageKind::BlobNotFound),
+        "attachment_byte_budget_exceeded" => {
+            Some(AttachmentRejectionStorageKind::ByteBudgetExceeded)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod attachment_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_rejection_storage_is_closed_and_round_trips() {
+        for kind in [
+            AttachmentRejectionStorageKind::BlobNotFound,
+            AttachmentRejectionStorageKind::ByteBudgetExceeded,
+        ] {
+            assert_eq!(
+                attachment_rejection_kind_from_str(attachment_rejection_kind_to_str(kind)),
+                Some(kind)
+            );
+        }
+        assert_eq!(
+            attachment_rejection_kind_from_str("unknown_attachment_rejection"),
+            None
+        );
+    }
+}

@@ -1,8 +1,9 @@
 use super::load::configured_defaults_version;
 use super::{APPLIED, REJECTED, descendant_scope_to_str};
 use crate::mapping::{
-    accepted_input_id_to_uuid, defaults_version_to_numeric, durable_command_id_to_uuid,
-    input_position_to_numeric, model_settings_overlay_to_json, turn_id_to_uuid,
+    AttachmentRejectionStorageKind, accepted_input_id_to_uuid, attachment_rejection_kind_to_str,
+    defaults_version_to_numeric, durable_command_id_to_uuid, input_position_to_numeric,
+    model_settings_overlay_to_json, turn_id_to_uuid,
 };
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -58,31 +59,43 @@ pub(super) struct EncodedActor {
     pub(super) kind: &'static str,
     pub(super) turn: Option<Uuid>,
     pub(super) tool_request: Option<Uuid>,
+    pub(super) program_run: Option<Uuid>,
 }
 
 pub(super) fn encode_actor(actor: Actor) -> EncodedActor {
     match actor {
+        Actor::Program { run } => EncodedActor {
+            kind: "program",
+            turn: None,
+            tool_request: None,
+            program_run: Some(run.run().into_uuid()),
+        },
         Actor::User => EncodedActor {
+            program_run: None,
             kind: "user",
             turn: None,
             tool_request: None,
         },
         Actor::Core => EncodedActor {
+            program_run: None,
             kind: "core",
             turn: None,
             tool_request: None,
         },
         Actor::Model { turn } => EncodedActor {
+            program_run: None,
             kind: "model",
             turn: Some(turn.into_uuid()),
             tool_request: None,
         },
         Actor::Recovery => EncodedActor {
+            program_run: None,
             kind: "recovery",
             turn: None,
             tool_request: None,
         },
         Actor::Tool { request } => EncodedActor {
+            program_run: None,
             kind: "tool",
             turn: None,
             tool_request: Some(request.into_uuid()),
@@ -288,7 +301,9 @@ pub(super) fn encode_result(
             digest,
         }) => EncodedResult {
             kind: REJECTED,
-            rejection_kind: Some("attachment_blob_not_found"),
+            rejection_kind: Some(attachment_rejection_kind_to_str(
+                AttachmentRejectionStorageKind::BlobNotFound,
+            )),
             session: command_session,
             accepted_input: None,
             turn: None,
@@ -307,7 +322,9 @@ pub(super) fn encode_result(
             maximum_bytes,
         }) => EncodedResult {
             kind: REJECTED,
-            rejection_kind: Some("attachment_byte_budget_exceeded"),
+            rejection_kind: Some(attachment_rejection_kind_to_str(
+                AttachmentRejectionStorageKind::ByteBudgetExceeded,
+            )),
             session: command_session,
             accepted_input: None,
             turn: None,

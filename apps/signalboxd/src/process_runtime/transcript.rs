@@ -138,6 +138,21 @@ where
         };
         let queued_at_snapshot = consume_snapshot_queued_update(&mut updates_queued_at_snapshot);
         match update {
+            ProcessUpdate::ResyncRequired { session } => {
+                if session.is_none_or(|session| session == selected_session) {
+                    return run_until_shutdown(
+                        &mut shutdown,
+                        write_error(
+                            writer,
+                            version,
+                            request_id,
+                            ProtocolError::without_detail(ErrorCode::ResyncRequired),
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Ok(()));
+                }
+            }
             ProcessUpdate::Durable {
                 cursor,
                 session,
@@ -891,6 +906,7 @@ where
             .await
         }
         ProcessTranscriptEntry::ToolDenied {
+            override_recorded,
             entry_index,
             source_session,
             entry,
@@ -906,6 +922,7 @@ where
                     source_session_id: wire_uuid(source_session.into_uuid()),
                     entry_id: wire_uuid(entry.into_uuid()),
                     entry: TranscriptEntry::ToolDenied {
+                        override_recorded: *override_recorded,
                         tool_request_id: wire_uuid(request.into_uuid()),
                         content: content.clone(),
                     },
@@ -963,6 +980,7 @@ where
             entry,
             request,
             content,
+            approved_before_close,
         } => {
             write_message(
                 writer,
@@ -975,6 +993,7 @@ where
                     entry: TranscriptEntry::ToolClosed {
                         tool_request_id: wire_uuid(request.into_uuid()),
                         content: content.clone(),
+                        approved_before_close: *approved_before_close,
                     },
                 },
             )
@@ -1734,7 +1753,10 @@ pub(super) fn wire_system_prompt(
 pub(super) fn wire_list_metadata(
     item: &SessionMetadataListItem,
 ) -> Option<(Option<String>, Vec<String>, Option<MetadataLastWriter>)> {
-    let last_writer = item.last_writer().map(wire_metadata_last_writer);
+    let last_writer = match item.last_writer() {
+        Some(writer) => Some(wire_metadata_last_writer(writer)?),
+        None => None,
+    };
     Some((
         item.title().map(str::to_owned),
         item.tags().map(str::to_owned).collect(),
@@ -1756,12 +1778,18 @@ pub(super) fn wire_metadata_snapshot(
         content.archived(),
     )
     .ok()?;
-    let last_writer = snapshot.last_writer().map(wire_metadata_last_writer);
+    let last_writer = match snapshot.last_writer() {
+        Some(writer) => Some(wire_metadata_last_writer(writer)?),
+        None => None,
+    };
     Some((metadata, last_writer))
 }
 
-pub(super) fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> MetadataLastWriter {
+pub(super) fn wire_metadata_last_writer(
+    writer: SessionMetadataLastWriter,
+) -> Option<MetadataLastWriter> {
     let actor = match writer.actor() {
+        Actor::Program { .. } => return None,
         Actor::User => MetadataActor::User {},
         Actor::Core => MetadataActor::Core {},
         Actor::Model { turn } => MetadataActor::Model {
@@ -1772,10 +1800,10 @@ pub(super) fn wire_metadata_last_writer(writer: SessionMetadataLastWriter) -> Me
             tool_request_id: wire_uuid(request.into_uuid()),
         },
     };
-    MetadataLastWriter::new(
+    Some(MetadataLastWriter::new(
         CanonicalU64::new(writer.updated_at().as_unix_micros()),
         actor,
-    )
+    ))
 }
 
 pub(super) const fn wire_imported_source_speaker(

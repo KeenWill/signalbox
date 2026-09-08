@@ -55,7 +55,9 @@ beyond half the rendered bytes and falls back to the latest safe boundary that
 fits. At two points a headroom guard adds the newest reported input for the
 pinned target, a byte allowance for model-visible content that input does not
 cover, and the configured output reservation, and compares the sum with the
-configured context window. Before activating a queued turn it may spend one
+configured context window. Queued-turn allowances measure each uncovered entry
+through the effective adapter's message serializer, including framing and
+content-free messages. Before activating a queued turn it may spend one
 automatic compaction; when that compaction fails, or the request still exceeds
 the window after it, one transaction fails the queued turn with no ordinary call
 prepared. Inside the tool-result continuation transaction an exceeded bound
@@ -80,6 +82,10 @@ Only a successful estimate whose input plus full output reservation is at most
 95 percent of the configured context ceiling enters the counted activation
 transaction; otherwise the turn compacts. An estimate that returns no validated
 count falls through to ordinary uncounted activation.
+
+For a failed count with matching correlation, the bridge emits one warning with
+the safe failure evidence and session, turn, and model-call correlation;
+mismatched correlation remains an error.
 
 Anthropic ordinary calls enable provider-default server-side compaction only
 when the exact effective provider target's configured capabilities explicitly
@@ -278,7 +284,9 @@ substitution provenance it would have to record does not exist; a substituted
 call is therefore classified `Ambiguous` by restart rather than `KnownFailed`
 live. The runtime's exhaustive provider-error classification is carried verbatim
 into the operator cause codes rather than restated, so the adapter taxonomy and
-the operator vocabulary cannot drift apart.
+the operator vocabulary cannot drift apart. The bridge includes a retained
+response-envelope rejection stage in its correlated terminal warning, without
+provider-authored detail.
 
 Every model-call transaction issues the session-scheduler row lock as its first
 statement, so per-session serialization is total and lock-order cycles on one

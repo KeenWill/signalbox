@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, Search, X } from 'lucide-react'
+import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
 import {
@@ -34,27 +34,33 @@ const SessionTitle = ({ summary }: { summary: SessionSummary }) => (
 )
 
 export function SessionCatalogSurface({
+  returnSessionId,
+  onReturnFocusConsumed,
+  lifecycleFilter,
+  pageOrder,
+  onLifecycleFilterChange,
+  onPageOrderChange,
   state,
   onStateChange,
   onTimelineIds,
 }: {
+  returnSessionId?: string
+  onReturnFocusConsumed: () => void
+  lifecycleFilter: string
+  pageOrder: string
+  onLifecycleFilterChange: (value: string) => void
+  onPageOrderChange: (value: string) => void
   state: ProductSessionState
   onTimelineIds: (ids: readonly string[]) => void
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close' | 'replace') => void
 }) {
   const dispatch = useAppDispatch()
   const keyboardSelection = useAppSelector((root) => root.app.selectedTimeline)
-  const [lifecycleFilter, setLifecycleFilter] = useState('all')
-  const [pageOrder, setPageOrder] = useState('activity')
-  const returnFocus = useRef<HTMLButtonElement>(null)
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
-  const closeFocus = useRef<HTMLButtonElement>(null)
-  const inspector = useRef<HTMLElement>(null)
-  const workspaceAction = useRef<HTMLButtonElement>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const errorHeading = useRef<HTMLHeadingElement>(null)
   const restorePageFocus = useRef(false)
-  const [narrowInspector, setNarrowInspector] = useState(false)
+  const pendingReturnFocus = useRef(returnSessionId)
   const [searchError, setSearchError] = useState<string | null>(null)
   const overlay = useAppSelector((root) => root.app.overlay)
   const sessions = useQuery({
@@ -109,26 +115,6 @@ export function SessionCatalogSurface({
       })
     return rows
   }, [sessions.data, rates.data, lifecycleFilter, pageOrder, rateById])
-  const totals = listed.reduce(
-    (sum, row) => {
-      const rate = rateById.get(row.session_id)
-      if (rate) {
-        sum.states[rate.lifecycle_state] = (sum.states[rate.lifecycle_state] ?? 0) + 1
-        sum.turns += BigInt(rate.turn_count)
-        sum.failed += BigInt(rate.failed_turn_count)
-        sum.retired += BigInt(rate.retired_turn_count)
-        sum.completed += BigInt(rate.completed_turn_count)
-      }
-      return sum
-    },
-    {
-      states: {} as Record<string, number>,
-      turns: BigInt(0),
-      failed: BigInt(0),
-      retired: BigInt(0),
-      completed: BigInt(0),
-    },
-  )
   useEffect(() => {
     onTimelineIds(listed.map((row) => row.session_id))
     return () => onTimelineIds([])
@@ -137,62 +123,13 @@ export function SessionCatalogSurface({
     if (keyboardSelection && overlay === null)
       sessionButtons.current.get(keyboardSelection)?.focus()
   }, [keyboardSelection, overlay])
-  const selected = listed.find((summary) => summary.session_id === state.session)
-  const selectedSessionId = selected?.session_id
   useEffect(() => {
-    if (sessions.data && state.session && !listed.some((row) => row.session_id === state.session))
-      onStateChange({ ...state, session: undefined }, 'close')
-  }, [sessions.data, listed, state, onStateChange])
-
-  useEffect(() => {
-    const query = window.matchMedia('(max-width: 760px)')
-    const update = () => setNarrowInspector(query.matches)
-    update()
-    query.addEventListener('change', update)
-    return () => query.removeEventListener('change', update)
-  }, [])
-
-  useEffect(() => {
-    if (selectedSessionId) {
-      returnFocus.current = sessionButtons.current.get(selectedSessionId) ?? null
-    }
-    const focusTarget = selectedSessionId ? closeFocus : returnFocus
-    const frame = requestAnimationFrame(() => {
-      const target = focusTarget.current
-      if (target?.isConnected) target.focus()
-      else if (target) pageHeading.current?.focus()
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [selectedSessionId])
-
-  useEffect(() => {
-    if (!narrowInspector || !selectedSessionId || overlay !== null) return
-    const containFocus = (event: KeyboardEvent) => {
-      if (event.key !== 'Tab') return
-      const first = closeFocus.current
-      const last = workspaceAction.current
-      const root = inspector.current
-      if (!first || !last || !root) return
-      const target = event.target
-      if (
-        !(target instanceof HTMLElement) ||
-        !root.contains(target) ||
-        (event.shiftKey && target === first) ||
-        (!event.shiftKey && target === last)
-      ) {
-        event.preventDefault()
-        if (event.shiftKey) last.focus()
-        else first.focus()
-      }
-    }
-    const frame = requestAnimationFrame(() => closeFocus.current?.focus())
-    document.addEventListener('keydown', containFocus, true)
-    return () => {
-      cancelAnimationFrame(frame)
-      document.removeEventListener('keydown', containFocus, true)
-    }
-  }, [narrowInspector, overlay, selectedSessionId])
-
+    if (!sessions.data || overlay !== null || !pendingReturnFocus.current) return
+    const target = sessionButtons.current.get(pendingReturnFocus.current)
+    pendingReturnFocus.current = undefined
+    target?.focus()
+    onReturnFocusConsumed()
+  }, [sessions.data, overlay, onReturnFocusConsumed])
   useEffect(() => {
     if (!sessions.data || !restorePageFocus.current) return
     restorePageFocus.current = false
@@ -222,11 +159,6 @@ export function SessionCatalogSurface({
     restorePageFocus.current = true
     onStateChange({ q: q || undefined, sort, archived })
   }
-  const openSession = (summary: SessionSummary, button: HTMLButtonElement) => {
-    returnFocus.current = button
-    onStateChange({ ...state, session: summary.session_id })
-  }
-  const closeSession = () => onStateChange({ ...state, session: undefined }, 'close')
   const nextPage = () => {
     const continuation = sessions.data?.continuation
     if (!continuation) return
@@ -258,7 +190,7 @@ export function SessionCatalogSurface({
             <input
               name="q"
               defaultValue={state.q}
-              placeholder="Exact title terms"
+              placeholder="Search titles"
               onKeyDown={(event) => {
                 if (event.key !== 'Escape') return
                 event.currentTarget.closest('main')?.focus()
@@ -270,7 +202,7 @@ export function SessionCatalogSurface({
           <span>Order</span>
           <select name="sort" defaultValue={state.sort ?? 'activity'}>
             <option value="activity">Recent activity</option>
-            <option value="identity">Session identity</option>
+            <option value="identity">Session ID</option>
           </select>
         </label>
         <label className="catalog-checkbox">
@@ -285,7 +217,7 @@ export function SessionCatalogSurface({
         </p>
       )}
 
-      {sessions.isLoading && <p className="catalog-notice">Reading a bounded session page…</p>}
+      {sessions.isLoading && <p className="catalog-notice">Loading sessions…</p>}
       {sessions.isError && (
         <section className="surface-empty" role="alert">
           <div>
@@ -316,10 +248,10 @@ export function SessionCatalogSurface({
         <section className="catalog-rates" aria-label="Listed session rates">
           <div className="catalog-rate-controls">
             <label>
-              State on this page{' '}
+              State{' '}
               <select
                 value={lifecycleFilter}
-                onChange={(event) => setLifecycleFilter(event.target.value)}
+                onChange={(event) => onLifecycleFilterChange(event.target.value)}
               >
                 <option value="all">All states</option>
                 {[
@@ -339,8 +271,8 @@ export function SessionCatalogSurface({
               </select>
             </label>
             <label>
-              Order on this page{' '}
-              <select value={pageOrder} onChange={(event) => setPageOrder(event.target.value)}>
+              Page order{' '}
+              <select value={pageOrder} onChange={(event) => onPageOrderChange(event.target.value)}>
                 <option value="activity">Catalog order</option>
                 <option value="failure">Last failure</option>
               </select>
@@ -355,64 +287,27 @@ export function SessionCatalogSurface({
                 Retry outcomes
               </button>
             </p>
-          ) : (
-            <>
-              <p>
-                <strong>{listed.length} listed</strong> ·{' '}
-                {[
-                  'created',
-                  'dispatched',
-                  'active',
-                  'waiting',
-                  'recovering',
-                  'blocked',
-                  'parked',
-                  'terminal',
-                ]
-                  .map((state) => `${totals.states[state] ?? 0} ${state}`)
-                  .join(' · ')}
-              </p>
-              <p>
-                <strong>
-                  {totals.turns === BigInt(0)
-                    ? 'No turns'
-                    : `${Number((totals.failed * BigInt(10000)) / totals.turns) / 100}% failed turns`}
-                </strong>{' '}
-                · {String(totals.failed)} failed / {String(totals.turns)} turns ·{' '}
-                {String(totals.completed)} completed turns · {String(totals.retired)} retired turns
-              </p>
-            </>
-          )}
+          ) : null}
         </section>
       )}
       {sessions.data && (
-        <div
-          className={
-            selected ? 'catalog-workbench catalog-workbench-selected' : 'catalog-workbench'
-          }
-        >
+        <div className="catalog-workbench">
           <section className="catalog-list" aria-labelledby="catalog-heading">
             <header>
               <div>
-                <span className="eyebrow">Bounded session catalog</span>
                 <h2 ref={pageHeading} id="catalog-heading" tabIndex={-1}>
-                  {sessions.data.total} sessions
+                  {sessions.data.total} {sessions.data.total === '1' ? 'session' : 'sessions'}
                 </h2>
               </div>
               <div className="catalog-header-actions">
                 <span>{sessions.data.summaries.length} on this page</span>
-                {!selected && (
-                  <button
-                    type="button"
-                    onClick={() => onStateChange({ ...state, workspace: true })}
-                  >
-                    Open workspace by ID
-                  </button>
-                )}
+                <button type="button" onClick={() => onStateChange({ ...state, workspace: true })}>
+                  Open by ID
+                </button>
               </div>
             </header>
             {listed.length === 0 ? (
-              <p className="catalog-notice">No sessions match the current filters.</p>
+              <p className="catalog-notice">No matching sessions</p>
             ) : (
               <ol>
                 {listed.map((summary) => (
@@ -423,15 +318,22 @@ export function SessionCatalogSurface({
                         else sessionButtons.current.delete(summary.session_id)
                       }}
                       type="button"
-                      aria-pressed={state.session === summary.session_id}
                       onFocus={() => dispatch(actions.timelineSelected(summary.session_id))}
-                      onClick={(event) => openSession(summary, event.currentTarget)}
+                      onClick={() =>
+                        onStateChange({ ...state, session: summary.session_id, workspace: true })
+                      }
                     >
                       <span className="catalog-session-copy">
                         <strong>
                           <SessionTitle summary={summary} />
                         </strong>
                         <code>{summary.session_id}</code>
+                        {summary.action && <small>{label(summary.action)}</small>}
+                        {summary.goal_block && (
+                          <small>
+                            {label(summary.goal_block.reason)} · {summary.goal_block.need_summary}
+                          </small>
+                        )}
                       </span>
                       <span
                         className={`state-chip state-${rateById.get(summary.session_id)?.lifecycle_state ?? 'unavailable'}`}
@@ -475,88 +377,6 @@ export function SessionCatalogSurface({
               </button>
             )}
           </section>
-
-          {selected && (
-            <aside
-              ref={inspector}
-              className="catalog-inspector"
-              role="dialog"
-              aria-modal={narrowInspector || undefined}
-              aria-labelledby="catalog-inspector-heading"
-            >
-              <header>
-                <div>
-                  <span className="eyebrow">Selected session</span>
-                  <h2 id="catalog-inspector-heading">
-                    <SessionTitle summary={selected} />
-                  </h2>
-                </div>
-                <button
-                  ref={closeFocus}
-                  type="button"
-                  aria-label="Close session inspector"
-                  onClick={closeSession}
-                >
-                  <X aria-hidden="true" />
-                </button>
-              </header>
-              <dl>
-                <div>
-                  <dt>Identity</dt>
-                  <dd>
-                    <code>{selected.session_id}</code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>State</dt>
-                  <dd>
-                    {label(rateById.get(selected.session_id)?.lifecycle_state ?? 'unavailable')}
-                  </dd>
-                </div>
-                {selected.action && (
-                  <div>
-                    <dt>Operator action</dt>
-                    <dd>{label(selected.action)}</dd>
-                  </div>
-                )}
-                <div>
-                  <dt>Activity source</dt>
-                  <dd>{label(selected.last_activity.kind)}</dd>
-                </div>
-                <div>
-                  <dt>Active work</dt>
-                  <dd>{selected.active_turn_count}</dd>
-                </div>
-                <div>
-                  <dt>Queued work</dt>
-                  <dd>{selected.queued_turn_count}</dd>
-                </div>
-                <div>
-                  <dt>Archived</dt>
-                  <dd>{selected.archived ? 'Yes' : 'No'}</dd>
-                </div>
-              </dl>
-              {selected.goal_block && (
-                <section>
-                  <span className="eyebrow">Blocked goal</span>
-                  <p>Reason: {label(selected.goal_block.reason)}</p>
-                  <p>{selected.goal_block.need_summary}</p>
-                </section>
-              )}
-              <p className="catalog-address-note">
-                Open the bounded historical workspace for this session without re-entering its
-                identity.
-              </p>
-              <button
-                ref={workspaceAction}
-                className="catalog-workspace-action"
-                type="button"
-                onClick={() => onStateChange({ ...state, workspace: true })}
-              >
-                Open timeline workspace
-              </button>
-            </aside>
-          )}
         </div>
       )}
     </div>

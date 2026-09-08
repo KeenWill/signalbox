@@ -49,12 +49,62 @@ impl PostgresModelCallRepository {
             pool,
             targets,
             credential_reference,
+            runner_recovery: None,
             credential_families: None,
             credential_pools: HashMap::new(),
             same_credential_attempt_bound: NonZeroUsize::MIN,
             cache_inclusive_input_targets: HashSet::new(),
             continuation_usage_limits: HashMap::new(),
         }
+    }
+
+    /// Shares the runner authority used at model and tool continuation boundaries.
+    pub fn with_runner_recovery(
+        mut self,
+        runner: crate::runner_protocol::RunnerProtocolStore,
+    ) -> Self {
+        self.runner_recovery = Some(runner);
+        self
+    }
+
+    pub(super) async fn settle_runner_replacement_after_observation(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        session: SessionId,
+        observation_frontier: Option<ContextFrontierId>,
+    ) -> Result<bool, ModelCallRepositoryError> {
+        if let Some(runner) = &self.runner_recovery {
+            let boundary = match observation_frontier {
+                Some(frontier) => Some(
+                    super::live_turn::load_call_snapshot(transaction.as_mut(), session, frontier)
+                        .await?
+                        .reconstitute()
+                        .ok_or(ModelCallCorruption::Inconsistent(
+                            "runner replacement observation snapshot",
+                        ))?,
+                ),
+                None => None,
+            };
+            let (settled, _) = runner
+                .settle_replacement_at_boundary(transaction, session, boundary.as_ref())
+                .await
+                .map_err(|error| match error {
+                    crate::runner_protocol::RunnerProtocolStoreError::Database(source) => {
+                        ModelCallRepositoryError::from(source)
+                    }
+                    _ => {
+                        ModelCallCorruption::Inconsistent("runner replacement observation boundary")
+                            .into()
+                    }
+                })?;
+            return Ok(settled);
+        }
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT NOT EXISTS (SELECT 1 FROM runner_replacement_stage WHERE session_id = $1)",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?)
     }
 
     /// Selects credentials from each session's latest append-only snapshot.
@@ -123,23 +173,35 @@ impl PostgresModelCallRepository {
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         let effective_target =
             serving_pool_target(self.credential_families.as_ref(), target, fast_mode);
-        let (projected_members, uncommitted_content_bytes) = match prospective.into() {
-            ProspectiveModelInput::Committed(frontier) => {
-                let mut connection = self.pool.acquire().await?;
-                let members = crate::context_compaction::projected_frontier_membership(
-                    &mut connection,
-                    session,
-                    frontier,
-                )
-                .await
-                .map_err(map_projected_membership_error)?;
-                (members, 0)
-            }
-            ProspectiveModelInput::Preview {
-                projected_members,
-                uncommitted_content_bytes,
-            } => (projected_members.to_vec(), uncommitted_content_bytes),
-        };
+        let (projected_members, uncommitted_content_bytes, rendered_bytes) =
+            match prospective.into() {
+                ProspectiveModelInput::Rendered(entries) => (
+                    entries.keys().copied().collect::<Vec<_>>(),
+                    0,
+                    Some(
+                        entries
+                            .values()
+                            .copied()
+                            .map(Decimal::from)
+                            .collect::<Vec<_>>(),
+                    ),
+                ),
+                ProspectiveModelInput::Committed(frontier) => {
+                    let mut connection = self.pool.acquire().await?;
+                    let members = crate::context_compaction::projected_frontier_membership(
+                        &mut connection,
+                        session,
+                        frontier,
+                    )
+                    .await
+                    .map_err(map_projected_membership_error)?;
+                    (members, 0, None)
+                }
+                ProspectiveModelInput::Preview {
+                    projected_members,
+                    uncommitted_content_bytes,
+                } => (projected_members.to_vec(), uncommitted_content_bytes, None),
+            };
         let member_sessions = projected_members
             .iter()
             .map(|member| session_id_to_uuid(member.source_session()))
@@ -287,7 +349,9 @@ impl PostgresModelCallRepository {
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
                     usage_cache_read_input_tokens,
-                    COALESCE(latest_call.proven_unreported_content_bytes, 0)
+                    CASE WHEN $7::numeric[] IS NULL THEN
+                        COALESCE(latest_call.proven_unreported_content_bytes, 0)
+                    ELSE 0 END
                     -- Entries an uncommitted preview minted have no durable row
                     -- to score; the preview measured their content itself.
                     + $4::numeric
@@ -307,6 +371,8 @@ impl PostgresModelCallRepository {
                                          'assistant_tool_use'
                                      )
                                 THEN 0
+                                WHEN measured.content_bytes IS NOT NULL
+                                THEN measured.content_bytes
                                 -- The durable proof already measured every
                                 -- result the producing call's round projected,
                                 -- including a returning foreground delegation's
@@ -333,24 +399,22 @@ impl PostgresModelCallRepository {
                                 ELSE CASE entry.payload_kind
                                     WHEN 'imported_entry' THEN
                                         COALESCE(octet_length(imported.content_encoding), 0)
-                                    -- Accepted-input content is an ordered part
-                                    -- array, so its context cost is the sum of
-                                    -- the text parts; attachment parts carry
-                                    -- their own rendered-stub accounting.
                                     WHEN 'origin_accepted_input' THEN
                                         COALESCE((
-                                            SELECT SUM(COALESCE(
-                                                octet_length(part.text_value), 0
-                                            ))
+                                            SELECT SUM(CASE part.part_kind
+                                                WHEN 'attachment' THEN $8::bigint
+                                                ELSE COALESCE(octet_length(part.text_value), 0)
+                                            END)
                                               FROM accepted_input_content_part AS part
                                              WHERE part.accepted_input_id =
                                                    input.accepted_input_id
                                         ), 0)
                                     WHEN 'steering_accepted_input' THEN
                                         COALESCE((
-                                            SELECT SUM(COALESCE(
-                                                octet_length(part.text_value), 0
-                                            ))
+                                            SELECT SUM(CASE part.part_kind
+                                                WHEN 'attachment' THEN $8::bigint
+                                                ELSE COALESCE(octet_length(part.text_value), 0)
+                                            END)
                                               FROM accepted_input_content_part AS part
                                              WHERE part.accepted_input_id =
                                                    input.accepted_input_id
@@ -369,12 +433,19 @@ impl PostgresModelCallRepository {
                                         COALESCE(octet_length(request.tool_name), 0)
                                         + COALESCE(octet_length(request.arguments_text), 0)
                                     WHEN 'tool_execution_result' THEN
+                                        CASE WHEN attempt.error_kind IS NULL THEN
                                         COALESCE(octet_length(attempt.result_text), 0)
-                                        + COALESCE(octet_length(attempt.error_detail), 0)
+                                   ELSE octet_length(jsonb_build_object('error',
+                                        jsonb_build_object('kind', attempt.error_kind,
+                                                          'detail', attempt.error_detail))::text)
+                                   END
                                     WHEN 'tool_denied' THEN
-                                        COALESCE(octet_length(decision.denial_reason), 0)
+                                        octet_length(jsonb_build_object('error', jsonb_build_object(
+                                        'kind', 'denied', 'detail', decision.denial_reason))::text)
                                     WHEN 'tool_inadmissible' THEN
-                                        COALESCE(octet_length(result_request.inadmissible_reason), 0)
+                                        octet_length(jsonb_build_object('error', jsonb_build_object(
+                                            'kind', 'execution_failed',
+                                            'detail', result_request.inadmissible_reason))::text)
                                     WHEN 'delegated_task' THEN
                                         COALESCE(octet_length(task.task_content), 0)
                                     WHEN 'delegation_message' THEN
@@ -386,7 +457,11 @@ impl PostgresModelCallRepository {
                             END
                         ), 0)::numeric
                           FROM unreported_member AS prospective
-                          JOIN semantic_transcript_entry AS entry
+                          LEFT JOIN UNNEST($2::uuid[], $3::uuid[], $7::numeric[])
+                               AS measured(source_session_id, semantic_entry_id, content_bytes)
+                            ON measured.source_session_id = prospective.source_session_id
+                           AND measured.semantic_entry_id = prospective.semantic_entry_id
+                          LEFT JOIN semantic_transcript_entry AS entry
                             ON entry.source_session_id = prospective.source_session_id
                            AND entry.semantic_entry_id = prospective.semantic_entry_id
                           LEFT JOIN accepted_input AS input
@@ -422,7 +497,7 @@ impl PostgresModelCallRepository {
                           LEFT JOIN session_child_result AS child_result
                             ON child_result.spawning_tool_request_id =
                                entry.delegation_result_spawning_tool_request_id
-                         WHERE NOT (
+                         WHERE entry.semantic_entry_id IS NULL OR NOT (
                                    latest_call.usage_output_tokens IS NOT NULL
                                AND (
                                       (
@@ -452,6 +527,11 @@ impl PostgresModelCallRepository {
         .bind(Decimal::from(uncommitted_content_bytes))
         .bind(replays_provider_compaction)
         .bind(effective_target.identity().into_uuid())
+        .bind(rendered_bytes)
+        .bind(
+            i64::try_from(signalbox_application::MAX_RENDERED_ATTACHMENT_STUB_BYTES)
+                .unwrap_or(i64::MAX),
+        )
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -619,6 +699,7 @@ impl PostgresModelCallRepository {
         .with_continuation_usage_limits(self.continuation_usage_limits.clone())
         .with_session_credentials(self.credential_families.clone())
         .with_credential_pools(self.credential_pools.clone())
+        .with_runner_recovery(self.runner_recovery.clone())
     }
 
     /// Derives approval-judge storage from this repository's exact database

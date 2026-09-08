@@ -589,6 +589,13 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     relationship: SignalboxImportedSessionRelationship,
     initialModelSelection: SignalboxModelSelection
   )
+  case reconcileTurn(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    expectedActiveTurnID: SignalboxCanonicalUUID,
+    content: String,
+    expectedDefaultsVersion: SignalboxCanonicalUInt64
+  )
   case stopTurn(
     commandID: SignalboxCommandID,
     sessionID: SignalboxCanonicalUUID,
@@ -596,6 +603,11 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
     descendantScope: SignalboxDescendantTerminationScope
+  )
+  case overrideDeniedToolRequest(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID
   )
   case decideToolRequest(
     commandID: SignalboxCommandID,
@@ -681,6 +693,20 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(relationship, forKey: "relationship")
       try container.encode(selection, forKey: "initial_model_selection")
       try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+    case .reconcileTurn(
+      let commandID,
+      let sessionID,
+      let activeTurnID,
+      let content,
+      let expectedDefaultsVersion
+    ):
+      try container.encode("reconcile_turn", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(activeTurnID, forKey: "expected_active_turn_id")
+      try container.encode(SignalboxUserInputContent.text(content), forKey: "content")
+      try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
+      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
     case .stopTurn(
       let commandID,
       let sessionID,
@@ -697,6 +723,11 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
       try container.encode(descendantScope, forKey: "descendant_scope")
       try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+    case .overrideDeniedToolRequest(let commandID, let sessionID, let toolRequestID):
+      try container.encode("override_denied_tool_request", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(toolRequestID, forKey: "tool_request_id")
     case .decideToolRequest(let commandID, let sessionID, let toolRequestID, let decision):
       try container.encode("decide_tool_request", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
@@ -1008,6 +1039,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   )
   case inputSubmitted(SignalboxInputSubmitted)
   case toolRequestDecided(SignalboxToolRequestDecided)
+  case toolDenialOverridden(toolRequestID: SignalboxCanonicalUUID)
   case sessionDefaults(SignalboxSessionDefaultsRead)
   case sessionsStart
   case sessionSummary(SignalboxProcessSessionSummary)
@@ -1092,6 +1124,9 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         )
       case "input_submitted":
         self = .inputSubmitted(try SignalboxInputSubmitted(from: decoder))
+      case "tool_denial_overridden":
+        try tagged.rejectUnadmittedFields(["type", "tool_request_id"], decoder: decoder)
+        self = .toolDenialOverridden(toolRequestID: try decoder.decode("tool_request_id"))
       case "tool_request_decided":
         self = .toolRequestDecided(try SignalboxToolRequestDecided(from: decoder))
       case "session_defaults":
@@ -3429,7 +3464,7 @@ public enum SignalboxDelegationWaitMode: String, Decodable, Equatable, Sendable 
   case background
 }
 
-public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable {
+public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable, CaseIterable {
   case returned
   case failed
   case stopped
@@ -3438,7 +3473,7 @@ public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable {
   case alreadyTerminal = "already_terminal"
 }
 
-public enum SignalboxDelegationReason: String, Decodable, Equatable, Sendable {
+public enum SignalboxDelegationReason: String, Decodable, Equatable, Sendable, CaseIterable {
   case childCompleted = "child_completed"
   case childExecutionFailed = "child_execution_failed"
   case childResultUnavailable = "child_result_unavailable"
@@ -3541,9 +3576,11 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     approval: SignalboxTranscriptToolApproval?)
   case toolExecutionResult(
     toolRequestID: SignalboxCanonicalUUID, toolAttemptID: SignalboxCanonicalUUID, content: String)
-  case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String)
+  case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String, overrideRecorded: Bool)
   case toolInadmissible(toolRequestID: SignalboxCanonicalUUID, content: String)
-  case toolClosed(toolRequestID: SignalboxCanonicalUUID, content: String)
+  case toolClosed(
+    toolRequestID: SignalboxCanonicalUUID, content: String, approvedBeforeClose: Bool
+  )
   case turnCompleted(turnID: SignalboxCanonicalUUID)
   case turnFailed(turnID: SignalboxCanonicalUUID)
   case turnCancelled(turnID: SignalboxCanonicalUUID)
@@ -3703,12 +3740,13 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         )
       case "tool_denied":
         try tagged.rejectUnadmittedFields(
-          ["type", "tool_request_id", "content"],
+          ["type", "tool_request_id", "content", "override_recorded"],
           decoder: decoder
         )
         self = .toolDenied(
           toolRequestID: try decoder.decode("tool_request_id"),
-          content: try decoder.decode("content"))
+          content: try decoder.decode("content"),
+          overrideRecorded: try decoder.decode("override_recorded"))
       case "tool_inadmissible":
         try tagged.rejectUnadmittedFields(
           ["type", "tool_request_id", "content"],
@@ -3719,12 +3757,13 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           content: try decoder.decode("content"))
       case "tool_closed":
         try tagged.rejectUnadmittedFields(
-          ["type", "tool_request_id", "content"],
+          ["type", "tool_request_id", "content", "approved_before_close"],
           decoder: decoder
         )
         self = .toolClosed(
           toolRequestID: try decoder.decode("tool_request_id"),
-          content: try decoder.decode("content"))
+          content: try decoder.decode("content"),
+          approvedBeforeClose: try decoder.decode("approved_before_close"))
       case "turn_completed":
         try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
         self = .turnCompleted(turnID: try decoder.decode("turn_id"))

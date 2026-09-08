@@ -313,9 +313,13 @@ fn runtime_delivery_definitions(
     models: &RuntimeModelCatalog,
     target: ResolvedProviderTarget,
     fast_mode: DomainFastMode,
+    retained_mapped_target: Option<ResolvedProviderTarget>,
 ) -> Option<(&RuntimeModelDefinition, &RuntimeModelDefinition)> {
     let selected = models.resolve(target)?;
-    let serving = models.effective_definition(selected, fast_mode)?;
+    let serving = match retained_mapped_target {
+        Some(target) => models.resolve(target)?,
+        None => models.effective_definition(selected, fast_mode)?,
+    };
     Some((selected, serving))
 }
 
@@ -541,6 +545,12 @@ impl BoundaryLossCode {
             LossCause::TransportFailed(_) => Self::TransportFailed,
             LossCause::ResponseBodyLost(_) => Self::ResponseBodyLost,
             LossCause::ResponseUnintelligible { .. } => Self::ResponseUnintelligible,
+            LossCause::ResponseEnvelopeRejected { stage, .. } => match stage {
+                signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers => {
+                    Self::StreamProtocolViolation
+                }
+                _ => Self::ResponseUnintelligible,
+            },
             LossCause::UnexpectedHttpStatus => Self::UnexpectedHttpStatus,
             LossCause::StreamEndedWithoutTerminalMarker { .. } => {
                 Self::StreamEndedWithoutTerminalMarker
@@ -823,6 +833,7 @@ impl PreparedBinding {
 
 /// Opaque runtime capability plus the application facts it was prepared from.
 pub struct RuntimeModelCallCapability<Prepared> {
+    invocation_capacity_reserved: bool,
     prepared: Prepared,
     binding: PreparedBinding,
     resolved_target: ResolvedTarget,
@@ -1182,6 +1193,7 @@ where
             &self.models,
             call.target(),
             request.model_settings().effective().fast_mode(),
+            operation.retained_mapped_target(),
         )
         .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let messages = render_runtime_messages(
@@ -1205,6 +1217,9 @@ where
                 request.model_settings(),
             ),
         );
+        runtime_operation.retained_mapped_target = operation
+            .retained_mapped_target()
+            .map(|_| ResolvedTarget::new(effective_definition.provider_model().to_owned()));
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
@@ -1214,15 +1229,16 @@ where
             self.runtime
                 .count_input_tokens(runtime_operation, CancellationSignal::when(cancellation))
                 .await,
-            correlation,
+            telemetry,
         )
     }
 }
 
 fn classify_runtime_input_count(
     outcome: signalbox_model_runtime::InputTokenCountOutcome<ModelCallId>,
-    correlation: ModelCallId,
+    telemetry: ModelCallTelemetry,
 ) -> Result<ModelCallInputTokenCount, RuntimeInputTokenCountError> {
+    let correlation = telemetry.call;
     match outcome {
         signalbox_model_runtime::InputTokenCountOutcome::Counted {
             correlation: returned,
@@ -1236,7 +1252,18 @@ fn classify_runtime_input_count(
         } if returned == correlation => Ok(ModelCallInputTokenCount::Unavailable),
         signalbox_model_runtime::InputTokenCountOutcome::Failed {
             correlation: returned,
-        } if returned == correlation => Ok(ModelCallInputTokenCount::Unavailable),
+            failure,
+        } if returned == correlation => {
+            tracing::warn!(
+                cause_code = "model_input_count_failed",
+                failure = %failure,
+                session_id = %telemetry.session.as_uuid(),
+                turn_id = %telemetry.turn.as_uuid(),
+                model_call_id = %telemetry.call.as_uuid(),
+                "provider input-token count failed"
+            );
+            Ok(ModelCallInputTokenCount::Unavailable)
+        }
         signalbox_model_runtime::InputTokenCountOutcome::Counted { .. }
         | signalbox_model_runtime::InputTokenCountOutcome::Cancelled { .. }
         | signalbox_model_runtime::InputTokenCountOutcome::Unavailable { .. }
@@ -1276,6 +1303,7 @@ where
             &self.models,
             call.target(),
             request.model_settings().effective().fast_mode(),
+            operation.retained_mapped_target(),
         )
         .ok_or_else(|| {
             fail_closed(
@@ -1329,6 +1357,9 @@ where
         // The session system prompt frozen through the calling turn's
         // defaults epoch rides every operation; adapters translate a `None`
         // as no system instructions (docs/spec/sessions-and-transcript.md).
+        runtime_operation.retained_mapped_target = operation
+            .retained_mapped_target()
+            .map(|_| ResolvedTarget::new(effective_definition.provider_model().to_owned()));
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
@@ -1341,6 +1372,7 @@ where
         {
             PreparationOutcome::Prepared(prepared) => Ok(ModelCallCapabilityPreparation::Ready(
                 RuntimeModelCallCapability {
+                    invocation_capacity_reserved: operation.invocation_capacity_reserved(),
                     prepared,
                     binding,
                     resolved_target,
@@ -1401,7 +1433,10 @@ where
         }
         let mut observations = AcceptanceObservations {
             invocation_process_group: None,
-            invocation_processes: self.invocation_processes.clone(),
+            invocation_processes: self
+                .invocation_processes
+                .clone()
+                .filter(|_| capability.invocation_capacity_reserved),
             expected_correlation: correlation,
             correlation_mismatch: false,
             acceptance_possible: Some(acceptance_possible),
@@ -1423,7 +1458,7 @@ where
                 CancellationSignal::when(cancellation),
             )
             .await;
-        if let Some(observer) = &self.invocation_processes {
+        if let Some(observer) = &observations.invocation_processes {
             observer
                 .finished(
                     correlation,
@@ -1593,10 +1628,50 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
                 session_id = %telemetry.session.as_uuid(),
                 turn_id = %telemetry.turn.as_uuid(),
                 model_call_id = %telemetry.call.as_uuid(),
+                stage = classified.envelope_stage.map(signalbox_model_runtime::ResponseEnvelopeRejectionStage::as_str),
                 "model call produced no assistant material"
             );
         }
     }
+}
+
+/// Measures each projected entry through the runtime renderer and an adapter serializer.
+///
+/// Each entry is rendered independently so its allowance includes a complete
+/// message envelope even where the final request combines adjacent entries.
+pub fn rendered_entry_bytes(
+    messages: &[ModelConversationMessage],
+    provenance: &[signalbox_application::ProviderReasoningProvenance],
+    models: &RuntimeModelCatalog,
+    mut measure: impl FnMut(&ConversationMessage) -> Option<usize>,
+) -> Option<std::collections::BTreeMap<signalbox_domain::SemanticTranscriptEntryRef, u64>> {
+    messages
+        .iter()
+        .map(|message| {
+            let source = match message {
+                ModelConversationMessage::RunnerPlacementChanged { source, .. }
+                | ModelConversationMessage::ModelIdentityChanged { source, .. }
+                | ModelConversationMessage::ContextSummary { source, .. }
+                | ModelConversationMessage::User { source, .. }
+                | ModelConversationMessage::DelegatedTask { source, .. }
+                | ModelConversationMessage::DelegationMessage { source, .. }
+                | ModelConversationMessage::BackgroundDelegationResult { source, .. }
+                | ModelConversationMessage::Assistant { source, .. }
+                | ModelConversationMessage::ProviderReasoning { source, .. }
+                | ModelConversationMessage::ProviderCompaction { source, .. }
+                | ModelConversationMessage::AssistantToolUse { source, .. }
+                | ModelConversationMessage::ToolResult { source, .. }
+                | ModelConversationMessage::ImportedUser { source, .. }
+                | ModelConversationMessage::ImportedAssistant { source, .. } => *source,
+            };
+            let rendered =
+                render_runtime_messages(std::slice::from_ref(message), provenance, models)?;
+            let bytes = rendered.iter().try_fold(0_u64, |total, message| {
+                Some(total.saturating_add(u64::try_from(measure(message)?).ok()?))
+            })?;
+            Some((source, bytes))
+        })
+        .collect()
 }
 
 fn render_runtime_messages(
@@ -2049,6 +2124,7 @@ pub fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
 /// explain it to an operator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TerminalClassification {
+    envelope_stage: Option<signalbox_model_runtime::ResponseEnvelopeRejectionStage>,
     observation: ModelCallTerminalObservation,
     cause: ModelCallCauseCode,
     /// The concrete provider identity that served the exchange, retained
@@ -2113,8 +2189,17 @@ fn classify_terminal(
         }
     }
 
+    let envelope_stage = match &evidence {
+        TerminalEvidence::BoundaryLoss(signalbox_model_runtime::BoundaryLossEvidence {
+            cause: LossCause::ResponseEnvelopeRejected { stage, .. },
+            ..
+        }) => Some(*stage),
+        _ => None,
+    };
+
     let classify = |observation, cause| {
         Ok(TerminalClassification {
+            envelope_stage,
             observation,
             cause,
             concrete_target: concrete_target.clone(),
@@ -2505,10 +2590,9 @@ mod tests {
     }
 
     #[test]
-    fn capacity_bridge_retains_latest_snapshot_through_both_redacting_sinks() {
+    fn capacity_bridge_retains_latest_snapshot_through_exact_redaction() {
         use signalbox_model_runtime::{
             CredentialRedactingSink, CredentialValue, RateLimitSnapshot, RateLimitWindow,
-            RedactingSink,
         };
         use std::time::{Duration, SystemTime};
 
@@ -2529,8 +2613,7 @@ mod tests {
         let credential = CredentialValue::new(b"synthetic-capacity-test-secret".to_vec());
         {
             let mut exact = CredentialRedactingSink::new(&mut sink, &credential);
-            let mut shaped = RedactingSink::new(&mut exact);
-            shaped.observe_rate_limits(
+            exact.observe_rate_limits(
                 call(),
                 RateLimitSnapshot {
                     observed_at,
@@ -2553,9 +2636,7 @@ mod tests {
             correlation: call(),
             fact: ObservationFact::UsageReported(TokenUsage::unreported()),
         });
-        let retained = sink
-            .rate_limits
-            .expect("capacity survives both redacting sinks");
+        let retained = sink.rate_limits.expect("capacity survives exact redaction");
         assert_eq!(*retained.observed_at(), observed_at);
         assert_eq!(retained.windows().len(), 2);
         assert_eq!(*retained.windows()[0].remaining_percent(), 23);
@@ -3750,7 +3831,7 @@ mod tests {
         );
     }
 
-    /// A CLI-redacted argument object becomes an inert domain proposal so the
+    /// A suppressed argument object becomes an inert domain proposal so the
     /// application can record its runtime-safety denial and continue the turn.
     #[test]
     fn fully_suppressed_tool_arguments_cross_as_inert_proposal() {
@@ -4265,11 +4346,173 @@ mod tests {
             super::classify_runtime_input_count(
                 signalbox_model_runtime::InputTokenCountOutcome::Failed {
                     correlation: call(),
+                    failure: signalbox_model_runtime::InputTokenCountFailure::Transport,
                 },
-                call(),
+                telemetry(),
             ),
             Ok(signalbox_application::ModelCallInputTokenCount::Unavailable)
         );
+    }
+
+    #[derive(Clone, Default)]
+    struct InputCountLog(std::sync::Arc<std::sync::Mutex<Vec<RecordedInputCountLog>>>);
+
+    #[derive(Debug)]
+    struct RecordedInputCountLog {
+        level: tracing::Level,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    impl tracing::field::Visit for RecordedInputCountLog {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    impl tracing::Subscriber for InputCountLog {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut recorded = RecordedInputCountLog {
+                level: *event.metadata().level(),
+                fields: std::collections::BTreeMap::new(),
+            };
+            event.record(&mut recorded);
+            self.0.lock().expect("test log lock").push(recorded);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn envelope_rejection_logs_one_correlated_stage_without_provider_detail() {
+        let log = InputCountLog::default();
+        let telemetry = telemetry();
+        let classified = classify_terminal(
+            TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause: LossCause::ResponseEnvelopeRejected {
+                    stage:
+                        signalbox_model_runtime::ResponseEnvelopeRejectionStage::DuplicateMembers,
+                    detail: String::from("provider-controlled rejection detail"),
+                },
+                exchange: ExchangeFacts::default(),
+                reported_model: None,
+                finish_reported: None,
+                tool_calls: ToolCallsAtLoss::Unobserved,
+                usage: TokenUsage::unreported(),
+            }),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("envelope rejection remains ambiguous");
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::Ambiguous
+        );
+        tracing::subscriber::with_default(log.clone(), || {
+            super::report_classified_outcome(telemetry, &classified);
+        });
+        let records = log.0.lock().expect("test log lock");
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.level, tracing::Level::WARN);
+        assert_eq!(record.fields["stage"], "\"duplicate_members\"");
+        assert_eq!(
+            record.fields["cause_code"],
+            "\"boundary_loss_stream_protocol_violation\""
+        );
+        assert_eq!(
+            record.fields["session_id"],
+            telemetry.session.as_uuid().to_string()
+        );
+        assert_eq!(
+            record.fields["turn_id"],
+            telemetry.turn.as_uuid().to_string()
+        );
+        assert_eq!(
+            record.fields["model_call_id"],
+            telemetry.call.as_uuid().to_string()
+        );
+        assert!(!format!("{record:?}").contains("provider-controlled rejection detail"));
+    }
+
+    #[test]
+    fn failed_input_count_logs_one_correlated_warning() {
+        let log = InputCountLog::default();
+        let telemetry = telemetry();
+
+        let result = tracing::subscriber::with_default(log.clone(), || {
+            super::classify_runtime_input_count(
+                signalbox_model_runtime::InputTokenCountOutcome::Failed {
+                    correlation: telemetry.call,
+                    failure: signalbox_model_runtime::InputTokenCountFailure::HttpStatus {
+                        status: 429,
+                    },
+                },
+                telemetry,
+            )
+        });
+
+        assert_eq!(
+            result,
+            Ok(signalbox_application::ModelCallInputTokenCount::Unavailable)
+        );
+        let records = log.0.lock().expect("test log lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, tracing::Level::WARN);
+        assert_eq!(
+            records[0].fields["cause_code"],
+            "\"model_input_count_failed\""
+        );
+        assert_eq!(records[0].fields["failure"], "http_status(429)");
+        assert_eq!(
+            records[0].fields["session_id"],
+            telemetry.session.as_uuid().to_string()
+        );
+        assert_eq!(
+            records[0].fields["turn_id"],
+            telemetry.turn.as_uuid().to_string()
+        );
+        assert_eq!(
+            records[0].fields["model_call_id"],
+            telemetry.call.as_uuid().to_string()
+        );
+    }
+
+    #[test]
+    fn mismatched_input_count_is_not_logged_as_the_current_call() {
+        let log = InputCountLog::default();
+        const OTHER_CALL: u128 = 2;
+        let other_call = ModelCallId::from_uuid(Uuid::from_u128(OTHER_CALL));
+
+        let result = tracing::subscriber::with_default(log.clone(), || {
+            super::classify_runtime_input_count(
+                signalbox_model_runtime::InputTokenCountOutcome::Failed {
+                    correlation: other_call,
+                    failure: signalbox_model_runtime::InputTokenCountFailure::Transport,
+                },
+                telemetry(),
+            )
+        });
+
+        assert_eq!(
+            result,
+            Err(RuntimeInputTokenCountError::CorrelationMismatch)
+        );
+        assert!(log.0.lock().expect("test log lock").is_empty());
     }
 
     #[test]
@@ -4376,6 +4619,29 @@ mod tests {
         assert_eq!(mapped.fast_mode, signalbox_model_runtime::FastMode::Enabled);
     }
 
+    /// Arbitrary distinct targets model the retained and reloaded fast mappings.
+    #[test]
+    fn retained_mapped_target_survives_a_changed_fast_mapping() {
+        let base = target(1);
+        let retained = target(2);
+        let reloaded = target(3);
+        let definition = |target, name: &str| {
+            RuntimeModelDefinition::try_new(target, name.to_owned(), 32, 200_000)
+                .expect("fixture definition is valid")
+        };
+        let catalog = RuntimeModelCatalog::try_from_definitions([
+            definition(base, "fixture-base").with_fast_target(reloaded),
+            definition(retained, "fixture-retained").with_fast_target(reloaded),
+            definition(reloaded, "fixture-reloaded"),
+        ])
+        .expect("mapped targets are configured");
+        let (selected, serving) =
+            runtime_delivery_definitions(&catalog, base, FastMode::Enabled, Some(retained))
+                .expect("retained delivery resolves");
+        assert_eq!(selected.target(), base);
+        assert_eq!(serving.target(), retained);
+    }
+
     #[test]
     fn mapped_fast_target_supplies_the_authorized_delivery_identity_and_limit() {
         let selected_model = "fixture-standard";
@@ -4404,7 +4670,7 @@ mod tests {
             .resolve(target(1))
             .expect("source target is present");
         let (selected, serving) =
-            runtime_delivery_definitions(&catalog, target(1), FastMode::Enabled)
+            runtime_delivery_definitions(&catalog, target(1), FastMode::Enabled, None)
                 .expect("mapped delivery resolves");
 
         assert_eq!(selected.provider_model(), selected_model);

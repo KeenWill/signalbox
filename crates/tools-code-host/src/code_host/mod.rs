@@ -120,16 +120,23 @@ impl CodeHostNumericBounds {
         self.stack_comparisons_in_flight
     }
 
-    const fn repository_file_content_bytes(self) -> Option<usize> {
-        self.repository_file_content_bytes
+    fn repository_file_content_bytes(self) -> Option<usize> {
+        match (self.repository_file_content_bytes, self.result_text_bytes) {
+            (Some(file), Some(text)) => Some(file.min(text)),
+            (file, text) => file.or(text),
+        }
     }
 
     const fn result_text_bytes(self) -> Option<usize> {
         self.result_text_bytes
     }
 
-    const fn result_items(self) -> Option<usize> {
-        self.result_items
+    fn result_items(self) -> Option<usize> {
+        Some(
+            self.result_items
+                .unwrap_or(result::MAX_COLLECTION_MEMBERS)
+                .min(result::MAX_COLLECTION_MEMBERS),
+        )
     }
 
     fn permits_result_text(self, observed: usize) -> bool {
@@ -137,7 +144,7 @@ impl CodeHostNumericBounds {
     }
 
     fn permits_result_items(self, observed: usize) -> bool {
-        self.result_items.is_none_or(|limit| observed <= limit)
+        self.result_items().is_none_or(|limit| observed <= limit)
     }
 }
 
@@ -573,9 +580,46 @@ fn decode_operation(
     }
 }
 
+/// Content-free classification of an unexpected HTTP response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodeHostHttpFailure {
+    /// Authentication or credential authorization must be restored.
+    CredentialUnavailable,
+    /// The credential lacks permission for this operation.
+    Forbidden,
+    /// The service reported a rate limit.
+    RateLimited,
+    /// The requested resource was not found.
+    NotFound,
+    /// The operation conflicts with the resource's current state.
+    Conflict,
+    /// The service rejected the request's values.
+    Validation,
+    /// The service failed without proving mutation nonacceptance.
+    Server,
+}
+
+impl CodeHostHttpFailure {
+    const fn detail(self) -> &'static str {
+        match self {
+            Self::CredentialUnavailable => CREDENTIAL_UNAVAILABLE_DETAIL,
+            Self::Forbidden => "code host forbids this operation",
+            Self::RateLimited => "code host rate limit exceeded",
+            Self::NotFound => "code host resource not found",
+            Self::Conflict => "code host operation conflicts with current state",
+            Self::Validation => "code host request validation failed",
+            Self::Server => "code host server failed",
+        }
+    }
+}
+
 /// Sanitized physical code-host failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodeHostTransportFailure {
+    /// The response supplies a sanitized HTTP failure class.
+    Http(CodeHostHttpFailure),
+    /// A pre-mutation ownership read failed at the HTTP boundary.
+    HttpBeforeMutation(CodeHostHttpFailure),
     /// Credential bytes could not form the authentication header.
     InvalidCredential,
     /// A definitive response rejected the operation.
@@ -735,11 +779,12 @@ pub struct CodeHostExecutor<Credentials, Transport> {
 }
 
 #[derive(signalbox_derive::OperatorError)]
-#[error("code-host tool executor failed")]
+#[error("code-host tool executor failed: {cause}")]
 /// Sanitized code-host executor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CodeHostExecutorError {
     class: OperatorFailureClass,
+    cause: &'static str,
 }
 
 impl ClassifyOperatorFailure for CodeHostExecutorError {
@@ -788,12 +833,23 @@ where
             Ok(_) => return Err(caller_bug()),
             Err(failure) => {
                 if let Some(class) = transport_failure_class(kind, failure) {
-                    return Err(CodeHostExecutorError { class });
+                    return Err(CodeHostExecutorError {
+                        class,
+                        cause: match failure {
+                            CodeHostTransportFailure::Http(http)
+                            | CodeHostTransportFailure::HttpBeforeMutation(http) => http.detail(),
+                            _ => "transport or response failure",
+                        },
+                    });
                 }
                 let Some(detail) = transport_failure_detail(failure) else {
                     return Err(caller_bug());
                 };
                 let detail = match detail {
+                    KnownFailureDetail::Http(http) => {
+                        ToolExecutionErrorDetail::try_new(http.detail().to_owned())
+                            .map_err(|_| caller_bug())?
+                    }
                     KnownFailureDetail::CredentialUnavailable => {
                         self.credential_unavailable_detail.clone()
                     }
@@ -822,6 +878,7 @@ where
         if content.len() > result::MAX_ENCODED_RESULT_BYTES {
             if kind.mutates() {
                 return Err(CodeHostExecutorError {
+                    cause: "encoded result exceeds its bound",
                     class: OperatorFailureClass::Infrastructure {
                         commit_ambiguous: true,
                     },
@@ -839,6 +896,7 @@ where
 /// durable transcript.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum KnownFailureDetail {
+    Http(CodeHostHttpFailure),
     /// The daemon-held credential could not authenticate the request.
     CredentialUnavailable,
     /// The code host answered, and its answer ends the attempt.
@@ -858,6 +916,16 @@ enum KnownFailureDetail {
 /// saw the request.
 const fn transport_failure_detail(failure: CodeHostTransportFailure) -> Option<KnownFailureDetail> {
     match failure {
+        CodeHostTransportFailure::Http(CodeHostHttpFailure::CredentialUnavailable)
+        | CodeHostTransportFailure::HttpBeforeMutation(
+            CodeHostHttpFailure::CredentialUnavailable,
+        ) => Some(KnownFailureDetail::CredentialUnavailable),
+        CodeHostTransportFailure::Http(CodeHostHttpFailure::Server)
+        | CodeHostTransportFailure::HttpBeforeMutation(CodeHostHttpFailure::Server) => None,
+        CodeHostTransportFailure::Http(http)
+        | CodeHostTransportFailure::HttpBeforeMutation(http) => {
+            Some(KnownFailureDetail::Http(http))
+        }
         CodeHostTransportFailure::InvalidCredential => {
             Some(KnownFailureDetail::CredentialUnavailable)
         }
@@ -879,6 +947,17 @@ const fn transport_failure_class(
     failure: CodeHostTransportFailure,
 ) -> Option<OperatorFailureClass> {
     match failure {
+        CodeHostTransportFailure::Http(CodeHostHttpFailure::Server) => {
+            Some(OperatorFailureClass::Infrastructure {
+                commit_ambiguous: kind.mutates(),
+            })
+        }
+        CodeHostTransportFailure::HttpBeforeMutation(CodeHostHttpFailure::Server) => {
+            Some(OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            })
+        }
+        CodeHostTransportFailure::Http(_) | CodeHostTransportFailure::HttpBeforeMutation(_) => None,
         CodeHostTransportFailure::InvalidCredential
         | CodeHostTransportFailure::Rejected
         | CodeHostTransportFailure::NotFound
@@ -907,6 +986,7 @@ const fn transport_failure_class(
 
 const fn caller_bug() -> CodeHostExecutorError {
     CodeHostExecutorError {
+        cause: "code-host caller invariant failed",
         class: OperatorFailureClass::CallerOrHubBug,
     }
 }
@@ -2509,6 +2589,45 @@ mod tests {
             transport_failure_detail(CodeHostTransportFailure::Rejected),
             Some(KnownFailureDetail::CodeHostRejected)
         );
+    }
+
+    /// A remote authentication refusal uses the same detail as a missing credential.
+    #[test]
+    fn remote_authentication_refusal_presents_credential_detail() {
+        assert_eq!(
+            transport_failure_detail(CodeHostTransportFailure::Http(
+                CodeHostHttpFailure::CredentialUnavailable
+            )),
+            Some(KnownFailureDetail::CredentialUnavailable)
+        );
+    }
+
+    /// Only a server failure after mutation dispatch can leave a remote commit ambiguous.
+    #[test]
+    fn server_failure_ambiguity_tracks_mutation_dispatch() {
+        for (kind, failure, commit_ambiguous) in [
+            (
+                CodeHostToolKind::ReviewThreads,
+                CodeHostTransportFailure::Http(CodeHostHttpFailure::Server),
+                false,
+            ),
+            (
+                CodeHostToolKind::ThreadReply,
+                CodeHostTransportFailure::Http(CodeHostHttpFailure::Server),
+                true,
+            ),
+            (
+                CodeHostToolKind::ThreadReply,
+                CodeHostTransportFailure::HttpBeforeMutation(CodeHostHttpFailure::Server),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                transport_failure_class(kind, failure),
+                Some(OperatorFailureClass::Infrastructure { commit_ambiguous }),
+                "{kind:?} {failure:?}"
+            );
+        }
     }
 
     /// A complete changed-file search miss reports its actual semantic result

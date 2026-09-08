@@ -14,6 +14,7 @@ import {
   productSurfaceStates,
   readProductRouteState,
   readProductSearchState,
+  readProductSessionState,
   SameOriginProductTransport,
 } from './product'
 import { webContractBootstrapFixture } from './product.fixture'
@@ -238,12 +239,13 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
-  it('rejects a bootstrap response beyond the fixed JSON byte bound', async () => {
+  it('preserves the bootstrap size error when body cancellation fails', async () => {
+    const cancel = vi.fn().mockRejectedValue(new Error('cancellation failed'))
     vi.stubGlobal(
       'fetch',
       vi.fn(
         async () =>
-          new Response(JSON.stringify(bootstrapFixture), {
+          new Response(new ReadableStream({ cancel }), {
             headers: { 'content-length': '65537' },
           }),
       ),
@@ -256,6 +258,7 @@ describe('SameOriginProductTransport', () => {
     expect((failure as ProductContractError).cause).toMatchObject({
       message: expect.stringContaining('response exceeded the product JSON byte limit'),
     })
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
@@ -1713,6 +1716,18 @@ describe('readProductSearchState', () => {
 })
 
 describe('readProductRouteState', () => {
+  it('preserves catalog queries through their own byte limit', () => {
+    const q = 'é'.repeat(512)
+    expect(readProductRouteState({ q }).q).toBe(q)
+    expect(readProductSessionState({ ...readProductRouteState({ q }) }).q).toBe(q)
+    expect(readProductSearchState({ q }).queryParameterIsValid).toBe(false)
+  })
+
+  it('does not admit the bounded prefix of an oversized catalog query', () => {
+    const state = readProductRouteState({ q: 'é'.repeat(10_000) })
+    expect(readProductSessionState({ ...state }).q).toBeUndefined()
+  })
+
   it('retains catalog continuation fields beside search route state', () => {
     expect(
       readProductRouteState({
@@ -1799,6 +1814,17 @@ describe('product surface availability', () => {
     expect(productSurfaceCacheLabel('sessions')).toBe('Bounded query')
     expect(productSurfaceCacheLabel('imports')).toBe('Bounded query')
     expect(productSurfaceCacheLabel('settings')).toBe('Local settings')
-    expect(productSurfaceCacheLabel('search')).toBeNull()
+    expect(productSurfaceCacheLabel('search')).toBe('Bounded query')
   })
+})
+
+it('bounds malformed search deep links without admitting their prefixes', () => {
+  expect(readProductSearchState({ q: ['first', 'second'] })).toMatchObject({
+    queryParameterIsValid: false,
+  })
+  const state = readProductSearchState({ q: 'é'.repeat(10000), session: 'a'.repeat(10000) })
+  expect(state.queryParameterIsValid).toBe(false)
+  expect(state.sessionParameterIsValid).toBe(false)
+  expect(new TextEncoder().encode(state.q).length).toBeLessThanOrEqual(512)
+  expect(state.session?.length).toBeLessThanOrEqual(45)
 })

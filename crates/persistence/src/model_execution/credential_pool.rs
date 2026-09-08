@@ -639,7 +639,12 @@ pub(super) async fn select_runtime_pool_credential(
                 })
         })
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
-    let wait = if selected.is_none() && !(predecessor_reference.is_some() && !predecessor_rotated) {
+    let retry_contended = predecessor_reference
+        .as_deref()
+        .is_some_and(|reference| bounded.iter().any(|member| member.profile == reference));
+    let wait = if selected.is_none()
+        && (predecessor_reference.is_none() || predecessor_rotated || retry_contended)
+    {
         super::credential_wait::admission_snapshot(
             connection,
             session,

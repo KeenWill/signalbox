@@ -19,21 +19,8 @@ pub const OUTPUT_TOKENS: u64 = 7;
 pub const SENSITIVE_OUTPUT_TOKEN: &str = "sk-sensitive-output";
 pub const SENSITIVE_REFRESH_TOKEN: &str = "sensitive-refresh";
 pub const SENSITIVE_STDERR_TOKEN: &str = "sensitive-stderr";
-pub const SENSITIVE_TOOL_ID_ONE: &str = "sk-sensitive-call-one";
-pub const SENSITIVE_TOOL_ID_TWO: &str = "API_KEY=sensitive-call-two";
 pub const SENSITIVE_ENVELOPE_TOKEN: &str = "authorization=Bearer sensitive-envelope-token";
-pub const SENSITIVE_SPLIT_STREAM_TOKEN: &str = "sk-sensitive-stream-token";
-pub const SENSITIVE_SPLIT_AUTHORIZATION: &str = "sensitive-split-authorization";
 pub const SENSITIVE_COMPOSITE_SECRET: &str = "sensitive-composite-secret";
-pub const SENSITIVE_STRUCTURED_SECRET: &str = "sensitive-structured-container-value";
-pub const SENSITIVE_STDERR_CONTINUATION: &str = "sensitive-stderr-continuation";
-/// A thread id ending in a credential-marker prefix; clean on its own, but
-/// later text beginning with the marker's remainder reconstructs `api_key=`
-/// beside it.
-pub const CREDENTIAL_PREFIX_THREAD_ID: &str = "api_";
-/// The final-text continuation of `CREDENTIAL_PREFIX_THREAD_ID`; also clean
-/// on its own (`key` matches no credential shape).
-pub const SENSITIVE_THREAD_CONTINUATION: &str = "key=opaque-thread-continuation done";
 pub const EARLY_STDIN_EXIT_MARKER: &str = "fake-codex-exit-before-stdin";
 /// Makes the fake CLI hand its stdin to a surviving descendant (which never
 /// reads it, keeping the upload blocked), write a synthetic stderr
@@ -66,16 +53,6 @@ pub const ADVISORY_STOP_SEQUENCE: &str = "offline-stop";
     reason = "process-only expected values share this module with the fake executable"
 )]
 pub const PRECISE_JSON_NUMBER: &str = "123456789012345678901234567890";
-#[allow(
-    dead_code,
-    reason = "process-only expected values share this module with the fake executable"
-)]
-pub const REDACTED_TOOL_ID_ONE: &str = "codex-redacted-call-1";
-#[allow(
-    dead_code,
-    reason = "process-only expected values share this module with the fake executable"
-)]
-pub const REDACTED_TOOL_ID_TWO: &str = "codex-redacted-call-2";
 
 /// Rejects what the live API's strict structured-output validation rejects,
 /// for the schema shapes the adapter's output schema uses (`properties` and

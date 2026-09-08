@@ -499,6 +499,7 @@ pub(super) async fn load_next_transcript_turn(
            LEFT JOIN automatic_reconciliation AS automatic_reconciliation
              ON automatic_reconciliation.turn_id = turn.turn_id
             AND automatic_reconciliation.session_id = turn.session_id
+            AND NOT turn.delegation_runtime_terminal
            LEFT JOIN credential_availability_wait AS credential_wait
              ON credential_wait.turn_id = turn.turn_id AND credential_wait.session_id = turn.session_id
             AND credential_wait.consumed_by_attempt_id IS NULL

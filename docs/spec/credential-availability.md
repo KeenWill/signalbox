@@ -38,11 +38,12 @@ the operator surface that clears them is on
 Pool policies have immutable identities; each clearable exclusion retains its
 generation and origin, and selection ignores cleared generations.
 
-An admission selects a member, selects an exhausted wait, or fails. A bound
-same-credential retry whose credential is excluded before preparation fails
-before wait selection; `park` applies only to pool admission. A released wait
-that selects no member or wait fails through a fresh attempt, retaining a
-predecessor provider cause exactly when its chain issued a call.
+An admission selects a member, selects a credential wait, or fails. A bound
+same-credential retry whose credential has a durable availability exclusion
+before preparation fails before wait selection; `park` applies only to pool
+admission. A released wait that selects no member or wait fails through a fresh
+attempt, retaining a predecessor provider cause exactly when its chain issued a
+call.
 
 ## Design decisions
 
@@ -191,18 +192,26 @@ instead consumes the wait, opens a fresh immediate successor with its applied
 interrupt proof, ends it AfterCancellation(Cancelled), and appends TurnCancelled
 after the wait frontier while reclassifying pending steering.
 
-A due deadline makes a wait eligible through the scheduler's existing
-reconciliation sweep. A durable member-availability update or a successful
-operator clear grants eligibility to waits naming that member in the same
-transaction. Eligibility prepares no call and consumes no wait. Startup alone
-leaves exhausted waits unchanged; deadline-free waits have no timer. Pooled
-capacity observations and wait admission acquire the model-call order guard,
-profile action locks and invocation-capacity locks before updating waits.
+A due deadline makes a wait eligible. Commit-time wait notifications nudge the
+scheduler; periodic invocation recovery also nudges eligible waits, including
+deadlines and dropped hints, without a configured reconciliation sweep. A
+durable member-availability update or a successful operator clear grants
+eligibility to waits naming that member in the same transaction. Eligibility
+prepares no call and consumes no wait. Startup alone leaves exhausted waits
+unchanged; deadline-free waits have no timer. Pooled capacity observations and
+wait admission acquire the model-call order guard, profile action locks and
+invocation-capacity locks before updating waits.
 
 Contended-wait: no member is admitted and at least one otherwise-admissible
 member is skipped only for its configured invocation bound. Either exhaustion
 policy enters the same call-free wait with cause contended, retaining every
-bounded member and its reservation identities alongside excluded members.
+bounded member and its reservation identities alongside excluded members. A
+same-credential retry blocked only by its invocation bound enters this wait and
+retains its retry binding.
+
+Process registration and completion observation apply only to calls with a
+retained invocation-capacity reservation.
+
 Preparation reserves only its selected `codex_home` member; invocation
 completion releases that reservation and grants eligibility to contended waits
 naming that bounded member in one transaction. Competing releases admit only the
@@ -223,15 +232,19 @@ proven group exit releases capacity while the call retains its proven-unsent
 outcome when registration aborts before request delivery.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
-wait attempt and closed cause. Transcript reads and initial follow snapshots
-retain the active turn and its slot without rejection detail. Release admission,
-call preparation, and send authorization use the wait's retained effective
-target with its retained policy; a missing current selection leaves the wait
-unconsumed. Release pins a pre-call wait's retained target on its turn, and
-domain call preparation retains that pin across catalog reloads. The rendered
-provider operation uses that retained target. Parking retains the exclusions
-that selected the wait. An exclusion with an absent or zero record generation is
-the oldest generation and cannot make its member wakeable by an operator clear.
+wait attempt and closed cause. Committed wait changes require connected
+followers to resynchronize their snapshots; no transcript entry is appended.
+Transcript reads and initial follow snapshots retain the active turn and its
+slot without rejection detail. Release admission, call preparation, and send
+authorization use the wait's retained effective target with its retained policy;
+a missing current selection leaves the wait unconsumed. Release pins a pre-call
+wait's retained target on its turn, and domain call preparation retains that pin
+across catalog reloads. The rendered provider operation uses that retained
+target. A post-failure wait retains its already mapped serving target separately
+from the turn's base-target pin; successor delivery does not apply a reloaded
+fast-mode mapping to that pin. Parking retains the exclusions that selected the
+wait. An exclusion with an absent or zero record generation is the oldest
+generation and cannot make its member wakeable by an operator clear.
 
 A terminal release after a predecessor call projects
 `failed_after_credential_wait` with the fresh terminal attempt and the

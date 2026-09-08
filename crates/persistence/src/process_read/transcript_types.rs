@@ -711,6 +711,8 @@ pub enum ProcessTranscriptEntry {
         request: ToolRequestId,
         /// Exact provider-visible denial content.
         content: String,
+        /// Whether this denial already has its one permitted user override.
+        override_recorded: bool,
     },
     /// The turn ended before one tool request resolved ordinarily.
     ToolInadmissible {
@@ -737,6 +739,8 @@ pub enum ProcessTranscriptEntry {
         request: ToolRequestId,
         /// Exact provider-visible terminal-closure content.
         content: String,
+        /// Whether an approval was recorded before the request closed.
+        approved_before_close: bool,
     },
     /// Explicit failed-turn marker.
     TurnFailed {

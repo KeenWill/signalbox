@@ -12,8 +12,9 @@ REST, WebSocket, or OpenAI-compatible surfaces.
 ## Live macOS surface
 
 - Present typed live delegation updates and remove retired goal turns from the queued inputs.
-- List native and imported conversations through the unified conversation read;
-  open, archive, and unarchive native sessions.
+- Page native and imported conversations through the unified conversation read;
+  refresh the displayed page, open sessions by identity, and archive or unarchive
+  native sessions.
 - Follow a session through explicit connect, hello, history, replay, steady, and
   bounded-recovery states.
 - Project transcript snapshots into the existing timeline normalizer.
@@ -29,11 +30,15 @@ REST, WebSocket, or OpenAI-compatible surfaces.
     after an edit.
 - Treat unknown wire kinds conservatively without losing an entire page or
   stream.
-- Approve or deny pending tool requests, and stop an active turn while sending
-  its required successor input.
+- Approve or deny pending tool requests, arm a one-shot override of a terminal
+  delegate denial from the current session, and stop an active turn while sending
+  its required successor input. An override applies to a later matching proposal
+  after one extra model round.
+- Reconcile a model-call recovery wait while sending its continuation, retaining
+  the exact prepared command after an ambiguous response.
 - Create a session by selecting a model alias read from the running daemon and
   optionally supplying a system prompt.
-- Inspect the bounded, read-only entry inventory for an imported conversation
+- Inspect imported entries in pages decoded from a validated temporary spool,
   and create a resume or fork session from a selected frontier and model alias.
 - Exercise the real encoder, decoder, request identity, and JSONL framing in
   deterministic mock UI flows.
@@ -57,8 +62,8 @@ export SIGNALBOX_SOCKET_PATH='/absolute/path/to/signalbox.sock'
 There is no maintainer-approved network transport reachable by a remote or
 mobile client. iPhone and iPad **Debug** builds run against the in-memory
 process-protocol harness. The harness is compiled out of Release builds, so a
-Release iPhone or iPad build has no backend at all — that configuration is not
-a supported way to run the app, and shipping one is gated on the same design
+Release iPhone or iPad build has no backend at all — that configuration is not a
+supported way to run the app, and shipping one is gated on the same design
 decision. Real remote/mobile connectivity remains a maintainer design gate
 recorded in
 [Protocols and persistence](../../docs/open-questions.md#protocols-and-persistence);
@@ -88,14 +93,17 @@ space-separated `xcodebuild` test identifiers and select which suites
 
 `Tests/SignalboxAppTests/LiveScreenSnapshotTests.swift` renders the screens
 `RootView` reaches, and its `+LegacyScreens` companion renders the kept screens
-that it no longer reaches. The 129 committed goldens under
+that it no longer reaches. The committed goldens under
 `Tests/SignalboxAppTests/__Snapshots__` cover four fixed screen canvases —
-iPhone and iPad, each in portrait and landscape — plus standalone sheet
-content. Rendering is in process, with one screen hosted in one window at a
-fixed canvas size, display scale, and safe area, so it sees no scene lifecycle
-or window chrome. A sheet presented by the hosted screen does reach its golden;
-sheet content is also snapshotted alone on its own canvas.
-`ScreenshotScenario` selects the fixtures.
+iPhone and iPad, each in portrait and landscape — plus standalone sheet content.
+Rendering is in process, with one screen hosted in one window at a fixed canvas
+size, display scale, and safe area, so it sees no scene lifecycle or window
+chrome. A sheet presented by the hosted screen does reach its golden; sheet
+content is also snapshotted alone on its own canvas. `ScreenshotScenario`
+selects the fixtures. Every canvas renders light and dark appearance at standard
+and accessibility text sizes. Missing appearance references are recorded as
+coverage gaps with candidate images attached to the test result; existing
+references are compared normally.
 
 The canonical record and verification entry points are the two scripts below:
 `scripts/record-snapshots.sh` and `scripts/test-snapshots.sh` take the suite and
@@ -117,14 +125,12 @@ switched on stops and names the setting instead of comparing against references
 recorded without it.
 
 In CI the suite is a report-only step that uploads the reference, the failed
-rendering, and their difference as an artifact when a comparison fails; the
-step is currently skipped while Swift client work is shelved, so no CI run
-checks these goldens or uploads diffs until the `if` in
-`.github/workflows/swift.yml` is deleted.
-Re-record the goldens after an intended visual change. Reviewing what you are
-about to bless is
-[rule 11](../../docs/agents/testing-style.md#expect-tests), which owns that
-rule for every snapshot in the repository and is the only place it is stated.
+rendering, and their difference when a comparison fails. It also exports missing
+appearance coverage gaps and their candidate images, plus the committed
+references. Recording uses the explicit entry point below. Re-record the goldens after an intended
+visual change. Reviewing what you are about to bless is
+[rule 11](../../docs/agents/testing-style.md#expect-tests), which owns that rule
+for every snapshot in the repository and is the only place it is stated.
 
 ```bash
 scripts/record-snapshots.sh

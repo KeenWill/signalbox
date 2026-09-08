@@ -5,7 +5,9 @@
 //! vocabulary and leave the table and column names here, so a schema change is
 //! contained in — and exercised by — the crate that owns the schema.
 
-use signalbox_domain::{ModelCallId, SessionId};
+use signalbox_domain::{
+    CommitSha, DispatchingModule, DurableCommandId, ModelCallId, SessionId, TurnId,
+};
 use sqlx::{FromRow, PgPool, types::Uuid};
 
 #[derive(signalbox_derive::Accessors)]
@@ -169,10 +171,181 @@ pub async fn inject_deadline_diagnostic_failure(pool: &PgPool) -> Result<(), sql
          CREATE VIEW session_deadline AS
          SELECT private_deadline_source() AS session_id,
                 'admission'::text AS deadline_kind,
+                false AS settled,
                 clock_timestamp() AS armed_at,
                 clock_timestamp() - INTERVAL '1 hour' AS expires_at;",
     )
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Seeds an attached goal's failed turn without executing a model provider.
+///
+/// Trigger changes and the synthetic terminal boundary are confined to one
+/// transaction in the isolated test database.
+pub async fn seed_failed_goal_turn(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal', start_lineage_kind = 'first_in_session',
+                immediate_predecessor_turn_id = NULL, starting_frontier_id = $3,
+                terminal_frontier_id = $4, terminal_disposition_kind = 'failed',
+                terminal_cause_kind = 'unclassified_failure'
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await
+}
+
+/// Releases a matching module park through the production lifecycle projection.
+pub async fn restore_module_park(
+    pool: &PgPool,
+    session: SessionId,
+    module: DispatchingModule,
+) -> Result<bool, crate::session_lifecycle::SessionLifecycleRepositoryError> {
+    let mut transaction = pool.begin().await?;
+    let restored = crate::session_lifecycle::restore_module_park_in_transaction(
+        &mut transaction,
+        session,
+        module,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(restored)
+}
+
+/// Reads the complete accepted input queued by one exact goal resumption event.
+pub async fn goal_resumption_input(
+    pool: &PgPool,
+    session: SessionId,
+    event: signalbox_domain::GoalEventOrdinal,
+) -> Result<signalbox_domain::UserContent, crate::goal::GoalRepositoryError> {
+    let stored = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT accepted_input_content_parts_json(turn.accepted_input_id)
+           FROM goal_turn AS turn
+          WHERE turn.session_id = $1 AND turn.source_event_ordinal = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(event.get()))
+    .fetch_one(pool)
+    .await?;
+    decode_goal_resumption_input(stored).map_err(Into::into)
+}
+
+fn decode_goal_resumption_input(
+    stored: serde_json::Value,
+) -> Result<signalbox_domain::UserContent, crate::goal::GoalCorruption> {
+    use crate::{goal::GoalCorruption, user_content::StoredUserContentError};
+    crate::user_content::decode(stored).map_err(|error| match error {
+        StoredUserContentError::UnsupportedPartKind(value) => GoalCorruption::Unsupported {
+            field: "part_kind",
+            value,
+        },
+        StoredUserContentError::UnsupportedAttachmentKind(value) => GoalCorruption::Unsupported {
+            field: "attachment_kind",
+            value,
+        },
+        StoredUserContentError::Malformed => {
+            GoalCorruption::Inconsistent("resumption input content")
+        }
+    })
+}
+
+/// Seeds an applied checkout in the repository-watch schema through migration
+/// `202609071400`, using a pool connected as the repository-watch module role.
+pub async fn seed_historical_repository_checkout(
+    pool: &PgPool,
+    command: DurableCommandId,
+    head: &CommitSha,
+) -> Result<(), sqlx::Error> {
+    // The rule, event and command identities only need to satisfy the parent schema.
+    sqlx::query(
+        "WITH event AS (
+             INSERT INTO gh_event
+                 (event_id, content_identity, repository, event_kind, target_kind,
+                  pull_request_number, normalized_payload, recorded_at,
+                  frontier_generation, event_ordinal, producer, repository_event_ordinal)
+             VALUES (gen_random_uuid(), decode(repeat('00', 32), 'hex'),
+                     'checkout/project', 'pull_request_opened', 'pull_request',
+                     1, ''::bytea, now(), 1, 1, 'poll', 1)
+             RETURNING event_id
+         ), rule AS (
+             INSERT INTO rule_revision
+                 (repository, rule_id, revision, content_digest, activated_at,
+                  activated_after_event_ordinal)
+             VALUES ('checkout/project', 'checkout', 1,
+                     decode(repeat('00', 32), 'hex'), now(), 0)
+             RETURNING repository, rule_id, revision
+         )
+         INSERT INTO dispatch_ledger
+             (dispatch_ref, action_ordinal, command_id, repository, rule_id,
+              rule_revision, event_id, command_kind, command_payload,
+              created_session_id, status, issued_at, settled_at,
+              checkout_path, checkout_head_sha)
+         SELECT $1, 1, $1, rule.repository, rule.rule_id, rule.revision,
+                event.event_id, 'create_session', ''::bytea, gen_random_uuid(),
+                'applied', now(), now(), '.', $2
+         FROM event CROSS JOIN rule",
+    )
+    .bind(command.into_uuid())
+    .bind(head.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::goal::GoalCorruption;
+
+    #[test]
+    fn goal_resumption_input_preserves_unsupported_content_discriminators() {
+        // These deliberately unsupported persisted spellings must survive decoding.
+        let unsupported = "unknown-stored-kind";
+        for (part_kind, attachment_kind, field) in [
+            (unsupported, "image", "part_kind"),
+            ("attachment", unsupported, "attachment_kind"),
+        ] {
+            let stored = serde_json::json!([{
+                "position": 0,
+                "part_kind": part_kind,
+                "text_value": null,
+                "blob_digest": signalbox_domain::BlobDigest::digest(b"attachment fixture").to_string(),
+                "attachment_kind": attachment_kind,
+                "declared_media_type": "image/png",
+                "display_filename": null,
+            }]);
+            assert_eq!(
+                super::decode_goal_resumption_input(stored),
+                Err(GoalCorruption::Unsupported {
+                    field,
+                    value: unsupported.to_owned()
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn goal_resumption_input_classifies_malformed_content_as_inconsistent() {
+        assert_eq!(
+            super::decode_goal_resumption_input(serde_json::json!([])),
+            Err(GoalCorruption::Inconsistent("resumption input content")),
+        );
+    }
 }

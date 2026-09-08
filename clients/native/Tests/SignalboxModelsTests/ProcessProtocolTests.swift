@@ -9,6 +9,84 @@ final class ProcessProtocolTests: XCTestCase {
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"
   private let blobDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+  func testOverrideRequestEncodesTheExactMutationShape() throws {
+    let request = SignalboxProcessClientRequest.overrideDeniedToolRequest(
+      commandID: try SignalboxCommandID(validating: turnID),
+      sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+      toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID)
+    )
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(request)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      #"{"command_id":"\#(turnID)","session_id":"\#(sessionID)","tool_request_id":"\#(toolRequestID)","type":"override_denied_tool_request"}"#
+    )
+  }
+
+  func testOverrideReceiptDecodesItsExactToolRequest() throws {
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: Data(#"{"type":"tool_denial_overridden","tool_request_id":"\#(toolRequestID)"}"#.utf8)
+    )
+
+    XCTAssertEqual(message, .toolDenialOverridden(
+      toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID)
+    ))
+  }
+
+  func testToolClosureDecodesApprovedAndUndecidedEvidence() throws {
+    for approvedBeforeClose in [true, false] {
+      let entry = try SignalboxJSONCoding.decoder().decode(
+        SignalboxTranscriptEntry.self,
+        from: Data(
+          #"{"type":"tool_closed","tool_request_id":"\#(toolRequestID)","content":"closed before execution","approved_before_close":\#(approvedBeforeClose)}"#.utf8)
+      )
+      XCTAssertEqual(entry, .toolClosed(
+        toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID),
+        content: "closed before execution", approvedBeforeClose: approvedBeforeClose
+      ))
+    }
+  }
+
+  func testToolClosureWithoutApprovalEvidenceIsNotProjectedAsAClosure() throws {
+    let entry = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptEntry.self,
+      from: Data(
+        #"{"type":"tool_closed","tool_request_id":"\#(toolRequestID)","content":"closed before execution"}"#.utf8)
+    )
+    guard case .unknown(_, _, let diagnostic) = entry else {
+      return XCTFail("A closure requires evidence distinguishing approval from no decision.")
+    }
+    XCTAssertNotNil(diagnostic)
+  }
+
+  func testToolDenialDecodesRecordedOverrideEvidence() throws {
+    for overrideRecorded in [true, false] {
+      let entry = try SignalboxJSONCoding.decoder().decode(
+        SignalboxTranscriptEntry.self,
+        from: Data(
+          #"{"type":"tool_denied","tool_request_id":"\#(toolRequestID)","content":"denied","override_recorded":\#(overrideRecorded)}"#.utf8)
+      )
+      XCTAssertEqual(entry, .toolDenied(
+        toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID),
+        content: "denied", overrideRecorded: overrideRecorded
+      ))
+    }
+  }
+
+  func testToolDenialRequiresRecordedOverrideEvidence() throws {
+    let entry = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptEntry.self,
+      from: Data(
+        #"{"type":"tool_denied","tool_request_id":"\#(toolRequestID)","content":"denied"}"#.utf8)
+    )
+    guard case .unknown(_, _, let diagnostic) = entry else {
+      return XCTFail("A denial requires evidence of its recorded override.")
+    }
+    XCTAssertNotNil(diagnostic)
+  }
+
   func testToolInadmissibleDecodesItsRequestAndResult() throws {
     let content = "execution_failed: placement_lost"
     let entry = try SignalboxJSONCoding.decoder().decode(
@@ -156,6 +234,26 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
       #"{"request":{"command_id":"\#(turnID)","content":[{"text":"Stop and continue","type":"text"}],"descendant_scope":"parent_and_descendants","expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session_id":"\#(sessionID)","type":"stop_turn"},"request_id":"9","version":1}"#
+    )
+  }
+
+  func testReconcileRequestEncodesTheExactContinuation() throws {
+    let frame = SignalboxProcessClientFrame(
+      requestID: try SignalboxRequestID(validating: 9),
+      request: .reconcileTurn(
+        commandID: try SignalboxCommandID(validating: turnID),
+        sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+        expectedActiveTurnID: try SignalboxCanonicalUUID(validating: turnID),
+        content: "Recover and continue",
+        expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 3)
+      )
+    )
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(frame)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      #"{"request":{"command_id":"\#(turnID)","content":[{"text":"Recover and continue","type":"text"}],"expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session_id":"\#(sessionID)","type":"reconcile_turn"},"request_id":"9","version":1}"#
     )
   }
 

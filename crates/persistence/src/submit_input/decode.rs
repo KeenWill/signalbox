@@ -8,10 +8,11 @@ use super::{
 };
 use crate::command_registry::SUBMIT_INPUT_KIND;
 use crate::mapping::{
-    accepted_input_id_from_uuid, defaults_version_from_numeric, durable_command_id_from_uuid,
-    durable_command_id_to_uuid, model_change_adjustments_from_json, model_settings_from_json,
-    model_settings_overlay_from_json, positive_u64_from_numeric, session_id_from_uuid,
-    turn_id_from_uuid,
+    AttachmentRejectionStorageKind, accepted_input_id_from_uuid,
+    attachment_rejection_kind_from_str, defaults_version_from_numeric,
+    durable_command_id_from_uuid, durable_command_id_to_uuid, model_change_adjustments_from_json,
+    model_settings_from_json, model_settings_overlay_from_json, positive_u64_from_numeric,
+    session_id_from_uuid, turn_id_from_uuid,
 };
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -454,7 +455,7 @@ pub(super) fn decode_origin_runtime_state(
     }
 }
 
-pub(super) fn decode_complete(
+pub(super) async fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
     related_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
@@ -480,7 +481,11 @@ pub(super) fn decode_complete(
         required(&row, "actor_kind")?,
         row.try_get("actor_turn_id")?,
         row.try_get("actor_tool_request_id")?,
-    )?;
+        row.try_get("actor_program_run_id")?,
+        row.try_get("verified_actor_program_run_id")?,
+        typed_version,
+    )
+    .await?;
     let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
     let session = session_id_from_uuid(required(&row, "command_session_id")?);
     let content = decode_content(required(&row, "command_content_parts")?, "command content")?;
@@ -496,26 +501,34 @@ pub(super) fn decode_complete(
         command_model_settings_override,
         "command delivery",
     )?;
-    let command = match (actor, delivery) {
-        (Actor::Core, DeliveryRequest::StartWhenNoActiveTurn { configuration }) => {
-            SubmitInput::new_core_continuation(command_id, session, content, configuration)
+    let command = match actor {
+        Actor::User => SubmitInput::new(command_id, session, content, delivery),
+        Actor::Program { run } => {
+            SubmitInput::new_program(command_id, session, content, delivery, run)
         }
-        (
-            Actor::Core,
+        Actor::Model { .. } | Actor::Tool { .. } | Actor::Recovery => {
+            SubmitInput::new(command_id, session, content, delivery)
+        }
+        Actor::Core => match delivery {
+            DeliveryRequest::StartWhenNoActiveTurn { configuration } => {
+                SubmitInput::new_core_continuation(command_id, session, content, configuration)
+            }
             DeliveryRequest::Interrupt {
                 expected_active_turn,
                 descendant_scope,
                 configuration,
-            },
-        ) => SubmitInput::new_core_interrupt(
-            command_id,
-            session,
-            content,
-            expected_active_turn,
-            descendant_scope,
-            configuration,
-        ),
-        (_, delivery) => SubmitInput::new(command_id, session, content, delivery),
+            } => SubmitInput::new_core_interrupt(
+                command_id,
+                session,
+                content,
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            ),
+            DeliveryRequest::NextSafePoint { .. } | DeliveryRequest::AfterCurrentTurn { .. } => {
+                return Err(SubmitInputCorruption::Inconsistent("core input delivery").into());
+            }
+        },
     };
 
     let result_kind: String = required(&row, "result_kind")?;
@@ -538,6 +551,19 @@ pub(super) fn decode_complete(
     let result_attachment_digest: Option<Vec<u8>> = row.try_get("result_attachment_digest")?;
     let result_attachment_maximum_bytes: Option<Decimal> =
         row.try_get("result_attachment_maximum_bytes")?;
+    if row
+        .try_get::<Option<Vec<Vec<u8>>>, _>("result_attachment_verified_prefix")?
+        .is_some()
+        && !(result_kind == REJECTED
+            && rejection_kind
+                .as_deref()
+                .and_then(attachment_rejection_kind_from_str)
+                == Some(AttachmentRejectionStorageKind::BlobNotFound))
+    {
+        return Err(
+            SubmitInputCorruption::Inconsistent("unexpected attachment verified prefix").into(),
+        );
+    }
     let accepted_effect_count: i64 = required(&row, "accepted_effect_count")?;
     let queued_effect_count: i64 = required(&row, "queued_effect_count")?;
 
@@ -656,7 +682,7 @@ pub(super) fn decode_complete(
     };
 
     input
-        .reconstitute()
+        .reconstitute_recorded()
         .map_err(|error| SubmitInputCorruption::Domain(error.failure()).into())
 }
 
@@ -925,17 +951,18 @@ fn decode_rejected(
             SubmitInputCorruption::Inconsistent("unexpected existing interrupt result").into(),
         );
     }
-    if !matches!(
-        rejection_kind,
-        "attachment_blob_not_found" | "attachment_byte_budget_exceeded"
-    ) && (attachment_digest.is_some() || attachment_maximum_bytes.is_some())
+    if attachment_rejection_kind_from_str(rejection_kind).is_none()
+        && (attachment_digest.is_some() || attachment_maximum_bytes.is_some())
     {
         return Err(
             SubmitInputCorruption::Inconsistent("unexpected attachment result evidence").into(),
         );
     }
     match rejection_kind {
-        "attachment_blob_not_found" => {
+        value
+            if attachment_rejection_kind_from_str(value)
+                == Some(AttachmentRejectionStorageKind::BlobNotFound) =>
+        {
             require_all_absent(
                 actual_turn,
                 expected_turn,
@@ -963,11 +990,33 @@ fn decode_rejected(
                         stored_actor,
                         result_session,
                         result_digest: signalbox_domain::BlobDigest::from_bytes(digest),
+                        verified_prefix: row
+                            .try_get::<Option<Vec<Vec<u8>>>, _>(
+                                "result_attachment_verified_prefix",
+                            )?
+                            .map(|prefix| {
+                                prefix
+                                    .into_iter()
+                                    .map(|digest| {
+                                        <[u8; 32]>::try_from(digest)
+                                            .map(signalbox_domain::BlobDigest::from_bytes)
+                                            .map_err(|_| {
+                                                SubmitInputCorruption::Inconsistent(
+                                                    "attachment verified prefix digest",
+                                                )
+                                            })
+                                    })
+                                    .collect::<Result<Box<[_]>, _>>()
+                            })
+                            .transpose()?,
                     },
                 ),
             )
         }
-        "attachment_byte_budget_exceeded" => {
+        value
+            if attachment_rejection_kind_from_str(value)
+                == Some(AttachmentRejectionStorageKind::ByteBudgetExceeded) =>
+        {
             require_all_absent(
                 actual_turn,
                 expected_turn,

@@ -2,14 +2,13 @@
 
 Nothing in this document is built; it extends
 [program substrate](../spec/program-substrate.md) with the committed design for
-registration, grants, capability executors, cancellation, and session driving.
+registration, grants, capability executors, and session driving.
 
 ## Goal
 
 A program is registered under a durable identity, runs under an explicit grant
 list, drives sessions and other effects host-side, recovers from a crash without
-a false exactly-once claim, and is cancelled by user authority. The journal
-stays thin coordination state.
+a false exactly-once claim. The journal stays thin coordination state.
 
 ## Design
 

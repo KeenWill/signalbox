@@ -14,7 +14,7 @@ fn attachment_part(digest: BlobDigest) -> UserContentPart {
     }
 }
 
-fn attachment_content(digest: BlobDigest) -> UserContent {
+pub(super) fn attachment_content(digest: BlobDigest) -> UserContent {
     UserContent::try_parts(vec![attachment_part(digest)])
         .expect("the fixture attachment content is canonical")
 }
@@ -3433,7 +3433,7 @@ async fn multipart_command_and_accepted_satellites_are_identical() -> Result<(),
 /// Catalogues one blob identity with a verified replica in its own store
 /// binding, which is the only committed shape an admission check can observe as
 /// available.
-async fn catalog_verified_blob(
+pub(super) async fn catalog_verified_blob(
     pool: &PgPool,
     digest: BlobDigest,
     byte_length: u64,
@@ -4791,10 +4791,229 @@ async fn executing_tool_batch_admits_a_bounded_attachment_queue() -> Result<(), 
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_executing_tool_batch_charges_its_retained_attachment()
 -> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_container, pool, _) = migrated_postgres().await?;
+    let (fixture, _) =
+        delegated_attachment_tool_batch(&pool, InitialToolApproval::PolicyAuto).await?;
+    assert_delegated_attachment_budget(
+        &pool,
+        fixture.child,
+        fixture.authorized.turn(),
+        DELEGATED_BATCH_FIXTURE_SEED,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_approval_wait_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let (fixture, _) = delegated_attachment_tool_batch(&pool, InitialToolApproval::Confirm).await?;
+    assert_delegated_attachment_budget(
+        &pool,
+        fixture.child,
+        fixture.authorized.turn(),
+        DELEGATED_BATCH_FIXTURE_SEED,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_tool_recovery_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let (fixture, _) =
+        delegated_attachment_tool_batch(&pool, InitialToolApproval::PolicyAuto).await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + 0x210));
+    repository
+        .prepare_next_attempt(
+            fixture.child,
+            fixture.authorized.turn(),
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?
+        .expect("the approved request prepares its attempt");
+    let dispatch = repository
+        .authorize_attempt(fixture.child, fixture.authorized.turn(), attempt)
+        .await?;
+    repository
+        .commit_observation(
+            dispatch
+                .executor_fence()
+                .bind(ToolAttemptObservation::Ambiguous),
+        )
+        .await?;
+    assert_delegated_attachment_budget(
+        &pool,
+        fixture.child,
+        fixture.authorized.turn(),
+        DELEGATED_BATCH_FIXTURE_SEED,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_model_recovery_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
     let fixture =
         authorize_delegated_model_call_fixture(&pool, DELEGATED_BATCH_FIXTURE_SEED).await?;
-    let turn = fixture.authorized.turn();
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous),
+            ModelCallTerminalIdentities::Ambiguous(AmbiguousModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + 0x210)),
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?;
+    assert_delegated_attachment_budget(
+        &pool,
+        fixture.child,
+        fixture.authorized.turn(),
+        DELEGATED_BATCH_FIXTURE_SEED,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_child_wait_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::ChildRelationshipPolicy;
+    use signalbox_persistence::session_delegation::SpawnSessionCandidates;
+    let (_container, pool, _) = migrated_postgres().await?;
+    let seed = DELEGATED_BATCH_FIXTURE_SEED;
+    let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
+    let grandchild = SessionId::from_uuid(Uuid::from_u128(seed + 0x230));
+    let task = "Inspect the nested delegated task";
+    let calls = [
+        (
+            "spawn_session",
+            serde_json::json!({"task": task, "relationship": {"kind": "background"}}).to_string(),
+        ),
+        (
+            "await_session",
+            serde_json::json!({"child_session_id": grandchild.as_uuid().to_string(), "mode": "foreground"})
+                .to_string(),
+        ),
+    ];
+    let requests = [
+        ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x210)),
+        ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x211)),
+    ];
+    let response = ToolUsingAssistantResponse::try_from_parts(
+        calls
+            .into_iter()
+            .map(|(name, arguments)| {
+                AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                    ToolName::try_new(name.to_owned()).expect("fixture tool name is valid"),
+                    NormalizedToolArguments::try_from_provider_text(arguments)
+                        .expect("fixture arguments are valid"),
+                ))
+            })
+            .collect(),
+    )
+    .expect("the response contains tool proposals");
+    fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                    retained_input_tokens: None,
+                    retained_output_tokens: None,
+                }),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                requests
+                    .iter()
+                    .enumerate()
+                    .map(|(index, request)| {
+                        ToolResponsePartIdentity::tool_call(
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                                seed + 0x212 + index as u128,
+                            )),
+                            *request,
+                            InitialToolApproval::PolicyAuto,
+                        )
+                    })
+                    .collect(),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x220)),
+                Some(TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x221))),
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?;
+    let tools = PostgresToolLoopRepository::new(pool.clone());
+    let spawn_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x222));
+    tools
+        .prepare_next_attempt(
+            fixture.child,
+            fixture.authorized.turn(),
+            spawn_attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?
+        .expect("the spawn request is next");
+    tools
+        .authorize_attempt(fixture.child, fixture.authorized.turn(), spawn_attempt)
+        .await?;
+    let delegation = SessionDelegationRepository::new(pool.clone());
+    let spawned = delegation
+        .record_process_spawn(
+            fixture.child,
+            fixture.authorized.turn(),
+            requests[0],
+            task.to_owned(),
+            ChildRelationshipPolicy::Background,
+            SpawnSessionCandidates {
+                child: grandchild,
+                turn: TurnId::from_uuid(Uuid::from_u128(seed + 0x231)),
+                entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x232)),
+            },
+        )
+        .await?;
+    assert!(matches!(spawned, ProcessDelegationOutcome::Applied(_)));
+    let await_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x223));
+    tools
+        .prepare_next_attempt(
+            fixture.child,
+            fixture.authorized.turn(),
+            await_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the await request is next");
+    tools
+        .authorize_attempt(fixture.child, fixture.authorized.turn(), await_attempt)
+        .await?;
+    let waited = delegation
+        .record_process_wait(
+            fixture.child,
+            fixture.authorized.turn(),
+            requests[1],
+            grandchild,
+            DelegationWaitMode::Foreground,
+        )
+        .await?;
+    assert!(matches!(waited, ProcessDelegationOutcome::Applied(_)));
+    assert_delegated_attachment_budget(&pool, fixture.child, fixture.authorized.turn(), seed).await
+}
+
+async fn delegated_attachment_tool_batch(
+    pool: &PgPool,
+    approval: InitialToolApproval,
+) -> Result<(AuthorizedDelegatedModelCallFixture, ToolRequestId), Box<dyn Error>> {
+    let fixture =
+        authorize_delegated_model_call_fixture(pool, DELEGATED_BATCH_FIXTURE_SEED).await?;
     let request =
         ToolRequestId::from_uuid(Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + TOOL_REQUEST));
     let response =
@@ -4824,44 +5043,47 @@ async fn delegated_executing_tool_batch_charges_its_retained_attachment()
                         DELEGATED_BATCH_FIXTURE_SEED + TOOL_CALL_ENTRY,
                     )),
                     request,
-                    InitialToolApproval::PolicyAuto,
+                    approval,
                 )],
                 ContextFrontierId::from_uuid(Uuid::from_u128(
                     DELEGATED_BATCH_FIXTURE_SEED + YIELDED_FRONTIER,
                 )),
-                Some(TurnAttemptId::from_uuid(Uuid::from_u128(
-                    DELEGATED_BATCH_FIXTURE_SEED + CONTINUATION_ATTEMPT,
-                ))),
+                (approval == InitialToolApproval::PolicyAuto).then(|| {
+                    TurnAttemptId::from_uuid(Uuid::from_u128(
+                        DELEGATED_BATCH_FIXTURE_SEED + CONTINUATION_ATTEMPT,
+                    ))
+                }),
             )),
             |_| panic!("the delegated fixture has no pending steering to reclassify"),
         )
         .await?;
-    assert!(
-        matches!(
-            &outcome,
-            ModelCallTerminalOutcome::ToolRound(round)
-                if matches!(round.next_phase(), ActiveTurnPhase::Running { .. })
-        ),
-        "the delegated fixture reaches a tool round whose automatically approved batch executes under the running phase"
-    );
+    assert!(matches!(outcome, ModelCallTerminalOutcome::ToolRound(_)));
+    Ok((fixture, request))
+}
 
+async fn assert_delegated_attachment_budget(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    seed: u128,
+) -> Result<(), Box<dyn Error>> {
     let retained_digest = BlobDigest::digest(b"delegated retained attachment");
     let later_steering_digest = BlobDigest::digest(b"delegated later steering attachment");
     catalog_verified_blob(
-        &pool,
+        pool,
         retained_digest,
         RETAINED_ATTACHMENT_LENGTH,
         "delegated_batch_retained",
-        Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + STORE_NAMESPACE),
+        Uuid::from_u128(seed + STORE_NAMESPACE),
         "retained",
     )
     .await?;
     catalog_verified_blob(
-        &pool,
+        pool,
         later_steering_digest,
         RETAINED_ATTACHMENT_LENGTH,
         "delegated_batch_later_steering",
-        Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + SECOND_STORE_NAMESPACE),
+        Uuid::from_u128(seed + SECOND_STORE_NAMESPACE),
         "later_steering",
     )
     .await?;
@@ -4872,18 +5094,14 @@ async fn delegated_executing_tool_batch_charges_its_retained_attachment()
             repository
                 .handle(
                     SubmitInput::new(
-                        DurableCommandId::from_uuid(Uuid::from_u128(
-                            DELEGATED_BATCH_FIXTURE_SEED + STEERING_COMMAND,
-                        )),
-                        fixture.child,
+                        DurableCommandId::from_uuid(Uuid::from_u128(seed + STEERING_COMMAND,)),
+                        session,
                         attachment_content(retained_digest),
                         DeliveryRequest::NextSafePoint {
                             expected_active_turn: turn,
                         },
                     ),
-                    AcceptedInputId::from_uuid(Uuid::from_u128(
-                        DELEGATED_BATCH_FIXTURE_SEED + STEERING_ACCEPTED_INPUT,
-                    )),
+                    AcceptedInputId::from_uuid(Uuid::from_u128(seed + STEERING_ACCEPTED_INPUT,)),
                     None,
                 )
                 .await?,
@@ -4897,18 +5115,14 @@ async fn delegated_executing_tool_batch_charges_its_retained_attachment()
         repository
             .handle(
                 SubmitInput::new(
-                    DurableCommandId::from_uuid(Uuid::from_u128(
-                        DELEGATED_BATCH_FIXTURE_SEED + LATER_STEERING_COMMAND,
-                    )),
-                    fixture.child,
+                    DurableCommandId::from_uuid(Uuid::from_u128(seed + LATER_STEERING_COMMAND,)),
+                    session,
                     attachment_content(later_steering_digest),
                     DeliveryRequest::NextSafePoint {
                         expected_active_turn: turn,
                     },
                 ),
-                AcceptedInputId::from_uuid(Uuid::from_u128(
-                    DELEGATED_BATCH_FIXTURE_SEED + LATER_STEERING_ACCEPTED_INPUT,
-                )),
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + LATER_STEERING_ACCEPTED_INPUT,)),
                 None,
             )
             .await?,
@@ -4919,8 +5133,6 @@ async fn delegated_executing_tool_batch_charges_its_retained_attachment()
         ))
     );
 
-    pool.close().await;
-    drop(container);
     Ok(())
 }
 
@@ -5271,6 +5483,489 @@ async fn creation_runner_placement_replay_compares_explicit_and_template_payload
                 CreateSessionOutcome::ConflictingReuse { command_id }
             );
         }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn missing_attachment_receipt_rejects_a_different_referenced_digest()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let first = BlobDigest::from_bytes([0x11; 32]);
+    let missing = BlobDigest::from_bytes([0x22; 32]);
+    let later = BlobDigest::from_bytes([0x33; 32]);
+    for (digest, store) in [(first, "canonical_first"), (later, "canonical_later")] {
+        catalog_verified_blob(&pool, digest, 1, store, Uuid::now_v7(), "verified").await?;
+    }
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        SessionId::from_uuid(Uuid::now_v7()),
+        UserContent::try_parts(vec![
+            attachment_part(later),
+            attachment_part(missing),
+            attachment_part(first),
+        ])
+        .expect("the fixture contains three valid attachment parts"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(1024);
+    let expected = SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBlobNotFound {
+        digest: missing,
+    });
+    assert_eq!(
+        repository
+            .handle(
+                command.clone(),
+                AcceptedInputId::from_uuid(Uuid::now_v7()),
+                Some(TurnId::from_uuid(Uuid::now_v7()))
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(expected.clone())
+    );
+    catalog_verified_blob(
+        &pool,
+        missing,
+        1,
+        "canonical_missing",
+        Uuid::now_v7(),
+        "now_verified",
+    )
+    .await?;
+    assert_eq!(
+        repository
+            .load(command.command_id())
+            .await?
+            .expect("the receipt remains durable")
+            .result(),
+        &expected
+    );
+    let mut corruption = pool.begin().await?;
+    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query(
+        "UPDATE submit_input_command SET result_attachment_digest = $2 WHERE command_id = $1",
+    )
+    .bind(command.command_id().into_uuid())
+    .bind(later.as_bytes().as_slice())
+    .execute(&mut *corruption)
+    .await?;
+    sqlx::query("ALTER TABLE submit_input_command ENABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+    let error = repository
+        .load(command.command_id())
+        .await
+        .expect_err("membership alone cannot authenticate the unavailable choice");
+    assert!(matches!(
+        error,
+        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Domain(
+            signalbox_domain::SubmitInputReconstitutionFailure::AttachmentDigestMismatch
+        ))
+    ));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn missing_attachment_receipt_without_prefix_survives_migration() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _) = migrated_postgres().await?;
+    let first = BlobDigest::from_bytes([0x11; 32]);
+    let missing = BlobDigest::from_bytes([0x22; 32]);
+    catalog_verified_blob(&pool, first, 1, "prefix_first", Uuid::now_v7(), "verified").await?;
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        SessionId::from_uuid(Uuid::now_v7()),
+        UserContent::try_parts(vec![attachment_part(missing), attachment_part(first)])
+            .expect("the fixture has two valid attachments"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(1024);
+    let expected = repository
+        .handle(
+            command.clone(),
+            AcceptedInputId::from_uuid(Uuid::now_v7()),
+            Some(TurnId::from_uuid(Uuid::now_v7())),
+        )
+        .await?;
+    assert_eq!(
+        expected,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentBlobNotFound { digest: missing }
+        ))
+    );
+    sqlx::query("ALTER TABLE submit_input_command DROP COLUMN result_attachment_verified_prefix")
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/202609080805_attachment_admission_evidence.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    let absent: bool = sqlx::query_scalar(
+        "SELECT result_attachment_verified_prefix IS NULL FROM submit_input_command WHERE command_id = $1",
+    ).bind(command.command_id().as_uuid()).fetch_one(&pool).await?;
+    assert!(absent, "the migration leaves omitted evidence absent");
+    catalog_verified_blob(
+        &pool,
+        missing,
+        1,
+        "prefix_missing",
+        Uuid::now_v7(),
+        "now_verified",
+    )
+    .await?;
+    assert_eq!(
+        repository
+            .load(command.command_id())
+            .await?
+            .expect("the receipt loads")
+            .result(),
+        &SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBlobNotFound {
+            digest: missing
+        })
+    );
+    assert_eq!(
+        repository
+            .handle(
+                command,
+                AcceptedInputId::from_uuid(Uuid::now_v7()),
+                Some(TurnId::from_uuid(Uuid::now_v7()))
+            )
+            .await?,
+        expected
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pinned_target_without_a_tool_batch_rolls_back_attachment_submission()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    // Arbitrary fixture identities; only the retained pin without a call is malformed.
+    let seed = 0xb3a0;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 3));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed, seed + 1, direct(seed + 2)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x10,
+                seed + 1,
+                "activate the pin fixture",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 4)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 6),
+            starting_frontier: Uuid::from_u128(seed + 7),
+            initial_attempt: Uuid::from_u128(seed + 5),
+        },
+    )
+    .await?;
+    let digest = BlobDigest::digest(b"attachment admitted only without corruption");
+    catalog_verified_blob(
+        &pool,
+        digest,
+        7,
+        "pin_fixture",
+        Uuid::from_u128(seed + 0x23),
+        "attachment",
+    )
+    .await?;
+    // Bypass the disposable database's write guards to exercise a corrupt reread.
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle SET pinned_provider_model_identity_id = $2 WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .bind(Uuid::from_u128(seed + 0x20))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21));
+    let accepted = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x22));
+    let error = SubmitInputRepository::new(pool.clone())
+        .with_attachment_maximum_bytes(10)
+        .handle(
+            SubmitInput::new(
+                command,
+                session,
+                attachment_content(digest),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            accepted,
+            None,
+        )
+        .await
+        .expect_err("a retained pin without a call or executing batch is corruption");
+    assert!(
+        matches!(error, SubmitInputRepositoryError::ModelExecution(error)
+        if matches!(*error, ModelCallRepositoryError::Corruption(ModelCallCorruption::Execution(
+            signalbox_domain::ModelCallExecutionReconstitutionFailure::PinnedTargetUnexpected))))
+    );
+    let leaked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1) OR EXISTS (SELECT 1 FROM accepted_input WHERE accepted_input_id = $2)")
+        .bind(command.into_uuid()).bind(accepted.into_uuid()).fetch_one(&pool).await?;
+    assert!(
+        !leaked,
+        "the provisional command and accepted input roll back together"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn program_submit_records_its_run_and_conflicts_with_user_replay()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{Actor, ProgramRunId};
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    // These values are arbitrary, independent fixture identities.
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0x5701, 0x5702, direct(0x5703)))
+        .await?;
+    let run = ProgramRunId::from_uuid(next_test_submit_uuid());
+    signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone())
+        .create_stream(run)
+        .await?;
+    let capability = signalbox_persistence::program_journal::ProgramSessionHost::new(
+        signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone()),
+    )
+    .session_capability(run)
+    .await?
+    .expect("program run is retained");
+    let user_command = start_input(
+        0x5704,
+        0x5702,
+        "program input",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let request = SubmitInputRequest::try_new_program(
+        user_command.command_id(),
+        user_command.session(),
+        user_command.content().clone(),
+        user_command.delivery(),
+        capability,
+    )?;
+    let repository = SubmitInputRepository::new(pool.clone());
+    let program_command = SubmitInput::new_program(
+        user_command.command_id(),
+        user_command.session(),
+        user_command.content().clone(),
+        user_command.delivery(),
+        capability.reference(),
+    );
+    let core_command = SubmitInput::new_core_continuation(
+        user_command.command_id(),
+        user_command.session(),
+        user_command.content().clone(),
+        input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    );
+    for (command, principal) in [
+        (user_command.clone(), None),
+        (core_command, None),
+        (
+            program_command,
+            Some(signalbox_domain::CommandPrincipal::Core),
+        ),
+    ] {
+        let error = repository
+            .handle_with_candidates_alias_resolver_as(
+                command,
+                principal,
+                signalbox_domain::ParentTerminationKind::Cancelled,
+                AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                None,
+                CancelledModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                ),
+                |_| panic!("invalid issuer cannot allocate a turn"),
+                |_| panic!("invalid issuer cannot cancel a tool"),
+                || panic!("invalid issuer cannot settle a closure"),
+                || panic!("invalid issuer cannot settle a closure"),
+                |_| None,
+            )
+            .await
+            .expect_err("actor and envelope must agree on program provenance");
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+                "actor and envelope principal"
+            ))
+        ));
+        assert!(repository.load(user_command.command_id()).await?.is_none());
+    }
+    let mut service = SubmitInputService::new(
+        signalbox_application::UuidV7SubmitInputIdGenerator,
+        repository.clone(),
+        AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    let first = service.execute(request.clone()).await?;
+    assert!(matches!(
+        first,
+        SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+    assert_eq!(service.execute(request).await?, first);
+    let stored = repository
+        .load(user_command.command_id())
+        .await?
+        .expect("submit is retained");
+    assert!(
+        matches!(stored.command().actor(), Actor::Program { run: reference } if reference.run() == run)
+    );
+    let issuer: String =
+        sqlx::query_scalar("SELECT issuer_kind FROM durable_command WHERE command_id = $1")
+            .bind(user_command.command_id().into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(issuer, "program");
+    let user_request = SubmitInputRequest::try_new(
+        user_command.command_id(),
+        user_command.session(),
+        user_command.content().clone(),
+        user_command.delivery(),
+    )?;
+    assert_eq!(
+        service.execute(user_request).await?,
+        SubmitInputOutcome::ConflictingReuse {
+            command_id: user_command.command_id(),
+        }
+    );
+    let mut earlier_version = pool.begin().await?;
+    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER USER")
+        .execute(&mut *earlier_version)
+        .await?;
+    let error =
+        sqlx::query("UPDATE submit_input_command SET storage_version = 3 WHERE command_id = $1")
+            .bind(user_command.command_id().into_uuid())
+            .execute(&mut *earlier_version)
+            .await
+            .expect_err("program actor cannot be stored in version 3");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("submit_input_command_actor_shape")
+    );
+    earlier_version.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn submit_replay_requires_the_actor_principal_pair() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{Actor, CommandPrincipal, ParentTerminationKind, ProgramRunId};
+    let (_container, pool, _) = migrated_postgres().await?;
+    let journal =
+        signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone());
+    let run = ProgramRunId::from_uuid(next_test_submit_uuid());
+    journal.create_stream(run).await?;
+    let capability = signalbox_persistence::program_journal::ProgramSessionHost::new(journal)
+        .session_capability(run)
+        .await?
+        .expect("the run is retained");
+    let session = SessionId::from_uuid(next_test_submit_uuid());
+    let content = UserContent::try_text(String::from("replay principal validation"))
+        .expect("fixture content is admitted");
+    let configuration = input_choices(1, ModelSelectionOverride::UseSessionDefault);
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn { configuration };
+    let repository = SubmitInputRepository::new(pool.clone());
+    for command in [
+        SubmitInput::new(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            session,
+            content.clone(),
+            delivery,
+        ),
+        SubmitInput::new_core_continuation(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            session,
+            content.clone(),
+            configuration,
+        ),
+        SubmitInput::new_program(
+            DurableCommandId::from_uuid(next_test_submit_uuid()),
+            session,
+            content,
+            delivery,
+            capability.reference(),
+        ),
+    ] {
+        let principal = match command.actor() {
+            Actor::Program { .. } => Some(CommandPrincipal::Core),
+            _ => None,
+        };
+        let recorded = repository
+            .handle(
+                command.clone(),
+                AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                None,
+            )
+            .await?;
+        assert!(matches!(recorded, SubmitInputHandlingOutcome::Recorded(_)));
+        let error = repository
+            .handle_with_candidates_alias_resolver_as(
+                command.clone(),
+                principal,
+                ParentTerminationKind::Cancelled,
+                AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                None,
+                CancelledModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                ),
+                |_| panic!("replay cannot allocate a turn"),
+                |_| panic!("replay cannot cancel a tool"),
+                || panic!("replay cannot settle a closure"),
+                || panic!("replay cannot settle a closure"),
+                |_| None,
+            )
+            .await
+            .expect_err("a recorded receipt cannot bypass the actor/principal check");
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+                "actor and envelope principal"
+            ))
+        ));
+        assert_eq!(
+            repository
+                .handle(
+                    command,
+                    AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                    None,
+                )
+                .await?,
+            recorded
+        );
     }
     Ok(())
 }
