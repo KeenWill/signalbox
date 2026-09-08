@@ -2,6 +2,15 @@
 
 # transcript
 
+## CredentialAvailabilityWaitCause
+
+```rust
+pub enum CredentialAvailabilityWaitCause {
+    Exhausted,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## CurrentModelCallState
 
 ```rust
@@ -85,6 +94,10 @@ impl<'de> de::Deserialize<'de> for FailedTerminalModelCall {
 
 ```rust
 pub enum TurnState {
+    ActiveAwaitingCredentialAvailability {
+        wait_attempt_id: CanonicalUuid,
+        cause: CredentialAvailabilityWaitCause,
+    },
     Queued {
         accepted_input_id: CanonicalUuid,
         content: UserInputContent,

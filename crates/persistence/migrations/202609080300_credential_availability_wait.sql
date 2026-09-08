@@ -16,7 +16,7 @@ CREATE TABLE credential_availability_wait (
     frontier_id uuid NOT NULL,
     pool_policy_id uuid NOT NULL REFERENCES credential_pool_policy,
     effective_target_id uuid NOT NULL,
-    cause text NOT NULL CHECK (cause IN ('contended', 'exhausted')),
+    cause text NOT NULL CHECK (cause = 'exhausted'),
     deadline timestamptz,
     eligible boolean NOT NULL DEFAULT false,
     predecessor_model_call_id uuid REFERENCES model_call,
@@ -356,6 +356,21 @@ BEGIN
         END IF;
         IF FOUND THEN
         IF predecessor_state');
+    EXECUTE definition;
+END;
+$$;
+
+DO $$
+DECLARE definition text;
+BEGIN
+    SELECT pg_get_functiondef('assert_turn_lifecycle_final_state_without_steering(uuid)'::regprocedure) INTO definition;
+    definition := replace(definition,
+        'OR end_disposition NOT IN (''known_failure'', ''lost'')',
+        'OR (end_disposition NOT IN (''known_failure'', ''lost'') AND NOT (
+            end_variant = ''without_stop'' AND end_disposition = ''yielded_to_durable_wait''
+            AND EXISTS (SELECT 1 FROM credential_availability_wait waiting
+                WHERE waiting.wait_attempt_id = turn_attempt.turn_attempt_id)
+            AND credential_wait_terminal_history_is_valid(checked_turn_id)))');
     EXECUTE definition;
 END;
 $$;

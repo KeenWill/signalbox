@@ -131,7 +131,6 @@ pub(crate) async fn load_phase(
         .bind(session.into_uuid()).bind(turn.into_uuid()).fetch_one(&mut *connection).await?;
     let cause = match row.try_get::<String, _>("cause")?.as_str() {
         "exhausted" => CredentialAvailabilityWaitCause::Exhausted,
-        "contended" => CredentialAvailabilityWaitCause::Contended,
         _ => return Err(ModelCallCorruption::Inconsistent("credential wait cause").into()),
     };
     let evidence: Vec<serde_json::Value> = sqlx::query_scalar("SELECT exclusions FROM credential_availability_wait_member WHERE wait_attempt_id = $1 ORDER BY ordinal")

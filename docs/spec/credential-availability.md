@@ -182,6 +182,10 @@ instead consumes the wait, opens a fresh immediate successor with its applied
 interrupt proof, ends it AfterCancellation(Cancelled), and appends TurnCancelled
 after the wait frontier while reclassifying pending steering.
 
+A parked turn projects `active_awaiting_credential_availability` with its ended
+wait attempt and closed cause. Transcript reads and initial follow snapshots
+retain the active turn and its slot without rejection detail.
+
 ## Planned
 
 - Contention and capacity reservations, wake delivery, and the typed wait
