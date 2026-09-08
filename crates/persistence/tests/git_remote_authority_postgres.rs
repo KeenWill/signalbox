@@ -1289,15 +1289,25 @@ async fn workspace_operator_records_generated_facts_and_replays_original_identit
             url: GitRemoteUrl::try_new(URL.to_owned())?,
         },
         mint.operation().clone(),
-        WorkspaceOperation::WithdrawRemote { mint: GitRemoteMintId::from_uuid(Uuid::from_u128(9999)) },
+        WorkspaceOperation::WithdrawRemote {
+            mint: GitRemoteMintId::from_uuid(Uuid::from_u128(9999)),
+        },
         withdrawal.operation().clone(),
     ];
     for (index, operation) in rejected_operations.into_iter().enumerate() {
         let command_id = command_id(10 + index as u128);
-        assert!(matches!(repository.handle(WorkspaceCommand::new(command_id, operation), &mut ids).await,
-            Err(signalbox_persistence::workspace::WorkspaceError::Rejected)));
-        let claimed: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1)")
-            .bind(command_id.into_uuid()).fetch_one(&pool).await?;
+        assert!(matches!(
+            repository
+                .handle(WorkspaceCommand::new(command_id, operation), &mut ids)
+                .await,
+            Err(signalbox_persistence::workspace::WorkspaceError::Rejected)
+        ));
+        let claimed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1)",
+        )
+        .bind(command_id.into_uuid())
+        .fetch_one(&pool)
+        .await?;
         assert!(!claimed);
     }
 
@@ -1306,7 +1316,8 @@ async fn workspace_operator_records_generated_facts_and_replays_original_identit
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn workspace_registration_replays_after_its_original_symlink_disappears() -> Result<(), Box<dyn Error>> {
+async fn workspace_registration_replays_after_its_original_symlink_disappears()
+-> Result<(), Box<dyn Error>> {
     use signalbox_application::workspace::UuidV7WorkspaceIdentityGenerator;
     use signalbox_persistence::workspace::WorkspaceRepository;
     let (_container, pool) = migrated_postgres().await?;
@@ -1317,12 +1328,32 @@ async fn workspace_registration_replays_after_its_original_symlink_disappears() 
     std::fs::create_dir(&directory)?;
     std::os::unix::fs::symlink(&directory, &link)?;
     let requested = link.to_str().expect("fixture path is UTF-8");
-    let root = WorkspaceRootPath::try_new(std::fs::canonicalize(&link)?.to_str().expect("fixture path is UTF-8").to_owned())?;
+    let root = WorkspaceRootPath::try_new(
+        std::fs::canonicalize(&link)?
+            .to_str()
+            .expect("fixture path is UTF-8")
+            .to_owned(),
+    )?;
     let command = command_id(1);
-    let receipt = repository.register(command, requested, root, &mut UuidV7WorkspaceIdentityGenerator).await?;
+    let receipt = repository
+        .register(
+            command,
+            requested,
+            root,
+            &mut UuidV7WorkspaceIdentityGenerator,
+        )
+        .await?;
     std::fs::remove_file(&link)?;
     std::fs::remove_dir(&directory)?;
-    assert_eq!(repository.registration_replay(command, requested).await?, Some(receipt));
-    assert_eq!(repository.registration_replay(command, OTHER_WORKSPACE_ROOT).await?, None);
+    assert_eq!(
+        repository.registration_replay(command, requested).await?,
+        Some(receipt)
+    );
+    assert_eq!(
+        repository
+            .registration_replay(command, OTHER_WORKSPACE_ROOT)
+            .await?,
+        None
+    );
     Ok(())
 }
