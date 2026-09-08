@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { defaultBrowserPreferences } from '../src/preferences'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -36,6 +37,28 @@ test.beforeEach(async ({ page }) => {
     route.fulfill({ body: previewFixture, contentType: 'image/png' }),
   )
 })
+
+for (const width of [820, 1440]) {
+  test(`stacks attachments within the available pane at viewport ${width}`, async ({ page }) => {
+    await page.addInitScript(
+      (preferences) => {
+        localStorage.setItem('signalbox.web.preferences.v1', JSON.stringify(preferences))
+      },
+      { ...defaultBrowserPreferences, paneSizes: { navigation: 360, inspector: 480 } },
+    )
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/scenario/attachments')
+    const layout = page.locator('.attachment-layout')
+    await expect(layout).toHaveCSS('display', 'block')
+    expect(await layout.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+      true,
+    )
+    const download = page.getByRole('link', { name: 'Download', exact: true })
+    await download.scrollIntoViewIfNeeded()
+    await expect(download).toBeInViewport()
+    await page.screenshot({ path: test.info().outputPath('attachment-pane.png') })
+  })
+}
 
 test('keeps document bytes behind the admitted download-only affordance', async ({ page }) => {
   const problems = watchBrowser(page)
