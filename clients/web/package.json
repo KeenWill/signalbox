@@ -10,7 +10,7 @@
     "lint": "biome ci .",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
-    "test:browser": "npm run build && playwright test",
+    "test:browser": "node browser_tests.mjs",
     "test:browser:update": "npm run build && playwright test --update-snapshots"
   },
   "engines": {
