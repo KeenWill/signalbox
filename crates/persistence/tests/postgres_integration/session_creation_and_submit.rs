@@ -3054,7 +3054,7 @@ const MULTIPART_REORDERED_TURN_ID: u128 = 0xa27;
 const MULTIPART_METADATA_ACCEPTED_INPUT_ID: u128 = 0x928;
 const MULTIPART_METADATA_TURN_ID: u128 = 0xa28;
 const MULTIPART_ATTACHMENT_PAYLOAD: &[u8] = b"multipart attachment";
-const MULTIPART_ATTACHMENT_MAXIMUM_BYTES: u64 = 1_024;
+const MULTIPART_ATTACHMENT_MAXIMUM_BYTES: u64 = MULTIPART_ATTACHMENT_PAYLOAD.len() as u64;
 const MULTIPART_BLOB_STORE_NAME: &str = "multipart_test";
 const MULTIPART_BLOB_OBJECT_KEY: &str = "multipart/object";
 
@@ -3301,11 +3301,13 @@ async fn changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dy
     let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
+    let kind = AttachmentKind::Document;
+    let media_type = DeclaredMediaType::try_new(String::from("application/pdf"))
+        .expect("the fixture media type is valid");
     let attachment = UserContentPart::Attachment {
         digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
+        kind,
+        media_type: media_type.clone(),
         display_filename: Some(
             AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
                 .expect("the fixture display filename is valid"),
@@ -3326,9 +3328,8 @@ async fn changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dy
     let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
     let changed_attachment = UserContentPart::Attachment {
         digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
+        kind,
+        media_type,
         display_filename: Some(
             AttachmentDisplayFilename::try_new(String::from("changed.pdf"))
                 .expect("the changed fixture filename is valid"),
@@ -5271,5 +5272,166 @@ async fn creation_runner_placement_replay_compares_explicit_and_template_payload
             );
         }
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn missing_attachment_receipt_rejects_a_different_referenced_digest()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let first = BlobDigest::from_bytes([0x11; 32]);
+    let missing = BlobDigest::from_bytes([0x22; 32]);
+    let later = BlobDigest::from_bytes([0x33; 32]);
+    for (digest, store) in [(first, "canonical_first"), (later, "canonical_later")] {
+        catalog_verified_blob(&pool, digest, 1, store, Uuid::now_v7(), "verified").await?;
+    }
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        SessionId::from_uuid(Uuid::now_v7()),
+        UserContent::try_parts(vec![
+            attachment_part(later),
+            attachment_part(missing),
+            attachment_part(first),
+        ])
+        .expect("the fixture contains three valid attachment parts"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(1024);
+    let expected = SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBlobNotFound {
+        digest: missing,
+    });
+    assert_eq!(
+        repository
+            .handle(
+                command.clone(),
+                AcceptedInputId::from_uuid(Uuid::now_v7()),
+                Some(TurnId::from_uuid(Uuid::now_v7()))
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(expected.clone())
+    );
+    catalog_verified_blob(
+        &pool,
+        missing,
+        1,
+        "canonical_missing",
+        Uuid::now_v7(),
+        "now_verified",
+    )
+    .await?;
+    assert_eq!(
+        repository
+            .load(command.command_id())
+            .await?
+            .expect("the receipt remains durable")
+            .result(),
+        &expected
+    );
+    let mut corruption = pool.begin().await?;
+    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query(
+        "UPDATE submit_input_command SET result_attachment_digest = $2 WHERE command_id = $1",
+    )
+    .bind(command.command_id().into_uuid())
+    .bind(later.as_bytes().as_slice())
+    .execute(&mut *corruption)
+    .await?;
+    sqlx::query("ALTER TABLE submit_input_command ENABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+    let error = repository
+        .load(command.command_id())
+        .await
+        .expect_err("membership alone cannot authenticate the unavailable choice");
+    assert!(matches!(
+        error,
+        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Domain(
+            signalbox_domain::SubmitInputReconstitutionFailure::AttachmentDigestMismatch
+        ))
+    ));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn missing_attachment_receipt_without_prefix_survives_migration() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _) = migrated_postgres().await?;
+    let first = BlobDigest::from_bytes([0x11; 32]);
+    let missing = BlobDigest::from_bytes([0x22; 32]);
+    catalog_verified_blob(&pool, first, 1, "prefix_first", Uuid::now_v7(), "verified").await?;
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        SessionId::from_uuid(Uuid::now_v7()),
+        UserContent::try_parts(vec![attachment_part(missing), attachment_part(first)])
+            .expect("the fixture has two valid attachments"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(1024);
+    let expected = repository
+        .handle(
+            command.clone(),
+            AcceptedInputId::from_uuid(Uuid::now_v7()),
+            Some(TurnId::from_uuid(Uuid::now_v7())),
+        )
+        .await?;
+    assert_eq!(
+        expected,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentBlobNotFound { digest: missing }
+        ))
+    );
+    sqlx::query("ALTER TABLE submit_input_command DROP COLUMN result_attachment_verified_prefix")
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/202609080805_attachment_admission_evidence.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    let absent: bool = sqlx::query_scalar(
+        "SELECT result_attachment_verified_prefix IS NULL FROM submit_input_command WHERE command_id = $1",
+    ).bind(command.command_id().as_uuid()).fetch_one(&pool).await?;
+    assert!(absent, "the migration leaves omitted evidence absent");
+    catalog_verified_blob(
+        &pool,
+        missing,
+        1,
+        "prefix_missing",
+        Uuid::now_v7(),
+        "now_verified",
+    )
+    .await?;
+    assert_eq!(
+        repository
+            .load(command.command_id())
+            .await?
+            .expect("the receipt loads")
+            .result(),
+        &SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBlobNotFound {
+            digest: missing
+        })
+    );
+    assert_eq!(
+        repository
+            .handle(
+                command,
+                AcceptedInputId::from_uuid(Uuid::now_v7()),
+                Some(TurnId::from_uuid(Uuid::now_v7()))
+            )
+            .await?,
+        expected
+    );
+    pool.close().await;
+    drop(container);
     Ok(())
 }

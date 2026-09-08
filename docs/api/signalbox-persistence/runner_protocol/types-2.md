@@ -102,3 +102,80 @@ impl convert::From<error::Error> for runner_protocol::RunnerRecoveryError {
     fn from(value: error::Error) -> Self;
 }
 ```
+
+## RunnerStatusAfter
+
+```rust
+pub enum RunnerStatusAfter {
+    Enrollment(uuid::Uuid),
+    Placement(uuid::Uuid),
+    OperationFailure(uuid::Uuid),
+    WorkspaceLeak,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerStatusFact
+
+```rust
+pub enum RunnerStatusFact {
+    Enrollment {
+        runner: signalbox_domain::RunnerId,
+        request: signalbox_domain::RunnerEnrollmentRequestId,
+        authority: signalbox_domain::RunnerEnrollmentState,
+        connection: option::Option<runner_protocol::RunnerConnectionState>,
+    },
+    Placement {
+        session: signalbox_domain::SessionId,
+        runner: process_read::ProcessRunnerProjection,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerStatusFailure
+
+```rust
+pub struct RunnerStatusFailure {
+    pub authorization: signalbox_domain::RunnerReplacementProvisioning,
+    pub category: signalbox_domain::RunnerProvisioningFailureKind,
+    pub detail: value::Value,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerStatusPage
+
+```rust
+pub struct RunnerStatusPage {
+    pub runners: vec::Vec<runner_protocol::status::RunnerStatusFact>,
+    pub failures: vec::Vec<runner_protocol::status::RunnerStatusFailure>,
+    pub next_after: option::Option<runner_protocol::status::RunnerStatusAfter>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
+## RunnerStatusError
+
+```rust
+pub enum RunnerStatusError {
+    InvalidPageSize,
+    Database(error::Error),
+    Corruption,
+}
+// derives: fmt::Debug
+impl fmt::Display for runner_protocol::status::RunnerStatusError {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for runner_protocol::status::RunnerStatusError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl convert::From<error::Error> for runner_protocol::status::RunnerStatusError {
+    fn from(error: error::Error) -> Self;
+}
+impl convert::From<runner_protocol::RunnerProtocolStoreError>
+    for runner_protocol::status::RunnerStatusError
+{
+    fn from(error: runner_protocol::RunnerProtocolStoreError) -> Self;
+}
+```

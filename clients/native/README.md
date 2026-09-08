@@ -11,6 +11,7 @@ REST, WebSocket, or OpenAI-compatible surfaces.
 
 ## Live macOS surface
 
+- Present typed live delegation updates and remove retired goal turns from the queued inputs.
 - List native and imported conversations through the unified conversation read;
   open, archive, and unarchive native sessions.
 - Follow a session through explicit connect, hello, history, replay, steady, and
@@ -30,6 +31,8 @@ REST, WebSocket, or OpenAI-compatible surfaces.
   stream.
 - Approve or deny pending tool requests, and stop an active turn while sending
   its required successor input.
+- Reconcile a model-call recovery wait while sending its continuation, retaining
+  the exact prepared command after an ambiguous response.
 - Create a session by selecting a model alias read from the running daemon and
   optionally supplying a system prompt.
 - Inspect the bounded, read-only entry inventory for an imported conversation

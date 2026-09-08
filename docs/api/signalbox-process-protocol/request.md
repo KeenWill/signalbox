@@ -6,6 +6,10 @@
 
 ```rust
 pub enum ClientRequest {
+    ReadRunnerStatus {
+        page_size: u32,
+        after: option::Option<RunnerStatusCursor>,
+    },
     RegisterWorkspace {
         command_id: CommandId,
         root: string::String,
