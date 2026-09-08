@@ -1179,3 +1179,4 @@ export function decodeWebImportContinuationResponse(value: unknown): WebImportCo
 export function decodeWebSearchPage(value: unknown): WebSearchPage;
 export function decodeWebUsageSummary(value: unknown): WebUsageSummary;
 export function decodeWebUsageCallPage(value: unknown, order: "newest"): WebUsageCallPage;
+export const MAX_SESSION_PAGE_ITEMS: number;

@@ -230,6 +230,41 @@ public struct SignalboxPreparedToolRequestDecision: Equatable, Sendable {
   }
 }
 
+public struct SignalboxPreparedTurnReconciliation: Equatable, Sendable {
+  public let commandID: SignalboxCommandID
+  public let sessionID: SignalboxCanonicalUUID
+  public let activeTurnID: SignalboxCanonicalUUID
+  public let content: String
+  public let expectedDefaultsVersion: SignalboxCanonicalUInt64
+  public let modelSelection: SignalboxModelSelection
+
+  public init(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    activeTurnID: SignalboxCanonicalUUID,
+    content: String,
+    expectedDefaultsVersion: SignalboxCanonicalUInt64,
+    modelSelection: SignalboxModelSelection
+  ) {
+    self.commandID = commandID
+    self.sessionID = sessionID
+    self.activeTurnID = activeTurnID
+    self.content = content
+    self.expectedDefaultsVersion = expectedDefaultsVersion
+    self.modelSelection = modelSelection
+  }
+
+  fileprivate var request: SignalboxProcessClientRequest {
+    .reconcileTurn(
+      commandID: commandID,
+      sessionID: sessionID,
+      expectedActiveTurnID: activeTurnID,
+      content: content,
+      expectedDefaultsVersion: expectedDefaultsVersion
+    )
+  }
+}
+
 public struct SignalboxPreparedTurnStop: Equatable, Sendable {
   public let commandID: SignalboxCommandID
   public let sessionID: SignalboxCanonicalUUID
@@ -319,6 +354,14 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   func decideToolRequest(
     _ prepared: SignalboxPreparedToolRequestDecision
   ) async throws -> SignalboxToolRequestDecided
+  func prepareTurnReconciliation(
+    session: SignalboxProcessSession,
+    activeTurnID: SignalboxCanonicalUUID,
+    content: String
+  ) async throws -> SignalboxPreparedTurnReconciliation
+  func reconcileTurn(
+    _ prepared: SignalboxPreparedTurnReconciliation
+  ) async throws -> SignalboxInputSubmitted
   func prepareTurnStop(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
@@ -429,6 +472,25 @@ extension SignalboxProcessServiceProtocol {
     _ = prepared
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement tool decisions."
+    )
+  }
+
+  public func prepareTurnReconciliation(
+    session _: SignalboxProcessSession,
+    activeTurnID _: SignalboxCanonicalUUID,
+    content _: String
+  ) async throws -> SignalboxPreparedTurnReconciliation {
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement turn reconciliation."
+    )
+  }
+
+  public func reconcileTurn(
+    _ prepared: SignalboxPreparedTurnReconciliation
+  ) async throws -> SignalboxInputSubmitted {
+    _ = prepared
+    throw SignalboxProcessServiceError.unexpectedMessage(
+      "This process service does not implement turn reconciliation."
     )
   }
 
@@ -729,7 +791,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
           .conversationImportAlreadyImported, .conversationPageStart,
           .conversationSummary, .conversationPageEnd, .importedConversationStart,
           .importedConversationEntry, .importedConversationEnd, .modelAliasesStart,
-          .modelAliasSummary, .modelAliasesEnd, .transcriptSnapshotStart,
+          .modelAliasSummary, .modelAliasesEnd, .credentialPoolPolicy, .transcriptSnapshotStart,
           .transcriptTurn, .transcriptModelCallUsage, .transcriptModelCallsEnd,
           .transcriptEntry, .transcriptUserEntry, .transcriptTextEntry, .transcriptContent,
           .transcriptSnapshotEnd, .sessionEvent, .providerTextDelta:
@@ -960,6 +1022,51 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       )
     }
     return decided
+  }
+
+  public func prepareTurnReconciliation(
+    session: SignalboxProcessSession,
+    activeTurnID: SignalboxCanonicalUUID,
+    content: String
+  ) async throws -> SignalboxPreparedTurnReconciliation {
+    SignalboxPreparedTurnReconciliation(
+      commandID: try commandID(),
+      sessionID: session.id,
+      activeTurnID: activeTurnID,
+      content: content,
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
+    )
+  }
+
+  public func reconcileTurn(
+    _ prepared: SignalboxPreparedTurnReconciliation
+  ) async throws -> SignalboxInputSubmitted {
+    let submitted: SignalboxInputSubmitted = try await mutation(
+      prepared.request,
+      success: { message in
+        guard case .inputSubmitted(let submitted) = message else {
+          return nil
+        }
+        return submitted
+      }
+    )
+    guard submitted.sessionID == prepared.sessionID else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The reconciliation receipt named a different session."
+      )
+    }
+    guard submitted.termination == nil else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The reconciliation receipt unexpectedly carried termination metadata."
+      )
+    }
+    guard submitted.modelSettings.matches(prepared.modelSelection) else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The reconciliation receipt settings named a different direct model."
+      )
+    }
+    return submitted
   }
 
   public func prepareTurnStop(

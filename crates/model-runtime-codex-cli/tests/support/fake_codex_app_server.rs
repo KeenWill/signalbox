@@ -103,19 +103,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(thread["params"]["sandbox"], "read-only");
     assert_eq!(thread["params"]["approvalPolicy"], "never");
     std::fs::write("fake-codex-thread", thread["params"].to_string())?;
-    let thread_id = if selected.as_deref() == Some("credential_prefix_thread_id_before_text") {
-        fixtures::CREDENTIAL_PREFIX_THREAD_ID
-    } else {
-        fixtures::THREAD_ID
-    };
+    let thread_id = fixtures::THREAD_ID;
     THREAD
         .set(thread_id.into())
         .map_err(|_| "duplicate thread")?;
-    let mut response = json!({"id":2,"result":{"thread":{"id":thread_id}}});
-    if selected.as_deref() == Some("credential_split_across_thread_started_field") {
-        response["result"]["diagnostic"] = json!("Authorization:");
-    }
-    emit_value(response);
+    emit_value(json!({"id":2,"result":{"thread":{"id":thread_id}}}));
     if Path::new(fixtures::EARLY_STDIN_EXIT_MARKER).exists() {
         eprintln!("Codex rejected stdin");
 
@@ -303,17 +295,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
-        "terminal_summary_split_credential" => {
-            reasoning(
-                "reason-summary-split",
-                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[..3],
-            );
-            retain_summary_message(&format!(
-                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
-                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[3..]
-            ));
-            completed();
-        }
         "streamed_completed" => {
             reasoning("reason-1", REASONING_TEXT);
             envelope(&format!(
@@ -321,332 +302,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fixtures::STREAMED_ANSWER
             ));
             completed();
-        }
-        "split_stream_credential_between_reasoning_items" => {
-            reasoning(
-                "reason-split-1",
-                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[..3],
-            );
-            reasoning(
-                "reason-split-2",
-                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[3..],
-            );
-            envelope(r#"{"outcome":"completed","text":"safe","tool_calls":[]}"#);
-            completed();
-        }
-        "split_stream_credential_before_final_text" => {
-            reasoning(
-                "reason-split-final",
-                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[..3],
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
-                &fixtures::SENSITIVE_SPLIT_STREAM_TOKEN[3..]
-            ));
-            completed();
-        }
-        "split_stream_authorization_before_final_text" => {
-            reasoning("reason-split-authorization", "Authorization:");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "split_stream_authorization_before_tool_arguments" => {
-            reasoning("reason-split-tool-arguments", "Authorization:");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-split-tool","name":"{}","arguments":"{}"}}]}}"#,
-                fixtures::TOOL_NAME,
-                json_escape(&format!(
-                    r#"{{"city":" {}"}}"#,
-                    fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-                ))
-            ));
-            completed();
-        }
-        "final_text_marker_before_tool_arguments" => {
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"Authorization:","tool_calls":[{{"id":"call-final-text","name":"{}","arguments":"{}"}}]}}"#,
-                fixtures::TOOL_NAME,
-                json_escape(&format!(
-                    r#"{{"value":" {}"}}"#,
-                    fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-                ))
-            ));
-            completed();
-        }
-        "split_stream_authorization_before_tool_id" => {
-            reasoning("reason-split-tool-id", "Authorization:");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":" {}","name":"{}","arguments":"{{}}"}}]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION,
-                fixtures::TOOL_NAME
-            ));
-            completed();
-        }
-        "split_stream_authorization_before_message_id" => {
-            reasoning("reason-split-message-id", "Authorization:");
-            agent_message(
-                &format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION),
-                r#"{"outcome":"completed","text":"safe","tool_calls":[]}"#,
-            );
-            completed();
-        }
-        "final_text_marker_before_message_id" => {
-            agent_message(
-                &format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION),
-                r#"{"outcome":"completed","text":"Authorization:","tool_calls":[]}"#,
-            );
-            completed();
-        }
-        "credential_split_across_thread_started_field" => {
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "two_independent_sibling_markers" => {
-            // Two independent object fields each end in a distinct credential
-            // marker; a following value could complete either, so the single
-            // dropped chain fails closed.
-            emit(
-                r#"{"method":"item/completed","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"two","type":"future_item","a_field":"api_","z_field":"refresh_tok"}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "streamed_empty_final_text_with_held_credential" => {
-            // A streamed reasoning delta holds a complete credential token, so
-            // `redact_terminal_failure_text("")` returns `[redacted]` for the
-            // empty final text; with no text delta and no tools, the empty
-            // completion must fail closed as unintelligible, not surface as a
-            // contentless Completed.
-            reasoning("reason-held", fixtures::SENSITIVE_SPLIT_STREAM_TOKEN);
-            envelope(r#"{"outcome":"completed","text":"","tool_calls":[]}"#);
-            completed();
-        }
-        "credential_split_across_sibling_object_fields" => {
-            // A marker-bearing field sorts BEFORE a benign sibling, so a
-            // document-order (serde key-sorted) concatenation would lose the
-            // `api_` marker; the strongest-unit seeding must keep it.
-            emit(
-                r#"{"method":"item/completed","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"sib","type":"future_item","a_marker":"api_","z_benign":"notice"}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_split_across_turn_started_field" => {
-            // A drifted turn.started carries an additive credential marker.
-            emit(
-                r#"{"method":"turn/started","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","diagnostic":"Authorization:"}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_split_across_agent_message_then_failure" => {
-            agent_message("msg-before-failure", "leaked Authorization:");
-            failed(&format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-        }
-        "credential_split_across_superseded_agent_message" => {
-            // An earlier agent message is superseded by a later one; its
-            // trailing marker plus the final message's value must not
-            // reconstruct across the discard.
-            agent_message("msg-superseded", "leaked Authorization:");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_split_across_lifecycle_event" => {
-            emit(
-                r#"{"method":"item/started","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"life","type":"future_item","aggregated_output":"Authorization:"}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_split_across_unknown_event" => {
-            // An additively-tolerated unknown top-level event carries the
-            // marker; the final text supplies the value.
-            emit(
-                r#"{"method":"diagnostic_event","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","content":"Authorization:"}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_split_across_ordered_unsupported_leaves" => {
-            // An unmodeled item's ordered array leaves jointly form the marker
-            // `api_key=` that no single leaf shows.
-            emit(
-                r#"{"method":"item/completed","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"arr","type":"future_item","fields":["api","_key="]}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "message_id_prefixes_final_text" => {
-            // The agent-message id ends in a credential-marker prefix and the
-            // final text opens with its continuation, reconstructing across the
-            // id and content fields of terminal evidence.
-            agent_message(
-                "api_",
-                &format!(
-                    r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                    fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-                ),
-            );
-            completed();
-        }
-        "credential_split_across_unsupported_item" => {
-            unsupported_item("diag-marker", "api_");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_split_across_dropped_pending_and_error_separator" => {
-            // Chronological provider text `api_key=<secret>`: a dropped error
-            // item seeds `api_`, a streamed reasoning delta contributes `key`
-            // (held only because it continues `api_`), a second dropped error
-            // supplies `=`, and the value arrives in the final text.
-            error_item("error-prefix", "api_");
-            reasoning("reason-key", "key");
-            error_item("error-separator", "=");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "unsupported_item_marker_in_nonstandard_field" => {
-            // The marker is in a non-`text`/`message` field of an unmodeled
-            // item; every string leaf must still seed the lookbehind.
-            emit(
-                r#"{"method":"item/completed","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"diag","type":"diagnostic","content":"api_"}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "unsupported_item_marker_beside_benign_field" => {
-            // An unmodeled item carries a marker in one field and benign text
-            // in another; the benign field must not erase the marker.
-            emit(
-                r#"{"method":"item/completed","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"diag","type":"diagnostic","message":"diagnostic notice","text":"api_"}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "held_credential_prefix_then_unrelated_error_item" => {
-            // The reasoning delta is itself an incomplete credential prefix
-            // (`api_`), held in the lookbehind; an unrelated error item
-            // follows, and the value arrives in the final text. The dropped
-            // error bytes never reach output, so `api_` stays adjacent to
-            // `key=<secret>` there and the value must be suppressed.
-            reasoning("reason-prefix", "api_");
-            error_item("error-unrelated", "diagnostic notice");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_reassembled_across_held_reasoning_and_error_item" => {
-            // The held reasoning bytes (`Auth`, an unrelated unsafe suffix)
-            // are chronologically before the dropped error marker (`api_`)
-            // and the final-text value (`key=<secret>`); only the dropped
-            // marker plus the value form the credential, so the held bytes
-            // must not be scanned between them.
-            reasoning("reason-unrelated", "Auth");
-            error_item("error-marker", "api_");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_split_across_error_item_after_held_reasoning" => {
-            // A streamed reasoning delta ends in a bare marker word (held as
-            // an unsafe suffix), an intervening error item supplies only the
-            // separator, and the final text begins with the value: the held
-            // `Authorization`, the dropped `:`, and the value must rejoin in
-            // chronological order.
-            reasoning("reason-held-marker", "Authorization");
-            error_item("error-separator", ":");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_split_across_error_item" => {
-            error_item("error-marker", "Authorization:");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":" {}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "credential_prefix_thread_id_before_text" => {
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_THREAD_CONTINUATION
-            ));
-            completed();
-        }
-        "split_stream_authorization_before_tool_name" => {
-            reasoning("reason-split-tool-name", "Authorization:");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-name","name":" {}","arguments":"{{}}"}}]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "reasoning_then_malformed_usage" => {
-            reasoning("reason-held-marker", "Authorization:");
-            usage_and_complete(&format!(
-                r#"{{"inputTokens":" {}","cachedInputTokens":2,"cacheWriteInputTokens":1,"outputTokens":7,"reasoningOutputTokens":3}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-        }
-        "dropped_marker_then_malformed_usage" => {
-            // A dropped error item seeds a marker prefix, then a known event
-            // fails shape decoding with the continuation quoted inside serde's
-            // own prose — which no joined-form scan can rejoin across.
-            error_item("err-marker", "api_");
-            usage_and_complete(&format!(
-                r#"{{"inputTokens":"key={}","cachedInputTokens":2,"cacheWriteInputTokens":1,"outputTokens":7}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-        }
-        "split_stream_authorization_before_failure" => {
-            reasoning("reason-split-authorization-failed", "Authorization:");
-            unrecoverable(&format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
         }
         "last_agent_message" => {
             agent_message("message-intermediate", "not a response envelope");
@@ -676,6 +331,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-deep","name":"{}","arguments":{}}}]}}"#,
                 fixtures::TOOL_NAME,
                 deeply_nested_arguments()
+            ));
+            completed();
+        }
+        "tool_call_reserved_key" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-reserved-key","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                json_escape(fixtures::RESERVED_KEY_TOOL_ARGUMENTS)
             ));
             completed();
         }
@@ -744,161 +407,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
-        "bare_credential_text" => {
-            let text = json_escape(&format!(
-                r#"  "client_secret":"{}""#,
-                fixtures::SENSITIVE_COMPOSITE_SECRET
-            ));
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"{text}","tool_calls":[]}}"#
-            ));
-            completed();
-        }
-        "structured_credential_value" => {
-            let text = json_escape(&format!(
-                r#"provider detail: {{"credential":{{"value":"{}"}}}}"#,
-                fixtures::SENSITIVE_STRUCTURED_SECRET
-            ));
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"{text}","tool_calls":[]}}"#
-            ));
-            completed();
-        }
-        "split_stream_structured_credential" => {
-            reasoning("reason-structured-1", r#"{"credential":{"value":"#);
-            reasoning(
-                "reason-structured-2",
-                &format!(r#""{}"}}}}"#, fixtures::SENSITIVE_STRUCTURED_SECRET),
-            );
-            envelope(r#"{"outcome":"completed","text":"safe","tool_calls":[]}"#);
-            completed();
-        }
-        "agent_message_additive_field_marker" => {
-            // A known agent-message item carrying an additively tolerated
-            // sibling serde discards; its marker must still govern the
-            // envelope text the same item retains.
-            emit(&format!(
-                r#"{{"method":"item/completed","params":{{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{{"id":"message-offline-1","type":"agentMessage","diagnostic":"api_","text":"{}"}}}}}}"#,
-                json_escape(&format!(
-                    r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                    fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-                ))
-            ));
-            completed();
-        }
-        "turn_failed_additive_field_marker" => {
-            // An additive field on the failure event holds the marker its own
-            // interpreted message completes.
-            emit(&format!(
-                r#"{{"method":"turn/completed","params":{{"threadId":"thread-offline-1","turnId":"turn-offline-1","turn":{{"id":"turn-offline-1","status":"failed","items":[],"diagnostic":"api_","error":{{"message":"key={}"}}}}}}}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-        }
-        "superseded_message_marker_before_clean_id" => {
-            // The superseded message ends in a live marker while its id is
-            // clean; folding the id after the text would resolve the chain and
-            // release the value the final text completes.
-            agent_message("superseded-done.", "api_");
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "unsupported_item_object_inside_an_array" => {
-            // The marker and a benign sibling are fields of an object nested
-            // inside an array; joining them into one wire-adjacent unit would
-            // erase the marker.
-            emit(
-                r#"{"method":"item/completed","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"diag","type":"diagnostic","entries":[{"a_marker":"api_","z_benign":"done."}]}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "unknown_event_metadata_marker" => {
-            // An unknown event interprets nothing — its `type` matched no known
-            // event and its `id` is never validated or emitted — so every field
-            // is dropped provider content that must still govern what follows.
-            emit(
-                r#"{"method":"future","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","id":"api_"}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "lifecycle_item_id_marker" => {
-            // A bare lifecycle event is dropped whole after its identity is
-            // validated as nonempty. The id ends in a credential-marker prefix
-            // and the final text opens with the continuation.
-            emit(
-                r#"{"method":"item/started","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"trace-api_","type":"future_item"}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "lifecycle_item_type_marker" => {
-            // The same boundary one field over: the lifecycle event's item
-            // `type` matched no arm of the adapter's, so it is provider text
-            // ending in the marker prefix.
-            emit(
-                r#"{"method":"item/started","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"item_7","type":"future_api_"}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "unsupported_item_type_marker" => {
-            // An unmodeled item's `type` is provider-chosen (it selected the
-            // catch-all arm rather than one of the adapter's literals) and the
-            // whole item is dropped.
-            emit(
-                r#"{"method":"item/completed","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"item_7","type":"future_api_"}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"key={}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "reasoning_item_id_marker" => {
-            emit(
-                r#"{"method":"item/completed","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"trace-api_","type":"reasoning","text":"key="}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
-        "error_item_id_marker" => {
-            // The same shape on the dropped error item, whose message is
-            // interpreted while its id is not.
-            emit(
-                r#"{"method":"item/completed","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"trace-api_","type":"error","message":"key="}}}"#,
-            );
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
-                fixtures::SENSITIVE_SPLIT_AUTHORIZATION
-            ));
-            completed();
-        }
         "benign_item_identity_before_answer" => {
-            // Ordinary identity metadata around an unmodeled item: an id
-            // ending in a digit and a real Codex item type. `todo_list` ends
-            // in bytes the lookbehind holds conservatively (a name that could
-            // still grow into `token`), so this is the control that folding
-            // the identity does not turn routine metadata into suppression —
-            // the answer must still reach the caller byte-verbatim.
             emit(
                 r#"{"method":"item/started","params":{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{"id":"item_7","type":"todo_list"}}}"#,
             );
@@ -1030,16 +539,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     r#"{{"access_token":"{}","city":"Oslo"}}"#,
                     fixtures::SENSITIVE_REFRESH_TOKEN
                 ))
-            ));
-            completed();
-        }
-        "sensitive_tool_ids" => {
-            envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"{}","name":"{}","arguments":"{{}}"}},{{"id":"{}","name":"{}","arguments":"{{}}"}}]}}"#,
-                fixtures::SENSITIVE_TOOL_ID_ONE,
-                fixtures::TOOL_NAME,
-                fixtures::SENSITIVE_TOOL_ID_TWO,
-                fixtures::TOOL_NAME
             ));
             completed();
         }
@@ -1175,11 +674,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
-        "stderr_credential_continuation" => {
-            reasoning("reason-stderr-continuation", "Authoriz");
-            eprintln!("ation: {}", fixtures::SENSITIVE_STDERR_CONTINUATION);
-            std::process::exit(7);
-        }
         "stderr_redaction" => {
             eprintln!(
                 "authentication failed API_KEY=\"{}\"",
@@ -1286,22 +780,6 @@ fn agent_message(id: &str, value: &str) {
 
 fn retain_summary_message(value: &str) {
     *SUMMARY.lock().expect("summary fixture lock") = Some(value.to_owned());
-}
-
-fn error_item(id: &str, message: &str) {
-    emit(&format!(
-        r#"{{"method":"item/completed","params":{{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{{"id":"{id}","type":"error","message":"{}"}}}}}}"#,
-        json_escape(message)
-    ));
-}
-
-fn unsupported_item(id: &str, text: &str) {
-    // An item type the adapter does not model; its `text` is dropped from the
-    // output but must still seed the redaction lookbehind.
-    emit(&format!(
-        r#"{{"method":"item/completed","params":{{"threadId":"thread-offline-1","turnId":"turn-offline-1","item":{{"id":"{id}","type":"diagnostic","text":"{}"}}}}}}"#,
-        json_escape(text)
-    ));
 }
 
 fn reasoning(id: &str, text: &str) {

@@ -26,6 +26,7 @@ where
 /// from pairing independent positional labels. No variant carries payload text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum InternalDiagnostic {
+    WorkspaceCorruption,
     BlobReadIntegrity,
     ReviewWorkflowProjectionCorruption,
     ReviewOrchestrationStoreCorruption,
@@ -137,7 +138,8 @@ impl InternalDiagnostic {
             | Self::SubmitInputIdentityCollision
             | Self::SubmitInputModelExecutionIdentityCollision
             | Self::ToolLoopIdentityCollision => OperatorFailureClass::IdentityCollision,
-            Self::BlobReadIntegrity
+            Self::WorkspaceCorruption
+            | Self::BlobReadIntegrity
             | Self::ReviewWorkflowProjectionCorruption
             | Self::ReviewOrchestrationStoreCorruption
             | Self::ReviewOrchestrationWorkflowCorruption
@@ -172,6 +174,7 @@ impl InternalDiagnostic {
 
     pub(super) const fn cause_code(self) -> &'static str {
         match self {
+            Self::WorkspaceCorruption => "workspace_corruption",
             Self::BlobReadIntegrity => "blob_read_integrity",
             Self::ReviewWorkflowProjectionCorruption => "review_workflow_projection_corruption",
             Self::ReviewOrchestrationStoreCorruption => "review_orchestration_store_corruption",
@@ -1491,6 +1494,9 @@ impl ProcessUpdate {
 
 #[derive(Clone, Debug)]
 pub(super) enum ProcessUpdateEvent {
+    CredentialPoolExhausted(
+        Box<signalbox_persistence::credential_pool_exhaustion::CredentialPoolExhaustion>,
+    ),
     SessionCreated,
     SessionModelSettingsChanged(DomainSessionModelSettingsChanged),
     TurnModelSettingsResolved(DomainTurnModelSettingsResolved),
@@ -1593,6 +1599,9 @@ impl ProcessUpdateEvent {
                 acceptance_position: acceptance_position.as_u64(),
                 content: content.clone(),
             },
+            DispatchedOutboxEventKind::CredentialPoolExhausted(evidence) => {
+                Self::CredentialPoolExhausted(evidence.clone())
+            }
             DispatchedOutboxEventKind::TurnTerminal { turn, disposition } => match disposition {
                 DispatchedTurnTerminalDisposition::Completed {
                     call,
@@ -1896,6 +1905,15 @@ impl ProcessUpdateEvent {
                 model_call_id: wire_uuid(call.into_uuid()),
                 completion_entry_id: wire_uuid(completion_entry.into_uuid()),
                 terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
+            },
+            Self::CredentialPoolExhausted(evidence) => SessionEvent::TurnCredentialPoolExhausted {
+                turn_id: wire_uuid(evidence.turn_id),
+                terminal_frontier_id: wire_uuid(evidence.terminal_frontier_id),
+                terminal_attempt_id: wire_uuid(evidence.terminal_attempt_id),
+                failure_entry_id: wire_uuid(evidence.failure_entry_id),
+                pool_policy_id: wire_uuid(evidence.pool_policy_id),
+                policy_members: evidence.policy_members.clone(),
+                members: super::credential_pool::wire_members(&evidence.members),
             },
             Self::TurnFailed {
                 turn,
@@ -2232,6 +2250,8 @@ pub enum ProcessRuntimeError {
     Dispatch(OutboxDispatchError),
     /// The shared runner-recovery notification listener failed.
     RunnerRecoveryNotifications(sqlx::Error),
+    /// A retained runner-recovery command could not be resumed.
+    RunnerRecoveryCommands(signalbox_persistence::runner_protocol::RunnerRecoveryError),
     /// The single dispatcher produced an impossible retry result.
     UnexpectedDispatcherRetry,
     /// The revalidated socket path could not be cleaned up.
@@ -2268,6 +2288,7 @@ impl fmt::Display for ProcessRuntimeError {
             Self::RunnerRecoveryNotifications(_) => {
                 "the runner recovery notification listener failed"
             }
+            Self::RunnerRecoveryCommands(_) => "a retained runner recovery command failed",
             Self::UnexpectedDispatcherRetry => {
                 "the process-update dispatcher unexpectedly requested retry"
             }
@@ -2285,6 +2306,7 @@ impl Error for ProcessRuntimeError {
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
             Self::RunnerRecoveryNotifications(error) => Some(error),
+            Self::RunnerRecoveryCommands(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
             Self::OauthRecovery(_)
             | Self::EncodeInvariant

@@ -844,6 +844,11 @@ where
                             })?;
                         match committed {
                             CommitActivationPreviewOutcome::Stale => continue,
+                            CommitActivationPreviewOutcome::PoolExhausted(failed_turn) => {
+                                observe_turn(failed_turn);
+                                report_guarded_turn_activation(session, failed_turn);
+                                return Ok(());
+                            }
                             CommitActivationPreviewOutcome::Activated(activated) => {
                                 if activated.session() != session {
                                     execution.report_post_activation_failure();
@@ -851,7 +856,7 @@ where
                                 }
                                 observe_turn(activated.turn());
                                 report_guarded_turn_activation(activated.session(), activated.turn());
-                                let execution = async { execution.execute(activated).await };
+                                let execution = Box::pin(async { execution.execute(activated).await });
                                 return execution
                                     .instrument(guarded_turn_span(session, turn))
                                     .await
@@ -979,6 +984,11 @@ where
                                 })?;
                             match committed {
                                 CommitActivationPreviewOutcome::Stale => continue,
+                                CommitActivationPreviewOutcome::PoolExhausted(failed_turn) => {
+                                    observe_turn(failed_turn);
+                                    report_guarded_turn_activation(session, failed_turn);
+                                    return Ok(());
+                                }
                                 CommitActivationPreviewOutcome::Activated(activated) => {
                                     if activated.session() != session {
                                         execution.report_post_activation_failure();
@@ -989,7 +999,7 @@ where
                                         activated.session(),
                                         activated.turn(),
                                     );
-                                    let execution = async { execution.execute(activated).await };
+                                    let execution = Box::pin(async { execution.execute(activated).await });
                                     return execution
                                         .instrument(guarded_turn_span(session, turn))
                                         .await
@@ -1119,14 +1129,22 @@ where
                     } else {
                         None
                     };
-                    let committed = activation
+                    let committed = match activation
                         .commit_counted_preview(
                             preview,
                             prospective,
                             &model_calls,
+                            FailedModelCallTurnIdentities::new(
+                                SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+                                ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+                            ),
                             prepared_instructions.as_ref().map(|prepared| prepared.evidence()),
                         )
                         .await
+                    {
+                        Err(error) if compaction_failure_closure_collision_is_retryable(&error) => continue,
+                        outcome => outcome,
+                    }
                         .map_err(|error| match error {
                             CommitActivationPreviewError::Activation(error) => {
                                 ContextGuardedTurnPassError::Activation { turn: Some(turn), source: error }
@@ -1143,6 +1161,11 @@ where
                         })?;
                     match committed {
                         CommitActivationPreviewOutcome::Stale => continue,
+                        CommitActivationPreviewOutcome::PoolExhausted(failed_turn) => {
+                            observe_turn(failed_turn);
+                            report_guarded_turn_activation(session, failed_turn);
+                            return Ok(());
+                        }
                         CommitActivationPreviewOutcome::Activated(activated) => {
                             if activated.session() != session {
                                 execution.report_post_activation_failure();
@@ -1150,9 +1173,9 @@ where
                             }
                             observe_turn(activated.turn());
                             report_guarded_turn_activation(activated.session(), activated.turn());
-                            let execution = async {
+                            let execution = Box::pin(async {
                                 execution.execute(activated).await
-                            };
+                            });
                             return execution
                                 .instrument(guarded_turn_span(session, turn))
                                 .await

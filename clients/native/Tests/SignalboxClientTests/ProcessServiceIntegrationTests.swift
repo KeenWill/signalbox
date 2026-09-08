@@ -3,6 +3,19 @@ import XCTest
 @testable import SignalboxNative
 
 final class ProcessServiceIntegrationTests: XCTestCase {
+  @MainActor
+  func testLiveDelegationPublishesItsBoundedPresentation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    let child = try SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
+    viewModel.apply(.event(.init(cursor: .init(rawValue: 1), sessionID: session.id,
+      event: .sessionMessage(spawningRequestID: child, messageID: child, senderSessionID: child,
+        recipientSessionID: session.id, ordinal: .init(rawValue: 1), deliverySequence: .init(rawValue: 1), content: "Child update"))))
+    XCTAssertEqual(viewModel.delegationUpdate?.detail, "Child update")
+    XCTAssertTrue(viewModel.timeline.isEmpty)
+  }
+
   /// An imported transcript frontier creates an independent native session.
   func testImportedTranscriptCanContinueAsANativeSession() async throws {
     let service = makeService()
@@ -2953,6 +2966,114 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testRetainedSubmissionResolvesBeforeRecoveryCanPrepareAContinuation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+    await viewModel.send()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0, turnID: ProcessSubmissionFixture.acceptedTurnID,
+        operatorActionRequired: true)))
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+
+    XCTAssertFalse(viewModel.showsReconciliation)
+    XCTAssertFalse(viewModel.canReconcileAndSend)
+    XCTAssertTrue(viewModel.canSend)
+    await viewModel.reconcileAndSendSuccessor()
+    XCTAssertNil(viewModel.errorMessage)
+    await viewModel.send()
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+    XCTAssertEqual(viewModel.composerText, "")
+    XCTAssertTrue(viewModel.canReconcileAndSend)
+  }
+
+  @MainActor
+  func testAutomaticModelRecoveryDoesNotPrepareOperatorReconciliation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingReconciliationProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0)))
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    XCTAssertFalse(viewModel.showsReconciliation)
+    XCTAssertFalse(viewModel.canReconcileAndSend)
+    await viewModel.reconcileAndSendSuccessor()
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
+  func testToolRecoveryDoesNotOfferModelCallReconciliation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingReconciliationProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithToolRecoveryTurn()))
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    XCTAssertFalse(viewModel.canReconcileAndSend)
+    await viewModel.reconcileAndSendSuccessor()
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
+  func testAmbiguousReconciliationRetriesTheOriginalTurnAfterSuccessorActivation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingReconciliationProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      service
+    }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0, operatorActionRequired: true)))
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    XCTAssertTrue(viewModel.canReconcileAndSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    await viewModel.reconcileAndSendSuccessor()
+    let submittedCommandIDs = await service.submittedCommandIDs
+    XCTAssertEqual(submittedCommandIDs, [ProcessSubmissionFixture.commandID])
+
+    viewModel.composerText = ProcessSubmissionFixture.content + " edited"
+    XCTAssertFalse(viewModel.canReconcileAndSend)
+    await viewModel.reconcileAndSendSuccessor()
+    let submittedAfterEdit = await service.submittedCommandIDs
+    XCTAssertEqual(submittedAfterEdit, submittedCommandIDs)
+    viewModel.composerText = ProcessSubmissionFixture.content
+    XCTAssertTrue(viewModel.canReconcileAndSend)
+
+    XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessDriverFixture.turn)
+    viewModel.apply(.event(try ProcessProjectionFixture.successorActivatedEvent()))
+    XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessSubmissionFixture.acceptedTurnID)
+
+    XCTAssertTrue(viewModel.canReconcileAndSend)
+    await viewModel.reconcileAndSendSuccessor()
+    XCTAssertEqual(viewModel.composerText, "")
+    let finalCommandIDs = await service.submittedCommandIDs
+    let submittedActiveTurnIDs = await service.submittedActiveTurnIDs
+
+    XCTAssertEqual(finalCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+    XCTAssertEqual(
+      submittedActiveTurnIDs,
+      [ProcessDriverFixture.turn, ProcessDriverFixture.turn]
+    )
+  }
+
+  @MainActor
   func testAmbiguousStopRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -3351,6 +3472,36 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(viewModel.pendingInputs, try ProcessSubmissionFixture.livePendingInput())
     XCTAssertTrue(viewModel.timeline.isEmpty)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
+  }
+
+  @MainActor
+  func testRetiringTheLastQueuedGoalTurnClearsQueuedActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
+
+    viewModel.apply(.event(try ProcessProjectionFixture.goalTurnRetiredEvent()))
+
+    XCTAssertTrue(viewModel.pendingInputs.isEmpty)
+    XCTAssertTrue(viewModel.acceptedInputsAwaitingTranscript.isEmpty)
+    XCTAssertEqual(viewModel.activity, .unavailable)
+  }
+
+  @MainActor
+  func testRetiringAGoalTurnPreservesOtherQueuedActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
+    viewModel.apply(.event(try ProcessProjectionFixture.secondAcceptedEvent()))
+
+    viewModel.apply(.event(try ProcessProjectionFixture.goalTurnRetiredEvent()))
+
+    XCTAssertEqual(
+      viewModel.pendingInputs.map(\.id.rawValue), ProcessProjectionFixture.remainingPendingIDs)
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.queuedActivity)
   }
 
@@ -3813,6 +3964,32 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       XCTAssertEqual(error, SignalboxProcessServiceError.unexpectedMessage(
         "The stop receipt omitted termination metadata or named a different descendant scope."))
     }
+  }
+
+  func testReconciliationReceiptAdmitsTheContinuationWithoutTermination() async throws {
+    let prepared = try ProcessSubmissionFixture.preparedReconciliation()
+    let requester = StaticProcessRequester(frames: [
+      try ProcessDriverFixture.inputSubmitted(
+        validatedForSelectionID: ProcessDriverFixture.modelCall)
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let receipt = try await service.reconcileTurn(prepared)
+    XCTAssertEqual(receipt.sessionID, prepared.sessionID)
+    XCTAssertEqual(receipt.turnID.rawValue, ProcessSubmissionFixture.acceptedTurnID)
+    XCTAssertNil(receipt.termination)
+  }
+
+  func testReconciliationRejectsAStopReceipt() async throws {
+    let prepared = try ProcessSubmissionFixture.preparedReconciliation()
+    let requester = StaticProcessRequester(frames: [
+      try ProcessDriverFixture.inputSubmitted(
+        validatedForSelectionID: ProcessDriverFixture.modelCall,
+        terminationJSON: #"{"descendant_scope":"parent_alone","descendant_count":"0"}"#)
+    ])
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+    let error = await capturedServiceError { _ = try await service.reconcileTurn(prepared) }
+    XCTAssertEqual(error, SignalboxProcessServiceError.unexpectedMessage(
+      "The reconciliation receipt unexpectedly carried termination metadata."))
   }
 
   func testStopReceiptPreservesTheMatchingRecordedCount() async throws {
@@ -4529,6 +4706,19 @@ private enum ProcessSubmissionFixture {
     [session.defaultsVersion, refreshed.defaultsVersion]
   }
 
+  static func preparedReconciliation() throws -> SignalboxPreparedTurnReconciliation {
+    SignalboxPreparedTurnReconciliation(
+      commandID: try SignalboxCommandID(validating: commandID),
+      sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
+      activeTurnID: try SignalboxCanonicalUUID(validating: acceptedTurnID),
+      content: content,
+      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      modelSelection: .direct(
+        selectionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.modelCall)
+      )
+    )
+  }
+
   /// Canonical stop fixture; the caller chooses its descendant scope.
   static func preparedStop(
     descendantScope: SignalboxDescendantTerminationScope
@@ -4986,6 +5176,73 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
       throw firstError
     }
     return try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func makeSynchronization(
+    sessionID: SignalboxCanonicalUUID,
+    updates: @escaping @Sendable (SignalboxSessionSynchronizationDriverUpdate) async -> Void
+  ) async -> any SignalboxSessionSynchronizing {
+    NoopProcessSynchronization()
+  }
+}
+
+private actor AmbiguousThenAcceptingReconciliationProcessService: SignalboxProcessServiceProtocol {
+  private(set) var submittedCommandIDs: [String] = []
+  private(set) var submittedActiveTurnIDs: [String] = []
+
+  func testConnection() async throws {}
+
+  func listSessions(includeArchived: Bool) async throws -> [SignalboxProcessSession] {
+    []
+  }
+
+  func setArchived(
+    _ archived: Bool,
+    session: SignalboxProcessSession
+  ) async throws -> SignalboxProcessSession {
+    session
+  }
+
+  func prepareInputSubmission(
+    session: SignalboxProcessSession,
+    content: String
+  ) async throws -> SignalboxPreparedInputSubmission {
+    try ProcessSubmissionFixture.preparedSubmission()
+  }
+
+  func submit(
+    _ submission: SignalboxPreparedInputSubmission
+  ) async throws -> SignalboxInputSubmitted {
+    try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
+  }
+
+  func prepareTurnReconciliation(
+    session: SignalboxProcessSession,
+    activeTurnID: SignalboxCanonicalUUID,
+    content: String
+  ) async throws -> SignalboxPreparedTurnReconciliation {
+    SignalboxPreparedTurnReconciliation(
+      commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
+      sessionID: session.id,
+      activeTurnID: activeTurnID,
+      content: content,
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
+    )
+  }
+
+  func reconcileTurn(
+    _ prepared: SignalboxPreparedTurnReconciliation
+  ) async throws -> SignalboxInputSubmitted {
+    submittedCommandIDs.append(prepared.commandID.rawValue.rawValue)
+    submittedActiveTurnIDs.append(prepared.activeTurnID.rawValue)
+    guard submittedCommandIDs.count > 1 else {
+      throw SignalboxProcessServiceError.mutationRetryExhausted(
+        code: .commitAmbiguous,
+        message: ProcessSubmissionFixture.failureMessage
+      )
+    }
+    return try ProcessSubmissionFixture.submittedReceipt(sessionID: prepared.sessionID)
   }
 
   func makeSynchronization(
@@ -7174,8 +7431,20 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithToolRecoveryTurn() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithActiveTurnState(
+      """
+      {"type":"active_awaiting_tool_recovery",
+       "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
+       "recovery_tool_attempt_id":"\(ProcessDriverFixture.modelCall)",
+       "automatic_reconciliation_attempts":"1","operator_action_required":true}
+      """
+    )
+  }
+
   static func snapshotWithKnownRecoveryTurn(
-    cursor: UInt64
+    cursor: UInt64, turnID: String = ProcessDriverFixture.turn,
+    operatorActionRequired: Bool = false
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -7190,14 +7459,14 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_turn",
-          "turn_id":"\(ProcessDriverFixture.turn)",
+          "turn_id":"\(turnID)",
           "acceptance_position":"1",
           "state":{
             "type":"active_awaiting_model_call_recovery",
             "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
             "recovery_model_call_id":"\(ProcessDriverFixture.modelCall)",
             "automatic_reconciliation_attempts":"0",
-            "operator_action_required":false
+            "operator_action_required":\(operatorActionRequired)
           }
         }
         """,
@@ -7205,7 +7474,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_model_call_usage",
           "model_call_index":"0",
-          "turn_id":"\(ProcessDriverFixture.turn)",
+          "turn_id":"\(turnID)",
           "model_call_id":"\(ProcessDriverFixture.modelCall)",
           "usage_provenance":"reported",
           "usage":{
@@ -11194,6 +11463,17 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func goalTurnRetiredEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"goal_turn_retired",
+        "turn_id":"\(ProcessDriverFixture.turn)"
+      }
+      """
+    )
+  }
+
   static func acceptedEvent() throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
@@ -12523,4 +12803,112 @@ private enum ProcessTimelineFixtureKind: Equatable {
   case processEvidence
   case turnFailure
   case unknown
+}
+
+extension ProcessServiceIntegrationTests {
+  func testPoolEventPublishesOnlyAfterExactTranscriptEvidenceMatches() async throws {
+    let fields = PoolEventValidationFixture.fields
+    for (name, eventFields, expectedEvents) in [
+      ("matching", fields, 1),
+      ("members", fields.replacingOccurrences(of: #""record_generation":"7""#, with: #""record_generation":"8""#), 0),
+      ("attempt", fields.replacingOccurrences(of: ProcessDriverFixture.attempt, with: ProcessDriverFixture.modelCall), 0),
+      ("frontier", fields.replacingOccurrences(of: ProcessDriverFixture.frontier, with: ProcessDriverFixture.modelCall), 0),
+      ("failure entry", fields.replacingOccurrences(of: ProcessDriverFixture.completionEntry, with: ProcessDriverFixture.modelCall), 0),
+    ] {
+      let requester = try PoolEventValidationRequester(eventFields: eventFields)
+      let recorder = PoolEventValidationRecorder()
+      let defaults = SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+      let driver = SignalboxSessionSynchronizationDriver(
+        requester: requester,
+        sessionID: try ProcessDriverFixture.sessionID(),
+        policy: .init(
+          deadlines: defaults.deadlines, retry: .init(delays: []),
+          snapshotCapacity: defaults.snapshotCapacity, eventBufferCapacity: defaults.eventBufferCapacity
+        )
+      ) { await recorder.append($0) }
+      await driver.start()
+      let published = try await recorder.eventsAfterTransportEnds()
+      await driver.stop()
+      XCTAssertEqual(published, expectedEvents, name)
+    }
+  }
+}
+
+private enum PoolEventValidationFixture {
+  // Arbitrary distinct correlations; each mismatch changes one retained terminal fact.
+  static let fields = """
+    "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+    "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+    "failure_entry_id":"\(ProcessDriverFixture.completionEntry)",
+    "pool_policy_id":"77777777-7777-4777-8777-777777777777",
+    "policy_members":["only"],
+    "members":[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":"7"}}]
+    """
+
+  static func frame(_ message: String) throws -> SignalboxProcessServerFrame {
+    try SignalboxProcessServerFrame.decode(
+      from: Data("{\"version\":1,\"request_id\":\"1\",\"message\":\(message)}".utf8)
+    )
+  }
+}
+
+private struct PoolEventValidationRequester: SignalboxProcessRequesting {
+  let follow: [SignalboxProcessServerFrame]
+  let transcript: [SignalboxProcessServerFrame]
+  let policy: SignalboxProcessServerFrame
+
+  init(eventFields: String) throws {
+    follow = [
+      try ProcessDriverFixture.snapshotStart(cursor: 0),
+      try ProcessDriverFixture.modelCallsEnd(),
+      try ProcessDriverFixture.snapshotEnd(cursor: 0),
+      try PoolEventValidationFixture.frame("""
+        {"type":"session_event","session_id":"\(ProcessDriverFixture.session)","cursor":"1",
+         "event":{"type":"turn_credential_pool_exhausted","turn_id":"\(ProcessDriverFixture.turn)",\(eventFields)}}
+        """),
+    ]
+    transcript = [
+      try ProcessDriverFixture.snapshotStart(cursor: 1),
+      try PoolEventValidationFixture.frame("""
+        {"type":"transcript_turn","turn_id":"\(ProcessDriverFixture.turn)","acceptance_position":"1",
+         "state":{"type":"failed_credential_pool_exhausted",\(PoolEventValidationFixture.fields)}}
+        """),
+      try ProcessDriverFixture.modelCallsEnd(),
+      try PoolEventValidationFixture.frame("""
+        {"type":"transcript_snapshot_end","session_id":"\(ProcessDriverFixture.session)",
+         "cursor":"1","turn_count":"1","entry_count":"0"}
+        """),
+    ]
+    policy = try PoolEventValidationFixture.frame(#"{"type":"credential_pool_policy","pool_policy_id":"77777777-7777-4777-8777-777777777777","policy_members":["only"]}"#)
+  }
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    switch request {
+    case .followSession: return StaticProcessExchange(frames: follow)
+    case .readTranscript: return StaticProcessExchange(frames: transcript)
+    case .readCredentialPoolPolicy: return StaticProcessExchange(frames: [policy])
+    default: throw ProcessDriverUpdateRecorderError.unexpectedRequest
+    }
+  }
+}
+
+private actor PoolEventValidationRecorder {
+  private var events = 0
+  private var ended = false
+
+  func append(_ update: SignalboxSessionSynchronizationDriverUpdate) {
+    switch update {
+    case .event: events += 1
+    case .retryLimitReached, .terminalFailure: ended = true
+    default: break
+    }
+  }
+
+  func eventsAfterTransportEnds() async throws -> Int {
+    for _ in 0..<100 {
+      if ended { return events }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    throw ProcessDriverUpdateRecorderError.eventTimeout
+  }
 }

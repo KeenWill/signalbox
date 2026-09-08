@@ -145,6 +145,7 @@ mod blob_objects;
 mod compaction;
 mod continuation_compaction;
 mod credential_exclusions;
+mod credential_pool;
 mod fixtures;
 mod fleet_soak;
 mod imported_conversations;
@@ -167,3 +168,5 @@ use fixtures::*;
 use input_admission::*;
 use reconciliation::*;
 use stop_turn::*;
+
+mod runner_status;

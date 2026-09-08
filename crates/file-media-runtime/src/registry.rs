@@ -184,20 +184,7 @@ impl FileMediaRegistry {
                 match sanitize_probe(reader, raw)? {
                     SanitizedProbe::NoMatch => {}
                     SanitizedProbe::Candidate(candidate) => {
-                        // A retained candidate must be re-examinable inside the
-                        // envelope `validate_candidate` will grant, and that envelope
-                        // is the clamped pair rather than the deployment ceiling
-                        // alone. For a reader whose declared validation envelope is
-                        // the smaller of the two, the ceiling by itself would keep
-                        // evidence validation can never cover.
-                        if candidate.evidence_bytes
-                            <= self
-                                .ceilings
-                                .validation_source_bytes
-                                .min(reader.validation().source_bytes())
-                        {
-                            candidates.push(candidate);
-                        }
+                        candidates.push(candidate);
                     }
                     SanitizedProbe::Malformed {
                         media_type,
@@ -253,16 +240,19 @@ impl FileMediaRegistry {
             .cloned()
             .collect::<Vec<_>>();
         if !strong.is_empty() {
-            return self
+            let inspection = self
                 .resolve_candidates(
                     processor,
-                    request,
+                    request.clone(),
                     source,
                     cancellation,
                     strong,
                     ValidationEvidence::StrongSignature,
                 )
-                .await;
+                .await?;
+            if !matches!(inspection, FileInspection::Unknown { .. }) {
+                return Ok(inspection);
+            }
         }
 
         let structural = candidates
@@ -294,6 +284,8 @@ impl FileMediaRegistry {
 
         if let Ok(declared) = request.source.declared_media_type().canonical_essence()
             && let Some(reader) = self.media_readers.get(&declared)
+            && (declared.as_str() != "text/plain"
+                || self.streaming_text_reader.as_ref() != Some(reader))
         {
             let inspection = self
                 .validate_candidate(
@@ -370,7 +362,17 @@ impl FileMediaRegistry {
             .map(|candidate| candidate.reader.clone())
             .collect::<std::collections::BTreeSet<_>>();
         if media_types.len() != 1 || readers.len() != 1 {
-            if !collision_validation_allowed(evidence, candidates.len()) {
+            if !collision_validation_allowed(evidence, candidates.len())
+                || candidates.iter().any(|candidate| {
+                    self.readers.get(&candidate.reader).is_some_and(|reader| {
+                        candidate.evidence_bytes
+                            > self
+                                .ceilings
+                                .validation_source_bytes
+                                .min(reader.validation().source_bytes())
+                    })
+                })
+            {
                 return Ok(FileInspection::Ambiguous {
                     source: request.source,
                     media_types,
@@ -471,6 +473,14 @@ impl FileMediaRegistry {
             .readers
             .get(&candidate.reader)
             .ok_or(FileMediaFailure::ProcessorFailed)?;
+        if candidate.evidence_bytes
+            > self
+                .ceilings
+                .validation_source_bytes
+                .min(reader.validation().source_bytes())
+        {
+            return Err(FileMediaFailure::ProcessorFailed);
+        }
         let raw = processor
             .validate(
                 reader.identity(),
@@ -1089,7 +1099,7 @@ fn validate_reader(
         || validation.range_count() == 0
         || validation.range_count() > crate::MAX_VALIDATION_RANGES
     {
-        return Err(FileMediaRegistryConstructionError::ViewBounds);
+        return Err(FileMediaRegistryConstructionError::ValidationBounds);
     }
     for view in reader.views() {
         validate_view(view.access(), view.bounds(), ceilings)?;
@@ -1319,6 +1329,8 @@ pub enum FileMediaRegistryConstructionError {
     DuplicateReaderMember,
     /// Probe bounds were zero, contradictory, or excessive.
     ProbeBounds,
+    /// Reader validation source-byte or range bounds were zero or excessive.
+    ValidationBounds,
     /// View bounds were absent, contradictory, or excessive.
     ViewBounds,
     /// A provider container-entry bound was zero or excessive.
@@ -1338,6 +1350,7 @@ impl fmt::Display for FileMediaRegistryConstructionError {
             Self::DuplicateMediaTypeClaim => "file media type has several registered readers",
             Self::DuplicateReaderMember => "file media reader member is duplicated",
             Self::ProbeBounds => "file media probe bounds are invalid",
+            Self::ValidationBounds => "file media reader validation bounds are invalid",
             Self::ViewBounds => "file media view bounds are invalid",
             Self::ContainerBounds => "file media container bounds are invalid",
             Self::TextFallback => "file media text fallback is invalid",

@@ -79,6 +79,14 @@ impl PostgresModelCallRepository {
             Ok(failed)
         }
         .await;
+        let result = match result {
+            Ok(outcome) => {
+                self.settle_runner_replacement_after_observation(&mut transaction, session, None)
+                    .await?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        };
         finish_commit(transaction, result).await
     }
 
@@ -487,7 +495,11 @@ impl PostgresModelCallRepository {
                 ));
             }
             if delegation_logically_terminal {
-                return Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal);
+                return Ok(if stored.state == "terminal" {
+                    RetainedModelCallObservationStatus::DiscardedByLogicalTerminal
+                } else {
+                    RetainedModelCallObservationStatus::Pending
+                });
             }
             match (stored.state.as_str(), stored.disposition.as_deref()) {
                 ("in_flight", None) => {
@@ -633,6 +645,14 @@ impl PostgresModelCallRepository {
             Ok(outcome)
         }
         .await;
+        let result = match result {
+            Ok(outcome) => {
+                self.settle_runner_replacement_after_observation(&mut transaction, session, None)
+                    .await?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        };
         finish_commit(transaction, result).await
     }
 }

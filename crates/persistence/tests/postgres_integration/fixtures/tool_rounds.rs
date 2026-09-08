@@ -280,6 +280,11 @@ pub(crate) fn announcement_for(
     fixture_call: ModelCallId,
 ) -> AmbiguityAnnouncement {
     match kind {
+        DispatchedOutboxEventKind::CredentialPoolExhausted(evidence)
+            if evidence.turn_id == fixture_turn.into_uuid() =>
+        {
+            AmbiguityAnnouncement::DefinitiveTurnOutcome
+        }
         DispatchedOutboxEventKind::ToolBatchTransition {
             turn,
             producing_call,
@@ -300,6 +305,7 @@ pub(crate) fn announcement_for(
                 | DispatchedTurnTerminalDisposition::Cancelled { .. },
         } if *turn == fixture_turn => AmbiguityAnnouncement::DefinitiveTurnOutcome,
         DispatchedOutboxEventKind::ToolBatchTransition { .. }
+        | DispatchedOutboxEventKind::CredentialPoolExhausted(_)
         | DispatchedOutboxEventKind::TurnTerminal { .. }
         | DispatchedOutboxEventKind::SessionCreated(_)
         | DispatchedOutboxEventKind::SessionStateChanged(_)

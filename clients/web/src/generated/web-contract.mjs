@@ -7062,6 +7062,8 @@ const schemas = {
   }
 };
 
+export const MAX_SESSION_PAGE_ITEMS = schemas.WebSessionCatalogSnapshot.properties.summaries.maxItems;
+
 function fail(path, expected) {
   throw new TypeError(`${path} must be ${expected}`);
 }

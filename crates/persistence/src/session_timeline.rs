@@ -250,6 +250,8 @@ impl SessionTimelineRepository {
             .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("window totals"))?;
         if item_count > descriptor.sizes.item_count
             || u64::from(projected_bytes) > descriptor.sizes.projected_structured_bytes
+            || (item_count == descriptor.sizes.item_count
+                && u64::from(projected_bytes) != descriptor.sizes.projected_structured_bytes)
         {
             return Err(SessionTimelineCorruption::InvalidOrdinal("window totals").into());
         }
@@ -1357,6 +1359,9 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                         }
                     };
                     (SessionTimelineDetailBody::Ownership { transition }, None)
+                }
+                DispatchedOutboxEventKind::CredentialPoolExhausted(evidence) => {
+                    terminal_turn_body(TurnId::from_uuid(evidence.turn_id), "failed", cursor)?
                 }
                 DispatchedOutboxEventKind::TurnTerminal {
                     disposition: DispatchedTurnTerminalDisposition::Retired,
@@ -2914,6 +2919,9 @@ fn response_excerpt(
 
 fn dispatched_event_kind(kind: &DispatchedOutboxEventKind) -> SessionTimelineEventKind {
     match kind {
+        DispatchedOutboxEventKind::CredentialPoolExhausted(_) => {
+            SessionTimelineEventKind::TurnFailed
+        }
         DispatchedOutboxEventKind::SessionCreated(_) => SessionTimelineEventKind::SessionCreated,
         DispatchedOutboxEventKind::SessionStateChanged(_) => {
             SessionTimelineEventKind::SessionStateChanged
@@ -3191,6 +3199,9 @@ fn decode_kind(
         (_, None) => None,
     };
     let kind = match (discriminator, disposition) {
+        (OutboxEventDiscriminator::CredentialPoolExhausted, _) => {
+            SessionTimelineEventKind::TurnFailed
+        }
         (OutboxEventDiscriminator::SessionCreated, _) => SessionTimelineEventKind::SessionCreated,
         (OutboxEventDiscriminator::SessionStateChanged, _) => {
             SessionTimelineEventKind::SessionStateChanged

@@ -409,6 +409,132 @@ async fn checkpoint_model_call(
     Ok(call)
 }
 
+/// Pending backend responses consume the setup budget and cannot retain a pool slot.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pending_backend_responses_are_bounded_for_all_liveness_transactions()
+-> Result<(), Box<dyn Error>> {
+    use std::{
+        future::Future,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    let (container, pool, database_url) = migrated_postgres().await?;
+    // Supplies distinct identities only; the configured checkout deadline is the behavior under test.
+    const ARBITRARY_SEED: u128 = 0x1210_0000;
+    const ACQUIRE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+    let fixture = activated_watchdog_session(&pool, ARBITRARY_SEED).await?;
+    let inventory = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidate = inventory.quiescent_active_turns(None).await?.candidates()[0];
+    let stall = Arc::new(AtomicBool::new(true));
+    let on_checkout = Arc::clone(&stall);
+    let single = PgPoolOptions::new()
+        .max_connections(1)
+        .test_before_acquire(false)
+        .before_acquire(move |connection, _| {
+            let stall = Arc::clone(&on_checkout);
+            Box::pin(async move {
+                if !stall.load(Ordering::SeqCst) {
+                    return Ok(true);
+                }
+                // Leave a server operation pending after checkout so BEGIN must drain it.
+                let mut busy = Box::pin(sqlx::raw_sql("SELECT pg_sleep(10)").execute(connection));
+                std::future::poll_fn(|context| {
+                    assert!(busy.as_mut().poll(context).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                Ok(true)
+            })
+        })
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    async fn ready_backend(pool: &PgPool, stall: &AtomicBool) -> Result<i32, Box<dyn Error>> {
+        stall.store(false, Ordering::SeqCst);
+        let backend = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(pool),
+        )
+        .await??;
+        stall.store(true, Ordering::SeqCst);
+        Ok(backend)
+    }
+    let first_backend = ready_backend(&single, &stall).await?;
+    let repository = PostgresTurnLivenessRepository::new(
+        single.clone(),
+        TurnLivenessPersistenceBounds::new(None, Some(ACQUIRE_WAIT), None),
+    );
+    let identities = AcceptedInputTurnFailureIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(ARBITRARY_SEED + 20)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(ARBITRARY_SEED + 21)),
+    );
+
+    let terminalization = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        repository.terminalize_stale_turn(
+            candidate,
+            identities.clone(),
+            &mut UuidV7StartupScanIdGenerator,
+        ),
+    )
+    .await?
+    .expect_err("BEGIN must spend the setup budget");
+    let second_backend = ready_backend(&single, &stall).await?;
+    assert_ne!(
+        first_backend, second_backend,
+        "terminalization discards its busy connection"
+    );
+    let recovery = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        repository.recover_observed_slot_held_turn(
+            candidate,
+            identities,
+            &mut UuidV7StartupScanIdGenerator,
+        ),
+    )
+    .await?
+    .expect_err("recovery BEGIN must spend the setup budget");
+    let third_backend = ready_backend(&single, &stall).await?;
+    assert_ne!(
+        second_backend, third_backend,
+        "recovery discards its busy connection"
+    );
+    let compaction = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        repository.recover_abandoned_compaction(
+            fixture.session,
+            ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_SEED + 22)),
+        ),
+    )
+    .await?
+    .expect_err("compaction BEGIN must spend the setup budget");
+    for error in [terminalization, recovery, compaction] {
+        assert!(matches!(error,
+            signalbox_persistence::turn_liveness::TurnLivenessRepositoryError::TerminalizationDatabase {
+                source: sqlx::Error::PoolTimedOut, commit_ambiguous: false,
+            }), "unexpected setup failure: {error:?}");
+    }
+    let replacement_backend = ready_backend(&single, &stall).await?;
+    assert_ne!(
+        third_backend, replacement_backend,
+        "compaction discards its busy connection"
+    );
+    let phase: String =
+        sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(phase, "active", "no timed-out setup commits a recovery");
+
+    single.close().await;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// An active turn with no operation outstanding reaches the inventory, and the
 /// shared failed-turn transition ends it without any new terminal machinery,
 /// recording the watchdog's own cause rather than the startup scan's.
@@ -1136,6 +1262,192 @@ async fn compaction_recovery_spares_a_compaction_its_window_never_prepared()
     );
     assert_eq!(call, (String::from("prepared"), None));
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn stalled_timeout_setup_releases_its_connection(
+    cancel_outer: bool,
+) -> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x129900).await?;
+    let single = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    sqlx::query("SET search_path = public, pg_catalog")
+        .execute(&single)
+        .await?;
+    let original_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&single)
+        .await?;
+    let bounds = TurnLivenessPersistenceBounds::new(
+        Some(std::time::Duration::from_secs(1)),
+        if cancel_outer {
+            None
+        } else {
+            Some(std::time::Duration::from_millis(250))
+        },
+        Some(std::time::Duration::from_secs(1)),
+    );
+    let repository = PostgresTurnLivenessRepository::new(single.clone(), bounds);
+    let candidate = *repository
+        .quiescent_active_turns(None)
+        .await?
+        .candidates()
+        .first()
+        .expect("fixture has one active turn");
+    // The disposable database stalls the exact timeout-installation statement.
+    sqlx::raw_sql(
+        "CREATE FUNCTION public.set_config(text, text, boolean) RETURNS text
+         LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(10); RETURN $2; END $$;",
+    )
+    .execute(&pool)
+    .await?;
+    let identities = AcceptedInputTurnFailureIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+        ContextFrontierId::from_uuid(Uuid::now_v7()),
+    );
+    let mut ids = UuidV7StartupScanIdGenerator;
+    let recovery = repository.recover_observed_slot_held_turn(candidate, identities, &mut ids);
+    if cancel_outer {
+        let mut recovery = Box::pin(recovery);
+        tokio::select! {
+            result = &mut recovery => panic!("setup must still be blocked: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let sleeping: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event = 'PgSleep')")
+                        .bind(original_backend).fetch_one(&pool).await?;
+                    if sleeping { break Ok::<_, sqlx::Error>(()); }
+                    tokio::task::yield_now().await;
+                }
+            }) => result??,
+        }
+        drop(recovery);
+    } else {
+        let error = recovery
+            .await
+            .expect_err("setup has its own acquisition budget");
+        assert!(matches!(error, signalbox_persistence::turn_liveness::TurnLivenessRepositoryError::TerminalizationDatabase {
+            source: sqlx::Error::PoolTimedOut, commit_ambiguous: false,
+        }));
+    }
+    let replacement: i32 = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&single),
+    )
+    .await??;
+    assert_ne!(
+        original_backend, replacement,
+        "interrupted setup cannot return its busy connection to the pool"
+    );
+    let phase: String =
+        sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(phase, "active");
+    single.close().await;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn liveness_timeout_setup_expires_without_retaining_the_pool_slot()
+-> Result<(), Box<dyn Error>> {
+    stalled_timeout_setup_releases_its_connection(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cancelled_liveness_timeout_setup_discards_its_busy_connection()
+-> Result<(), Box<dyn Error>> {
+    stalled_timeout_setup_releases_its_connection(true).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn exact_expiry_observation_recovers_a_between_operations_turn() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x18_100).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let candidate = repository
+        .observed_slot_held_turn(fixture.session)
+        .await?
+        .expect("the exact expired turn remains observable between operations");
+    assert_eq!(candidate.turn(), fixture.turn);
+    assert_eq!(
+        repository.slot_held_active_turns(None).await?.candidates(),
+        [],
+        "the periodic busy-operation inventory remains distinct"
+    );
+
+    let outcome = repository
+        .recover_observed_slot_held_turn(
+            candidate,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x18_110)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x18_111)),
+            ),
+            &mut UuidV7StartupScanIdGenerator,
+        )
+        .await?;
+    let state: String =
+        sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(matches!(
+        outcome,
+        Some(StartupScanSessionOutcome::Recovered(_))
+    ));
+    assert_eq!(state, "terminal");
+    assert_eq!(
+        repository.observed_slot_held_turn(fixture.session).await?,
+        None
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn exact_expiry_recovery_does_not_take_a_different_between_operations_turn()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x18_200).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+    let current = repository
+        .observed_slot_held_turn(fixture.session)
+        .await?
+        .expect("the running turn is observable");
+    let old = StaleTurnCandidate::new(
+        current.session(),
+        TurnId::from_uuid(Uuid::from_u128(0x18_210)),
+        current.evidence(),
+    );
+
+    let outcome = repository
+        .recover_observed_slot_held_turn(
+            old,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x18_211)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x18_212)),
+            ),
+            &mut UuidV7StartupScanIdGenerator,
+        )
+        .await?;
+
+    assert_eq!(outcome, None);
+    assert_eq!(
+        repository.observed_slot_held_turn(fixture.session).await?,
+        Some(current)
+    );
     pool.close().await;
     drop(container);
     Ok(())

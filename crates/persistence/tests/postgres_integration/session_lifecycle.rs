@@ -598,6 +598,106 @@ async fn leaving_a_park_re_enters_the_mapped_state() -> Result<(), Box<dyn Error
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn resuming_an_approval_wait_publishes_only_the_mapped_state() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    const APPROVAL_RESUME_SEED: u128 = 0x11fe_a000;
+    let (fixture, _, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        APPROVAL_RESUME_SEED,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Confirm,
+    )
+    .await?;
+    assert_resume_event(
+        &pool,
+        fixture.session,
+        SessionLifecycleState::Waiting {
+            wait: signalbox_domain::SessionWait::Approval,
+        },
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn resuming_model_recovery_publishes_only_the_mapped_state() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    const RECOVERY_RESUME_SEED: u128 = 0x11fe_b000;
+    let fixture = crate::model_call_execution_and_recovery::park_restart_ambiguity(
+        &pool,
+        RECOVERY_RESUME_SEED,
+    )
+    .await?;
+    assert_resume_event(
+        &pool,
+        fixture.session,
+        SessionLifecycleState::Recovering {
+            operation: signalbox_domain::SessionRecoveryOperation::ModelCall,
+        },
+    )
+    .await
+}
+
+async fn assert_resume_event(
+    pool: &PgPool,
+    session: SessionId,
+    mapped: SessionLifecycleState,
+) -> Result<(), Box<dyn Error>> {
+    let repository = SessionLifecycleRepository::new(pool.clone());
+    assert_eq!(
+        repository
+            .load(session)
+            .await?
+            .expect("fixture session exists")
+            .state(),
+        mapped
+    );
+    repository.adopt(session, LifecycleActor::Operator).await?;
+    repository
+        .park(
+            session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+        )
+        .await?;
+    let before: Decimal = sqlx::query_scalar("SELECT max(event_sequence) FROM outbox_event")
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(repository.resume(session).await?, mapped);
+    rewind_outbox_delivery_before(pool, before + Decimal::ONE).await?;
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let mut changes = Vec::new();
+    while dispatcher
+        .dispatch_next(|event| {
+            if let DispatchedOutboxEventKind::SessionStateChanged(change) = event.kind() {
+                changes.push(change.clone());
+            }
+            OutboxDeliveryDecision::Delivered
+        })
+        .await?
+        != OutboxDispatchOutcome::Idle
+    {}
+    assert_eq!(
+        changes,
+        vec![
+            signalbox_persistence::outbox::DispatchedSessionStateChange {
+                prior: signalbox_persistence::outbox::DispatchedSessionStateKind::Parked,
+                state: mapped,
+                actor: LifecycleActor::Operator,
+            }
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn retired_unactivated_turn_does_not_make_a_park_resume_active() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;

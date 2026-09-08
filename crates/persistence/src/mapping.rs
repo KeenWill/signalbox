@@ -224,6 +224,7 @@ pub(crate) enum OutboxEventDiscriminator {
     SessionStateChanged,
     SessionTerminal,
     TurnTerminal,
+    CredentialPoolExhausted,
     GoalChanged,
     CommandSettled,
     InjectionSettled,
@@ -247,6 +248,7 @@ pub(crate) fn outbox_event_discriminator_from_str(value: &str) -> Option<OutboxE
         SESSION_STATE_CHANGED => OutboxEventDiscriminator::SessionStateChanged,
         SESSION_TERMINAL => OutboxEventDiscriminator::SessionTerminal,
         TURN_TERMINAL => OutboxEventDiscriminator::TurnTerminal,
+        "turn_credential_pool_exhausted" => OutboxEventDiscriminator::CredentialPoolExhausted,
         GOAL_CHANGED => OutboxEventDiscriminator::GoalChanged,
         COMMAND_SETTLED => OutboxEventDiscriminator::CommandSettled,
         INJECTION_SETTLED => OutboxEventDiscriminator::InjectionSettled,
@@ -330,6 +332,7 @@ pub(crate) const fn timeline_event_kind_str(
         (OutboxEventDiscriminator::TurnTerminal, Some(TurnDispositionStorageKind::Retired)) => {
             GOAL_TURN_RETIRED
         }
+        (OutboxEventDiscriminator::CredentialPoolExhausted, _) => TURN_FAILED,
         (OutboxEventDiscriminator::TurnTerminal, None) => return None,
         (OutboxEventDiscriminator::SessionCreated, _) => SESSION_CREATED,
         (OutboxEventDiscriminator::SessionStateChanged, _) => SESSION_STATE_CHANGED,
@@ -4380,6 +4383,55 @@ mod tests {
         assert_eq!(
             durable_command_id_from_uuid(valid),
             Ok(DurableCommandId::from_uuid(valid))
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AttachmentRejectionStorageKind {
+    BlobNotFound,
+    ByteBudgetExceeded,
+}
+
+pub(crate) const fn attachment_rejection_kind_to_str(
+    kind: AttachmentRejectionStorageKind,
+) -> &'static str {
+    match kind {
+        AttachmentRejectionStorageKind::BlobNotFound => "attachment_blob_not_found",
+        AttachmentRejectionStorageKind::ByteBudgetExceeded => "attachment_byte_budget_exceeded",
+    }
+}
+
+pub(crate) fn attachment_rejection_kind_from_str(
+    value: &str,
+) -> Option<AttachmentRejectionStorageKind> {
+    match value {
+        "attachment_blob_not_found" => Some(AttachmentRejectionStorageKind::BlobNotFound),
+        "attachment_byte_budget_exceeded" => {
+            Some(AttachmentRejectionStorageKind::ByteBudgetExceeded)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod attachment_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_rejection_storage_is_closed_and_round_trips() {
+        for kind in [
+            AttachmentRejectionStorageKind::BlobNotFound,
+            AttachmentRejectionStorageKind::ByteBudgetExceeded,
+        ] {
+            assert_eq!(
+                attachment_rejection_kind_from_str(attachment_rejection_kind_to_str(kind)),
+                Some(kind)
+            );
+        }
+        assert_eq!(
+            attachment_rejection_kind_from_str("unknown_attachment_rejection"),
+            None
         );
     }
 }

@@ -83,6 +83,7 @@ pub enum FileMediaRegistryConstructionError {
     DuplicateMediaTypeClaim,
     DuplicateReaderMember,
     ProbeBounds,
+    ValidationBounds,
     ViewBounds,
     ContainerBounds,
     TextFallback,

@@ -354,6 +354,7 @@ impl InboundFrameBudgets {
 }
 
 mod runner_recovery;
+mod runner_status;
 mod runtime;
 
 use runtime::{ProcessFanouts, nudge_delegation_issuer};
@@ -362,7 +363,7 @@ pub use runtime::{
     ProcessProviderTextDeltaSink, ProcessRuntime,
 };
 #[cfg(test)]
-use runtime::{nudge_delegation_wake, observe_outbox_metrics_once};
+use runtime::{nudge_eligible_outbox_wake, observe_outbox_metrics_once};
 mod connection;
 pub use connection::shared_snapshot_reader_budget;
 use connection::*;
@@ -395,3 +396,5 @@ pub(crate) use protocol::interrupt_for_committed_closure;
 use protocol::*;
 #[cfg(test)]
 include!("tests.rs");
+
+mod credential_pool;

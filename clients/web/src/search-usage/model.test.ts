@@ -131,7 +131,7 @@ describe('SearchUsageScenarioSource', () => {
     })
 
     expect(first.results[0]?.address.event_sequence).toBe(SEARCH_USAGE_FAR_ADDRESS)
-    expect(first.continuation?.projection_id).toBe('2')
-    expect(second.results[0]?.address.event_sequence).toBe('777751')
+    expect(first.continuation?.projection_id).toBe(first.results.at(-1)?.projection_id)
+    expect(second.results[0]?.address.event_sequence).toBe('777764')
   })
 })
