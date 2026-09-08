@@ -6,6 +6,24 @@
 
 ```rust
 pub enum ClientRequest {
+    RegisterWorkspace {
+        command_id: CommandId,
+        root: string::String,
+    },
+    MintGitRemote {
+        command_id: CommandId,
+        workspace_id: CanonicalUuid,
+        name: string::String,
+        url: string::String,
+    },
+    WithdrawGitRemote {
+        command_id: CommandId,
+        mint_id: CanonicalUuid,
+    },
+    CancelProgramRun {
+        command_id: CommandId,
+        run_id: CanonicalUuid,
+    },
     ReloadConfiguration {
         command_id: CommandId,
     },

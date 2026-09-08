@@ -11,6 +11,7 @@ mod event;
 mod frame;
 mod goal;
 mod operator_status;
+mod program;
 mod request;
 mod response;
 mod review;
@@ -41,3 +42,7 @@ pub use user_input::*;
 
 #[cfg(test)]
 mod tests;
+
+pub use program::{
+    ProgramRunCancellationOutcome, ProgramRunCancelledState, ProgramRunTerminalState,
+};

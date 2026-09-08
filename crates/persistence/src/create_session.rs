@@ -31,7 +31,8 @@ use crate::mapping::{
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const WRITTEN_STORAGE_VERSION: i16 = 7;
+const WRITTEN_STORAGE_VERSION: i16 = 8;
+const RUNNER_PLACEMENT_FROM_STORAGE_VERSION: i16 = 8;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
@@ -205,7 +206,8 @@ impl CreateSessionRepository {
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
-                | CommandKind::ClearCredentialExclusion,
+                | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun,
             ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
@@ -268,7 +270,8 @@ impl CreateSessionRepository {
                     | CommandKind::ProvisionOauthCredential
                     | CommandKind::ReprovisionOauthCredential
                     | CommandKind::DeleteOauthCredential
-                    | CommandKind::ClearCredentialExclusion,
+                    | CommandKind::ClearCredentialExclusion
+                    | CommandKind::CancelProgramRun,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(
@@ -335,7 +338,8 @@ impl CreateSessionRepository {
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
-                | CommandKind::ClearCredentialExclusion,
+                | CommandKind::ClearCredentialExclusion
+                | CommandKind::CancelProgramRun,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -571,6 +575,9 @@ async fn insert_command_record(
     let command_selection = encode_selection(command.initial_configuration_defaults().model());
     let (finish_kind, finish_statement) = finish_condition_columns(command.finish_condition());
     let created_session = session_id_to_uuid(applied.session());
+    let runner_placement = crate::creation_runner_placement::RunnerPlacementColumns::encode(
+        command.runner_placement(),
+    );
     sqlx::query(
         "INSERT INTO create_session_command
             (command_id, command_kind, storage_version,
@@ -581,9 +588,10 @@ async fn insert_command_record(
              placement_path, root_global_read_intent,
              result_kind, created_session_id,
              dispatching_module, dispatch_ref,
-             start_gate, ownership, finish_condition_kind, finish_condition)
+             start_gate, ownership, finish_condition_kind, finish_condition,
+             runner_selector_kind, runner_selector_id, runner_selector_class, runner_directory_kind, runner_directory, runner_credential_profile, runner_workspace_kind, runner_repository, runner_sandbox, runner_permission_overrides)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-                 $19, $20, $21, $22, $23, $24)",
+                 $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
@@ -630,6 +638,16 @@ async fn insert_command_record(
     .bind(ownership_to_str(command.ownership()))
     .bind(finish_kind)
     .bind(finish_statement)
+    .bind(runner_placement.runner_selector_kind)
+    .bind(runner_placement.runner_selector_id)
+    .bind(runner_placement.runner_selector_class)
+    .bind(runner_placement.runner_directory_kind)
+    .bind(runner_placement.runner_directory)
+    .bind(runner_placement.runner_credential_profile)
+    .bind(runner_placement.runner_workspace_kind)
+    .bind(runner_placement.runner_repository)
+    .bind(runner_placement.runner_sandbox)
+    .bind(runner_placement.runner_permission_overrides)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -697,6 +715,16 @@ async fn load_from_connection(
             c.command_id AS typed_command_id,
             c.command_kind AS typed_kind,
             c.storage_version AS typed_version,
+            c.runner_selector_kind,
+            c.runner_selector_id,
+            c.runner_selector_class,
+            c.runner_directory_kind,
+            c.runner_directory,
+            c.runner_credential_profile,
+            c.runner_workspace_kind,
+            c.runner_repository,
+            c.runner_sandbox,
+            c.runner_permission_overrides,
             c.creation_cause AS command_cause,
             c.ancestry_kind AS command_ancestry,
             c.dispatching_module AS command_dispatching_module,
@@ -851,6 +879,13 @@ fn decode_complete(
             command_placement,
         ),
     };
+    let runner_placement =
+        <crate::creation_runner_placement::RunnerPlacementColumns as sqlx::FromRow<
+            sqlx::postgres::PgRow,
+        >>::from_row(&row)?
+        .decode(typed_version, RUNNER_PLACEMENT_FROM_STORAGE_VERSION)
+        .map_err(CreateSessionCorruption::Inconsistent)?;
+    let command = command.with_runner_placement(runner_placement);
     let start_gate: String = required(&row, "start_gate")?;
     let ownership: String = required(&row, "ownership")?;
     let finish_condition = finish_condition_from_columns(
