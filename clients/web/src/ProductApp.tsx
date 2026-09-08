@@ -22,7 +22,11 @@ import {
   useRef,
   useState,
 } from 'react'
-import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
+import {
+  ArtifactInspector,
+  artifactResolutionId,
+  emptyArtifactInspectorState,
+} from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
@@ -589,6 +593,13 @@ export function ProductApp({
   }, [])
   const [artifactOpen, setArtifactOpen] = useState(false)
   const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
+  const artifactRequest = artifactInspectorState.request
+  useEffect(() => {
+    if (artifactRequest === null) return
+    return () => {
+      dispatch(actions.artifactOriginalReleased(artifactResolutionId(artifactRequest)))
+    }
+  }, [artifactRequest, dispatch])
   const narrowInspector = useNarrowInspector()
   const [focusAfterBootstrapRecovery, setFocusAfterBootstrapRecovery] = useState(false)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
@@ -654,12 +665,15 @@ export function ProductApp({
     : null
   const inspectorInSheet = app.layout === 'focus' || narrowInspector
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.
+  const revalidateBootstrap = bootstrap.refetch
   const productImportApi = useMemo(
     () =>
       bootstrap.data === undefined
         ? null
-        : HttpImportApi.withAdmittedBootstrap(bootstrap.data, bootstrap.dataUpdatedAt),
-    [bootstrap.data, bootstrap.dataUpdatedAt],
+        : HttpImportApi.withAdmittedBootstrap(bootstrap.data, bootstrap.dataUpdatedAt, async () => {
+            await revalidateBootstrap({ throwOnError: true })
+          }),
+    [bootstrap.data, bootstrap.dataUpdatedAt, revalidateBootstrap],
   )
   const context = useMemo<ProductCommandContext>(() => {
     // `productCommandRegistry` already carries the `imports.*` family behind `available()` gates;
@@ -1067,10 +1081,29 @@ export function ProductApp({
               type="button"
               className="bootstrap-retry"
               onClick={(event) => {
-                const restoreFocus = document.activeElement === event.currentTarget
+                const opener = event.currentTarget
+                let restoreFocus = document.activeElement === opener
+                const recordBlur = () => {
+                  queueMicrotask(() => {
+                    if (opener.isConnected) restoreFocus = false
+                  })
+                }
+                const recordPointerMove = () => {
+                  restoreFocus = false
+                }
+                opener.addEventListener('blur', recordBlur)
+                document.addEventListener('pointerdown', recordPointerMove)
                 void bootstrap.refetch().then((result) => {
+                  opener.removeEventListener('blur', recordBlur)
+                  document.removeEventListener('pointerdown', recordPointerMove)
                   if (result.isSuccess && restoreFocus) {
-                    requestAnimationFrame(() => bootstrapStatusRef.current?.focus())
+                    requestAnimationFrame(() => {
+                      if (
+                        document.activeElement === opener ||
+                        (!opener.isConnected && document.activeElement === document.body)
+                      )
+                        bootstrapStatusRef.current?.focus()
+                    })
                   }
                 })
               }}
