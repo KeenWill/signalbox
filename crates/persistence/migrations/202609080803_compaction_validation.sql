@@ -363,3 +363,17 @@ BEGIN
     RETURN NULL;
 END;
 $$;
+
+DO $search_path_pins$
+DECLARE
+    signature text;
+BEGIN
+    FOREACH signature IN ARRAY ARRAY[
+        'context_frontier_member_position(uuid, uuid, uuid, uuid)',
+        'require_context_compaction_exact_evidence()'
+    ] LOOP
+        EXECUTE format('ALTER FUNCTION %s SET search_path TO %I, pg_catalog, pg_temp',
+                       signature, current_schema);
+    END LOOP;
+END
+$search_path_pins$;
