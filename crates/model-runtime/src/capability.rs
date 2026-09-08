@@ -67,12 +67,17 @@ impl ModelCapabilities {
     /// that remains to be emitted as a request control.
     ///
     /// A mapped target implements fast mode by serving identity, so its
-    /// request-control value is disabled after the target is selected.
+    /// request-control value is disabled after the target is selected. A retained
+    /// mapped target takes precedence over the current catalog mapping.
     pub fn effective_target<'a>(
         &'a self,
         selected: &'a ResolvedTarget,
         fast_mode: FastMode,
+        retained_mapped_target: Option<&'a ResolvedTarget>,
     ) -> Result<(&'a ResolvedTarget, FastMode), ModelCapabilityError> {
+        if let Some(target) = retained_mapped_target {
+            return Ok((target, FastMode::Disabled));
+        }
         match (fast_mode, &self.fast_mode) {
             (FastMode::Disabled, _) => Ok((selected, FastMode::Disabled)),
             (FastMode::Enabled, Some(FastModeTarget::SameTarget)) => {
@@ -390,16 +395,33 @@ mod tests {
         );
 
         assert_eq!(
-            capabilities.effective_target(&selected, FastMode::Enabled),
+            capabilities.effective_target(&selected, FastMode::Enabled, None),
             Ok((&mapped, FastMode::Disabled))
         );
         assert_eq!(
-            capabilities.effective_target(&selected, FastMode::Disabled),
+            capabilities.effective_target(&selected, FastMode::Disabled, None),
             Ok((&selected, FastMode::Disabled))
         );
         assert_eq!(
-            same_target_capabilities.effective_target(&selected, FastMode::Enabled),
+            same_target_capabilities.effective_target(&selected, FastMode::Enabled, None),
             Ok((&selected, FastMode::Enabled))
+        );
+    }
+
+    /// Arbitrary distinct targets represent the base and two mapped catalog revisions.
+    #[test]
+    fn retained_fast_target_bypasses_the_current_mapping() {
+        let selected = ResolvedTarget::new("fixture-base");
+        let retained = ResolvedTarget::new("fixture-retained");
+        let reloaded = ResolvedTarget::new("fixture-reloaded");
+        let capabilities = ModelCapabilities::new(
+            BTreeSet::new(),
+            Some(FastModeTarget::Mapped(reloaded)),
+            BTreeSet::new(),
+        );
+        assert_eq!(
+            capabilities.effective_target(&selected, FastMode::Enabled, Some(&retained)),
+            Ok((&retained, FastMode::Disabled))
         );
     }
 

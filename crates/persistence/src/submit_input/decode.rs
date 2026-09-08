@@ -486,6 +486,10 @@ pub(super) async fn decode_complete(
         typed_version,
     )
     .await?;
+    let issuer: String = required(&row, "registry_issuer_kind")?;
+    if matches!(actor, Actor::Program { .. }) != (issuer == "program") {
+        return Err(SubmitInputCorruption::Inconsistent("actor and envelope principal").into());
+    }
     let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
     let session = session_id_from_uuid(required(&row, "command_session_id")?);
     let content = decode_content(required(&row, "command_content_parts")?, "command content")?;

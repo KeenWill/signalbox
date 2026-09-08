@@ -415,7 +415,7 @@ pub(super) fn update_signals_child_result(update: &ProcessUpdate, wait: Delegati
             | ProcessUpdateEvent::TurnCancelled { .. }
             | ProcessUpdateEvent::TurnReconciliationRequired { .. } => false,
         },
-        ProcessUpdate::ProviderTextDelta(_) => false,
+        ProcessUpdate::ProviderTextDelta(_) | ProcessUpdate::ResyncRequired { .. } => false,
     }
 }
 

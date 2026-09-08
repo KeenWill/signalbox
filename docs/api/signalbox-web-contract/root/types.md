@@ -607,6 +607,7 @@ pub struct WebSessionWorkFacts {
 
 ```rust
 pub struct WebSessionTimelineDescriptor {
+    pub repository_watch: option::Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     pub sizes: WebSessionTimelineSizeFacts,
     pub first_address: WebTimelineAddress,

@@ -291,10 +291,11 @@ provider-authored detail.
 Every model-call transaction issues the session-scheduler row lock as its first
 statement, so per-session serialization is total and lock-order cycles on one
 session are impossible; [persistence-protocol](persistence-protocol.md) owns the
-lock order. Tool-result continuation reconstructs its result frontier under the
-per-session lock and takes the global ordering guard only before projecting its
-outbox event, so long frontier reads do not serialize unrelated model-call
-writers while the guard still prevents a credential/allocator cycle.
+lock order. Tool-result continuation reconstructs and validates its result
+frontier under the per-session lock and takes the global ordering guard only
+before projecting its outbox event, so long frontier reads do not serialize
+unrelated model-call writers while the guard still prevents a
+credential/allocator cycle.
 
 A failure with retained execution evidence after its one reconciliation pass, an
 ambiguous commit outcome, an unwind, or cancellation raises the fatal signal and

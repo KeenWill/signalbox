@@ -111,6 +111,19 @@ impl std::fmt::Debug for ConfigurationReload {
 }
 
 impl ConfigurationReload {
+    pub(crate) async fn repository_watch_origin(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> Result<
+        Option<signalbox_module_repo_watch_v2::RetainedDispatchAction>,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        match &self.watch {
+            Some(watch) => watch.session_origin(session).await,
+            None => Ok(None),
+        }
+    }
+
     /// Retains the exact startup catalogs and the configured file locations.
     pub fn new(
         pool: sqlx::PgPool,

@@ -1,6 +1,6 @@
 use std::{collections::HashSet, ffi::OsStr, fs, io::Read};
 
-use git2::{ObjectFormat, Odb, Repository, Signature};
+use git2::{ObjectFormat, Odb, Signature};
 use rustix::fs::{AtFlags, Mode, OFlags, openat};
 use rustix::io::dup;
 
@@ -20,7 +20,7 @@ use crate::limits::{
 };
 use crate::objects::{PackRoot, persist_objects};
 use crate::packed_reference::packed_reference_namespace_conflicts;
-use crate::pinning::{PinnedObjectDatabase, PinnedRepository};
+use crate::pinning::{PinnedObjectDatabase, PinnedRepository, RepositoryShell};
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
 use crate::reflog::ReferenceLogLock;
@@ -210,7 +210,7 @@ pub(super) fn read_merge_parent_ids(
 }
 
 pub(super) fn commit<ValidateRoot>(
-    repository: &mut Repository,
+    repository: &mut RepositoryShell,
     identity: &GitIdentity,
     arguments: GitCommitArguments,
     authority: &PinnedRepository,
@@ -249,6 +249,7 @@ where
         .collect::<Result<Vec<_>, _>>()?;
     if is_ordinary_commit && parents.len() == 1 {
         let parent_tree = find_bounded_tree(repository, parents[0].tree_id())?;
+        validate_tree_discovery(repository, &parent_tree)?;
         let changes = repository
             .diff_tree_to_index(Some(&parent_tree), Some(&index), None)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -338,7 +339,7 @@ fn validate_live_commit_target(
         Odb::new_ext(authority.object_format).map_err(|_| LocalGitFailure::Operation)?;
     pinned_objects.add_to(&object_database)?;
     repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .map_err(|_| LocalGitFailure::Operation)?;
     let commit = find_bounded_commit(&repository, target)?;
     let tree = find_bounded_tree(&repository, commit.tree_id())?;

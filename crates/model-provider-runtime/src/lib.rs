@@ -313,9 +313,13 @@ fn runtime_delivery_definitions(
     models: &RuntimeModelCatalog,
     target: ResolvedProviderTarget,
     fast_mode: DomainFastMode,
+    retained_mapped_target: Option<ResolvedProviderTarget>,
 ) -> Option<(&RuntimeModelDefinition, &RuntimeModelDefinition)> {
     let selected = models.resolve(target)?;
-    let serving = models.effective_definition(selected, fast_mode)?;
+    let serving = match retained_mapped_target {
+        Some(target) => models.resolve(target)?,
+        None => models.effective_definition(selected, fast_mode)?,
+    };
     Some((selected, serving))
 }
 
@@ -829,6 +833,7 @@ impl PreparedBinding {
 
 /// Opaque runtime capability plus the application facts it was prepared from.
 pub struct RuntimeModelCallCapability<Prepared> {
+    invocation_capacity_reserved: bool,
     prepared: Prepared,
     binding: PreparedBinding,
     resolved_target: ResolvedTarget,
@@ -907,15 +912,36 @@ impl ClassifyOperatorFailure for RuntimeModelCallProviderError {
     }
 }
 
+/// Retains invocation process identity and releases its durable capacity.
+pub trait InvocationProcessObserver: Send + Sync {
+    /// Persists a process group before the child receives its request.
+    fn register(
+        &self,
+        call: ModelCallId,
+        process_group: u32,
+    ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + '_>>;
+    /// Reconciles capacity after runtime execution has completed cleanup.
+    /// The observed group is retained even when registration did not finish.
+    fn finished(
+        &self,
+        call: ModelCallId,
+        process_group: Option<u32>,
+        proven_unsent: bool,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
 /// Application-port adapter over one provider-neutral model runtime.
 pub struct RuntimeModelCallProvider<R> {
     runtime: Arc<R>,
     models: RuntimeModelCatalog,
     text_deltas: Arc<dyn ProviderTextDeltaSink>,
     diagnostic_model_identity_limit: Option<usize>,
+    invocation_processes: Option<Arc<dyn InvocationProcessObserver>>,
 }
 
 struct AcceptanceObservations<AcceptancePossible, Correlation> {
+    invocation_process_group: Option<u32>,
+    invocation_processes: Option<Arc<dyn InvocationProcessObserver>>,
     expected_correlation: Correlation,
     correlation_mismatch: bool,
     acceptance_possible: Option<AcceptancePossible>,
@@ -938,6 +964,26 @@ where
     AcceptancePossible: FnOnce(),
     Correlation: PartialEq,
 {
+    fn register_process(
+        &mut self,
+        correlation: Correlation,
+        process_group: u32,
+    ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+        if correlation != self.expected_correlation {
+            self.correlation_mismatch = true;
+            return Box::pin(async { false });
+        }
+        self.invocation_process_group = Some(process_group);
+        let observer = self.invocation_processes.clone();
+        let call = self.telemetry.call;
+        Box::pin(async move {
+            match observer {
+                Some(observer) => observer.register(call, process_group).await,
+                None => true,
+            }
+        })
+    }
+
     fn observe_rate_limits(
         &mut self,
         correlation: Correlation,
@@ -1001,8 +1047,18 @@ impl<R> RuntimeModelCallProvider<R> {
             runtime: Arc::new(runtime),
             models,
             text_deltas: Arc::new(DiscardProviderTextDeltas),
+            invocation_processes: None,
             diagnostic_model_identity_limit,
         }
+    }
+
+    /// Connects spawned invocations to their durable capacity reservations.
+    pub fn with_invocation_process_observer(
+        mut self,
+        observer: impl InvocationProcessObserver + 'static,
+    ) -> Self {
+        self.invocation_processes = Some(Arc::new(observer));
+        self
     }
 
     /// Delivers already-redacted provider text observations to an ephemeral
@@ -1022,6 +1078,7 @@ impl<R> Clone for RuntimeModelCallProvider<R> {
             runtime: Arc::clone(&self.runtime),
             models: self.models.clone(),
             text_deltas: Arc::clone(&self.text_deltas),
+            invocation_processes: self.invocation_processes.clone(),
             diagnostic_model_identity_limit: self.diagnostic_model_identity_limit,
         }
     }
@@ -1136,6 +1193,7 @@ where
             &self.models,
             call.target(),
             request.model_settings().effective().fast_mode(),
+            operation.retained_mapped_target(),
         )
         .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let messages = render_runtime_messages(
@@ -1159,6 +1217,9 @@ where
                 request.model_settings(),
             ),
         );
+        runtime_operation.retained_mapped_target = operation
+            .retained_mapped_target()
+            .map(|_| ResolvedTarget::new(effective_definition.provider_model().to_owned()));
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
@@ -1242,6 +1303,7 @@ where
             &self.models,
             call.target(),
             request.model_settings().effective().fast_mode(),
+            operation.retained_mapped_target(),
         )
         .ok_or_else(|| {
             fail_closed(
@@ -1295,6 +1357,9 @@ where
         // The session system prompt frozen through the calling turn's
         // defaults epoch rides every operation; adapters translate a `None`
         // as no system instructions (docs/spec/sessions-and-transcript.md).
+        runtime_operation.retained_mapped_target = operation
+            .retained_mapped_target()
+            .map(|_| ResolvedTarget::new(effective_definition.provider_model().to_owned()));
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
         runtime_operation.delivery = DeliveryMode::Streamed;
@@ -1307,6 +1372,7 @@ where
         {
             PreparationOutcome::Prepared(prepared) => Ok(ModelCallCapabilityPreparation::Ready(
                 RuntimeModelCallCapability {
+                    invocation_capacity_reserved: operation.invocation_capacity_reserved(),
                     prepared,
                     binding,
                     resolved_target,
@@ -1366,6 +1432,11 @@ where
             ));
         }
         let mut observations = AcceptanceObservations {
+            invocation_process_group: None,
+            invocation_processes: self
+                .invocation_processes
+                .clone()
+                .filter(|_| capability.invocation_capacity_reserved),
             expected_correlation: correlation,
             correlation_mismatch: false,
             acceptance_possible: Some(acceptance_possible),
@@ -1387,6 +1458,15 @@ where
                 CancellationSignal::when(cancellation),
             )
             .await;
+        if let Some(observer) = &observations.invocation_processes {
+            observer
+                .finished(
+                    correlation,
+                    observations.invocation_process_group,
+                    matches!(report.evidence, TerminalEvidence::ProvenUnsent(_)),
+                )
+                .await;
+        }
         require_correlation(telemetry, report.correlation)?;
         if observations.correlation_mismatch {
             return Err(fail_closed(
@@ -2497,6 +2577,8 @@ mod tests {
 
     fn capacity_sink() -> AcceptanceObservations<fn(), ModelCallId> {
         AcceptanceObservations {
+            invocation_process_group: None,
+            invocation_processes: None,
             expected_correlation: call(),
             correlation_mismatch: false,
             acceptance_possible: None,
@@ -3012,6 +3094,8 @@ mod tests {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
+            invocation_process_group: None,
+            invocation_processes: None,
             expected_correlation: call(),
             correlation_mismatch: false,
             acceptance_possible: Some(move || {
@@ -3049,6 +3133,8 @@ mod tests {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
+            invocation_process_group: None,
+            invocation_processes: None,
             expected_correlation: call(),
             correlation_mismatch: false,
             acceptance_possible: Some(move || {
@@ -3094,6 +3180,8 @@ mod tests {
         let expected_text = String::from("already [redacted]");
         let recorded = RecordedTextDeltas::default();
         let mut sink = AcceptanceObservations {
+            invocation_process_group: None,
+            invocation_processes: None,
             expected_correlation: expected_call,
             correlation_mismatch: false,
             acceptance_possible: Some(|| {}),
@@ -4531,6 +4619,29 @@ mod tests {
         assert_eq!(mapped.fast_mode, signalbox_model_runtime::FastMode::Enabled);
     }
 
+    /// Arbitrary distinct targets model the retained and reloaded fast mappings.
+    #[test]
+    fn retained_mapped_target_survives_a_changed_fast_mapping() {
+        let base = target(1);
+        let retained = target(2);
+        let reloaded = target(3);
+        let definition = |target, name: &str| {
+            RuntimeModelDefinition::try_new(target, name.to_owned(), 32, 200_000)
+                .expect("fixture definition is valid")
+        };
+        let catalog = RuntimeModelCatalog::try_from_definitions([
+            definition(base, "fixture-base").with_fast_target(reloaded),
+            definition(retained, "fixture-retained").with_fast_target(reloaded),
+            definition(reloaded, "fixture-reloaded"),
+        ])
+        .expect("mapped targets are configured");
+        let (selected, serving) =
+            runtime_delivery_definitions(&catalog, base, FastMode::Enabled, Some(retained))
+                .expect("retained delivery resolves");
+        assert_eq!(selected.target(), base);
+        assert_eq!(serving.target(), retained);
+    }
+
     #[test]
     fn mapped_fast_target_supplies_the_authorized_delivery_identity_and_limit() {
         let selected_model = "fixture-standard";
@@ -4559,7 +4670,7 @@ mod tests {
             .resolve(target(1))
             .expect("source target is present");
         let (selected, serving) =
-            runtime_delivery_definitions(&catalog, target(1), FastMode::Enabled)
+            runtime_delivery_definitions(&catalog, target(1), FastMode::Enabled, None)
                 .expect("mapped delivery resolves");
 
         assert_eq!(selected.provider_model(), selected_model);

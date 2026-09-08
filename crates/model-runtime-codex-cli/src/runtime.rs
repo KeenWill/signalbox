@@ -634,6 +634,7 @@ impl CodexCliRuntime {
             credential_reference: operation.credential_reference,
             requested_target: operation.requested_target,
             resolved_target: operation.resolved_target,
+            retained_mapped_target: operation.retained_mapped_target,
             system: operation.system,
             messages: operation.messages,
             settings: operation.settings,
@@ -660,9 +661,11 @@ impl CodexCliRuntime {
         };
         let mut request_fast_mode = operation.settings.fast_mode;
         if let Some(capabilities) = capabilities {
-            let (target, effective_request_fast_mode) = match capabilities
-                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
-            {
+            let (target, effective_request_fast_mode) = match capabilities.effective_target(
+                &operation.resolved_target,
+                operation.settings.fast_mode,
+                operation.retained_mapped_target.as_ref(),
+            ) {
                 Ok(application) => application,
                 Err(error) => {
                     return PreparationOutcome::Failed {
