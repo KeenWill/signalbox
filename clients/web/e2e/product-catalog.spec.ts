@@ -295,6 +295,24 @@ test('rejects an over-bound search before changing URL state', async ({ page }) 
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('preserves the complete admitted title query on submit and reload', async ({ page }) => {
+  await useCatalogFixture(page)
+  const queries: string[] = []
+  await page.route('**/api/sessions?**', (route) => {
+    queries.push(new URL(route.request().url()).searchParams.get('search') ?? '')
+    return route.fulfill({ json: { ...filteredPage, summaries: [], total: '0' } })
+  })
+  await page.goto('/sessions')
+  const q = 'é'.repeat(512)
+  await page.getByRole('textbox', { name: 'Search titles' }).fill(q)
+  await page.getByRole('button', { name: 'Apply' }).click()
+  await expect.poll(() => queries.at(-1)).toBe(q)
+  await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe(q)
+  await page.reload()
+  await expect(page.getByRole('textbox', { name: 'Search titles' })).toHaveValue(q)
+  await expect.poll(() => queries.at(-1)).toBe(q)
+})
+
 test('restores focus after filters replace the bounded catalog page', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
