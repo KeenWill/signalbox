@@ -29,11 +29,12 @@ after the new follow or deadline task is installed, its unconditional cleanup
 cancels the new generation's work. The reducer can remain in `connect` with
 neither a transport nor its deadline.
 
-A deterministic regression can suspend the update callback during the stop
-phase, enqueue a restart, and delay completion of old transport closure until
-the restart's connect update is observed. It must verify that the new exchange
-and deadline survive completion of the old stop. Keep stop cleanup in the
-serialized input effects, or bind cleanup to the stopped generation.
+The drain awaits the old transport closure before processing the queued start,
+so a regression cannot gate that closure on observing the restart's connect
+update. Reproducing the cleanup race requires controlling when the stop caller
+resumes after the queued stop completes. No deterministic runtime reproduction
+is established here. Keep stop cleanup in the serialized input effects, or bind
+cleanup to the stopped generation.
 
 ### P2: an uncorrelated mutation receipt discards retry identity
 
