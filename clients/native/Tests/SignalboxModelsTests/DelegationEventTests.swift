@@ -58,6 +58,31 @@ final class DelegationEventTests: XCTestCase {
     XCTAssertEqual(try decode(cascade, recipient: child).event, expected)
   }
 
+  func testLifecycleCommandCascadeDecodesOnParentAndChildStreams() throws {
+    let event = #"{"type":"child_lifecycle_disposition","spawning_request_id":"\#(request)","child_session_id":"\#(child)","outcome":"cancelled","reason":"parent_cancelled","provenance":\#(lifecycleProvenance)}"#
+    let expected = SignalboxProcessSessionEvent.childLifecycleDisposition(
+      spawningRequestID: try .init(validating: request), childSessionID: try .init(validating: child),
+      outcome: .cancelled, reason: .parentCancelled,
+      provenance: .parentLifecycleCommand(parentSessionID: try .init(validating: parent),
+        commandID: try .init(validating: request), descendantScope: .parentAndDescendants))
+    XCTAssertEqual(try decode(event).event, expected)
+    XCTAssertEqual(try decode(event, recipient: child).event, expected)
+  }
+
+  func testLifecycleCommandResultDecodesItsCascadeProvenance() throws {
+    let event = #"{"type":"child_result","spawning_request_id":"\#(request)","child_session_id":"\#(child)","outcome":"cancelled","content":null,"reason":"parent_cancelled","provenance":\#(lifecycleProvenance)}"#
+    XCTAssertEqual(try decode(event).event, .childResult(
+      spawningRequestID: try .init(validating: request), childSessionID: try .init(validating: child),
+      outcome: .cancelled, content: nil, reason: .parentCancelled,
+      provenance: .parentLifecycleCommand(parentSessionID: try .init(validating: parent),
+        commandID: try .init(validating: request), descendantScope: .parentAndDescendants)))
+    XCTAssertThrowsError(try decode(event.replacingOccurrences(of: "parent_and_descendants", with: "parent_alone")))
+  }
+
+  private var lifecycleProvenance: String {
+    #"{"type":"parent_lifecycle_command","parent_session_id":"\#(parent)","command_id":"\#(request)","descendant_scope":"parent_and_descendants"}"#
+  }
+
   private var message: String {
     #"{"type":"session_message","spawning_request_id":"\#(request)","message_id":"\#(request)","sender_session_id":"\#(child)","recipient_session_id":"\#(parent)","ordinal":"1","delivery_sequence":"4","content":"Child update"}"#
   }

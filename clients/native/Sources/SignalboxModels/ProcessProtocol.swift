@@ -3189,9 +3189,10 @@ extension SignalboxTranscriptTurnState {
     }
     switch provenance {
     case .parentTurnCommand(_, _, _, .parentAndDescendants),
-      .parentGoalCommand(_, _, _, .parentAndDescendants):
+      .parentGoalCommand(_, _, _, .parentAndDescendants),
+      .parentLifecycleCommand(_, _, .parentAndDescendants):
       return true
-    case .childTurn, .parentTurnCommand, .parentGoalCommand:
+    case .childTurn, .parentTurnCommand, .parentGoalCommand, .parentLifecycleCommand:
       return false
     }
   }
@@ -3419,6 +3420,11 @@ public enum SignalboxDelegationProvenance: Decodable, Equatable, Sendable {
     commandID: SignalboxCanonicalUUID,
     descendantScope: SignalboxDescendantTerminationScope)
 
+  case parentLifecycleCommand(
+    parentSessionID: SignalboxCanonicalUUID,
+    commandID: SignalboxCanonicalUUID,
+    descendantScope: SignalboxDescendantTerminationScope)
+
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     switch tagged.kind {
@@ -3435,6 +3441,13 @@ public enum SignalboxDelegationProvenance: Decodable, Equatable, Sendable {
       self = .parentTurnCommand(
         parentSessionID: try decoder.decode("parent_session_id"),
         parentTurnID: try decoder.decode("parent_turn_id"),
+        commandID: try decoder.decode("command_id"),
+        descendantScope: try decoder.decode("descendant_scope"))
+    case "parent_lifecycle_command":
+      try tagged.rejectUnadmittedFields(
+        ["type", "parent_session_id", "command_id", "descendant_scope"], decoder: decoder)
+      self = .parentLifecycleCommand(
+        parentSessionID: try decoder.decode("parent_session_id"),
         commandID: try decoder.decode("command_id"),
         descendantScope: try decoder.decode("descendant_scope"))
     case "parent_goal_command":
@@ -3727,9 +3740,10 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
       (.cancelled, .parentCancelled, let provenance, .none):
       switch provenance {
       case .parentTurnCommand(_, _, _, .parentAndDescendants),
-        .parentGoalCommand(_, _, _, .parentAndDescendants):
+        .parentGoalCommand(_, _, _, .parentAndDescendants),
+      .parentLifecycleCommand(_, _, .parentAndDescendants):
         return true
-      case .childTurn, .parentTurnCommand, .parentGoalCommand:
+      case .childTurn, .parentTurnCommand, .parentGoalCommand, .parentLifecycleCommand:
         return false
       }
     default:
@@ -5346,14 +5360,16 @@ extension SignalboxDelegationProvenance {
   fileprivate var delegationParentID: SignalboxCanonicalUUID? {
     switch self {
     case .childTurn: return nil
-    case .parentTurnCommand(let parent, _, _, _), .parentGoalCommand(let parent, _, _, _): return parent
+    case .parentTurnCommand(let parent, _, _, _), .parentGoalCommand(let parent, _, _, _),
+      .parentLifecycleCommand(let parent, _, _): return parent
     }
   }
 
   fileprivate var hasDelegationCascade: Bool {
     switch self {
     case .parentTurnCommand(_, _, _, .parentAndDescendants),
-      .parentGoalCommand(_, _, _, .parentAndDescendants): return true
+      .parentGoalCommand(_, _, _, .parentAndDescendants),
+      .parentLifecycleCommand(_, _, .parentAndDescendants): return true
     default: return false
     }
   }

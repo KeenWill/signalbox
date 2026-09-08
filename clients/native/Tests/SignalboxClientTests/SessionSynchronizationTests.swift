@@ -35,7 +35,7 @@ final class SessionSynchronizationTests: XCTestCase {
     var transport = try SynchronizationFixture.synchronizedTransport(cursor: SynchronizationFixture.initialCursor)
     let event = SignalboxProcessSessionEvent.childLifecycleDisposition(
       spawningRequestID: parent, childSessionID: child, outcome: .cancelled, reason: .parentCancelled,
-      provenance: .parentTurnCommand(parentSessionID: parent, parentTurnID: parent,
+      provenance: .parentLifecycleCommand(parentSessionID: parent,
         commandID: parent, descendantScope: .parentAndDescendants))
     let effects = transport.send(.frame(generation: SynchronizationFixture.initialGeneration,
       message: .sessionEvent(.init(cursor: .init(rawValue: SynchronizationFixture.unknownCursor), sessionID: child, event: event))))
