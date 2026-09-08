@@ -1538,3 +1538,37 @@ if (answer.kind !== "answer") throw new Error("turn refused");
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_unregistered_run_is_rejected_by_registered_execution()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let run = ProgramRunId::from_uuid(Uuid::now_v7());
+    journal.create_stream(run).await?;
+    journal
+        .append_delivery(run, DeliveryKind::RunCancel(payload(b"cancelled")))
+        .await?;
+    let error = ProgramHost::new(journal)
+        .execute_registered(
+            run,
+            &mut ScriptedDeliveries::new([]),
+            &mut EffectProbe {
+                policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+                adopted: None,
+                executions: 0,
+                adoptions: 0,
+            },
+        )
+        .await
+        .expect_err("terminal streams require the same registration as live execution");
+    assert!(matches!(
+        error,
+        ProgramHostError::Registration(
+            signalbox_persistence::program_registration::ProgramRegistrationError::RunMissing
+        )
+    ));
+    pool.close().await;
+    Ok(())
+}

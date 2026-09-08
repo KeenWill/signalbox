@@ -26,13 +26,13 @@ vocabularies are closed; the domain crate's `RequestKind`, `DeliveryKind`, and
 requests, effects, capability refusals, nondeterminism faults, and user
 cancellation are produced.
 
-Resume discards nothing and restores nothing. A journal that already holds a
-terminal delivery, one that ended the run instead of answering a request, names
-the run's outcome; the host returns that outcome and creates no isolate. Any
-other woken run re-executes its module from the start; `ReplayCursor` answers
-each request from the journal in delivery order, and execution goes live where
-the journal ends. Live primitive requests are answered through
-`LiveDeliverySource`; granted effects reach host-side `EffectExecutor`
+Resume discards nothing and restores nothing. A registered run's journal that
+already holds a terminal delivery, one that ended the run instead of answering a
+request, names the run's outcome; the host returns that outcome and creates no
+isolate. Any other woken run re-executes its module from the start;
+`ReplayCursor` answers each request from the journal in delivery order, and
+execution goes live where the journal ends. Live primitive requests are answered
+through `LiveDeliverySource`; granted effects reach host-side `EffectExecutor`
 implementations.
 
 `ProgramRegistrationRepository` stores immutable registrations keyed by name and
