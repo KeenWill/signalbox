@@ -1053,10 +1053,17 @@ export function ProductApp({
               type="button"
               className="bootstrap-retry"
               onClick={(event) => {
-                const restoreFocus = document.activeElement === event.currentTarget
+                const opener = event.currentTarget
+                const restoreFocus = document.activeElement === opener
                 void bootstrap.refetch().then((result) => {
                   if (result.isSuccess && restoreFocus) {
-                    requestAnimationFrame(() => bootstrapStatusRef.current?.focus())
+                    requestAnimationFrame(() => {
+                      if (
+                        document.activeElement === opener ||
+                        (!opener.isConnected && document.activeElement === document.body)
+                      )
+                        bootstrapStatusRef.current?.focus()
+                    })
                   }
                 })
               }}

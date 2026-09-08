@@ -1,8 +1,15 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { type Dispatch, type FormEvent, type RefObject, type SetStateAction, useMemo } from 'react'
+import {
+  type Dispatch,
+  type FormEvent,
+  type RefObject,
+  type SetStateAction,
+  useEffect,
+  useMemo,
+} from 'react'
 import type { CommandContext } from './commands'
-import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
+import { ArtifactRenderer, selectImageView } from './features/artifacts/ArtifactRenderer'
 import { selectBoundedOriginalView } from './features/artifacts/artifactScenario'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import type { WebBlobDescriptor } from './generated/web-contract.mjs'
@@ -13,6 +20,7 @@ import {
   ProductTransportError,
   productTransport,
 } from './product'
+import { actions, useAppDispatch } from './state'
 
 export interface ArtifactRequest extends BlobDescriptorInput {
   sequence: number
@@ -59,7 +67,8 @@ export const inspectedArtifact = (
     id: `product-artifact:${String(sequence)}:${descriptor.digest}`,
     displayName: descriptor.display_filename[0] ?? descriptor.digest,
   }
-  return descriptor.declared_media_type.toLowerCase().startsWith('image/')
+  return selectImageView(descriptor) !== undefined ||
+    selectBoundedOriginalView(descriptor) !== undefined
     ? { ...identity, kind: 'image', source: { kind: 'signalbox_blob', descriptor } }
     : { ...identity, kind: 'blob', descriptor }
 }
@@ -88,6 +97,7 @@ export function ArtifactInspector({
   state: ArtifactInspectorState
   onStateChange: Dispatch<SetStateAction<ArtifactInspectorState>>
 }) {
+  const dispatch = useAppDispatch()
   const queryClient = useQueryClient()
   const { digest, mediaType, displayFilename, request } = state
   const descriptor = useQuery({
@@ -108,6 +118,13 @@ export function ArtifactInspector({
     () => (resolved === undefined ? null : inspectedArtifact(resolved, sequence)),
     [resolved, sequence],
   )
+  const artifactId = artifact?.id
+  useEffect(() => {
+    if (artifactId === undefined) return
+    return () => {
+      dispatch(actions.artifactOriginalReleased(artifactId))
+    }
+  }, [artifactId, dispatch])
   // The registry gates original loading on the invoking context, so the inspector admits exactly
   // the artifact it resolved, and only when the descriptor proves a bounded original.
   const rendererContext = useMemo<CommandContext>(
@@ -212,10 +229,17 @@ export function ArtifactInspector({
             <button
               type="button"
               onClick={(event) => {
-                const restoreFocus = document.activeElement === event.currentTarget
+                const opener = event.currentTarget
+                const restoreFocus = document.activeElement === opener
                 void descriptor.refetch().then((result) => {
                   if (result.isSuccess && restoreFocus) {
-                    requestAnimationFrame(() => digestInputRef?.current?.focus())
+                    requestAnimationFrame(() => {
+                      if (
+                        document.activeElement === opener ||
+                        (!opener.isConnected && document.activeElement === document.body)
+                      )
+                        digestInputRef?.current?.focus()
+                    })
                   }
                 })
               }}

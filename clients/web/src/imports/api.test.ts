@@ -157,17 +157,20 @@ describe('HttpImportApi correlation', () => {
     expect(fetch.mock.calls[1]?.[0]).toBe('/api/bootstrap')
   })
 
-  it('rejects a declared oversized catalog response before parsing it', async () => {
+  it('cancels a declared oversized catalog response before parsing it', async () => {
+    const cancel = vi.fn()
+    const body = new ReadableStream({ cancel })
     vi.stubGlobal(
       'fetch',
       vi.fn(
-        async () => new Response('{}', { headers: { 'Content-Length': String(1024 * 1024 + 1) } }),
+        async () => new Response(body, { headers: { 'Content-Length': String(1024 * 1024 + 1) } }),
       ),
     )
 
     await expect(
       new HttpImportApi(() => Promise.resolve()).list({ limit: 1 }),
     ).rejects.toBeInstanceOf(ImportResponseTooLargeError)
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('accepts the documented omitted first-window anchor', async () => {
