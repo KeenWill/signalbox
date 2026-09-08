@@ -38,6 +38,15 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Reads the immutable policy referenced by one session turn.
+    ReadCredentialPoolPolicy {
+        /// Session the caller is reading.
+        session_id: CanonicalUuid,
+        /// Turn that must reference the policy.
+        turn_id: CanonicalUuid,
+        /// Exact retained policy identity.
+        pool_policy_id: CanonicalUuid,
+    },
     /// Read one bounded page of current runner facts and retained diagnostics.
     ReadRunnerStatus {
         page_size: u32,
@@ -883,6 +892,7 @@ impl ClientRequest {
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
             | Self::DecideToolRequest { .. }
+            | Self::ReadCredentialPoolPolicy { .. }
             | Self::CancelProgramRun { .. }
             | Self::OverrideDeniedToolRequest { .. } => {}
         }

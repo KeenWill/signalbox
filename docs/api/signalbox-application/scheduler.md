@@ -368,3 +368,11 @@ where
         Shutdown: future::Future<Output = ()> + marker::Send;
 }
 ```
+
+## with_released_scheduler_admission
+
+```rust
+pub async fn with_released_scheduler_admission<F: future::Future>(
+    io: F,
+) -> <F as future::Future>::Output;
+```
