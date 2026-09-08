@@ -59,7 +59,7 @@ jobs:
           native=false
           while IFS= read -r path; do
             case "$path" in
-              clients/native/* | .github/workflows/swift.yml)
+              clients/native/* | crates/process-protocol/* | .github/workflows/swift.yml)
                 native=true
                 break
                 ;;
@@ -92,8 +92,7 @@ jobs:
           xcodebuild -version
       # Cheap and first: the coverage summarizer's regression tests run in
       # seconds, ahead of the build and simulator pass whose report they
-      # render. This job is gated on `clients/native/**` having changed, which
-      # is exactly when the summarizer can regress.
+      # render. Native and process-protocol changes run this job.
       - name: Test the coverage summarizer
         run: python3 clients/native/scripts/test_summarize_coverage.py
       - name: Build (iOS Simulator, Debug)

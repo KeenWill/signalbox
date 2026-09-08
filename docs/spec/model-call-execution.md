@@ -204,7 +204,8 @@ is left to startup recovery, because the identities are pinned by then and an
 identical retry would fail the same way. The output ceiling and the context
 window are operator-declared per catalog selection and never inferred from
 provider or model names. The daemon reserves the full configured output ceiling
-before each continuation even for an adapter that can only render the ceiling as
+before each continuation whose producing call reported input usage and used the
+same effective target, even for an adapter that can only render the ceiling as
 advisory context, so such a deployment keeps its intended reply budget rather
 than the model's larger capability ceiling.
 

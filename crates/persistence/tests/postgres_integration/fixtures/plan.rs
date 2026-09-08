@@ -430,7 +430,7 @@ pub(crate) async fn corrupt_dependency_event_authority(
 ) -> Result<u64, sqlx::Error> {
     sqlx::query(
         "ALTER TABLE tool_request
-         DISABLE TRIGGER tool_request_is_append_only",
+         DISABLE TRIGGER tool_request_resolution_guard",
     )
     .execute(pool)
     .await?;
@@ -449,7 +449,7 @@ pub(crate) async fn corrupt_dependency_event_authority(
     .await?;
     sqlx::query(
         "ALTER TABLE tool_request
-         ENABLE TRIGGER tool_request_is_append_only",
+         ENABLE TRIGGER tool_request_resolution_guard",
     )
     .execute(pool)
     .await?;

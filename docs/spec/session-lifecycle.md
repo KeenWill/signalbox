@@ -68,10 +68,12 @@ resume. The goal command that [goal mode](goal-mode.md) calls supersede starts a
 new goal generation in the same session and is unrelated to the session outcome
 superseded.
 
-Modules observe the lifecycle through seven event kinds with typed payloads on
+Modules observe the lifecycle through eight event kinds with typed payloads on
 the transactional outbox that [persistence protocol](persistence-protocol.md)
-owns; the other outbox kinds are core-internal. The compaction funnel and the
-five lifecycle metrics are read-only views over durable columns.
+owns; the other outbox kinds are core-internal. Each non-terminal state change
+appends a session-state-changed event with the prior state, new state, and
+actor. The compaction funnel and the five lifecycle metrics are read-only views
+over durable columns.
 
 ## Design decisions
 
@@ -191,12 +193,6 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
 - Failure parking of owned sessions: a structural failure, an unknown failure,
   or an exhausted retry budget on a live owned session parks it with the typed
   cause instead of terminalizing it or stopping silently; see
-  [session lifecycle design](../design/session-lifecycle.md).
-- Deadline events for modules: modules and the program substrate subscribe to
-  deadline expiries instead of running their own watchdogs; see
-  [session lifecycle design](../design/session-lifecycle.md).
-- Session state-change events: the eighth module-facing event kind, so modules
-  observe park, resume, and other non-terminal transitions; see
   [session lifecycle design](../design/session-lifecycle.md).
 - Program-run lifecycle actor: a run-scoped actor for commands issued by a
   program run; see [session lifecycle design](../design/session-lifecycle.md).

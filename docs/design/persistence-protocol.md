@@ -8,8 +8,8 @@ This design is not built; it extends
 Complete the durable storage that built subsystems already reserve space for:
 general runner operation-failure evidence; retirement of an unacknowledged
 workspace release; runner placement in imported-create command records; the
-instruction admitted set; credential-pool state and availability waits; a
-producer for the session-state-changed event; and daemon-owned OAuth material.
+instruction admitted set; credential-pool state and availability waits; and
+daemon-owned OAuth material.
 
 ## Design
 
@@ -58,17 +58,10 @@ machine they serve is owned by
 [credential-availability](../spec/credential-availability.md), and its design
 fixes their transitions.
 
-A session-state-changed event is appended, through the outbox append, in the
-transaction that commits a nonterminal session state change; the transition to
-terminal has its own event. Its typed record and decoder exist.
-
 ## Compatibility constraints
 
 No writer produces imported-create storage version 4, and the version gate keeps
 rejecting it until a record at that version carries placement.
-
-The session-state-changed decoder stays, and nothing appends the kind until its
-producer lands.
 
 Failure detail is never acknowledged before it is stored, because a restart
 would forget evidence operators must inspect; the operation transition is never
@@ -96,9 +89,6 @@ The admitted set has a table, a repository operation, and inventory-recorded
 locks.
 
 Pool state, reservations, and waits are durable and reconstitute after restart.
-
-Every committed nonterminal session state change appears as a
-session-state-changed event in the outbox.
 
 A replace-and-clear commit publishes a durable member-availability update, and a
 deadline-free exhausted wait parked on that member wakes.
