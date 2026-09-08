@@ -1,4 +1,4 @@
-ALTER TABLE credential_exclusion DROP CONSTRAINT credential_exclusion_oauth_generation_check,
+ALTER TABLE credential_exclusion DROP CONSTRAINT credential_exclusion_check,
     ADD CONSTRAINT credential_exclusion_oauth_generation_check CHECK (
         oauth_generation IS NULL OR (oauth_generation > 0 AND origin IN ('codex_home', 'oauth_refresh')));
 

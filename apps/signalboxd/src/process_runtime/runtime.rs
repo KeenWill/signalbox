@@ -697,7 +697,7 @@ mod runner_recovery_tests {
         resume_runner_replacements_and_notify(&store, &notifications).await?;
         let (updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
-            signalbox_persistence::PostgresEligibilitySweep::new(pool.clone()),
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
         );
         let forwarder = tokio::spawn(forward_database_notifications(
             listener,

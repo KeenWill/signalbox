@@ -3938,3 +3938,113 @@ async fn same_epoch_established_event_cannot_publish_recovery() -> Result<(), Bo
     drop(pool);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn delegated_runner_recovery_charges_its_retained_attachment() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        AttachmentKind, BlobDigest, DeclaredMediaType, SubmitInputAppliedResult, SubmitInputResult,
+        UserContentPart,
+    };
+    use signalbox_persistence::submit_input::SubmitInputHandlingOutcome;
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, turn_attempt) = insert_running_turn(&pool).await?;
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(session, exact_runner_request(runner));
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    convert_running_turn_to_delegated_runner_recovery(
+        &pool,
+        session,
+        turn,
+        turn_attempt,
+        runner,
+        placement.revision(),
+    )
+    .await?;
+    let retained = BlobDigest::digest(b"runner recovery retained attachment");
+    let later = BlobDigest::digest(b"runner recovery later attachment");
+    sqlx::query("INSERT INTO blob_store_binding (store_name, namespace_id) VALUES ('runner_attachments', $1)")
+        .bind(Uuid::now_v7()).execute(&pool).await?;
+    let mut catalog = pool.begin().await?;
+    for (digest, object) in [(retained, "retained"), (later, "later")] {
+        sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7)")
+            .bind(digest.as_bytes().as_slice())
+            .execute(&mut *catalog)
+            .await?;
+        sqlx::query("INSERT INTO blob_replica (digest, store_name, object_key) VALUES ($1, 'runner_attachments', $2)")
+            .bind(digest.as_bytes().as_slice()).bind(object).execute(&mut *catalog).await?;
+    }
+    catalog.commit().await?;
+    let content = |digest| {
+        UserContent::try_parts(vec![UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::File,
+            media_type: DeclaredMediaType::try_new("application/octet-stream".to_owned())
+                .expect("fixture media type is valid"),
+            display_filename: None,
+        }])
+        .expect("fixture content is valid")
+    };
+    let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(10);
+    let retained_outcome = repository
+        .handle_with_candidates(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                content(retained),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::now_v7()),
+            None,
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("safe-point steering does not reclassify inputs"),
+            |_| panic!("safe-point steering does not cancel tools"),
+        )
+        .await?;
+    assert!(
+        matches!(
+            retained_outcome,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::PendingSteering(_)
+            ))
+        ),
+        "one seven-byte attachment fits the ten-byte bound"
+    );
+    let later_outcome = repository
+        .handle_with_candidates(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                content(later),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::now_v7()),
+            None,
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("safe-point steering does not reclassify inputs"),
+            |_| panic!("safe-point steering does not cancel tools"),
+        )
+        .await?;
+    assert_eq!(
+        later_outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            signalbox_domain::SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: 10
+            }
+        ))
+    );
+    Ok(())
+}
