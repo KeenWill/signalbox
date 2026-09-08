@@ -4190,10 +4190,10 @@ function assertTimelineDetailPage(value) {{
     if (expectedBodyContinuation !== null) {{
       fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
     }}
-    if (previousAddress === null) {{
-      fail("timeline_detail_page.continuation", "absent on an empty page");
-    }}
-    if (BigInt(value.continuation.address.event_sequence) <= previousAddress) {{
+    if (
+      previousAddress !== null &&
+      BigInt(value.continuation.address.event_sequence) <= previousAddress
+    ) {{
       fail("timeline_detail_page.continuation.address", "after the final returned item");
     }}
   }}

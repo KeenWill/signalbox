@@ -2294,7 +2294,7 @@ test("generated detail decoder requires a continued body to end the page", () =>
   );
 });
 
-test("generated detail decoder rejects a continuation on an empty page", () => {
+test("generated detail decoder accepts an unreturned item continuation on an empty page", () => {
   const page = userInputDetailPage();
   page.items = [];
   page.projected_body_bytes = 0;
@@ -2303,9 +2303,41 @@ test("generated detail decoder rejects a continuation on an empty page", () => {
     address: { event_sequence: "9" },
   };
 
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+});
+
+test("generated detail decoder rejects charged bytes on an empty continuation page", () => {
+  const page = userInputDetailPage();
+  page.items = [];
+  page.projected_body_bytes = 128;
+  page.continuation = {
+    type: "more_at",
+    address: { event_sequence: "9" },
+  };
+
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
-    /absent on an empty page/,
+    /the computed 0 bytes/,
+  );
+});
+
+test("generated detail decoder rejects a body continuation on an empty page", () => {
+  const page = userInputDetailPage();
+  page.items = [];
+  page.projected_body_bytes = 0;
+  page.continuation = {
+    type: "more_body",
+    body: {
+      address: { event_sequence: "9" },
+      field: "input_text",
+      member_index: 0,
+      offset_bytes: "3",
+    },
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /the excerpt body continuation/,
   );
 });
 
