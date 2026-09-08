@@ -20,6 +20,20 @@ impl SubmitInput {
         content: UserContent,
         configuration: PerInputConfigurationChoices,
     ) -> Self;
+    pub const fn new_program(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        capability: ProgramSessionCapability,
+    ) -> Self;
+    pub const fn from_recorded_fields(
+        command_id: DurableCommandId,
+        session: SessionId,
+        actor: Actor,
+        content: UserContent,
+        delivery: DeliveryRequest,
+    ) -> Self;
     pub const fn new_core_interrupt(
         command_id: DurableCommandId,
         session: SessionId,
