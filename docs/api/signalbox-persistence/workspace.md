@@ -18,6 +18,7 @@ pub enum WorkspaceOutcome {
 pub enum WorkspaceError {
     Database(error::Error),
     CommitAmbiguous(error::Error),
+    Rejected,
     Corruption(&'static str),
 }
 // derives: fmt::Debug
@@ -39,6 +40,18 @@ pub struct WorkspaceRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl workspace::WorkspaceRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub async fn registration_replay(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+        requested_root: &str,
+    ) -> result::Result<option::Option<workspace::WorkspaceOutcome>, workspace::WorkspaceError>;
+    pub async fn register(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+        requested_root: &str,
+        root: signalbox_domain::WorkspaceRootPath,
+        ids: &mut impl signalbox_application::workspace::WorkspaceIdentityGenerator,
+    ) -> result::Result<workspace::WorkspaceOutcome, workspace::WorkspaceError>;
     pub async fn handle(
         &self,
         command: signalbox_domain::WorkspaceCommand,

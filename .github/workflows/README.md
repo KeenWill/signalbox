@@ -67,13 +67,14 @@ The runner image has no `sudo` (pods run with `no-new-privileges`), no Nix, no
 `gh` CLI, or host-provided Playwright system dependencies. Jobs needing host
 facilities stay hosted for now, although this may change over time.
 
-| Job                                               | Why                                                   |
-| ------------------------------------------------- | ----------------------------------------------------- |
-| `bazel.yml` `bazel-host-integration`              | privileged cgroup delegation via `sudo`               |
-| `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`             |
-| `devenv-lock.yml` `relock`                        | Nix                                                   |
-| `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix) |
-| `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                 |
+| Job                                               | Why                                                           |
+| ------------------------------------------------- | ------------------------------------------------------------- |
+| `bazel.yml` `bazel-host-integration`              | privileged cgroup delegation via `sudo`                       |
+| `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`                     |
+| `devenv-smoke.yml` `linux`                        | Nix; committed-lock evaluation and disposable script fixtures |
+| `devenv-lock.yml` `relock`                        | Nix                                                           |
+| `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix)         |
+| `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                         |
 
 The `bazel-postgres` job uses the canonical routing expression with
 `signalbox-docker`, or `ubuntu-latest` for fork and named bot pull requests.
