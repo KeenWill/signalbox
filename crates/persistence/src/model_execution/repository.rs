@@ -333,24 +333,22 @@ impl PostgresModelCallRepository {
                                 ELSE CASE entry.payload_kind
                                     WHEN 'imported_entry' THEN
                                         COALESCE(octet_length(imported.content_encoding), 0)
-                                    -- Accepted-input content is an ordered part
-                                    -- array, so its context cost is the sum of
-                                    -- the text parts; attachment parts carry
-                                    -- their own rendered-stub accounting.
                                     WHEN 'origin_accepted_input' THEN
                                         COALESCE((
-                                            SELECT SUM(COALESCE(
-                                                octet_length(part.text_value), 0
-                                            ))
+                                            SELECT SUM(CASE part.part_kind
+                                                WHEN 'attachment' THEN $7::bigint
+                                                ELSE COALESCE(octet_length(part.text_value), 0)
+                                            END)
                                               FROM accepted_input_content_part AS part
                                              WHERE part.accepted_input_id =
                                                    input.accepted_input_id
                                         ), 0)
                                     WHEN 'steering_accepted_input' THEN
                                         COALESCE((
-                                            SELECT SUM(COALESCE(
-                                                octet_length(part.text_value), 0
-                                            ))
+                                            SELECT SUM(CASE part.part_kind
+                                                WHEN 'attachment' THEN $7::bigint
+                                                ELSE COALESCE(octet_length(part.text_value), 0)
+                                            END)
                                               FROM accepted_input_content_part AS part
                                              WHERE part.accepted_input_id =
                                                    input.accepted_input_id
@@ -369,10 +367,15 @@ impl PostgresModelCallRepository {
                                         COALESCE(octet_length(request.tool_name), 0)
                                         + COALESCE(octet_length(request.arguments_text), 0)
                                     WHEN 'tool_execution_result' THEN
+                                        CASE WHEN attempt.error_kind IS NULL THEN
                                         COALESCE(octet_length(attempt.result_text), 0)
-                                        + COALESCE(octet_length(attempt.error_detail), 0)
+                                   ELSE octet_length(jsonb_build_object('error',
+                                        jsonb_build_object('kind', attempt.error_kind,
+                                                          'detail', attempt.error_detail))::text)
+                                   END
                                     WHEN 'tool_denied' THEN
-                                        COALESCE(octet_length(decision.denial_reason), 0)
+                                        octet_length(jsonb_build_object('error', jsonb_build_object(
+                                        'kind', 'denied', 'detail', decision.denial_reason))::text)
                                     WHEN 'tool_inadmissible' THEN
                                         COALESCE(octet_length(result_request.inadmissible_reason), 0)
                                     WHEN 'delegated_task' THEN
@@ -452,6 +455,8 @@ impl PostgresModelCallRepository {
         .bind(Decimal::from(uncommitted_content_bytes))
         .bind(replays_provider_compaction)
         .bind(effective_target.identity().into_uuid())
+        .bind(i64::try_from(signalbox_application::MAX_RENDERED_ATTACHMENT_STUB_BYTES)
+            .unwrap_or(i64::MAX))
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {

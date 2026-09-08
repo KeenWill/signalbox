@@ -14,7 +14,7 @@ fn attachment_part(digest: BlobDigest) -> UserContentPart {
     }
 }
 
-fn attachment_content(digest: BlobDigest) -> UserContent {
+pub(super) fn attachment_content(digest: BlobDigest) -> UserContent {
     UserContent::try_parts(vec![attachment_part(digest)])
         .expect("the fixture attachment content is canonical")
 }
@@ -3433,7 +3433,7 @@ async fn multipart_command_and_accepted_satellites_are_identical() -> Result<(),
 /// Catalogues one blob identity with a verified replica in its own store
 /// binding, which is the only committed shape an admission check can observe as
 /// available.
-async fn catalog_verified_blob(
+pub(super) async fn catalog_verified_blob(
     pool: &PgPool,
     digest: BlobDigest,
     byte_length: u64,

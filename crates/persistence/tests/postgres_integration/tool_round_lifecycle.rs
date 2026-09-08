@@ -4436,3 +4436,227 @@ async fn completed_cancellation_requires_closed_tool_round() -> Result<(), Box<d
     drop(container);
     Ok(())
 }
+/// Headroom reserves model-visible steering and rendered errors before dispatch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tool_continuation_headroom_counts_steering_and_error_envelopes()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind};
+    let (_container, pool, _) = migrated_postgres().await?;
+    let digest = BlobDigest::digest(b"headroom attachment");
+    super::session_creation_and_submit::catalog_verified_blob(
+        &pool,
+        digest,
+        19,
+        "headroom",
+        Uuid::from_u128(0x135000),
+        "attachment",
+    )
+    .await?;
+    let success = || ToolAttemptObservation::Completed {
+        result: ToolResultContent::Text(ToolResultText::try_new(String::from("ok")).unwrap()),
+    };
+    let failure = |detail| ToolAttemptObservation::KnownFailed {
+        error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, detail),
+    };
+    // Five three-byte characters reserve fifteen bytes, not five characters.
+    for (index, steering, observation, result_bytes, steering_bytes) in [
+        (
+            0,
+            Some(UserContent::try_text(String::from("界界界界界")).unwrap()),
+            Some(success()),
+            2,
+            15,
+        ),
+        (
+            1,
+            Some(super::session_creation_and_submit::attachment_content(
+                digest,
+            )),
+            Some(success()),
+            2,
+            2304,
+        ),
+        (2, None, Some(failure(None)), 55, 0),
+        (
+            3,
+            None,
+            Some(failure(Some(
+                ToolExecutionErrorDetail::try_new(String::from("\"\\界")).unwrap(),
+            ))),
+            60,
+            0,
+        ),
+        (4, None, None, 45, 0),
+    ] {
+        assert_headroom_case(
+            &pool,
+            HeadroomCase {
+                index,
+                steering,
+                observation,
+                result_bytes,
+                steering_bytes,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+struct HeadroomCase {
+    index: u128,
+    steering: Option<UserContent>,
+    observation: Option<ToolAttemptObservation>,
+    result_bytes: u64,
+    steering_bytes: u64,
+}
+
+async fn assert_headroom_case(pool: &PgPool, case: HeadroomCase) -> Result<(), Box<dyn Error>> {
+    let HeadroomCase {
+        index,
+        steering,
+        observation,
+        result_bytes,
+        steering_bytes,
+    } = case;
+    let seed = 0x136000 + index * 0x100;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_usage(
+        pool,
+        seed,
+        "current_time",
+        "{}",
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(70))
+            .with_output_tokens(Some(5)),
+    )
+    .await?;
+    let tools = PostgresToolLoopRepository::new(pool.clone());
+    if let Some(content) = steering {
+        SubmitInputRepository::new(pool.clone())
+            .with_attachment_maximum_bytes(19)
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x40)),
+                    fixture.session,
+                    content,
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: fixture.turn,
+                    },
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41)),
+                None,
+            )
+            .await?;
+    }
+    let decision = if observation.is_some() {
+        ToolApprovalDecision::Approve
+    } else {
+        ToolApprovalDecision::Deny { reason: None }
+    };
+    tools
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                decision,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+    if let Some(observation) = observation {
+        let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+        tools
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                attempt,
+                ToolEffectClass::EffectFree,
+            )
+            .await?;
+        let authorized = tools
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        tools
+            .commit_observation(authorized.executor_fence().bind(observation))
+            .await?;
+    }
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+        target,
+    )])
+    .unwrap();
+    let model_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                100,
+            )]);
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27));
+    let outcome = model_repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x26,
+                ))],
+                frontier,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x42)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 0x43)),
+                )
+            },
+        )
+        .await?;
+    assert!(
+        matches!(
+            outcome,
+            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+        ),
+        "case {index}"
+    );
+    let evidence: (Decimal, Decimal, bool) = sqlx::query_as(
+        "SELECT projected_result_content_bytes, pending_steering_content_bytes,
+                EXISTS (SELECT 1 FROM model_call WHERE model_call_id = $2)
+           FROM tool_continuation_context_headroom WHERE producing_model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(call.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        evidence,
+        (
+            Decimal::from(result_bytes),
+            Decimal::from(steering_bytes),
+            false
+        ),
+        "case {index}"
+    );
+    let reported = model_repository
+        .latest_reported_usage(fixture.session, target, FastMode::Disabled, false, frontier)
+        .await?
+        .expect("the producing call reported usage");
+    assert_eq!(
+        reported.projected_unreported_content_bytes(),
+        result_bytes,
+        "pending steering is reclassified, not retained as a tool result"
+    );
+    Ok(())
+}
