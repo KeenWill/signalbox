@@ -178,15 +178,8 @@ impl CheckoutFixture {
     }
 
     async fn with_head_repository(head_repository: &str) -> Result<Self, Box<dyn Error>> {
-        Self::with_migrator(head_repository, &signalbox_persistence::MIGRATOR).await
-    }
-
-    async fn with_migrator(
-        head_repository: &str,
-        migrator: &sqlx::migrate::Migrator,
-    ) -> Result<Self, Box<dyn Error>> {
         let (container, core, url) = postgres().await?;
-        migrator.run(&core).await?;
+        migrate(&core).await?;
         sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
             .execute(&core)
             .await?;
@@ -1284,49 +1277,48 @@ async fn removal_migration_settles_existing_checkouts_without_inventing_location
             .into(),
         ..sqlx::migrate::Migrator::DEFAULT
     };
-    let mut fixture = CheckoutFixture::with_migrator("checkout/project", &parent).await?;
-    let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(fixture.core.clone());
-    fixture
-        .store
-        .submit_pending(
-            &mut RepositoryWatchCommandCodec,
-            &mut fixture.sink,
-            &lifecycle,
-        )
-        .await
-        .expect("parent command submission");
-    fixture
-        .store
-        .record_dispatch_checkout(fixture.command, &fixture.head)
+    let (container, core, url) = postgres().await?;
+    parent.run(&core).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core)
         .await?;
+    let module = module_pool(&url).await?;
+    let command = DurableCommandId::from_uuid(Uuid::now_v7());
+    let head = CommitSha::try_new("a".repeat(40))?;
+    signalbox_persistence::test_support::seed_historical_repository_checkout(
+        &module, command, &head,
+    )
+    .await?;
 
-    migrate(&fixture.core).await?;
+    migrate(&core).await?;
     let checkout: (String, String, bool, bool, bool) = sqlx::query_as(
         "SELECT checkout_path, checkout_head_sha, checkout_removed,
                 checkout_workspace_root IS NULL, checkout_session_id IS NULL
          FROM dispatch_ledger WHERE command_id = $1",
     )
-    .bind(fixture.command.into_uuid())
-    .fetch_one(&fixture.module)
+    .bind(command.into_uuid())
+    .fetch_one(&module)
     .await?;
     assert_eq!(
         checkout,
         (
             String::from("."),
-            fixture.head.as_str().to_owned(),
+            head.as_str().to_owned(),
             true,
             true,
             true
         )
     );
     assert!(
-        fixture
-            .store
+        RepoWatchStore::new(module.clone())
             .checkout_removal_candidates()
             .await?
             .is_empty()
     );
-    migrate(&fixture.core).await?;
+    migrate(&core).await?;
+    module.close().await;
+    core.close().await;
+    drop(container);
     Ok(())
 }
 

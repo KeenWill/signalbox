@@ -569,7 +569,9 @@ impl CurrentTurnAttempt {
                 CurrentTurnAttemptState::Prepared,
                 AttemptEnd::WithoutStop {
                     disposition:
-                        UnstoppedAttemptDisposition::KnownFailure | UnstoppedAttemptDisposition::Lost,
+                        UnstoppedAttemptDisposition::KnownFailure
+                        | UnstoppedAttemptDisposition::Lost
+                        | UnstoppedAttemptDisposition::YieldedToDurableWait,
                 },
             )
             | (
@@ -904,7 +906,7 @@ mod tests {
         );
         assert_without_stop_rejects(prepared(), UnstoppedAttemptDisposition::TurnCompleted);
         assert_without_stop_rejects(prepared(), UnstoppedAttemptDisposition::TurnRefused);
-        assert_without_stop_rejects(
+        assert_without_stop_ends_for(
             prepared(),
             UnstoppedAttemptDisposition::YieldedToDurableWait,
         );
@@ -989,7 +991,7 @@ mod tests {
             ├─────────────────────────────────────────────────────┼──────────┤
             │ without stop: TurnCompleted                         │ rejected │
             │ without stop: TurnRefused                           │ rejected │
-            │ without stop: YieldedToDurableWait                  │ rejected │
+            │ without stop: YieldedToDurableWait                  │ ends     │
             │ without stop: KnownFailure                          │ ends     │
             │ without stop: Lost                                  │ ends     │
             │ without stop: Ambiguous                             │ rejected │

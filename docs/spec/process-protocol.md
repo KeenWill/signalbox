@@ -253,8 +253,10 @@ review-findings listing takes its run and its findings from separate
 transactions. Every reported duration is clamped nonnegative and sampled against
 the database transaction timestamp, not a client clock.
 
-Every read that holds a pooled connection across more than one statement takes
-one snapshot-reader admission; the single-statement defaults read takes none.
+Except for immutable credential-pool policy validation, every read that holds a
+pooled connection across more than one statement takes one snapshot-reader
+admission; the single-statement defaults read takes none. Pool-policy validation
+takes no admission so a follower can validate its snapshot while holding one.
 Every request states its admission class before dispatch, so no read verb
 reaches the pool by omission. The reader budget leaves at least two pool
 connections outside snapshot work.
@@ -290,9 +292,14 @@ values, and a client never infers the semantic arm by reparsing either string.
 The projection resolves the domain's reference-only tool entries before crossing
 the wire, so a client never needs private storage access. A physically ambiguous
 tool attempt never becomes an execution result; it projects as `tool_closed`,
-carrying the tool request identity and the closure content and omitting the
-attempt identity. `operator_action_required` is false while automatic recovery
-is scheduled or attempting and true only after the recovery budget in
+carrying the tool request identity, closure content, and required Boolean
+`approved_before_close`, and omitting the attempt identity.
+`approved_before_close` is true exactly when the request had a recorded approval
+before closure; an undecided request closed by turn end carries false. A
+`tool_denied` entry carries required Boolean `override_recorded`, true when that
+denial has its one permitted user override, including after retirement.
+`operator_action_required` is false while automatic recovery is scheduled or
+attempting and true only after the recovery budget in
 [turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md) is
 exhausted.
 
@@ -571,8 +578,8 @@ belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
 version-1 encoding, and the closed receipt algebra belong here, and a later
 incompatible shape requires a new protocol version.
 
-If counted-activation revalidation finds no admissible member, activation and
-pool-exhaustion terminalization commit together before execution resumes.
+If counted-activation revalidation selects pre-call exhaustion failure,
+activation and terminalization commit together before execution resumes.
 
 When no pool member is admissible, pre-call exhaustion projects
 `failed_credential_pool_exhausted { terminal_frontier_id, terminal_attempt_id, failure_entry_id, pool_policy_id, policy_members, members }`
@@ -613,9 +620,12 @@ and order, the snapshot state and the live event carry identical `members`, the
 policy read returns the same inventory, and the client exposes the terminal
 state only after those checks pass.
 
+Credential admission waits project the active turn state
+`active_awaiting_credential_availability`, carrying the call-free ended
+`wait_attempt_id` and the closed `exhausted` cause. The terminal client keeps
+following that turn.
+
 ## Planned
 
 - Runner creation and status requests, and the status read's failure evidence:
-  [design](../design/process-protocol.md).
-- Typed projection of the credential-availability wait:
   [design](../design/process-protocol.md).

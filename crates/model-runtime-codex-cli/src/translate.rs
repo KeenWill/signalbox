@@ -375,6 +375,17 @@ pub(crate) enum TranslationError {
     Defect(PreparationDefect),
 }
 
+/// Measures one array-framed history message through the adapter's request serializer.
+///
+/// Returns `None` for a message the adapter cannot render. Independent message
+/// envelopes conservatively retain framing that adjacent messages may share.
+pub fn serialized_message_bytes(message: &ConversationMessage) -> Option<usize> {
+    let rendered = render_message(message).ok()?;
+    serde_json::to_vec(&[rendered])
+        .ok()
+        .map(|bytes| bytes.len())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::value::RawValue;
@@ -385,6 +396,30 @@ mod tests {
     };
 
     use super::translate;
+
+    #[test]
+    fn measured_growth_covers_appended_message_array_separators() {
+        let mut operation = operation_with_message(ConversationMessage::user_text("baseline"));
+        let baseline = translate(&operation)
+            .expect("baseline renders")
+            .prompt
+            .len();
+        let mut allowance = 0;
+        for text in ["first appended input", "second appended input"] {
+            let message = ConversationMessage::user_text(text);
+            allowance += super::serialized_message_bytes(&message).expect("input renders");
+            operation.messages.push(message);
+            let growth = translate(&operation)
+                .expect("appended input renders")
+                .prompt
+                .len()
+                - baseline;
+            assert!(
+                allowance >= growth,
+                "allowance {allowance} must cover serialized growth {growth}"
+            );
+        }
+    }
 
     fn operation_with_message(message: ConversationMessage) -> ModelOperation<()> {
         ModelOperation::new(

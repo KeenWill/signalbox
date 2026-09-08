@@ -10,6 +10,16 @@ use signalbox_model_runtime::{
 
 use crate::wire::{CreateResponse, WireFunctionTool, WireInputItem, WireReasoning};
 
+/// Measures one standalone history message through the adapter's request serializer.
+///
+/// Returns `None` for a message the adapter cannot render. Independent message
+/// envelopes conservatively retain framing that adjacent messages may share.
+pub fn serialized_message_bytes(message: &ConversationMessage) -> Option<usize> {
+    let mut rendered = Vec::new();
+    wire_messages(message, &mut rendered).ok()?;
+    serde_json::to_vec(&rendered).ok().map(|bytes| bytes.len())
+}
+
 /// Builds the wire request for one operation.
 ///
 /// Pure translation: any failure is a trustworthy [`PreparationFailure`]

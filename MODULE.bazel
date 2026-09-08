@@ -60,7 +60,7 @@ register_toolchains("@gcc_linux_x86_64//:all")
 
 RUST_VERSION = "1.98.1"
 
-RUSTDOC_TOOLCHAIN = "nightly-2026-09-07"
+RUSTDOC_TOOLCHAIN = "nightly-2026-09-08"
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(

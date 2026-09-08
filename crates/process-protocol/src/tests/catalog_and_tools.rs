@@ -665,3 +665,61 @@ fn tool_decision_responses_have_exact_closed_shapes() -> Result<(), Box<dyn std:
         r#"{"type":"error","code":"rejected","message":"the request is not owned by the session","detail":{"type":"tool_request_not_in_session","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
     )
 }
+
+#[test]
+fn tool_closure_distinguishes_approved_and_undecided_requests()
+-> Result<(), Box<dyn std::error::Error>> {
+    for approved_before_close in [true, false] {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(1),
+            entry_id: uuid(2),
+            entry: TranscriptEntry::ToolClosed {
+                tool_request_id: uuid(3),
+                content: String::from("closed before execution"),
+                approved_before_close,
+            },
+        };
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        let mut missing_evidence: serde_json::Value = serde_json::from_slice(&encoded)?;
+        missing_evidence["message"]["entry"]
+            .as_object_mut()
+            .expect("a transcript entry is an object")
+            .remove("approved_before_close");
+        let mut missing_evidence = serde_json::to_vec(&missing_evidence)?;
+        missing_evidence.push(b'\n');
+        assert!(decode_server_line(&missing_evidence).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn tool_denial_carries_required_recorded_override_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    for override_recorded in [false, true] {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(1),
+            entry_id: uuid(2),
+            entry: TranscriptEntry::ToolDenied {
+                tool_request_id: uuid(3),
+                content: String::from("denied"),
+                override_recorded,
+            },
+        };
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        let mut missing: serde_json::Value = serde_json::from_slice(&encoded)?;
+        missing["message"]["entry"]
+            .as_object_mut()
+            .expect("entry object")
+            .remove("override_recorded");
+        let mut missing = serde_json::to_vec(&missing)?;
+        missing.push(b'\n');
+        assert!(decode_server_line(&missing).is_err());
+    }
+    Ok(())
+}
