@@ -125,7 +125,7 @@ impl FollowRetry {
         use std::{io::ErrorKind, time::Duration};
         let disconnected = match &error {
             ClientError::ConnectionClosed => true,
-            ClientError::Io(error) => matches!(
+            ClientError::DaemonIo(error) => matches!(
                 error.kind(),
                 ErrorKind::ConnectionReset
                     | ErrorKind::ConnectionAborted
@@ -175,7 +175,9 @@ impl Connection {
     ) -> Result<Self, ClientError> {
         let version = ProtocolVersion::One;
         let encoded = encode_request(version, request_id, request)?;
-        let stream = UnixStream::connect(socket).await?;
+        let stream = UnixStream::connect(socket)
+            .await
+            .map_err(ClientError::DaemonIo)?;
         let (reader, writer) = stream.into_split();
         let mut connection = Self {
             version,
@@ -206,7 +208,7 @@ impl Connection {
         delivery: RequestDelivery,
     ) -> Result<(), ClientError> {
         self.writer.write_all(encoded).await.map_err(|error| {
-            let error = ClientError::Io(error);
+            let error = ClientError::DaemonIo(error);
             match delivery {
                 RequestDelivery::ReadOnly | RequestDelivery::Setup => error,
                 RequestDelivery::Mutation => error.mutation(),
@@ -345,11 +347,17 @@ fn response_version_is_admitted(expected: ProtocolVersion, frame: &ServerFrame) 
 }
 
 async fn read_frame_line(
-    reader: &mut BufReader<OwnedReadHalf>,
+    reader: &mut BufReader<impl tokio::io::AsyncRead + Unpin>,
     partial_frame_line: &mut Vec<u8>,
 ) -> Result<Vec<u8>, ClientError> {
     loop {
-        let available = reader.fill_buf().await?;
+        let available = reader.fill_buf().await.map_err(|error| {
+            if partial_frame_line.is_empty() {
+                ClientError::DaemonIo(error)
+            } else {
+                ClientError::Protocol("connection closed before a complete frame")
+            }
+        })?;
         if available.is_empty() {
             if partial_frame_line.is_empty() {
                 return Err(ClientError::ConnectionClosed);
@@ -458,6 +466,60 @@ mod tests {
         ));
         assert!(FollowRetry::default().next_delay(error).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn local_io_failures_do_not_reconnect_the_daemon() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::NotConnected,
+        ] {
+            let error = ClientError::Io(std::io::Error::from(kind));
+            assert!(
+                matches!(FollowRetry::default().next_delay(error), Err(ClientError::Io(error)) if error.kind() == kind)
+            );
+        }
+    }
+
+    struct ResetAfterBytes(&'static [u8]);
+
+    impl tokio::io::AsyncRead for ResetAfterBytes {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.0.is_empty() {
+                return std::task::Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()));
+            }
+            let count = buffer.remaining().min(self.0.len());
+            buffer.put_slice(&self.0[..count]);
+            self.0 = &self.0[count..];
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_reset_after_partial_bytes_is_a_truncated_frame() {
+        let mut reader = BufReader::new(ResetAfterBytes(b"{"));
+        let error = read_frame_line(&mut reader, &mut Vec::new())
+            .await
+            .expect_err("incomplete response");
+        assert!(matches!(
+            error,
+            ClientError::Protocol("connection closed before a complete frame")
+        ));
+        assert!(FollowRetry::default().next_delay(error).is_err());
+    }
+
+    #[tokio::test]
+    async fn connection_reset_at_a_frame_boundary_can_reconnect() {
+        let mut reader = BufReader::new(ResetAfterBytes(b""));
+        let error = read_frame_line(&mut reader, &mut Vec::new())
+            .await
+            .expect_err("daemon reset");
+        assert!(matches!(error, ClientError::DaemonIo(_)));
+        assert!(FollowRetry::default().next_delay(error).is_ok());
     }
 
     #[test]
