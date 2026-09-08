@@ -3,6 +3,7 @@ use super::credential_pool::{SelectedRuntimePoolCredential, load_durable_pool_ex
 use super::credential_pool_evidence::Candidate;
 use super::*;
 use crate::credential_pool_exhaustion::CredentialPoolExclusion;
+use signalbox_application::{AvailabilitySuccessorOutcome, ModelCallObservationCommitOutcome};
 use signalbox_domain::{
     CredentialAvailabilityWait, CredentialAvailabilityWaitCause, ModelCallExecution, TurnAttemptId,
 };
@@ -412,7 +413,7 @@ pub(super) async fn park_failed(
     successor_attempt: TurnAttemptId,
     cause: ProviderModelCallFailureCause,
     targets: &ModelTargetCatalog,
-) -> Result<Option<CredentialAvailabilityWait>, ModelCallRepositoryError> {
+) -> Result<Option<ModelCallObservationCommitOutcome>, ModelCallRepositoryError> {
     let effective_target: Uuid = sqlx::query_scalar(
         "SELECT effective_provider_model_identity_id FROM model_call WHERE model_call_id = $1",
     )
@@ -432,7 +433,7 @@ pub(super) async fn park_failed(
         .collect::<Vec<_>>();
     let mut bounded = crate::credential_invocations::bounded_members(connection, &profiles).await?;
     bounded.retain(|member| !excluded.excluded.contains(&member.profile));
-    let Some(snapshot) = admission_snapshot(
+    let snapshot = admission_snapshot(
         connection,
         execution.session(),
         execution.turn(),
@@ -441,10 +442,15 @@ pub(super) async fn park_failed(
         &excluded,
         bounded,
     )
-    .await?
-    else {
+    .await?;
+    if snapshot.is_none()
+        && policy
+            .members()
+            .iter()
+            .all(|member| excluded.excluded.contains(member.credential_reference()))
+    {
         return Ok(None);
-    };
+    }
     let successor = execution
         .clone()
         .apply_availability_successor(observation.clone(), successor_attempt)
@@ -465,6 +471,13 @@ pub(super) async fn park_failed(
         backoff,
     )
     .await?;
+    let Some(snapshot) = snapshot else {
+        return Ok(Some(
+            ModelCallObservationCommitOutcome::AvailabilitySuccessor(Box::new(
+                AvailabilitySuccessorOutcome::new(successor, backoff),
+            )),
+        ));
+    };
     let fresh = Box::pin(super::live_turn::require_live_execution(
         connection,
         execution.session(),
@@ -477,7 +490,9 @@ pub(super) async fn park_failed(
         pending_consumed_actions: Vec::new(),
         wait: Some(snapshot),
     };
-    park_initial(connection, &fresh, Some(&selected)).await
+    Ok(park_initial(connection, &fresh, Some(&selected))
+        .await?
+        .map(ModelCallObservationCommitOutcome::CredentialWait))
 }
 
 pub(super) async fn fail_released_chain(
