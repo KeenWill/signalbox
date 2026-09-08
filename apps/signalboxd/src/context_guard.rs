@@ -426,26 +426,50 @@ impl ReportedUsageCompaction {
             .model_configuration
             .adapter_for_provider_model(definition.provider_model())
             .ok_or(ReportedUsageCompactionError::Render(turn))?;
+        let routes = self.model_configuration.adapter_routes();
+        let capabilities = self.model_configuration.runtime_model_capability_catalog();
+        let mut measurement = signalbox_model_runtime::ModelOperation::new(
+            (),
+            signalbox_model_runtime::CredentialReference::new(
+                operation.credential_reference().as_str().to_owned(),
+            ),
+            signalbox_model_runtime::RequestedTarget::new(selected.provider_model().to_owned()),
+            signalbox_model_runtime::ResolvedTarget::new(selected.provider_model().to_owned()),
+            Vec::new(),
+            signalbox_model_runtime::ModelSettings::new(definition.max_output_tokens()),
+        );
+        measurement.settings.fast_mode = match fast_mode {
+            signalbox_domain::FastMode::Enabled => signalbox_model_runtime::FastMode::Enabled,
+            signalbox_domain::FastMode::Disabled => signalbox_model_runtime::FastMode::Disabled,
+        };
         let rendered_bytes = signalbox_model_provider_runtime::rendered_entry_bytes(
             operation.messages(),
             operation.reasoning_provenance(),
             &self.runtime_models,
-            |message| match adapter {
-                ModelAdapter::Anthropic => {
-                    signalbox_model_runtime_anthropic::serialized_message_bytes(
-                        message,
-                        definition.provider_compaction_supported(),
-                    )
-                }
-                ModelAdapter::OpenAi => {
-                    signalbox_model_runtime_openai::serialized_message_bytes(message)
-                }
-                ModelAdapter::CodexCli => {
-                    signalbox_model_runtime_codex_cli::serialized_message_bytes(message)
-                }
-                ModelAdapter::ClaudeCli => {
-                    signalbox_model_runtime_claude_cli::serialized_message_bytes(message)
-                }
+            |message| {
+                measurement.messages = vec![message.clone()];
+                crate::model_adapter::projected_messages_bytes(
+                    &mut measurement,
+                    &routes,
+                    &capabilities,
+                    |message| match adapter {
+                        ModelAdapter::Anthropic => {
+                            signalbox_model_runtime_anthropic::serialized_message_bytes(
+                                message,
+                                definition.provider_compaction_supported(),
+                            )
+                        }
+                        ModelAdapter::OpenAi => {
+                            signalbox_model_runtime_openai::serialized_message_bytes(message)
+                        }
+                        ModelAdapter::CodexCli => {
+                            signalbox_model_runtime_codex_cli::serialized_message_bytes(message)
+                        }
+                        ModelAdapter::ClaudeCli => {
+                            signalbox_model_runtime_claude_cli::serialized_message_bytes(message)
+                        }
+                    },
+                )
             },
         )
         .ok_or(ReportedUsageCompactionError::Render(turn))?;
