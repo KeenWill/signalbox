@@ -83,7 +83,6 @@ variants: 26 close-now, 17 staged, and 1 report-only.
 | S02 | High     | Native's `submit_input` always sends `start_when_idle`; it cannot encode `steer` or `queue`, an explicit null `expected_defaults_version`, or decode `steering_submitted`.                                                                                                                                                                                                                                                                                                                                                                                                                                 | **staged** — see [queue management](../../../docs/open-questions.md#queue-management).                                                             |
 | S03 | Medium   | Native has no `compact_session` request or `session_compacted` receipt, although it can read compaction events and context summaries.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | **staged** — see [turn lifecycle](../../../docs/open-questions.md#turn-lifecycle).                                                                 |
 | S04 | Medium   | Native reads session defaults but drops `system_prompt` in its application model and has no `replace_session_defaults` request or `session_defaults_replaced` receipt.                                                                                                                                                                                                                                                                                                                                                                                                                                     | **staged** — see [configuration categories](../../../docs/open-questions.md#configuration-categories).                                             |
-| S05 | High     | Native has no `reconcile_turn` request despite decoding reconciliation-required turn and event states.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | **staged** — see [turn lifecycle](../../../docs/open-questions.md#turn-lifecycle).                                                                 |
 | S06 | Medium   | Native lacks the review mutation verbs `create_review_target`, `start_review_run`, `activate_review_pass`, `complete_review_pass`, `record_review_findings`, `record_review_finding_event`, `reserve_review_external_link`, `attach_review_external_link`, `start_review_orchestration`, `record_review_import_outcome`, `record_review_concern_outcome`, `record_review_judgment_plan`, `record_review_judgment_effect`, `record_review_repair_outcomes`, and `record_review_publication_outcomes`. It also lacks their creation, activation, completion, recording, linking, and orchestration receipts. | **staged** — see [client scope](../../../docs/open-questions.md#client-scope).                                                                     |
 | S07 | Medium   | Native lacks `read_review_target`, `read_review_run`, `read_review_finding`, `list_review_findings`, and `read_review_orchestration`, plus `review_target`, `review_run`, `review_finding`, the three finding-page messages, and `review_orchestration`.                                                                                                                                                                                                                                                                                                                                                   | **staged** — see [client scope](../../../docs/open-questions.md#client-scope).                                                                     |
 | S08 | Medium   | The daemon template catalog exposes only template name and bundle version, which is insufficient for a useful native template browser without another source of display metadata.                                                                                                                                                                                                                                                                                                                                                                                                                          | **staged** — see [template storage and authoring](../../../docs/open-questions.md#template-storage-and-authoring).                                 |
@@ -110,8 +109,8 @@ are outside `clients/native/**`, and this effort does not alter daemon behavior.
 
 ## Current shape catalog
 
-The 35 request verbs absent from native are the six non-review verbs in S01
-through S05 and S16, the 20 review verbs in S06 and S07, the five goal verbs in
+The 34 request verbs absent from native are the five non-review verbs in S01
+through S04 and S16, the 20 review verbs in S06 and S07, the five goal verbs in
 S09, and the four chunked-import verbs in S14. The 32 named server kinds absent
 before this work are `steering_submitted`; the three template sequence kinds;
 `session_defaults_replaced`; `session_compacted`; `session_placement_updated`;
@@ -127,15 +126,15 @@ kinds `goal_transition_applied`, `goal_history_start`, `goal_history_state`,
 `review_findings_end`, `review_orchestration_started`,
 `review_orchestration_advanced`, and `review_orchestration`.
 
-The durable event family itself is current: `session_created`, `input_accepted`,
+The durable event family decodes `session_created`, `input_accepted`,
 `turn_activated`, `model_call_transition`, `tool_batch_transition`,
 `tool_approval_decided`, `context_compacted`, `turn_completed`, `turn_failed`,
-`turn_refused`, `turn_cancelled`, `turn_reconciliation_required`, and
-`turn_tool_reconciliation_required` are all decoded. The current
-`goal_turn_retired` variant and future variants use native's generic
-unknown-event representation for forward compatibility. The gap was acceptance
-or presentation of newer nested/event content, covered by C03 and C07; a full
-goal-mode surface remains S09.
+`turn_refused`, `turn_cancelled`, `turn_reconciliation_required`,
+`turn_tool_reconciliation_required`, `goal_turn_retired`, `child_spawned`,
+`child_waiting`, `session_message`, `child_result`, and
+`child_lifecycle_disposition`. Delegation updates publish incrementally; a
+terminal cascade on the child stream requests its authoritative transcript. A
+full goal-mode surface remains S09.
 
 The non-text transcript family is `model_identity_changed`,
 `assistant_tool_use`, `tool_execution_result`, `tool_denied`, `tool_closed`,

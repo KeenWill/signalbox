@@ -17,6 +17,7 @@ futures-util = { version = "0.3.31", default-features = false, features = ["std"
 httpdate = "1.0.3"
 schemars = "1.0.4"
 serde = "1.0.219"
+# Tool-argument redaction must retain arbitrary-precision numeric lexemes.
 serde_json = { version = "1.0.140", features = ["arbitrary_precision", "raw_value"] }
 tokio = { version = "1.53.0", default-features = false, features = [
     "io-util",

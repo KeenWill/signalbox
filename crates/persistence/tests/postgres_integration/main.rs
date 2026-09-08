@@ -25,6 +25,7 @@ mod support;
 
 mod approval_decisions;
 mod attention;
+mod compaction_validation;
 mod convergence_sweep;
 mod credential_capacity;
 mod credential_capacity_policy;
