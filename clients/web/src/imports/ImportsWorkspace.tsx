@@ -2,7 +2,7 @@ import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Menu } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type CommandContext,
   importHotkeyBindings,
@@ -86,6 +86,7 @@ export function ImportsWorkspace({
   onNavigationDisabledChange?: (disabled: boolean) => void
 }) {
   const queryClient = useQueryClient()
+  const catalogRef = useRef<HTMLElement>(null)
   const navigate = useNavigate()
   const app = useAppSelector(selectApp)
   const queryScope = scenario ? 'scenario' : 'production'
@@ -521,7 +522,12 @@ export function ImportsWorkspace({
               </div>
             </header>
           )}
-          <section className="imports-catalog" aria-labelledby="imports-catalog-heading">
+          <section
+            ref={catalogRef}
+            tabIndex={-1}
+            className="imports-catalog"
+            aria-labelledby="imports-catalog-heading"
+          >
             <header className="section-header imports-catalog-header">
               <h2 id="imports-catalog-heading" className="sr-only">
                 Imports
@@ -594,7 +600,13 @@ export function ImportsWorkspace({
             {importsQuery.isError && (
               <div className="imports-state imports-error" role="alert">
                 <p>Imports unavailable</p>
-                <button type="button" onClick={() => void importsQuery.refetch()}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    catalogRef.current?.focus()
+                    void importsQuery.refetch()
+                  }}
+                >
                   Retry imports
                 </button>
               </div>

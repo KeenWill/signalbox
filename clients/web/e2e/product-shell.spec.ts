@@ -1752,7 +1752,10 @@ test('hides empty import controls and retries failed discovery', async ({ page }
   await expect(page.getByRole('alert')).toContainText('Imports unavailable')
   await expect(page.locator('.import-inspector')).toHaveCount(0)
   mode = 'ready'
-  await page.getByRole('button', { name: 'Retry imports', exact: true }).click()
+  const retry = page.getByRole('button', { name: 'Retry imports', exact: true })
+  await retry.focus()
+  await retry.press('Enter')
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   await expect(page.locator('.import-inspector')).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Imports', exact: true })).toBeFocused()
 })
