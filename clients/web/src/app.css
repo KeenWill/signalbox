@@ -334,6 +334,7 @@ kbd {
 .settings-surface {
   align-content: start;
   overflow: auto;
+  container: settings / inline-size;
 }
 .settings-intro {
   max-width: 680px;
@@ -972,7 +973,8 @@ kbd {
   }
 }
 
-@media (max-width: 855px) {
+/* Two 220px preference columns and their gap must fit the pane's content width. */
+@container settings (width < calc(440px + 0.65rem)) {
   .settings-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1570,6 +1572,8 @@ kbd {
 .workspace {
   display: grid;
   min-width: 0;
+  container: scenario-workspace / inline-size;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 49px minmax(0, 1fr);
   background: var(--surface-2);
 }
@@ -2666,19 +2670,7 @@ kbd {
   }
 }
 
-@media (max-width: 760px) {
-  .app-shell,
-  .app-shell.layout-focus {
-    display: block;
-    height: 100dvh;
-  }
-  .navigation-pane {
-    display: none;
-  }
-  .workspace {
-    height: 100%;
-    grid-template-rows: 51px minmax(0, 1fr);
-  }
+@container scenario-workspace (max-width: 760px) {
   .workspace-header {
     gap: 0.35rem;
     padding: 0 0.45rem;
@@ -2691,6 +2683,21 @@ kbd {
   }
   .toolbar > .segmented {
     display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-shell,
+  .app-shell.layout-focus {
+    display: block;
+    height: 100dvh;
+  }
+  .navigation-pane {
+    display: none;
+  }
+  .workspace {
+    height: 100%;
+    grid-template-rows: 51px minmax(0, 1fr);
   }
   .mobile-only {
     display: inline-grid;

@@ -371,18 +371,18 @@ where
     let mut published = 0_usize;
     while published < logs.len() {
         if logs[published].publish().is_err() {
-            rollback_published_logs(&mut logs[..published]);
-            return Err(LocalGitFailure::Operation);
+            return Err(LocalGitFailure::Operation
+                .after_rollback(rollback_published_logs(&mut logs[..published])));
         }
         published += 1;
     }
     if let Err(failure) = validate_publication() {
-        rollback_published_logs(&mut logs);
-        return Err(failure);
+        return Err(failure.after_rollback(rollback_published_logs(&mut logs)));
     }
-    if update_lock.publish(authority, &expected).is_err() {
-        rollback_published_logs(&mut logs);
-        return Err(LocalGitFailure::Operation);
+    if let Err(failure) = update_lock.publish(authority, &expected) {
+        return Err(failure
+            .operation_class()
+            .after_rollback(rollback_published_logs(&mut logs)));
     }
     Ok(())
 }
@@ -410,18 +410,20 @@ where
     )?;
     log.publish()?;
     if let Err(failure) = validate_root_before_publish() {
-        let _ = log.rollback();
-        return Err(failure);
+        return Err(failure.after_rollback(log.rollback()));
     }
-    if head_lock.publish(authority, &expected).is_err() {
-        let _ = log.rollback();
-        return Err(LocalGitFailure::Operation);
+    if let Err(failure) = head_lock.publish(authority, &expected) {
+        return Err(failure.operation_class().after_rollback(log.rollback()));
     }
     Ok(())
 }
 
-pub(super) fn rollback_published_logs(logs: &mut [ReferenceLogLock]) {
+pub(super) fn rollback_published_logs(
+    logs: &mut [ReferenceLogLock],
+) -> Result<(), LocalGitFailure> {
+    let mut outcome = Ok(());
     for log in logs.iter_mut().rev() {
-        let _ = log.rollback();
+        outcome = log.rollback().and(outcome);
     }
+    outcome
 }

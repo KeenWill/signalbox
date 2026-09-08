@@ -400,3 +400,51 @@ fn commit_rejects_a_nonregular_merge_state_entry_before_publication() {
         head_before
     );
 }
+
+/// A retained reflog publication prevents a definitive failure even when the ref never moved.
+#[test]
+fn commit_reports_ambiguity_when_a_published_reflog_cannot_be_restored() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let authority = &executor.repository_authority;
+    let reference = "refs/heads/main";
+    let lock = ReferenceLock::acquire(authority, reference).expect("reference lock acquires");
+    let head_log = fixture.root().join(".git/logs/HEAD");
+    let head_log_lock = fixture.root().join(".git/logs/HEAD.lock");
+    let original_log = fs::read(&head_log).expect("original reflog reads");
+    let signature = identity().signature().expect("fixture identity signs");
+    let attempted_target = Oid::ZERO_SHA1;
+
+    let failure = crate::commit::publish_commit_reference(
+        authority,
+        lock,
+        reference,
+        fixture.initial,
+        attempted_target,
+        &signature,
+        || {
+            fs::write(&head_log_lock, b"concurrent writer")
+                .expect("rollback lock contention installs");
+            Err(LocalGitFailure::Operation)
+        },
+    )
+    .expect_err("reference publication is refused after the reflogs publish");
+
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
+    assert_eq!(
+        Repository::open(fixture.root())
+            .expect("repository opens")
+            .head()
+            .expect("HEAD reads")
+            .target(),
+        Some(fixture.initial)
+    );
+    assert_ne!(
+        fs::read(&head_log).expect("retained reflog reads"),
+        original_log
+    );
+    assert_eq!(
+        fs::read(&head_log_lock).expect("concurrent lock remains"),
+        b"concurrent writer"
+    );
+}

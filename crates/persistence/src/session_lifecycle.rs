@@ -566,11 +566,11 @@ async fn lift_park_from_held(
         Some("dispatched") => SessionLifecycleState::Dispatched,
         _ => SessionLifecycleState::Active,
     };
-    write_state(connection, &held, resumed, actor).await?;
     if matches!(
         resumed,
         SessionLifecycleState::Created | SessionLifecycleState::Dispatched
     ) {
+        write_state(connection, &held, resumed, actor).await?;
         return Ok(resumed);
     }
     let (actor_kind, actor_module, _, _) = encode_actor(actor);

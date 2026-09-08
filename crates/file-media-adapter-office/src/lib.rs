@@ -24,7 +24,7 @@ use signalbox_file_media_runtime::{
 use zip::{CompressionMethod, ZipArchive};
 
 const PROVIDER_NAME: &str = "office-open-xml";
-const READER_REVISION: &str = "zip-8-quick-xml-0-41-v1";
+const READER_REVISION: &str = "zip-8-quick-xml-0-41-v2";
 const DOCX_READER: &str = "docx";
 const XLSX_READER: &str = "xlsx";
 const PPTX_READER: &str = "pptx";
@@ -48,7 +48,7 @@ const ZIP_SUFFIX_BYTES: u64 = 65_536;
 const MAX_ZIP64_EOCD_BYTES: u64 = 64 * 1024;
 // The 22-byte ZIP EOCD and 65,535-byte comment leave 21 bytes before the suffix, followed
 // backward by the 20-byte ZIP64 locator and bounded ZIP64 record (PKWARE APPNOTE).
-const EOCD_PRECEDING_BYTES: u64 = 21 + 20 + MAX_ZIP64_EOCD_BYTES;
+const EOCD_PRECEDING_BYTES: u64 = 21 + 20 + 56 + MAX_ZIP64_EOCD_BYTES;
 const SELECTED_PART_NAME_BYTES: u64 = 20;
 const MAX_SELECTED_PARTS: u64 = 3;
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
@@ -68,6 +68,8 @@ const MAX_NAMESPACE_PREFIX_BYTES: usize = 64;
 const MAX_NAMESPACE_URI_BYTES: usize = 1024;
 const MAX_NAMESPACE_DECLARATIONS: usize = 128;
 const MAX_MARKUP_COMPATIBILITY_ENTRIES: usize = 128;
+const MAX_MARKUP_COMPATIBILITY_NAME_BYTES: usize = 1024;
+const MAX_MARKUP_COMPATIBILITY_BYTES: usize = 64 * 1024;
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
 const CONTENT_TYPES: &str = "[Content_Types].xml";
 const PACKAGE_RELS: &str = "_rels/.rels";
@@ -1089,6 +1091,9 @@ fn validate_package_relationships(
             .read_event_into(&mut buffer)
             .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?
         {
+            Event::Start(_) | Event::Empty(_) if depth >= 2 => {
+                return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+            }
             Event::Start(element) => {
                 if depth == 0 {
                     if saw_root
@@ -1826,6 +1831,12 @@ fn ordered_relationship_ids(
                     list_depth = None;
                 }
             }
+            Event::Text(text) if !text.xml10_content().trim().is_empty() => {
+                return Err(XmlIssue::Malformed);
+            }
+            Event::CData(text) if !text.as_ref().trim().is_empty() => {
+                return Err(XmlIssue::Malformed);
+            }
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
             Event::Eof if depth == 0 => break,
             Event::Eof => return Err(XmlIssue::Malformed),
@@ -1897,8 +1908,22 @@ fn element_uses_scoped_namespace(
 
 #[derive(Clone, Default)]
 struct MarkupCompatibilityScope {
-    ignorable_namespaces: HashSet<Vec<u8>>,
-    process_content: HashSet<(Vec<u8>, Vec<u8>)>,
+    ignorable_namespaces: std::sync::Arc<HashSet<Vec<u8>>>,
+    process_content: std::sync::Arc<HashSet<(Vec<u8>, Vec<u8>)>>,
+}
+
+impl MarkupCompatibilityScope {
+    fn retained_bytes(&self) -> usize {
+        self.ignorable_namespaces
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+            + self
+                .process_content
+                .iter()
+                .map(|(namespace, name)| namespace.len() + name.len())
+                .sum::<usize>()
+    }
 }
 
 fn apply_markup_compatibility_attributes(
@@ -1938,10 +1963,12 @@ fn apply_markup_compatibility_attributes(
                     let namespace = namespace_scope
                         .get(declared_prefix.as_bytes())
                         .ok_or(XmlIssue::Malformed)?;
-                    compatibility.ignorable_namespaces.insert(namespace.clone());
+                    std::sync::Arc::make_mut(&mut compatibility.ignorable_namespaces)
+                        .insert(namespace.clone());
                     if compatibility.ignorable_namespaces.len()
                         + compatibility.process_content.len()
                         > MAX_MARKUP_COMPATIBILITY_ENTRIES
+                        || compatibility.retained_bytes() > MAX_MARKUP_COMPATIBILITY_BYTES
                     {
                         return Err(XmlIssue::Malformed);
                     }
@@ -1954,12 +1981,15 @@ fn apply_markup_compatibility_attributes(
                     let namespace = namespace_scope
                         .get(declared_prefix.as_bytes())
                         .ok_or(XmlIssue::Malformed)?;
-                    compatibility
-                        .process_content
+                    if local.is_empty() || local.len() > MAX_MARKUP_COMPATIBILITY_NAME_BYTES {
+                        return Err(XmlIssue::Malformed);
+                    }
+                    std::sync::Arc::make_mut(&mut compatibility.process_content)
                         .insert((namespace.clone(), local.as_bytes().to_vec()));
                     if compatibility.ignorable_namespaces.len()
                         + compatibility.process_content.len()
                         > MAX_MARKUP_COMPATIBILITY_ENTRIES
+                        || compatibility.retained_bytes() > MAX_MARKUP_COMPATIBILITY_BYTES
                     {
                         return Err(XmlIssue::Malformed);
                     }
@@ -2474,6 +2504,8 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
     let mut value = String::new();
     let mut inline_value = String::new();
     let mut namespace_scopes = vec![std::collections::HashMap::new()];
+    let mut compatibility_scopes = vec![MarkupCompatibilityScope::default()];
+    let mut ignored_depth = None;
     loop {
         match reader
             .read_event_into(&mut buffer)
@@ -2486,16 +2518,32 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
                 apply_namespace_declarations(&element, &mut scope)?;
+                let mut compatibility = compatibility_scopes
+                    .last()
+                    .cloned()
+                    .ok_or(XmlIssue::Malformed)?;
+                apply_markup_compatibility_attributes(&element, &scope, &mut compatibility)?;
+                if ignored_depth.is_none()
+                    && ignores_markup_compatibility_element(
+                        element.name().as_ref().as_bytes(),
+                        &scope,
+                        &compatibility,
+                    )
+                {
+                    ignored_depth = Some(element_depth);
+                }
+                compatibility_scopes.push(compatibility);
                 let qualified_name = element.name();
                 let name = local_name(qualified_name.as_ref().as_bytes());
                 // Extension elements (e.g. `<ext:c>`) share local names with
                 // real spreadsheet cells; require the SpreadsheetML namespace
                 // so foreign markup cannot be read back as cell text.
-                let spreadsheet_element = element_uses_scoped_namespace(
-                    qualified_name.as_ref().as_bytes(),
-                    &scope,
-                    SPREADSHEETML_NAMESPACE,
-                );
+                let spreadsheet_element = ignored_depth.is_none()
+                    && element_uses_scoped_namespace(
+                        qualified_name.as_ref().as_bytes(),
+                        &scope,
+                        SPREADSHEETML_NAMESPACE,
+                    );
                 if spreadsheet_element && name == b"c" {
                     shared_cell = false;
                     inline_cell = false;
@@ -2529,44 +2577,47 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                 }
                 namespace_scopes.push(scope);
             }
-            Event::Text(text) if value_depth > 0 => {
+            Event::Text(text) if value_depth > 0 && ignored_depth.is_none() => {
                 value.push_str(&text.xml10_content());
             }
-            Event::CData(text) if value_depth > 0 => {
+            Event::CData(text) if value_depth > 0 && ignored_depth.is_none() => {
                 value.push_str(text.as_ref());
             }
-            Event::GeneralRef(reference) if value_depth > 0 => {
+            Event::GeneralRef(reference) if value_depth > 0 && ignored_depth.is_none() => {
                 let decoded = reference.as_ref();
                 value.push_str(&decode_xml_reference(decoded)?);
             }
-            Event::Text(text) if inline_text_depth > 0 => {
+            Event::Text(text) if inline_text_depth > 0 && ignored_depth.is_none() => {
                 let decoded = text.xml10_content();
                 append_xml_text(&mut inline_value, &decoded)?;
             }
-            Event::CData(text) if inline_text_depth > 0 => {
+            Event::CData(text) if inline_text_depth > 0 && ignored_depth.is_none() => {
                 let decoded = text.as_ref();
                 append_xml_text(&mut inline_value, decoded)?;
             }
-            Event::GeneralRef(reference) if inline_text_depth > 0 => {
+            Event::GeneralRef(reference) if inline_text_depth > 0 && ignored_depth.is_none() => {
                 let decoded = reference.as_ref();
                 let value = decode_xml_reference(decoded)?;
                 append_xml_text(&mut inline_value, &value)?;
             }
             Event::End(element) => {
                 element_depth = element_depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
-                // Namespace is not re-checked here: a well-formed document's
-                // end tag always matches the namespace-gated start tag that
-                // incremented these depths or set these flags, so the
-                // Start-side check above is sufficient.
                 let qualified_name = element.name();
                 let name = local_name(qualified_name.as_ref().as_bytes());
-                if name == b"v" && value_depth > 0 {
+                let scope = namespace_scopes.last().ok_or(XmlIssue::Malformed)?;
+                let spreadsheet_element = ignored_depth.is_none()
+                    && element_uses_scoped_namespace(
+                        qualified_name.as_ref().as_bytes(),
+                        scope,
+                        SPREADSHEETML_NAMESPACE,
+                    );
+                if spreadsheet_element && name == b"v" && value_depth > 0 {
                     value_depth -= 1;
-                } else if name == b"t" && inline_text_depth > 0 {
+                } else if spreadsheet_element && name == b"t" && inline_text_depth > 0 {
                     inline_text_depth -= 1;
-                } else if name == b"rPh" && inline_phonetic_depth > 0 {
+                } else if spreadsheet_element && name == b"rPh" && inline_phonetic_depth > 0 {
                     inline_phonetic_depth -= 1;
-                } else if name == b"c" {
+                } else if spreadsheet_element && name == b"c" {
                     if shared_cell {
                         let index = value.parse::<usize>().map_err(|_| XmlIssue::Malformed)?;
                         append_xml_text(
@@ -2584,6 +2635,10 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                     inline_value.clear();
                 }
                 namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
+                compatibility_scopes.pop().ok_or(XmlIssue::Malformed)?;
+                if ignored_depth == Some(element_depth + 1) {
+                    ignored_depth = None;
+                }
             }
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
             Event::Eof
@@ -4323,6 +4378,79 @@ mod tests {
     }
 
     #[test]
+    fn markup_compatibility_rejects_oversized_process_content_names() {
+        let local = "n".repeat(1025);
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:ext="urn:extension" mc:ProcessContent="ext:{local}"><w:t>visible</w:t></w:document>"#
+        );
+        assert!(matches!(
+            extract_xml_text(xml.as_bytes(), OfficeKind::Docx),
+            Err(XmlIssue::Malformed)
+        ));
+    }
+
+    #[test]
+    fn markup_compatibility_bounds_aggregate_process_content_bytes() {
+        let tokens = (0..70)
+            .map(|index| format!("ext:n{index}{}", "n".repeat(1000)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:ext="urn:extension" mc:ProcessContent="{tokens}"><w:t>visible</w:t></w:document>"#
+        );
+        assert!(matches!(
+            extract_xml_text(xml.as_bytes(), OfficeKind::Docx),
+            Err(XmlIssue::Malformed)
+        ));
+    }
+
+    #[test]
+    fn worksheet_foreign_cell_end_keeps_the_enclosing_cell_text() {
+        let xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:ext="urn:extension"><sheetData><row><c t="inlineStr"><is><t>first</t><ext:c></ext:c><t>second</t></is></c></row></sheetData></worksheet>"#;
+        assert_eq!(
+            spreadsheet_worksheet_text(xml, &[]).expect("worksheet extracts"),
+            "firstsecond\n"
+        );
+    }
+
+    #[test]
+    fn worksheet_skips_ignorable_subtrees() {
+        let xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:ext="urn:extension" mc:Ignorable="ext"><sheetData><row><c t="inlineStr"><is><t>visible</t><ext:payload><t>hidden</t></ext:payload></is></c></row></sheetData></worksheet>"#;
+        assert_eq!(
+            spreadsheet_worksheet_text(xml, &[]).expect("worksheet extracts"),
+            "visible\n"
+        );
+    }
+
+    #[test]
+    fn ordered_relationship_documents_reject_character_content() {
+        let xml = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/>unexpected</workbook>"#;
+        assert!(matches!(
+            workbook_relationship_ids(xml),
+            Err(XmlIssue::Malformed)
+        ));
+    }
+
+    #[test]
+    fn package_relationships_reject_child_elements() {
+        let xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"><payload/></Relationship></Relationships>"#;
+        assert!(matches!(
+            validate_package_relationships(xml, &[OfficeKind::Docx]),
+            Err(ValidationIssue::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn package_relationships_accept_explicit_empty_end_tags() {
+        let xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"></Relationship></Relationships>"#;
+        assert_eq!(
+            validate_package_relationships(xml, &[OfficeKind::Docx])
+                .expect("leaf relationship validates"),
+            vec![OfficeKind::Docx]
+        );
+    }
+
+    #[test]
     fn worksheet_extraction_ignores_extension_cell_names() {
         let xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:ext="urn:extension"><sheetData><row><c t="inlineStr"><is><t>real</t></is></c><ext:c t="inlineStr"><ext:t>hidden</ext:t></ext:c></row></sheetData></worksheet>"#;
 
@@ -4577,7 +4705,7 @@ mod tests {
 
     #[test]
     fn zip64_trailer_budget_covers_bounded_extensible_data() {
-        assert_eq!(EOCD_PRECEDING_BYTES, 21 + 20 + MAX_ZIP64_EOCD_BYTES);
+        assert_eq!(EOCD_PRECEDING_BYTES, 21 + 20 + 56 + MAX_ZIP64_EOCD_BYTES);
     }
 
     #[test]

@@ -10,8 +10,7 @@ pub use current_time::{
 };
 pub use echo::{ECHO_NAME, EchoExecutor, EchoExecutorError, EchoTool, EchoToolConstructionError};
 pub use session_status::{
-    PostgresSessionStatusWriter, PostgresSessionStatusWriterError, SESSION_STATUS_UPDATE_NAME,
-    SessionStatusExecutor, SessionStatusExecutorError, SessionStatusTool,
-    SessionStatusToolConstructionError, SessionStatusWrite, SessionStatusWriteOutcome,
-    SessionStatusWriter,
+    SESSION_STATUS_UPDATE_NAME, SessionStatusExecutor, SessionStatusExecutorError,
+    SessionStatusTool, SessionStatusToolConstructionError, SessionStatusWrite,
+    SessionStatusWriteOutcome, SessionStatusWriter,
 };
