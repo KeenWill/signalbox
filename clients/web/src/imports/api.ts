@@ -255,7 +255,7 @@ const decodeResponse = async <Value>(
   if (contentLength !== null) {
     const declaredLength = Number(contentLength)
     if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
-      await response.body?.cancel()
+      await response.body?.cancel().catch(() => undefined)
       throw new ImportResponseTooLargeError()
     }
   }

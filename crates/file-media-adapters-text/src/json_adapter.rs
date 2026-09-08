@@ -6,9 +6,9 @@ use serde::{
 };
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    JsonParseLimits, MAX_STRUCTURED_DEPTH, ProbeStrength, ProcessorFailure, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
-    parse_json_without_duplicate_members_bounded,
+    JsonParseError, JsonParseLimits, MAX_STRUCTURED_DEPTH, ProbeStrength, ProcessorFailure,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ValidationEvidence,
+    VerifiedBlobSource, parse_json_without_duplicate_members_bounded,
 };
 
 use crate::{
@@ -163,15 +163,24 @@ pub(crate) async fn read(
             limit_kind: String::from("depth_limit_exceeded"),
         });
     }
-    let value = parse_json(&text).map_err(|_| ProcessorFailure::Failed)?;
+    let value = match parse_json_without_duplicate_members_bounded(
+        &text,
+        JsonParseLimits {
+            maximum_nodes: MAX_TEXT_FAMILY_BYTES,
+            maximum_container_entries: request.maximum_container_entries,
+        },
+    ) {
+        Ok(value) => value,
+        Err(JsonParseError::ContainerEntryLimit) => {
+            return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                limit_kind: String::from("container_entry_limit_exceeded"),
+            });
+        }
+        Err(JsonParseError::Invalid(_)) => return Err(ProcessorFailure::Failed),
+    };
     if json_value_depth_exceeds(&value, MAX_STRUCTURED_DEPTH) {
         return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
             limit_kind: String::from("depth_limit_exceeded"),
-        });
-    }
-    if json_container_entries_exceed(&value, request.maximum_container_entries) {
-        return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
-            limit_kind: String::from("container_entry_limit_exceeded"),
         });
     }
     let body_json = serde_json::to_string(&value).map_err(|_| ProcessorFailure::Failed)?;
@@ -367,16 +376,6 @@ fn is_complete_json_probe_document(prefix: &[u8]) -> bool {
     source::probe_utf8(prefix).is_some_and(|text| validate_json(text).is_ok())
 }
 
-fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
-    parse_json_without_duplicate_members_bounded(
-        text,
-        JsonParseLimits {
-            maximum_nodes: u64::MAX,
-            maximum_container_entries: u64::MAX,
-        },
-    )
-}
-
 /// Detects excessive nesting before building a recursively dropped JSON tree.
 fn json_depth_exceeds(bytes: &[u8], maximum_depth: u32) -> bool {
     let mut depth = 0_u32;
@@ -423,32 +422,6 @@ fn json_value_depth_exceeds(value: &serde_json::Value, maximum_depth: u32) -> bo
                     return true;
                 }
                 pending.extend(values.values().map(|value| (value, depth)));
-            }
-            serde_json::Value::Null
-            | serde_json::Value::Bool(_)
-            | serde_json::Value::Number(_)
-            | serde_json::Value::String(_) => {}
-        }
-    }
-    false
-}
-
-/// Checks concentrated container fan-out iteratively before output crosses the worker.
-fn json_container_entries_exceed(value: &serde_json::Value, maximum_entries: u64) -> bool {
-    let mut pending = vec![value];
-    while let Some(value) = pending.pop() {
-        match value {
-            serde_json::Value::Array(values) => {
-                if values.len() as u64 > maximum_entries {
-                    return true;
-                }
-                pending.extend(values);
-            }
-            serde_json::Value::Object(values) => {
-                if values.len() as u64 > maximum_entries {
-                    return true;
-                }
-                pending.extend(values.values());
             }
             serde_json::Value::Null
             | serde_json::Value::Bool(_)
