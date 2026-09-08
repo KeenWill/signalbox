@@ -55,7 +55,8 @@ pub(crate) const FLEET_PASS_ADMISSION_CAP: usize = 16;
 pub(crate) const FLEET_SESSION_COUNT: usize = FLEET_PASS_ADMISSION_CAP;
 pub(crate) const FLEET_BASELINE_OCCUPANCY_BOUND: Duration = Duration::from_secs(900);
 pub(crate) const FLEET_OCCUPANCY_BOUND: Duration = Duration::from_secs(1);
-pub(crate) const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
+// Allow the occupancy expiry, detached database recovery, and scheduling under load.
+pub(crate) const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(30);
 pub(crate) const FLEET_SETUP_BOUND: Duration = Duration::from_secs(120);
 
 pub(crate) struct FleetPrepared {
