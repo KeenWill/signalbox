@@ -1578,9 +1578,11 @@ const fn goal_event_continuation(event: &TimelineGoalEvent) -> Option<TimelineBo
     }
 }
 
-// Transitions without satellite rows retain their original stored member references.
+// The fallback follows only the transition's sealed frontier or recovery attempt.
+// Terminal attempt payloads and their authorization facts are immutable.
 const TOOL_DETAIL_MEMBERS_SQL: &str = "WITH transition AS (
-    SELECT session_id, producing_model_call_id
+    SELECT event_sequence, session_id, producing_model_call_id,
+           transition_kind, frontier_id, tool_attempt_id
       FROM tool_batch_transition_outbox_event WHERE event_sequence = $1
 ), frozen AS NOT MATERIALIZED (
     SELECT * FROM tool_batch_transition_detail_member WHERE event_sequence = $1
@@ -1591,14 +1593,13 @@ const TOOL_DETAIL_MEMBERS_SQL: &str = "WITH transition AS (
            attempt_sandbox_posture, attempt_result_text, attempt_error_detail
       FROM frozen WHERE member_kind = 'tool'
     UNION ALL
-         SELECT row_number() OVER (
-                    ORDER BY request.request_ordinal,
-                             generation.generation NULLS FIRST,
-                             attempt.attempt_id NULLS FIRST
-                ) - 1,
+         SELECT request.request_ordinal,
                 request.request_id, attempt.attempt_id, EXISTS (
                     SELECT 1
                       FROM tool_approval_judge_model_call AS judge
+                      JOIN tool_approval_decided_outbox_event AS decision
+                        ON decision.request_id = judge.request_id
+                       AND decision.event_sequence < transition.event_sequence
                      WHERE judge.request_id = request.request_id
                        AND judge.recommendation_kind = 'escalate_to_human'
                 ),
@@ -1627,22 +1628,30 @@ const TOOL_DETAIL_MEMBERS_SQL: &str = "WITH transition AS (
                      LIMIT 1
                 ),
                 attempt.result_text, attempt.error_detail
-           FROM tool_request AS request
+           FROM transition
+           JOIN tool_round AS round
+             ON round.producing_model_call_id = transition.producing_model_call_id
+           JOIN context_frontier AS boundary
+             ON boundary.context_frontier_id = round.boundary_frontier_id
+            AND boundary.owning_session_id = transition.session_id
+           JOIN tool_request AS request
+             ON request.producing_model_call_id = transition.producing_model_call_id
+           LEFT JOIN context_frontier_member AS member
+             ON transition.transition_kind = 'results_projected'
+            AND member.owning_session_id = transition.session_id
+            AND member.context_frontier_id = transition.frontier_id
+            AND member.member_position = boundary.member_count + request.request_ordinal + 1
+           LEFT JOIN semantic_transcript_entry AS payload
+             ON payload.source_session_id = member.source_session_id
+            AND payload.semantic_entry_id = member.semantic_entry_id
            LEFT JOIN tool_attempt AS attempt
-             ON attempt.request_id = request.request_id
-           LEFT JOIN LATERAL (
-                SELECT lease.generation
-                  FROM runner_physical_attempt_lease_binding AS binding
-                  JOIN runner_lease_generation AS lease
-                    ON lease.lease_id = binding.lease_id
-                   AND lease.attempt_id = binding.attempt_id
-                 WHERE binding.attempt_id = attempt.attempt_id
-                 ORDER BY lease.generation DESC
-                 LIMIT 1
-           ) AS generation ON TRUE
-          WHERE request.producing_model_call_id = (
-              SELECT producing_model_call_id FROM transition
-          ) AND NOT EXISTS (SELECT 1 FROM frozen)
+             ON attempt.attempt_id = CASE transition.transition_kind
+                 WHEN 'results_projected' THEN payload.tool_result_attempt_id
+                 WHEN 'recovery_required' THEN transition.tool_attempt_id
+             END
+            AND attempt.request_id = request.request_id
+            AND attempt.state_kind = 'terminal'
+          WHERE NOT EXISTS (SELECT 1 FROM frozen)
 ), goal_members AS (
     SELECT member_index, session_id, goal_event_ordinal
       FROM frozen WHERE member_kind = 'goal'
@@ -1655,6 +1664,10 @@ const TOOL_DETAIL_MEMBERS_SQL: &str = "WITH transition AS (
       JOIN goal_event AS event
         ON event.session_id = transition.session_id
        AND event.model_tool_request_id = request.request_id
+      JOIN goal_changed_outbox_event AS goal_header
+        ON goal_header.session_id = event.session_id
+       AND goal_header.event_ordinal = event.event_ordinal
+       AND goal_header.event_sequence < transition.event_sequence
      WHERE NOT EXISTS (SELECT 1 FROM frozen)
 )";
 

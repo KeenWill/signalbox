@@ -3228,7 +3228,7 @@ test("injection settlements reject contradictory delivery evidence", () => {
   }
 });
 
-test("child lifecycle disposition cannot name its parent as the child", () => {
+test("child lifecycle disposition permits both outboxes and rejects identical parent and child", () => {
   const page = userInputDetailPage();
   page.items[0].kind = "delegation_update";
   page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
@@ -3239,6 +3239,10 @@ test("child lifecycle disposition cannot name its parent as the child", () => {
     provenance: { type: "parent_lifecycle_command", session_id: page.session_id, command_id: page.session_id },
   } };
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
-  page.items[0].body.detail.child_session_id = page.session_id;
+  const parentSession = page.session_id;
+  page.session_id = page.items[0].body.detail.child_session_id;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.detail.child_session_id = parentSession;
+  page.session_id = parentSession;
   assert.throws(() => decodeWebSessionTimelineDetailPage(page), /child_session_id must be a session other than the relationship parent/);
 });

@@ -7776,8 +7776,7 @@ function assertTimelineDetailPage(value) {
         if (
           (item.body.detail.type === "child_spawned" ||
             item.body.detail.type === "child_waiting" ||
-            item.body.detail.type === "child_result" ||
-            item.body.detail.type === "child_lifecycle_disposition") &&
+            item.body.detail.type === "child_result") &&
           item.body.detail.child_session_id === value.session_id
         ) {
           fail(
@@ -7798,6 +7797,9 @@ function assertTimelineDetailPage(value) {
               detail.outcome === "child_cancelled");
           if (!lifecycleValid) {
             fail(`${path}.body.detail`, "a durable lifecycle disposition shape");
+          }
+          if (detail.child_session_id === detail.provenance.session_id) {
+            fail(`${path}.body.detail.child_session_id`, "a session other than the relationship parent");
           }
         }
         if (item.body.detail.type === "child_result") {
