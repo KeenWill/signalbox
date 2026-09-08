@@ -908,6 +908,7 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         | PrepareInitialModelCallOutcome::CredentialWait(_)
         | PrepareInitialModelCallOutcome::WaitFailed(_)
         | PrepareInitialModelCallOutcome::Ready { .. }
+        | PrepareInitialModelCallOutcome::RetainedContentLimitExceeded { .. }
         | PrepareInitialModelCallOutcome::TargetUnavailable(_) => {
             return Err(error("initial model call did not checkpoint"));
         }
@@ -941,6 +942,7 @@ async fn full_path(pool: &PgPool, ids: OperationIds) -> HarnessResult<()> {
         | PrepareInitialModelCallOutcome::CredentialWait(_)
         | PrepareInitialModelCallOutcome::WaitFailed(_)
         | PrepareInitialModelCallOutcome::Checkpointed(_)
+        | PrepareInitialModelCallOutcome::RetainedContentLimitExceeded { .. }
         | PrepareInitialModelCallOutcome::TargetUnavailable(_) => {
             return Err(error("checkpointed model call did not reload as ready"));
         }

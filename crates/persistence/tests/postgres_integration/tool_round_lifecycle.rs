@@ -2759,7 +2759,7 @@ async fn refused_continuation_call_reloads_and_scans() -> Result<(), Box<dyn Err
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8300;
     let (fixture, model_repository, continuation_call, authorized) =
-        authorize_continuation_after_completed_round(&pool, seed).await?;
+        authorize_continuation_after_terminal_round(&pool, seed, None).await?;
     let refused_observation = authorized
         .observation_correlation()
         .bind_terminal_observation(ModelCallTerminalObservation::Refused);
@@ -2863,7 +2863,7 @@ async fn in_flight_continuation_call_restart_parks_recovery() -> Result<(), Box<
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8500;
     let (fixture, _, continuation_call, _) =
-        authorize_continuation_after_completed_round(&pool, seed).await?;
+        authorize_continuation_after_terminal_round(&pool, seed, None).await?;
 
     let mut recovery_ids = FixedStartupScanIds::new([], []);
     let scan = PostgresStartupScanRepository::new(pool.clone())
@@ -2984,7 +2984,7 @@ async fn stop_requested_continuation_call_restart_reconciles() -> Result<(), Box
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x8700;
     let (fixture, _, continuation_call, _) =
-        authorize_continuation_after_completed_round(&pool, seed).await?;
+        authorize_continuation_after_terminal_round(&pool, seed, None).await?;
 
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x30));
     let interrupt_outcome = SubmitInputRepository::new(pool.clone())

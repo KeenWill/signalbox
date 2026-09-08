@@ -519,9 +519,15 @@ capability and replace pages of at most eight items and 65,536 projected bytes,
 clamped to the advertised limits, with exact byte accounting and continuation
 matching. Pagination resets when the session, window bounds, or observation
 cursor changes; the response bound includes their attachment references. Text
-pages advance past metadata-only detail records automatically within the item
-and projected-byte page budgets; discarded records consume both budgets. The
-continuation remains available when either budget is exhausted.
+pages advance past metadata-only detail records automatically within the
+workspace record budget and projected-byte page budget; discarded records
+consume both budgets. The scan and retained-content item budgets are clamped
+independently to the advertised limit. The continuation remains available when
+either budget is exhausted. The conversation shows user and assistant text, tool
+arguments and output, and unsuccessful turn outcomes in event order. Repeated
+terminal outcomes for the same turn and cause appear once. Bookkeeping is hidden
+until Events is selected. The last bounded raw detail page is retained
+separately from conversation content to validate body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
@@ -543,9 +549,18 @@ Every selected row is decoded through the same fail-closed typed outbox
 projection as durable dispatch, under one repeatable-read transaction. A detail
 response reports its projected body bytes and never silently truncates: an
 oversized text is a typed bounded excerpt carrying its total length and exact
-continuation, never a summary that appears complete. A known category without a
-richer typed body is a closed event fact; an unknown durable event or state is
-corruption, never a generic body or guessed prose.
+continuation, never a summary that appears complete. Detail bodies carry typed
+session and turn lifecycle facts, model settings and provider responses, tool
+arguments and execution evidence, approval decisions, goals, compaction, runner
+placement, and delegation; a retired turn remains a closed event fact. Creation
+bodies retain the cause and its dispatch, program-run, or spawning-request
+identity. User overrides retain the command and denied-request identities.
+Repeated tool and goal members continue by member index. Tool-transition members
+freeze attempt state and payloads when the transition commits. Transitions
+without frozen members project the original stored tool and goal references. An
+unknown durable event or state is corruption, never a generic body or guessed
+prose. Expanding a browser timeline event renders its typed body; following a
+continuation replaces the current detail page.
 
 A search result's address is directly usable with the timeline around read even
 when the matching region is not loaded, and each returned source is correlated

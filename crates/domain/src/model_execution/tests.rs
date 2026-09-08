@@ -1078,7 +1078,7 @@ fn continuation_reconstitutes_exact_frontier_and_pin() {
         continuation.frontier().snapshot(),
         continuation.ordered_entries().collect(),
     ))
-    .with_tool_denial_correlations(vec![denied_approval(request)]);
+    .with_tool_denial_correlations(vec![denied_approval(request).into()]);
     let mut missing_denial = input.clone();
     missing_denial.tool_denial_correlations.clear();
     assert_eq!(
@@ -1095,7 +1095,8 @@ fn continuation_reconstitutes_exact_frontier_and_pin() {
             ToolApprovalDecision::Approve,
         )
         .reconstitute()
-        .expect("the mismatching approval fixture is valid"),
+        .expect("the mismatching approval fixture is valid")
+        .into(),
     ];
     assert_eq!(
         approved_instead
@@ -1419,7 +1420,7 @@ fn continuation_rejects_unresolved_latest_tool_round() {
         continuation.frontier().snapshot(),
         continuation.ordered_entries().collect(),
     ))
-    .with_tool_denial_correlations(vec![denied_approval(earlier_request)]);
+    .with_tool_denial_correlations(vec![denied_approval(earlier_request).into()]);
 
     let error = input
         .reconstitute()
@@ -1568,7 +1569,7 @@ fn continuation_rejects_crosswired_turn_pin() {
         continuation.frontier().snapshot(),
         continuation.ordered_entries().collect(),
     ))
-    .with_tool_denial_correlations(vec![denied_approval(request)]);
+    .with_tool_denial_correlations(vec![denied_approval(request).into()]);
 
     let error = input
         .reconstitute()

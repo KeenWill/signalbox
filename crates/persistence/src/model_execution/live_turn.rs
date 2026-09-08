@@ -1,5 +1,4 @@
 use super::load::{load_attachment_blob_facts, load_live_turn_calls, load_origin_contents};
-use super::prepared::map_tool_evidence_error;
 use super::{ModelCallCorruption, ModelCallRepositoryError, map_scheduling_error, required};
 use crate::mapping::{
     accepted_input_id_from_uuid, durable_command_id_from_uuid, input_position_from_numeric,
@@ -22,7 +21,8 @@ use signalbox_domain::{
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, SessionId,
-    ToolApprovalResolution, ToolResultAttemptCorrelation, TurnAttemptId, TurnId,
+    ToolDenialCorrelation, ToolInadmissibleCorrelation, ToolResultAttemptCorrelation,
+    TurnAttemptId, TurnId,
 };
 use sqlx::postgres::PgRow;
 use sqlx::types::Uuid;
@@ -965,7 +965,7 @@ async fn load_delegated_consumed_steering(
 pub(super) async fn load_tool_inadmissible_correlations(
     connection: &mut PgConnection,
     entries: &[SemanticTranscriptEntry],
-) -> Result<Vec<signalbox_domain::ToolRequest>, ModelCallRepositoryError> {
+) -> Result<Vec<ToolInadmissibleCorrelation>, ModelCallRepositoryError> {
     let requests = entries
         .iter()
         .filter_map(|entry| match entry.payload() {
@@ -973,17 +973,42 @@ pub(super) async fn load_tool_inadmissible_correlations(
             _ => None,
         })
         .collect::<Vec<_>>();
-    Ok(crate::tool_loop::load_requests_by_id(connection, &requests)
-        .await
-        .map_err(map_tool_evidence_error)?
-        .into_values()
+    load_tool_inadmissibility_facts(
+        connection,
+        &requests.iter().map(|id| id.into_uuid()).collect::<Vec<_>>(),
+    )
+    .await
+}
+
+pub(super) async fn load_tool_inadmissibility_facts(
+    connection: &mut PgConnection,
+    requests: &[Uuid],
+) -> Result<Vec<ToolInadmissibleCorrelation>, ModelCallRepositoryError> {
+    let rows: Vec<(Uuid, Uuid, Uuid, Uuid, bool)> = sqlx::query_as(
+        "SELECT request_id, session_id, turn_id, producing_model_call_id, inadmissible_reason IS NOT NULL
+           FROM tool_request WHERE request_id = ANY($1)",
+    )
+    .bind(requests)
+    .fetch_all(connection)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(request, session, turn, producing_call, inadmissible)| ToolInadmissibleCorrelation {
+                request: signalbox_domain::ToolRequestId::from_uuid(request),
+                session: session_id_from_uuid(session),
+                turn: TurnId::from_uuid(turn),
+                producing_call: ModelCallId::from_uuid(producing_call),
+                inadmissible,
+            },
+        )
         .collect())
 }
 
 pub(super) async fn load_tool_denial_correlations(
     connection: &mut PgConnection,
     frontier_entries: &[SemanticTranscriptEntry],
-) -> Result<Vec<ToolApprovalResolution>, ModelCallRepositoryError> {
+) -> Result<Vec<ToolDenialCorrelation>, ModelCallRepositoryError> {
     let requests = frontier_entries
         .iter()
         .filter_map(|entry| match entry.payload() {
@@ -991,27 +1016,33 @@ pub(super) async fn load_tool_denial_correlations(
             _ => None,
         })
         .collect::<Vec<_>>();
+    load_tool_denial_facts(connection, &requests).await
+}
+
+pub(super) async fn load_tool_denial_facts(
+    connection: &mut PgConnection,
+    requests: &[Uuid],
+) -> Result<Vec<ToolDenialCorrelation>, ModelCallRepositoryError> {
     if requests.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query(
-        "SELECT approval.request_id, approval.decision_kind,
-                approval.decision_source, approval.denial_reason,
-                approval.user_command_id,
-                approval.delegate_model_selection_id,
-                approval.delegate_model_call_id, approval.rationale
-           FROM tool_approval_decision AS approval
-          WHERE approval.request_id = ANY($1)",
+    let rows: Vec<(Uuid, bool)> = sqlx::query_as(
+        "SELECT request_id, decision_kind = 'deny'
+           FROM tool_approval_decision WHERE request_id = ANY($1)",
     )
-    .bind(&requests)
-    .fetch_all(&mut *connection)
+    .bind(requests)
+    .fetch_all(connection)
     .await?;
     if rows.len() != requests.len() {
         return Err(ModelCallCorruption::Inconsistent("tool-denial resolution ownership").into());
     }
-    crate::tool_loop::decode_approvals(connection, rows)
-        .await
-        .map_err(map_tool_evidence_error)
+    Ok(rows
+        .into_iter()
+        .map(|(request, denied)| ToolDenialCorrelation {
+            request: signalbox_domain::ToolRequestId::from_uuid(request),
+            denied,
+        })
+        .collect())
 }
 
 pub(super) async fn load_tool_result_correlations(

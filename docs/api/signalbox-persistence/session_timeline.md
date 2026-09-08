@@ -14,6 +14,7 @@ pub enum SessionTimelineCorruption {
     ItemProjectionOverflow,
     DetailProjectionOverflow,
     MissingDetailRecord,
+    InvalidStoredValue(&'static str),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for session_timeline::SessionTimelineCorruption {

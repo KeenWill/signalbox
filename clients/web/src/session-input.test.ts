@@ -1,4 +1,10 @@
 import { afterEach, expect, expectTypeOf, it, vi } from 'vitest'
+import {
+  detailItems,
+  detailPage,
+  resultCursor,
+  toolResultItem,
+} from '../e2e/session-detail-fixture'
 import type {
   WebSessionTimelineDetailPage,
   WebTimelineDetailContinuation,
@@ -481,9 +487,9 @@ it('reads only new transcript addresses and keeps appended text within the item 
 it('loads messages beyond metadata-only detail pages within the scan budget', async () => {
   const metadata = Array.from({ length: 4 }, (_, index) => ({
     address: { event_sequence: String(index + 1) },
-    kind: 'injection_settled',
+    kind: 'session_state_changed',
     projected_body_bytes: 128,
-    body: { type: 'event_fact', kind: 'injection_settled' },
+    body: { type: 'session_state', state: 'waiting' },
   }))
   const message = inputPage(1)
   message.items = message.items.map((item) => ({ ...item, address: { event_sequence: '5' } }))
@@ -526,9 +532,9 @@ it.each([
         session_id: sessionId,
         items: Array.from({ length: count }, (_, index) => ({
           address: { event_sequence: String(index + 1) },
-          kind: 'injection_settled',
+          kind: 'session_state_changed',
           projected_body_bytes: bytes / count,
-          body: { type: 'event_fact', kind: 'injection_settled' },
+          body: { type: 'session_state', state: 'waiting' },
         })),
         projected_body_bytes: bytes,
         continuation,
@@ -539,7 +545,12 @@ it.each([
     const held = await readExtendedSessionTranscript(
       window,
       null,
-      { ...limits, max_timeline_detail_bytes: budget, min_timeline_detail_bytes: minimum },
+      {
+        ...limits,
+        max_timeline_detail_items: 8,
+        max_timeline_detail_bytes: budget,
+        min_timeline_detail_bytes: minimum,
+      },
       null,
     )
     expect(fetch).toHaveBeenCalledTimes(1)
@@ -633,6 +644,22 @@ it('relays provider text and replaces the follow stream when its consumer reques
   expect(fetch).toHaveBeenCalledTimes(3)
 })
 
+it.each([
+  { max_timeline_detail_items: 0, max_timeline_detail_bytes: 256 },
+  { max_timeline_detail_items: 129, max_timeline_detail_bytes: 256 },
+  { max_timeline_detail_items: 1.5, max_timeline_detail_bytes: 256 },
+  { max_timeline_detail_items: 1, max_timeline_detail_bytes: 255 },
+  { max_timeline_detail_items: 1, max_timeline_detail_bytes: 65537 },
+  { max_timeline_detail_items: 1, max_timeline_detail_bytes: Number.NaN },
+])('rejects invalid advertised detail limits before fetching %j', async (advertised) => {
+  const fetch = vi.fn()
+  vi.stubGlobal('fetch', fetch)
+  await expect(
+    readTranscript(sessionId, '1', '1', null, { ...limits, ...advertised }),
+  ).rejects.toThrow('advertised timeline detail limits')
+  expect(fetch).not.toHaveBeenCalled()
+})
+
 it('reuses a held first page with a server continuation when its window is unchanged', async () => {
   const page = {
     ...inputPage(8),
@@ -678,3 +705,265 @@ it('retains the paginated first page and continuation when the tail grows', asyn
   expect(extended.through).toBe('10')
   expect(fetch).toHaveBeenCalledTimes(1)
 })
+
+it('stops a bookkeeping scan at the workspace record budget regardless of history length', async () => {
+  const fetch = vi.fn(async (url: string) => {
+    const query = new URL(url, 'http://localhost').searchParams
+    const first = Number(query.get('cursor_address') ?? '1')
+    const count = Number(query.get('max_items'))
+    return Response.json({
+      session_id: sessionId,
+      items: Array.from({ length: count }, (_, index) => ({
+        address: { event_sequence: String(first + index) },
+        kind: 'session_state_changed',
+        projected_body_bytes: 128,
+        body: { type: 'session_state', state: 'waiting' },
+      })),
+      projected_body_bytes: count * 128,
+      continuation: { type: 'more_at', address: { event_sequence: String(first + count) } },
+    })
+  })
+  vi.stubGlobal('fetch', fetch)
+  const result = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '1000000' },
+    null,
+    limits,
+    null,
+  )
+  expect(fetch).toHaveBeenCalledTimes(10)
+  expect(result.page.items).toEqual([])
+  expect(result.page.continuation).toEqual({ type: 'more_at', address: { event_sequence: '81' } })
+  expect(result.rawPage.items).toHaveLength(8)
+  expect(result.rawPage.items[0]?.address.event_sequence).toBe('73')
+  expect(result.rawPage.projected_body_bytes).toBe(8 * 128)
+})
+
+it.each(['unchanged', 'body facts', 'byte total'] as const)(
+  'validates the held chunk at a manual body continuation: %s',
+  async (change) => {
+    const cursor = {
+      address: { event_sequence: '1' },
+      field: 'input_text' as const,
+      member_index: 0,
+      offset_bytes: '1',
+    }
+    const initial = inputPage(1)
+    const firstItem = initial.items[0]!
+    const firstPage = {
+      ...initial,
+      items: [
+        {
+          ...firstItem,
+          body: {
+            ...firstItem.body,
+            text: {
+              ...firstItem.body.text,
+              total_bytes: '2',
+              continuation: cursor,
+            },
+          },
+        },
+      ],
+      continuation: { type: 'more_body' as const, body: cursor },
+    }
+    const next = inputPage(1, change === 'byte total' ? 2 : 1)
+    const nextItem = next.items[0]!
+    nextItem.body.text.offset_bytes = '1'
+    nextItem.body.text.total_bytes = change === 'byte total' ? '3' : '2'
+    if (change === 'body facts') nextItem.body.turn_id = '00000000-0000-0000-0000-000000000992'
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(firstPage))
+      .mockResolvedValueOnce(Response.json(next))
+    vi.stubGlobal('fetch', fetch)
+    const window = { sessionId, first: '1', through: '1' }
+    const held = await readExtendedSessionTranscript(window, null, limits, null)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const result = readExtendedSessionTranscript(
+      window,
+      held.page.continuation ?? null,
+      limits,
+      held,
+    )
+    if (change === 'unchanged')
+      await expect(result).resolves.toMatchObject({
+        page: {
+          items: next.items,
+          projected_body_bytes: next.projected_body_bytes,
+          continuation: next.continuation,
+        },
+      })
+    else await expect(result).rejects.toThrow('Continued detail changed')
+    expect(fetch).toHaveBeenCalledTimes(2)
+  },
+)
+
+it.each(['unchanged', 'body facts', 'byte total'] as const)(
+  'validates a hidden body across a manual continuation: %s',
+  async (change) => {
+    const cursor = {
+      address: { event_sequence: '1' },
+      field: 'goal_text' as const,
+      member_index: 0,
+      offset_bytes: '1',
+    }
+    const item = {
+      address: cursor.address,
+      kind: 'goal_changed' as const,
+      projected_body_bytes: 129,
+      body: {
+        type: 'goal_event' as const,
+        session_id: sessionId,
+        event: {
+          type: 'blocked' as const,
+          generation: '1',
+          reason: 'user_input_required' as const,
+          text: { text: 'a', offset_bytes: '0', total_bytes: '2', continuation: cursor },
+        },
+      },
+    }
+    const next = {
+      ...item,
+      projected_body_bytes: change === 'byte total' ? 130 : 129,
+      body: {
+        ...item.body,
+        event: {
+          ...item.body.event,
+          generation: change === 'body facts' ? '2' : '1',
+          text: {
+            text: change === 'byte total' ? 'bc' : 'b',
+            offset_bytes: '1',
+            total_bytes: change === 'byte total' ? '3' : '2',
+            continuation: null,
+          },
+        },
+      },
+    }
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          ...detailPage([item], { type: 'more_body', body: cursor }),
+          session_id: sessionId,
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ ...detailPage([next]), session_id: sessionId }))
+    vi.stubGlobal('fetch', fetch)
+    const window = { sessionId, first: '1', through: '1' }
+    const held = await readExtendedSessionTranscript(window, null, limits, null)
+    expect(held.page.items).toEqual([])
+    const result = readExtendedSessionTranscript(window, held.page.continuation, limits, held)
+    if (change === 'unchanged')
+      await expect(result).resolves.toMatchObject({ page: { items: [], continuation: null } })
+    else await expect(result).rejects.toThrow('Continued detail changed')
+    expect(fetch).toHaveBeenCalledTimes(2)
+  },
+)
+
+it.each(['one response', 'scan continuation', 'window extension'] as const)(
+  'retains one failed outcome per turn and cause across %s',
+  async (boundary) => {
+    const terminal = {
+      address: { event_sequence: '1' },
+      kind: 'turn_failed' as const,
+      projected_body_bytes: 128,
+      body: {
+        type: 'turn_lifecycle' as const,
+        turn_id: sessionId,
+        lifecycle: 'terminalized' as const,
+        cause_code: 'failed',
+      },
+    }
+    const duplicate = { ...terminal, address: { event_sequence: '2' } }
+    const otherTurn = {
+      ...terminal,
+      address: { event_sequence: '3' },
+      body: { ...terminal.body, turn_id: '00000000-0000-0000-0000-000000000992' },
+    }
+    const otherCause = {
+      ...terminal,
+      address: { event_sequence: '4' },
+      kind: 'turn_cancelled' as const,
+      body: { ...terminal.body, cause_code: 'cancelled' },
+    }
+    const items = [terminal, duplicate, otherTurn, otherCause]
+    const page = (
+      selected: WebSessionTimelineDetailPage['items'],
+      continuation: WebTimelineDetailContinuation | null = null,
+    ) => Response.json({ ...detailPage(selected, continuation), session_id: sessionId })
+    const fetch = vi.fn()
+    if (boundary === 'one response') fetch.mockResolvedValueOnce(page(items))
+    else
+      fetch
+        .mockResolvedValueOnce(
+          page(
+            [terminal],
+            boundary === 'scan continuation'
+              ? { type: 'more_at', address: duplicate.address }
+              : null,
+          ),
+        )
+        .mockResolvedValueOnce(page(items.slice(1)))
+    vi.stubGlobal('fetch', fetch)
+    const window = { sessionId, first: '1', through: '4' }
+    const held =
+      boundary === 'window extension'
+        ? await readExtendedSessionTranscript({ ...window, through: '1' }, null, limits, null)
+        : null
+    const result = await readExtendedSessionTranscript(window, null, limits, held)
+    expect(result.page.items).toEqual([terminal, otherTurn, otherCause])
+    expect(result.page.projected_body_bytes).toBe(3 * 128)
+    expect(fetch).toHaveBeenCalledTimes(boundary === 'one response' ? 1 : 2)
+  },
+)
+
+it.each(['retained', 'outside the window'] as const)(
+  'deduplicates appended tool arguments against requests %s',
+  async (prior) => {
+    const argumentsItem = structuredClone(detailItems[1])!
+    if (argumentsItem.body.type !== 'tool_batch') throw new Error('tool fixture missing')
+    const proposal = {
+      ...argumentsItem,
+      address: { event_sequence: '1' },
+      body: {
+        ...argumentsItem.body,
+        state: { type: 'proposed' as const, frontier_id: sessionId },
+        tools: argumentsItem.body.tools.map((tool) => ({
+          ...tool,
+          evidence: { ...tool.evidence, result_present: false },
+        })),
+      },
+    }
+    const message = { ...detailItems[0]!, address: { event_sequence: '2' } }
+    const repeated = { ...argumentsItem, address: { event_sequence: '3' } }
+    const output = { ...toolResultItem(), address: { event_sequence: '3' } }
+    const cursor = {
+      ...resultCursor,
+      body: { ...resultCursor.body, address: { event_sequence: '3' } },
+    }
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(detailPage([proposal, message])))
+      .mockResolvedValueOnce(Response.json(detailPage([repeated], cursor)))
+      .mockResolvedValueOnce(Response.json(detailPage([output])))
+    vi.stubGlobal('fetch', fetch)
+    const held = await readExtendedSessionTranscript(
+      { sessionId, first: '1', through: '2' },
+      null,
+      limits,
+      null,
+    )
+    const result = await readExtendedSessionTranscript(
+      { sessionId, first: prior === 'retained' ? '1' : '2', through: '3' },
+      null,
+      limits,
+      held,
+    )
+    expect(result.page.items).toEqual(
+      prior === 'retained' ? [proposal, message, output] : [message, repeated, output],
+    )
+    expect(result.page.projected_body_bytes).toBe(
+      result.page.items.reduce((sum, item) => sum + item.projected_body_bytes, 0),
+    )
+  },
+)

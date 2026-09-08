@@ -9,8 +9,9 @@ use super::{
     ScriptedModelCallProvider, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId, ToolRequestId,
     TurnId, UnusedAuthorization, UnusedObservation, UserContent, counted_frontier_bytes,
-    credential_reference, identity, projected_frontier_content_bytes, ready_with_tool_evidence,
-    render_frontier_messages, rendered_content_bytes, tool_round_saturated_fixture,
+    credential_reference, identity, projected_frontier_container_bytes,
+    projected_frontier_content_bytes, ready_with_tool_evidence, render_frontier_messages,
+    rendered_content_bytes, tool_round_saturated_fixture,
     tool_round_saturated_fixture_with_assistant_text,
 };
 
@@ -246,6 +247,10 @@ fn projected_frontier_content_bytes_counts_every_payload_kind_the_render_clones(
         |accepted_input| origin_contents.get(&accepted_input),
         std::iter::empty(),
     );
+    let container_bytes = projected_frontier_container_bytes(
+        entries.iter().map(|(_, payload)| payload),
+        |accepted_input| origin_contents.get(&accepted_input),
+    );
     let messages = render_frontier_messages(
         entries.iter().map(|(source, payload)| (*source, payload)),
         |accepted_input| origin_contents.get(&accepted_input).cloned(),
@@ -253,6 +258,20 @@ fn projected_frontier_content_bytes_counts_every_payload_kind_the_render_clones(
         std::iter::empty(),
     )
     .expect("the payload fixture renders");
+    let rendered_container_bytes = std::mem::size_of_val(messages.as_ref())
+        + messages
+            .iter()
+            .map(|message| match message {
+                super::ModelConversationMessage::User { content, .. } => {
+                    std::mem::size_of_val(content.parts())
+                }
+                _ => 0,
+            })
+            .sum::<usize>();
+    assert_eq!(
+        container_bytes, rendered_container_bytes,
+        "non-rendering imports and terminal markers must not spend message container bytes"
+    );
 
     assert_eq!(
         counted,
@@ -290,7 +309,10 @@ fn projected_frontier_content_bytes_counts_every_payload_kind_the_render_clones(
 fn assistant_text_over_bound_frontiers_are_refused_before_any_clone() {
     let assistant_text = "assistant prose that no tool-evidence accounting would ever see";
     let (plain_request, plain_entries, _) = tool_round_saturated_fixture(2);
-    let plain_bytes = counted_frontier_bytes(&plain_request, &plain_entries);
+    let plain_bytes = counted_frontier_bytes(&plain_request, &plain_entries)
+        + plain_request.frontier_entries().count()
+            * std::mem::size_of::<super::ModelConversationMessage>()
+        + std::mem::size_of::<super::ModelUserContentPart>();
     // Control: at this exact ceiling the same frontier without the text
     // renders, so the refusal below is caused by the text and not by a
     // ceiling too small for the fixture's tool evidence.
@@ -320,7 +342,9 @@ fn assistant_text_over_bound_frontiers_are_refused_before_any_clone() {
     assert_eq!(
         error,
         ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {
-            observed_bytes: plain_bytes + assistant_text.len(),
+            observed_bytes: plain_bytes
+                + assistant_text.len()
+                + std::mem::size_of::<super::ModelConversationMessage>(),
             limit_bytes: plain_bytes,
         },
         "the refusal must report the assistant text it counted"
@@ -471,7 +495,7 @@ async fn retained_frontier_content_limit_fires_before_provider_entry() {
     );
     assert!(
         telemetry.contains("terminal_outcome=\"tool_round_limit_reached\""),
-        "the service terminalization must expose the tool_round_limit_reached label"
+        "the service terminalization must expose the tool_round_limit_reached label: {telemetry}"
     );
     let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
     assert_eq!(prepare.calls, 1);
@@ -495,4 +519,136 @@ async fn retained_frontier_content_limit_fires_before_provider_entry() {
         "an over-bound turn must not reach provider interaction"
     );
     assert!(retained.is_none());
+}
+
+#[test]
+fn message_cardinality_spends_the_retained_representation_budget() {
+    let (many_request, tool_entries, _) = tool_round_saturated_fixture(64);
+    let content_bytes = counted_frontier_bytes(&many_request, &tool_entries);
+    let single_request = super::support::prepared_execution_with_content_fixture(
+        UserContent::try_text("x".repeat(content_bytes)).expect("fixture text"),
+    )
+    .resume_prepared_call()
+    .expect("fixture call resumes");
+    let limit = content_bytes
+        + single_request.frontier_entries().count()
+            * std::mem::size_of::<super::ModelConversationMessage>()
+        + std::mem::size_of::<super::ModelUserContentPart>();
+    PreparedModelOperation::render_within(
+        single_request,
+        credential_reference(),
+        None,
+        Box::new([]),
+        &[],
+        &[],
+        limit,
+    )
+    .expect("one message fits with the same total payload bytes");
+    let result = PreparedModelOperation::render_within(
+        many_request,
+        credential_reference(),
+        None,
+        Box::new([]),
+        &tool_entries,
+        &[],
+        limit,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded { .. })
+        ),
+        "many short messages spend more retained representation bytes: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn evidence_loading_limit_closes_before_provider_preparation() {
+    let (request, _, failed) = tool_round_saturated_fixture(2);
+    let session = request.session();
+    let mut service = ModelCallExecutionService::new(
+        FixedIds::baseline(),
+        FakePrepare {
+            outcomes: [Ok(
+                super::PrepareModelCallOutcome::RetainedContentLimitExceeded {
+                    turn: request.turn(),
+                    call: request.call().id(),
+                },
+            )]
+            .into(),
+            calls: 0,
+        },
+        ScriptedFailure {
+            results: [Ok(failed.clone())].into(),
+            calls: 0,
+            recorded: Vec::new(),
+        },
+        UnusedAuthorization,
+        UnusedObservation,
+        ScriptedModelCallProvider::new([]),
+        InProcessAttemptDispatchGate::default(),
+        None,
+    );
+    assert_eq!(
+        service
+            .execute(session)
+            .with_subscriber(tracing_subscriber::registry())
+            .await
+            .expect("the oversized prepared call closes"),
+        ModelCallExecutionOutcome::ToolRoundLimitReached(Box::new(failed))
+    );
+}
+
+#[test]
+fn attachment_heap_content_spends_the_budget_before_rendering() {
+    let content = UserContent::try_parts(vec![super::UserContentPart::Attachment {
+        digest: super::BlobDigest::digest(b"attachment heap fixture"),
+        kind: super::AttachmentKind::Document,
+        media_type: signalbox_domain::DeclaredMediaType::try_new("\"".repeat(255))
+            .expect("bounded media type"),
+        display_filename: Some(
+            signalbox_domain::AttachmentDisplayFilename::try_new("\u{1}".repeat(255))
+                .expect("bounded filename"),
+        ),
+    }])
+    .expect("one attachment part");
+    let request = super::support::prepared_execution_with_content_fixture(content)
+        .resume_prepared_call()
+        .expect("fixture call resumes");
+    // The canonical stub is 2,242 bytes at u64::MAX, plus two 255-byte metadata values.
+    let expected_heap_bytes = 2_752;
+    let representation_bytes = request.frontier_entries().count()
+        * std::mem::size_of::<super::ModelConversationMessage>()
+        + std::mem::size_of::<super::ModelUserContentPart>();
+    let limit = representation_bytes + expected_heap_bytes;
+    let operation = PreparedModelOperation::render_within(
+        request.clone(),
+        credential_reference(),
+        None,
+        Box::new([]),
+        &[],
+        &[],
+        limit,
+    )
+    .expect("the exact retained allocation fits");
+    assert_eq!(
+        rendered_content_bytes(operation.messages()),
+        expected_heap_bytes
+    );
+    assert_eq!(
+        PreparedModelOperation::render_within(
+            request,
+            credential_reference(),
+            None,
+            Box::new([]),
+            &[],
+            &[],
+            limit - 1,
+        )
+        .expect_err("attachment heap content exceeds the one-byte-smaller budget"),
+        ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {
+            observed_bytes: limit,
+            limit_bytes: limit - 1,
+        }
+    );
 }
