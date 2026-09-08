@@ -29,6 +29,9 @@ reader, and validates through that reader. It ends as a validated file, as
 unknown bytes with no views, or as a typed failure. A read selects one declared
 view and returns bounded UTF-8 or JSON with a completeness or continuation fact.
 
+Archive ZIP parsing bounds cumulative bytes visited, including rescans and
+nested-content detection; exhausted scan work is a limit failure.
+
 Each format family is one adapter crate implementing `FileMediaProvider`,
 compiled into its own worker executable.
 `signalbox-file-media-processor-runtime` implements the processor port by
