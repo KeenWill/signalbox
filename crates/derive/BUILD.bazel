@@ -1,5 +1,6 @@
+load("@rust_toolchain_pin//:defs.bzl", "RUSTUP_TOOLCHAIN")
 load("//tooling/bazel:package.bzl", "rust_package")
-load("//tooling/bazel:rust.bzl", "rust_proc_macro")
+load("//tooling/bazel:rust.bzl", "rust_binary", "rust_proc_macro")
 load("//tooling/bazel:testing.bzl", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
 TEST_PROC_MACRO_DEPS = [":signalbox_derive"]
@@ -8,6 +9,13 @@ rust_package()
 
 rust_proc_macro(
     name = "signalbox_derive",
+)
+
+rust_binary(
+    name = "module_sources",
+    srcs = ["src/bin/module_sources.rs"],
+    crate_root = "src/bin/module_sources.rs",
+    visibility = ["//:__pkg__"],
 )
 
 rust_unit_test(
@@ -44,9 +52,13 @@ rust_integration_test(
         allow_empty = True,
         exclude = ["tests/**/*.rs"],
     ) + [],
-    env = {"SIGNALBOX_TEST_MANIFEST": "$(rootpath Cargo.toml)"},
+    env = {
+        "RUSTUP_TOOLCHAIN": RUSTUP_TOOLCHAIN,
+        "SIGNALBOX_TEST_MANIFEST": "$(rootpath Cargo.toml)",
+    },
     env_inherit = [
         "HOME",
+        "PATH",
         "CARGO_HOME",
         "RUSTUP_HOME",
     ],

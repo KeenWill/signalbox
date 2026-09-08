@@ -21,6 +21,7 @@ impl outbox::DispatchedOutboxEvent {
 
 ```rust
 pub enum DispatchedOutboxEventKind {
+    CredentialPoolExhausted(boxed::Box<credential_pool_exhaustion::CredentialPoolExhaustion>),
     SessionCreated(outbox::DispatchedSessionCreation),
     SessionStateChanged(outbox::DispatchedSessionStateChange),
     SessionTerminal(outbox::DispatchedSessionTerminal),

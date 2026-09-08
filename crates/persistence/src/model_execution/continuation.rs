@@ -129,6 +129,12 @@ where
             session,
             turn,
             producing_call,
+            execution
+                .active_turn()
+                .pending_steering()
+                .iter()
+                .map(|pending| pending.accepted_input().into_uuid())
+                .collect(),
             serving_pool_target(credential_families, resolved.target(), fast_mode),
             *limit,
         )
@@ -206,6 +212,11 @@ where
     } else {
         None
     };
+    if let Some(wait) =
+        super::credential_wait::park_initial(connection, &execution, selected.as_ref()).await?
+    {
+        return Ok(PrepareToolContinuationOutcome::CredentialWait(wait));
+    }
     if let Some(SelectedRuntimePoolCredential {
         reference: None,
         policy: Some(policy),
@@ -336,6 +347,7 @@ pub(super) struct ToolContinuationHeadroomEvidence {
     pub(super) usage: ProviderReportedTokenUsage,
     pub(super) input_includes_cache_tokens: bool,
     pub(super) projected_result_content_bytes: u64,
+    pub(super) pending_steering_content_bytes: u64,
     pub(super) limit: ToolContinuationUsageLimit,
 }
 
@@ -344,6 +356,7 @@ async fn load_tool_continuation_headroom_evidence(
     session: SessionId,
     turn: TurnId,
     producing_call: ModelCallId,
+    pending_steering: Vec<sqlx::types::Uuid>,
     current_effective_target: ResolvedProviderTarget,
     limit: ToolContinuationUsageLimit,
 ) -> Result<Option<ToolContinuationHeadroomEvidence>, ModelCallRepositoryError> {
@@ -373,8 +386,12 @@ async fn load_tool_continuation_headroom_evidence(
                 (
                     SELECT COALESCE(SUM(projected.content_bytes), 0)::numeric
                       FROM (
-                            SELECT COALESCE(octet_length(attempt.result_text), 0)
-                                   + COALESCE(octet_length(attempt.error_detail), 0)
+                            SELECT CASE WHEN attempt.error_kind IS NULL THEN
+                                        COALESCE(octet_length(attempt.result_text), 0)
+                                   ELSE octet_length(jsonb_build_object('error',
+                                        jsonb_build_object('kind', attempt.error_kind,
+                                                          'detail', attempt.error_detail))::text)
+                                   END
                                        AS content_bytes
                               FROM semantic_transcript_entry AS entry
                               JOIN tool_attempt AS attempt
@@ -390,7 +407,8 @@ async fn load_tool_continuation_headroom_evidence(
 
                             UNION ALL
 
-                            SELECT COALESCE(octet_length(decision.denial_reason), 0)
+                            SELECT octet_length(jsonb_build_object('error', jsonb_build_object(
+                                        'kind', 'denied', 'detail', decision.denial_reason))::text)
                                        AS content_bytes
                               FROM semantic_transcript_entry AS entry
                               JOIN tool_request AS request
@@ -405,7 +423,9 @@ async fn load_tool_continuation_headroom_evidence(
 
                             UNION ALL
 
-                            SELECT octet_length(request.inadmissible_reason) AS content_bytes
+                            SELECT octet_length(jsonb_build_object('error', jsonb_build_object(
+                                        'kind', 'execution_failed',
+                                        'detail', request.inadmissible_reason))::text) AS content_bytes
                               FROM semantic_transcript_entry AS entry
                               JOIN tool_request AS request ON request.request_id = entry.tool_result_request_id
                                 AND request.session_id = entry.source_session_id
@@ -435,7 +455,13 @@ async fn load_tool_continuation_headroom_evidence(
                                AND request.session_id = model_call.session_id
                                AND request.turn_id = model_call.turn_id
                       ) AS projected
-                ) AS projected_result_content_bytes
+                ) AS projected_result_content_bytes,
+                (SELECT COALESCE(SUM(CASE part.part_kind
+                     WHEN 'attachment' THEN $5::bigint
+                     ELSE COALESCE(octet_length(part.text_value), 0)
+                 END), 0)::numeric
+                   FROM accepted_input_content_part AS part
+                  WHERE part.accepted_input_id = ANY($4)) AS pending_steering_content_bytes
            FROM model_call
           WHERE model_call_id = $1
             AND session_id = $2
@@ -446,6 +472,9 @@ async fn load_tool_continuation_headroom_evidence(
     .bind(producing_call.into_uuid())
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
+    .bind(&pending_steering)
+    .bind(i64::try_from(signalbox_application::MAX_RENDERED_ATTACHMENT_STUB_BYTES)
+        .unwrap_or(i64::MAX))
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
@@ -481,6 +510,9 @@ async fn load_tool_continuation_headroom_evidence(
     let input_includes_cache_tokens = row.try_get("usage_input_includes_cache_tokens")?;
     let projected_result_content_bytes = decode("projected_result_content_bytes")?.ok_or(
         ModelCallCorruption::Missing("projected tool-result content byte count"),
+    )?;
+    let pending_steering_content_bytes = decode("pending_steering_content_bytes")?.ok_or(
+        ModelCallCorruption::Missing("pending steering content byte count"),
     )?;
     let Some(input_tokens) = usage.input_tokens() else {
         return Ok(None);
@@ -525,12 +557,14 @@ async fn load_tool_continuation_headroom_evidence(
         // UTF-8 payload bytes therefore reserve a deliberately conservative
         // allowance for result material appended after the reported input.
         .saturating_add(projected_result_content_bytes)
+        .saturating_add(pending_steering_content_bytes)
         .saturating_add(limit.max_output_tokens())
         > limit.context_window_tokens();
     Ok(exhausted.then_some(ToolContinuationHeadroomEvidence {
         usage,
         input_includes_cache_tokens,
         projected_result_content_bytes,
+        pending_steering_content_bytes,
         limit,
     }))
 }

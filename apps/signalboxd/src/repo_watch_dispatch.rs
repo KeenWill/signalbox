@@ -24,7 +24,12 @@ use signalbox_persistence::{
     },
 };
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::{
+    ffi::OsString,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::PathBuf,
+    sync::Arc,
+};
 use uuid::Uuid;
 
 /// Submits retained commands with checkout provisioning inside the held creation.
@@ -36,9 +41,7 @@ pub async fn submit_pending(
     (),
     signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
 > {
-    let runner = sink.models.daemon_tools().and_then(|tools| {
-        signalbox_tools_exec::TokioProcessRunner::try_new(tools.exec_supervisor_executable()).ok()
-    });
+    let runner = sink.checkout_runner.clone();
     submit_with_checkout(store, configuration, sink, runner).await
 }
 
@@ -78,6 +81,68 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
             &source,
         )
         .await
+}
+
+/// Removes retired dispatch checkouts during startup and lifecycle processing.
+pub async fn scavenge_checkouts(
+    store: &signalbox_module_repo_watch_v2::RepoWatchStore,
+    core: &PgPool,
+) -> Result<(), RepositoryWatchCommandError> {
+    let checkouts = store
+        .checkout_removal_candidates()
+        .await
+        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+    let sessions: Vec<Uuid> = checkouts
+        .iter()
+        .filter(|checkout| checkout.retired_reason.is_none())
+        .map(|checkout| checkout.location.session.into_uuid())
+        .collect();
+    let terminal: std::collections::BTreeSet<Uuid> = if sessions.is_empty() {
+        Default::default()
+    } else {
+        sqlx::query_scalar(
+            "SELECT session_id FROM session_lifecycle WHERE session_id = ANY($1) AND state_kind = 'terminal'",
+        ).bind(&sessions).fetch_all(core)
+        .await
+        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+        .into_iter().collect()
+    };
+    for checkout in checkouts {
+        let session = checkout.location.session;
+        if checkout.retired_reason.is_none() && !terminal.contains(&session.into_uuid()) {
+            continue;
+        }
+        let workspace_root = PathBuf::from(OsString::from_vec(checkout.location.workspace_root));
+        let Ok(roots) = crate::daemon_tools::SessionWorkspaceRoots::try_new(&workspace_root) else {
+            tracing::warn!(
+                reason = "checkout_workspace_root_rejected",
+                "repository-watch checkout removal skipped"
+            );
+            continue;
+        };
+        let removal = tokio::task::spawn_blocking(move || {
+            crate::repo_watch_checkout::remove(
+                &roots,
+                session,
+                checkout.dispatch,
+                checkout.created,
+                checkout.identity,
+            )
+        })
+        .await;
+        if !matches!(removal, Ok(Ok(()))) {
+            tracing::warn!(
+                reason = "checkout_removal_failed",
+                "repository-watch checkout removal failed"
+            );
+            continue;
+        }
+        store
+            .settle_checkout_removal(checkout.command)
+            .await
+            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+    }
+    Ok(())
 }
 
 struct CheckoutCommandSink<'a, Runner> {
@@ -123,7 +188,7 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 _ => StopStickiness::Sticky,
             };
             Some((stop, sticky))
-        } else if checkout.head.as_ref() == Some(context.head_sha()) {
+        } else if checkout.removed || checkout.head.as_ref() == Some(context.head_sha()) {
             None
         } else if let Some(repository) = self
             .configuration
@@ -131,30 +196,56 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
             .iter()
             .find(|repository| repository.repository() == checkout.event.repository())
         {
-            let provisioned = async {
-                let tools = self
-                    .core
-                    .models
-                    .daemon_tools()
-                    .ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Configuration))?;
-                let roots =
-                    crate::daemon_tools::SessionWorkspaceRoots::try_new(tools.workspace_root())
-                        .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
-                let runner = self
-                    .runner
-                    .as_mut()
-                    .ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Configuration))?;
-                crate::repo_watch_checkout::provision(
-                    runner,
-                    &roots,
-                    session,
-                    checkout.event.repository(),
-                    context,
-                    &crate::repo_watch_credentials::RepositoryWatchClientLoader::new(repository),
-                )
-                .await
-            }
-            .await;
+            let location = match checkout.location {
+                Some(location) => Some(location),
+                None => match self.core.models.daemon_tools() {
+                    Some(tools) => Some(
+                        self.store
+                            .retain_checkout_location(
+                                id,
+                                session,
+                                tools.workspace_root().as_os_str().as_bytes(),
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?,
+                    ),
+                    None => None,
+                },
+            };
+            let prepared = (|| {
+                let location =
+                    location.ok_or(CheckoutProvisioningFailed::at(CheckoutStep::Configuration))?;
+                let workspace_root = PathBuf::from(OsString::from_vec(location.workspace_root));
+                let roots = crate::daemon_tools::SessionWorkspaceRoots::try_new(&workspace_root)
+                    .map_err(|_| CheckoutProvisioningFailed::at(CheckoutStep::Workspace))?;
+                crate::repo_watch_checkout::prepare(&roots, location.session, checkout.dispatch)
+            })();
+            let provisioned = match prepared {
+                Ok(mut directory) => {
+                    let retained = self
+                        .store
+                        .retain_checkout_identity(id, directory.identity, directory.created)
+                        .await
+                        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+                    if retained != Some(directory.identity) {
+                        Err(CheckoutProvisioningFailed::at(CheckoutStep::Workspace))
+                    } else if let Some(runner) = self.runner.as_mut() {
+                        crate::repo_watch_checkout::provision(
+                            runner,
+                            &mut directory,
+                            checkout.event.repository(),
+                            context,
+                            &crate::repo_watch_credentials::RepositoryWatchClientLoader::new(
+                                repository,
+                            ),
+                        )
+                        .await
+                    } else {
+                        Err(CheckoutProvisioningFailed::at(CheckoutStep::Configuration))
+                    }
+                }
+                Err(failure) => Err(failure),
+            };
             match provisioned {
                 Ok(()) => {
                     self.store
@@ -298,6 +389,7 @@ impl SessionCommandCodec for RepositoryWatchCommandCodec {
 
 /// Applies seam commands through the ordinary core handlers and interrupt machinery.
 pub struct RepositoryWatchCommandSink {
+    pub checkout_runner: Option<signalbox_tools_exec::TokioProcessRunner>,
     pub pool: PgPool,
     pub models: Arc<HubModelConfiguration>,
     pub eligibility_nudge: InProcessEligibilityNudge,
@@ -311,6 +403,7 @@ pub enum RepositoryWatchCommandError {
     UnsupportedCommand,
     CoreCommandFailed,
     InterruptFailed,
+    CheckoutRemovalFailed,
 }
 
 impl SessionCommandSink for RepositoryWatchCommandSink {
