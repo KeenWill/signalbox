@@ -152,7 +152,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
-    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, with_released_scheduler_admission,
 };
 pub use search::{
     MAX_SEARCH_HIGHLIGHTS_PER_RESULT, SearchArtifactId, SearchArtifactProjection,
