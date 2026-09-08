@@ -762,9 +762,13 @@ export function ProductApp({
       options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
       callback: (event) => {
         if (artifactSheetOwnsFocus) return
+        const searchFormOwnsTarget =
+          surface === 'search' &&
+          event.target instanceof HTMLElement &&
+          event.target.closest('.search-form') !== null
         if (
           (binding.commandId === 'palette.open' ||
-            (binding.commandId === 'surface.escape' && surface !== 'search')) &&
+            (binding.commandId === 'surface.escape' && !searchFormOwnsTarget)) &&
           isEditableTarget(event.target)
         ) {
           return
