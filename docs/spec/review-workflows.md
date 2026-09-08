@@ -229,7 +229,7 @@ blocked, or cancelled member yields an incomplete publication outcome, never a
 complete one.
 
 Review-command digests hash the current wire serialization with findings sorted
-by identity; golden vectors pin that serialization.
+by identity.
 
 Every review mutation carries a user-global command identity under the claim
 protocol

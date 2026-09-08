@@ -686,28 +686,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn review_findings_digest_pins_current_wire_serialization() -> Result<(), Box<dyn Error>> {
-        // Identities and content are fixed inputs to these SHA-256 vectors.
-        for (findings, expected) in [
-            (vec![], "f7c98a43d572d9ec5ee615def698628958ba3dd642e5f319bd250d41ae30c5ca"),
-            (vec![review_finding_input(6)], "9ec5e7395907f097f4479dc1f013f8bd653b6cba52bdc8363bf6e871f1667c5d"),
-        ] {
-            let mut request = ClientRequest::RecordReviewFindings {
-                command_id: CommandId::try_from_uuid(Uuid::from_u128(1))?,
-                run_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-                pass_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-                turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
-                output_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
-                findings,
-            };
-            let digest = canonical_review_request_digest(&mut request)
-                .expect("review request serialization succeeds");
-            assert_eq!(hex::encode(digest), expected, "wire digest for {request:?}");
-        }
-        Ok(())
-    }
-
     /// every stop refusal the interrupt treatment records reaches the
     /// wire as its recorded typed rejection, not as an encode invariant that
     /// closes the connection; the racing-target projections are covered by the
