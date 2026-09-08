@@ -202,11 +202,13 @@ identities and the deadline. When every bounded member becomes excluded,
 admission reruns the exhaustion policy and converts to exhausted-wait in place
 or terminalizes. Startup re-evaluates contended waits against current
 registrations and retained reservations; restart alone grants no eligibility.
-The daemon rechecks retained invocation groups until their exit permits
-reservation release. Startup and periodic recovery release null-group
-reservations once the call is terminal; live calls retain their reservations.
-Failed registration retains the observed group through cleanup so proven group
-exit releases capacity while the call retains its boundary-loss outcome.
+Invocation identity retains the process-group ID and its leader's start time; a
+reused numeric ID does not retain the prior invocation's reservation. The daemon
+rechecks retained invocation groups until their exit permits reservation
+release. Startup and periodic recovery release null-group reservations once the
+call is terminal; live calls retain their reservations. Failed registration
+retains the observed group through cleanup so proven group exit releases
+capacity while the call retains its boundary-loss outcome.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
 wait attempt and closed cause. Transcript reads and initial follow snapshots

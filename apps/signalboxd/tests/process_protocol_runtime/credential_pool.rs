@@ -243,7 +243,9 @@ async fn pool_projection_capacity_recovery_retains_live_groups_and_releases_ende
     observer.finished(call, None, true).await;
     observer.recover().await?;
     assert_eq!(
-        credential_invocations::process_group(&runtime.pool, call).await?,
+        credential_invocations::process_group(&runtime.pool, call)
+            .await?
+            .map(|(group, _)| group),
         Some(group),
         "completion and startup require proof that the invocation group ended"
     );
