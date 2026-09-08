@@ -2385,6 +2385,7 @@ fn parse_review_thread(
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     let comments = comment_nodes
         .iter()
+        .take(bounds.result_items().unwrap_or(usize::MAX))
         .map(|value| parse_review_thread_comment(bounds, value))
         .collect::<Result<Vec<_>, _>>()?;
     ReviewThread::try_new(
@@ -2396,10 +2397,8 @@ fn parse_review_thread(
             path: required_string(object, "path")?,
             line: optional_u64(object, "line")?,
             comments,
-            comments_truncated: nested_bool(
-                required(object, "comments")?,
-                &["pageInfo", "hasNextPage"],
-            )?,
+            comments_truncated: !bounds.permits_result_items(comment_nodes.len())
+                || nested_bool(required(object, "comments")?, &["pageInfo", "hasNextPage"])?,
         },
     )
     .ok_or(CodeHostTransportFailure::InvalidResponse)
@@ -5407,8 +5406,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_threads_truncates_completed_comments_to_the_configured_bound() {
+        let (mut transport, listener) = graphql_test_transport().await;
+        // One retained comment makes the two-page fixture exceed the configured item bound.
+        transport.bounds.result_items = Some(1);
+        let server = tokio::spawn(async move {
+            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await;
+            serve_graphql_response(&listener, &thread_comments_response()).await
+        });
+        let arguments = serde_json::from_value(
+            serde_json::json!({"repository": "owner/repository", "number": 17}),
+        )
+        .expect("review arguments decode");
+        let result = transport
+            .review_threads(arguments, &test_credential())
+            .await
+            .expect("over-bound comments produce a bounded result")
+            .into_json_value();
+        repository_server_result(server).await;
+        assert_eq!(
+            result["threads"][0]["comments"]
+                .as_array()
+                .expect("comments")
+                .len(),
+            1
+        );
+        assert_eq!(result["threads"][0]["comments"][0]["id"], "PRRC_first");
+        assert_eq!(result["threads"][0]["comments_truncated"], true);
+    }
+
+    #[tokio::test]
     async fn inventory_classifies_disposition_on_later_comment_page() {
-        let (transport, listener) = graphql_test_transport().await;
+        let (mut transport, listener) = graphql_test_transport().await;
+        // Classification must still consume evidence beyond the model-facing comment bound.
+        transport.bounds.result_items = Some(1);
         let server = tokio::spawn(async move {
             serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await;
             serve_graphql_response(&listener, &thread_comments_response()).await
