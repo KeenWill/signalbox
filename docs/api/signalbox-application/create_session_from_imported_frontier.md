@@ -8,6 +8,13 @@
 pub struct CreateSessionFromImportedFrontierRequest {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl CreateSessionFromImportedFrontierRequest {
+    pub fn with_runner_placement(
+        self,
+        placement: option::Option<signalbox_domain::SessionRunnerPlacementRequest>,
+    ) -> Self;
+    pub const fn runner_placement(
+        &self,
+    ) -> option::Option<&signalbox_domain::SessionRunnerPlacementRequest>;
     pub fn try_new(
         command_id: signalbox_domain::DurableCommandId,
         imported_frontier: signalbox_domain::ImportedTranscriptFrontier,
