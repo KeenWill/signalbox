@@ -100,6 +100,47 @@ const useDeterministicSession = async (
   await page.route('**/api/sessions/**', (route) => {
     const pathname = new URL(route.request().url()).pathname
     const requestedSessionId = decodeURIComponent(pathname.split('/')[3] ?? '')
+    if (pathname.endsWith('/timeline-detail')) {
+      const query = new URL(route.request().url()).searchParams
+      const items = ['41', '42', '43']
+        .filter(
+          (address) =>
+            BigInt(address) >= BigInt(query.get('first') ?? '41') &&
+            BigInt(address) <= BigInt(query.get('through') ?? '43'),
+        )
+        .map((address) => {
+          const kind =
+            timelineKind(requestedSessionId, address) ??
+            (address === '41'
+              ? 'input_accepted'
+              : address === '42'
+                ? 'turn_activated'
+                : 'turn_completed')
+          const body =
+            kind === 'input_accepted'
+              ? {
+                  type: 'user_input',
+                  turn_id: requestedSessionId,
+                  text: { text: '', offset_bytes: '0', total_bytes: '0', continuation: null },
+                  attachments: [],
+                }
+              : {
+                  type: 'turn_lifecycle',
+                  turn_id: requestedSessionId,
+                  lifecycle: kind === 'turn_activated' ? 'activated' : 'terminalized',
+                  cause_code: kind.slice('turn_'.length),
+                }
+          return { address: { event_sequence: address }, kind, body, projected_body_bytes: 128 }
+        })
+      return route.fulfill({
+        json: {
+          session_id: requestedSessionId,
+          items,
+          projected_body_bytes: items.length * 128,
+          continuation: null,
+        },
+      })
+    }
     if (pathname.endsWith('/timeline')) {
       if (shouldFailTimeline(requestedSessionId)) {
         return route.fulfill({ status: 503, body: 'temporarily unavailable' })
@@ -468,12 +509,13 @@ test('opens and inspects a bounded production session without a mouse', async ({
   const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByRole('paragraph').filter({ hasText: /^Active$/ })).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
   await expect(page.getByRole('form', { name: 'Message composer' })).toBeVisible()
-  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
-  await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
+  const timeline = page.getByRole('grid', { name: 'Session timeline' })
+  await expect(page.getByRole('row', { name: /41 input accepted/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
@@ -485,16 +527,18 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await page.keyboard.press('Tab')
   await expect(reconnect).toBeFocused()
   await page.keyboard.press('Tab')
+  await expect(page.getByRole('checkbox', { name: 'Events', exact: true })).toBeFocused()
+  await page.keyboard.press('Tab')
   await expect(timeline).toBeFocused()
   await latest.focus()
   await page.keyboard.press('j')
   await expect(timeline).toBeFocused()
-  await expect(page.getByRole('option', { name: /42 turn activated/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /42 turn activated/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
 
-  const completed = page.getByRole('option', { name: /43 turn completed/ })
+  const completed = page.getByRole('row', { name: /43 turn completed/ })
   await completed.click()
   await expect(timeline).toBeFocused()
   await expect(completed).toHaveAttribute('aria-controls', 'session-timeline-detail-43')
@@ -502,23 +546,21 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.locator('#session-timeline-disclosure-43')).toHaveText('Expanded')
   await expect(page.locator('#session-timeline-detail-43')).toBeVisible()
   await expect(
-    page.getByText('Durable event metadata; message text appears in the transcript above'),
+    page.getByRole('article', { name: 'turn completed detail' }).getByText('terminalized'),
   ).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Inspector', exact: true })).toHaveCount(0)
 
-  const accepted = page.getByRole('option', { name: /41 input accepted/ })
-  await accepted.click()
+  const accepted = page.getByRole('row', { name: /41 input accepted/ })
+  await accepted.getByText('input accepted', { exact: true }).click()
   await expect(page.locator('#session-timeline-detail-41')).toBeVisible()
-  await expect(
-    page.getByRole('region', { name: 'transcript attachments unavailable' }),
-  ).toBeVisible()
-  await accepted.click()
+  await expect(page.getByRole('region', { name: 'User input', exact: true })).toBeVisible()
+  await accepted.getByText('input accepted', { exact: true }).click()
   await expect(page.locator('#session-timeline-detail-41')).toBeHidden()
 
   const first = page.getByRole('button', { name: /First/ })
   await first.click()
   await expect(first).toBeFocused()
-  await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /41 input accepted/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
@@ -537,6 +579,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.locator('.session-item-summary small').first()).toBeHidden()
 
@@ -547,6 +590,7 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   const reopenedSessionId = page.getByRole('textbox', { name: 'Session ID' })
   await reopenedSessionId.fill(sessionWorkspaceFixture.id)
   await reopenedSessionId.press('Enter')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
 
   await expect(page.locator('.session-item-summary small').first()).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -561,14 +605,15 @@ test('keeps palette selection commands focused on the Session timeline', async (
   const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  const timeline = page.getByRole('grid', { name: 'Session timeline' })
   await expect(timeline).toBeVisible()
 
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await page.getByRole('button', { name: /Select next timeline item/ }).click()
 
   await expect(timeline).toBeFocused()
-  await expect(page.getByRole('option', { name: /42 turn activated/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /42 turn activated/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
@@ -585,7 +630,8 @@ test('preserves the saved row when reopening the current Session fails', async (
   const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  await page.getByRole('option', { name: /43 turn completed/ }).click()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  await page.getByRole('row', { name: /43 turn completed/ }).click()
 
   failTimeline = true
   await sessionId.press('Enter')
@@ -623,7 +669,8 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
   const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  await page.getByRole('option', { name: /43 turn completed/ }).click()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  await page.getByRole('row', { name: /43 turn completed/ }).click()
 
   await sessionId.fill(otherSessionId)
   await sessionId.press('Enter')
@@ -662,13 +709,14 @@ test('clears cached Session projections after a refetch error', async ({ page })
   const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeVisible()
 
   failTimeline = true
   await page.getByRole('button', { name: /Latest/ }).click()
 
   await expect(page.getByRole('alert')).toContainText('Session unavailable')
-  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toHaveCount(0)
+  await expect(page.getByRole('grid', { name: 'Session timeline' })).toHaveCount(0)
   await expect(
     page
       .getByRole('complementary', { name: 'Inspector', exact: true })
@@ -697,7 +745,8 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
   const sessionId = page.getByRole('textbox', { name: 'Session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  await expect(page.getByRole('option', { name: /43 turn completed/ })).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  await expect(page.getByRole('row', { name: /43 turn completed/ })).toBeVisible()
 
   contradictRetainedEvent = true
   await page.getByRole('button', { name: /Latest/ }).click()

@@ -103,24 +103,26 @@ shell title.
 The browser read plane serves a session catalog with attention states, a live
 projection and follow stream for one session, a timeline of durable events with
 typed detail, and lexical search. Its request and response shapes live in
-`crates/web-contract`. `POST /api/sessions/{session_id}/input` submits browser
-text with a user-global command ID through the operator submit-input path,
-starting only when no turn is active. The browser keeps the message composer
-visible below the scrolling session history, with scroll access when a resized
-composer exceeds the available viewport. A 204 response acknowledges durable
-acceptance; typed errors report rejection, and an unconfirmed outcome is retried
-with the same command ID and text. Browser drafts are limited to 65,536 UTF-16
-code units before serialization; the serialized request must fit the JSON byte
-limit. Input requests have a 30-second deadline, after which an unacknowledged
-command remains available for retry. Browser submissions use the session model
-and inherit all per-input model settings; replay requires those same choices.
-Accepted browser input and its equal replay nudge the daemon's eligibility work
-source. Unconfirmed commands remain in browser application state by session
-across navigation until acknowledged or rejected. At most four sessions may
-retain unresolved input; new submissions at that limit are refused with a
-visible reason, while retries remain available. A bounded rates read reports
-lifecycle state, turn outcome counts, the latest failed turn and its provider
-cause, and goal disposition for up to 32 listed sessions.
+`crates/web-contract`. Bootstrap advertises the minimum accepted detail byte
+budget from `TimelineDetailLimits`; automatic transcript pagination stops when
+its remaining budget is smaller. `POST /api/sessions/{session_id}/input` submits
+browser text with a user-global command ID through the operator submit-input
+path, starting only when no turn is active. The browser keeps the message
+composer visible below the scrolling session history, with scroll access when a
+resized composer exceeds the available viewport. A 204 response acknowledges
+durable acceptance; typed errors report rejection, and an unconfirmed outcome is
+retried with the same command ID and text. Browser drafts are limited to 65,536
+UTF-16 code units before serialization; the serialized request must fit the JSON
+byte limit. Input requests have a 30-second deadline, after which an
+unacknowledged command remains available for retry. Browser submissions use the
+session model and inherit all per-input model settings; replay requires those
+same choices. Accepted browser input and its equal replay nudge the daemon's
+eligibility work source. Unconfirmed commands remain in browser application
+state by session across navigation until acknowledged or rejected. At most four
+sessions may retain unresolved input; new submissions at that limit are refused
+with a visible reason, while retries remain available. A bounded rates read
+reports lifecycle state, turn outcome counts, the latest failed turn and its
+provider cause, and goal disposition for up to 32 listed sessions.
 
 ## Design decisions
 
@@ -521,7 +523,16 @@ subscription. Transcript text reads require the bounded timeline-detail
 capability and replace pages of at most eight items and 65,536 projected bytes,
 clamped to the advertised limits, with exact byte accounting and continuation
 matching. Pagination resets when the session, window bounds, or observation
-cursor changes; the response bound includes their attachment references.
+cursor changes; the response bound includes their attachment references. Text
+pages advance past metadata-only detail records automatically within the
+workspace record budget and projected-byte page budget; discarded records
+consume both budgets. The scan and retained-content item budgets are clamped
+independently to the advertised limit. The continuation remains available when
+either budget is exhausted. The conversation shows user and assistant text, tool
+arguments and output, and unsuccessful turn outcomes in event order. Repeated
+terminal outcomes for the same turn and cause appear once. Bookkeeping is hidden
+until Events is selected. The last bounded raw detail page is retained
+separately from conversation content to validate body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.
@@ -543,9 +554,18 @@ Every selected row is decoded through the same fail-closed typed outbox
 projection as durable dispatch, under one repeatable-read transaction. A detail
 response reports its projected body bytes and never silently truncates: an
 oversized text is a typed bounded excerpt carrying its total length and exact
-continuation, never a summary that appears complete. A known category without a
-richer typed body is a closed event fact; an unknown durable event or state is
-corruption, never a generic body or guessed prose.
+continuation, never a summary that appears complete. Detail bodies carry typed
+session and turn lifecycle facts, model settings and provider responses, tool
+arguments and execution evidence, approval decisions, goals, compaction, runner
+placement, and delegation; a retired turn remains a closed event fact. Creation
+bodies retain the cause and its dispatch, program-run, or spawning-request
+identity. User overrides retain the command and denied-request identities.
+Repeated tool and goal members continue by member index. Tool-transition members
+freeze attempt state and payloads when the transition commits. Transitions
+without frozen members project the original stored tool and goal references. An
+unknown durable event or state is corruption, never a generic body or guessed
+prose. Expanding a browser timeline event renders its typed body; following a
+continuation replaces the current detail page.
 
 A search result's address is directly usable with the timeline around read even
 when the matching region is not loaded, and each returned source is correlated
