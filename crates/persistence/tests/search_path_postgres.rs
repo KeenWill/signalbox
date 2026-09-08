@@ -391,6 +391,19 @@ fn follows_relation_name(tokens: &[BodyToken], mut index: usize) -> bool {
                 && matches!(tokens[index - 1], BodyToken::Word { .. })))
     {
         index -= 1;
+        while index > 0
+            && matches!(
+                &tokens[index - 1],
+                BodyToken::Word {
+                    keyword: Some(_),
+                    ..
+                }
+            )
+            && !tokens[index - 1].is_keyword("from")
+            && !tokens[index - 1].is_keyword("join")
+        {
+            index -= 1;
+        }
         if index == 0 {
             return false;
         }
@@ -794,6 +807,9 @@ fn column_alias_lists_do_not_add_call_edges() {
 fn table_alias_column_lists_do_not_add_call_edges() {
     for source in [
         "SELECT restore_probe_tail() FROM records restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM ONLY records restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM ONLY public.records restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM records JOIN ONLY public.records restore_probe_head(value) ON true",
         "SELECT restore_probe_tail() FROM first, second restore_probe_head(value)",
         "SELECT restore_probe_tail() FROM first, public.second restore_probe_head(value)",
         "SELECT restore_probe_tail() FROM public.records restore_probe_head(value)",
@@ -861,6 +877,7 @@ fn fixture_keywords() -> BTreeMap<String, KeywordUse> {
         ("from", false, false),
         ("join", false, true),
         ("lateral", false, false),
+        ("only", false, false),
         ("select", false, false),
         ("case", false, false),
         ("when", false, false),
