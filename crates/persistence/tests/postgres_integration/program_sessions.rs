@@ -265,3 +265,99 @@ async fn a_program_cancel_wakes_a_waiting_session_operation() -> Result<(), Box<
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_program_waiters_leave_a_single_connection_query_pool_available()
+-> Result<(), Box<dyn Error>> {
+    let (_container, migrated, _) = migrated_postgres().await?;
+    let application = Uuid::now_v7().to_string();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            migrated
+                .connect_options()
+                .as_ref()
+                .clone()
+                .application_name(&application),
+        )
+        .await?;
+    let repository = sessions(&pool);
+    let mut inputs = Vec::new();
+    // Three waiting programs exceed the query pool's single available connection.
+    for _ in 0..3 {
+        let run =
+            registered_session_run(&pool, ProgramGrants::new([ProgramCapability::Session])).await?;
+        let session = repository
+            .create(
+                run,
+                ProgramSessionCreate {
+                    command: DurableCommandId::from_uuid(Uuid::now_v7()),
+                    defaults: SessionConfigurationDefaults::new(direct(0x6204)),
+                },
+            )
+            .await?;
+        inputs.push((
+            run,
+            ProgramSessionTurn {
+                command: DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                content: UserContent::try_text("waiting input".to_owned())
+                    .expect("valid fixture input"),
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        ));
+    }
+    let (nudge, mut ready) = tokio::sync::mpsc::unbounded_channel();
+    let mut waiters = tokio::task::JoinSet::new();
+    for (run, input) in &inputs {
+        let repository = repository.clone();
+        let nudge = nudge.clone();
+        let run = *run;
+        let input = input.clone();
+        waiters.spawn(async move {
+            repository
+                .drive_turn(
+                    run,
+                    input,
+                    |_| None,
+                    |session| {
+                        nudge.send(session).expect("fixture receiver exists");
+                    },
+                )
+                .await
+        });
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for _ in &inputs {
+            ready.recv().await.expect("waiting program admitted");
+        }
+        for (run, _) in &inputs {
+            signalbox_persistence::program_cancellation::cancel(
+                &pool,
+                signalbox_persistence::program_cancellation::CancelProgramRun {
+                    command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                    run_id: *run,
+                },
+            )
+            .await?;
+        }
+        while let Some(result) = waiters.join_next().await {
+            assert!(matches!(result?, Err(ProgramSessionError::RunEnded)));
+        }
+        Ok::<_, Box<dyn Error>>(())
+    })
+    .await??;
+    let connections: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
+            .bind(&application)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        connections, 2,
+        "one query connection and one shared listener"
+    );
+    pool.close().await;
+    migrated.close().await;
+    Ok(())
+}

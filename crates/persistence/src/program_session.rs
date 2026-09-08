@@ -9,7 +9,12 @@ use signalbox_domain::{
         ProgramSessionCreate, ProgramSessionDisposition, ProgramSessionOutcome, ProgramSessionTurn,
     },
 };
-use sqlx::{PgPool, Row, postgres::PgListener};
+use sqlx::{
+    PgPool, Row,
+    postgres::{PgListener, PgPoolOptions},
+};
+use std::sync::Arc;
+use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::{
@@ -30,6 +35,8 @@ pub enum ProgramSessionError {
     InvalidCommand,
     #[error(transparent)]
     Database(#[source] sqlx::Error),
+    #[error(transparent)]
+    Listener(#[source] Arc<sqlx::Error>),
     #[error(transparent)]
     Journal(#[source] ProgramJournalRepositoryError),
     #[error(transparent)]
@@ -86,15 +93,18 @@ impl From<signalbox_application::SubmitInputRequestError> for ProgramSessionErro
     }
 }
 
+type SessionActivity = watch::Receiver<Option<Arc<sqlx::Error>>>;
+
 #[derive(Clone, Debug)]
 pub struct ProgramSessionRepository {
     pool: PgPool,
     input: SubmitInputRepository,
     creation: crate::create_session::CreateSessionRepository,
+    activity: Arc<Mutex<Option<SessionActivity>>>,
 }
 
 impl ProgramSessionRepository {
-    pub const fn new(
+    pub fn new(
         pool: PgPool,
         input: SubmitInputRepository,
         creation: crate::create_session::CreateSessionRepository,
@@ -103,6 +113,7 @@ impl ProgramSessionRepository {
             pool,
             input,
             creation,
+            activity: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -248,6 +259,43 @@ impl ProgramSessionRepository {
             .map(Some)
     }
 
+    async fn subscribe(&self) -> Result<SessionActivity, sqlx::Error> {
+        let mut activity = self.activity.lock().await;
+        if let Some(receiver) = activity
+            .as_ref()
+            .filter(|receiver| receiver.has_changed().is_ok())
+        {
+            return Ok(receiver.clone());
+        }
+        let listener_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .max_lifetime(None)
+            .idle_timeout(None)
+            .connect_lazy_with(self.pool.connect_options().as_ref().clone());
+        let mut listener = PgListener::connect_with(&listener_pool).await?;
+        listener.listen("program_session_activity").await?;
+        let (notifications, receiver) = watch::channel(None);
+        let query_pool = self.pool.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = notifications.closed() => break,
+                    _ = query_pool.close_event() => break,
+                    result = listener.try_recv() => {
+                        let error = result.err().map(Arc::new);
+                        let failed = error.is_some();
+                        notifications.send_replace(error);
+                        if failed {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        *activity = Some(receiver.clone());
+        Ok(receiver)
+    }
+
     async fn await_result(
         &self,
         run: ProgramRunId,
@@ -259,8 +307,7 @@ impl ProgramSessionRepository {
             return Err(ProgramSessionError::Refused);
         };
         nudge(origin.session());
-        let mut listener = PgListener::connect_with(&self.pool).await?;
-        listener.listen("program_session_activity").await?;
+        let mut activity = self.subscribe().await?;
         loop {
             let journal = ProgramJournalRepository::new(self.pool.clone())
                 .load(run)
@@ -275,7 +322,13 @@ impl ProgramSessionRepository {
             {
                 return Ok(outcome);
             }
-            listener.try_recv().await?;
+            activity
+                .changed()
+                .await
+                .map_err(|_| sqlx::Error::PoolClosed)?;
+            if let Some(error) = activity.borrow_and_update().clone() {
+                return Err(ProgramSessionError::Listener(error));
+            }
         }
     }
 

@@ -9,6 +9,7 @@ pub enum ProgramSessionError {
     Create(create_session::CreateSessionRepositoryError),
     InvalidCommand,
     Database(error::Error),
+    Listener(sync::Arc<error::Error>),
     Journal(program_journal::ProgramJournalRepositoryError),
     Capability(program_journal::ProgramSessionCapabilityError),
     Submit(submit_input::SubmitInputRepositoryError),
@@ -62,7 +63,7 @@ impl convert::From<signalbox_application::SubmitInputRequestError>
 pub struct ProgramSessionRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl program_session::ProgramSessionRepository {
-    pub const fn new(
+    pub fn new(
         pool: sqlx_postgres::PgPool,
         input: submit_input::SubmitInputRepository,
         creation: create_session::CreateSessionRepository,
