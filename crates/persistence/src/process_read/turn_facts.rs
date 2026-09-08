@@ -354,6 +354,12 @@ pub(super) async fn load_next_transcript_turn(
             turn.runner_recovery_tool_attempt_id,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
+            EXISTS (
+                SELECT 1 FROM credential_pool_terminal_exhaustion AS exhausted
+                 WHERE exhausted.session_id = turn.session_id
+                   AND exhausted.turn_id = turn.turn_id
+                   AND exhausted.terminal_model_call_id IS NULL
+            ) AS credential_pool_exhausted,
             turn.terminal_tool_attempt_id,
             wait_failure.predecessor_model_call_id AS wait_failure_predecessor_call_id,
             wait_predecessor.terminal_provider_failure_cause AS wait_failure_provider_cause,
