@@ -841,16 +841,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         "The metadata replacement receipt violated the metadata contract."
       )
     }
-    guard
-      let refreshed = try await listSessions(includeArchived: true).first(where: {
-        $0.id == session.id
-      })
-    else {
-      throw SignalboxProcessServiceError.unexpectedMessage(
-        "The archived session was absent from the refreshed metadata list."
-      )
-    }
-    return refreshed
+    return try await readSession(sessionID: session.id)
   }
 
   public func prepareInputSubmission(

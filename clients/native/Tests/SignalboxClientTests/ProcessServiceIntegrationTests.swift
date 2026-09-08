@@ -530,6 +530,35 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(error, ProcessDriverFixture.conversationListTextCapacityError)
   }
 
+  @MainActor
+  func testArchivePublishesWhenTheInventoryExceedsThePageBudget() async throws {
+    let policy = ProcessDriverFixture.singlePageMetadataPolicy
+    let service = makeService(policy: policy)
+    let viewModel = ProcessSessionListViewModel(policy: policy) { service }
+    await viewModel.refresh()
+    let subject = try XCTUnwrap(viewModel.conversations.first)
+    XCTAssertNotNil(viewModel.nextAfter)
+
+    await viewModel.toggleArchive(subject)
+
+    XCTAssertEqual(viewModel.conversations.first?.id, subject.id)
+    XCTAssertEqual(viewModel.conversations.first?.archived, true)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  func testArchiveReadbackDoesNotConsumeTheInventoryByteBudget() async throws {
+    let service = makeService(policy: ProcessDriverFixture.zeroConversationScalarCapacityPolicy)
+    let sessionID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let subject = try await service.readSession(sessionID: sessionID)
+
+    let updated = try await service.setArchived(true, session: subject)
+
+    XCTAssertEqual(updated.id, subject.id)
+    XCTAssertTrue(updated.archived)
+    XCTAssertEqual(updated.title, subject.title)
+    XCTAssertEqual(updated.tags, subject.tags)
+  }
+
   func testArchiveUsesCompleteMetadataReplace() async throws {
     let service = makeService()
     let before = try await service.listSessions(includeArchived: true)
