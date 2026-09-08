@@ -392,9 +392,9 @@ pub(super) async fn load_tool_conversation_entries(
     if resident_bytes > limit_bytes {
         return Ok(None);
     }
-    let mut request_ids = BTreeSet::new();
-    let mut attempt_ids = BTreeSet::new();
-    let mut approval_ids = BTreeSet::new();
+    let mut request_ids = Vec::new();
+    let mut attempt_ids = Vec::new();
+    let mut approval_ids = Vec::new();
     for entry in request
         .frontier_entries()
         .filter(|entry| projected.contains(&entry.reference()))
@@ -403,14 +403,14 @@ pub(super) async fn load_tool_conversation_entries(
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. }
             | SemanticTranscriptEntryPayload::ToolInadmissible { request }
             | SemanticTranscriptEntryPayload::ToolClosed { request } => {
-                request_ids.insert(*request);
+                request_ids.push(*request);
             }
             SemanticTranscriptEntryPayload::ToolDenied { request } => {
-                request_ids.insert(*request);
-                approval_ids.insert(*request);
+                request_ids.push(*request);
+                approval_ids.push(*request);
             }
             SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
-                attempt_ids.insert(*attempt);
+                attempt_ids.push(*attempt);
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::DelegatedTask { .. }
@@ -453,12 +453,10 @@ pub(super) async fn load_tool_conversation_entries(
     {
         return Ok(None);
     }
-    let attempts = crate::tool_loop::load_attempts_by_id(
-        connection,
-        &attempt_ids.iter().copied().collect::<Vec<_>>(),
-    )
-    .await
-    .map_err(map_tool_evidence_error)?;
+    let attempts = crate::tool_loop::load_attempts_by_id(connection, &attempt_ids)
+        .await
+        .map_err(map_tool_evidence_error)?;
+    let mut request_ids = request_ids.into_iter().collect::<BTreeSet<_>>();
     for attempt in attempts.values() {
         let request = match attempt {
             signalbox_domain::ReconstitutedToolAttempt::Current(current) => current.request(),
@@ -472,12 +470,9 @@ pub(super) async fn load_tool_conversation_entries(
     )
     .await
     .map_err(map_tool_evidence_error)?;
-    let approvals = crate::tool_loop::load_approvals_by_request(
-        connection,
-        &approval_ids.iter().copied().collect::<Vec<_>>(),
-    )
-    .await
-    .map_err(map_tool_evidence_error)?;
+    let approvals = crate::tool_loop::load_approvals_by_request(connection, &approval_ids)
+        .await
+        .map_err(map_tool_evidence_error)?;
 
     let mut resolved = Vec::new();
     for entry in request
@@ -584,16 +579,22 @@ async fn tool_evidence_fits_before_loading(
             SELECT octet_length(tool_name)::bigint + octet_length(arguments_text)
                    + COALESCE(octet_length(inadmissible_reason), 0) AS bytes
               FROM tool_request
-             WHERE request_id = ANY($1)
-                OR request_id IN (SELECT request_id FROM tool_attempt WHERE attempt_id = ANY($2))
+              JOIN (
+                  SELECT request_id FROM unnest($1::uuid[]) AS projected(request_id)
+                  UNION ALL
+                  SELECT tool_attempt.request_id FROM tool_attempt
+                  JOIN unnest($2::uuid[]) AS projected(attempt_id) USING (attempt_id)
+              ) AS retained_requests USING (request_id)
             UNION ALL
             SELECT COALESCE(octet_length(result_text), 0)::bigint
                    + COALESCE(octet_length(error_detail), 0)
-              FROM tool_attempt WHERE attempt_id = ANY($2)
+              FROM tool_attempt
+              JOIN unnest($2::uuid[]) AS projected(attempt_id) USING (attempt_id)
             UNION ALL
             SELECT COALESCE(octet_length(denial_reason), 0)::bigint
                    + COALESCE(octet_length(rationale), 0)
-              FROM tool_approval_decision WHERE request_id = ANY($3)
+              FROM tool_approval_decision
+              JOIN unnest($3::uuid[]) AS projected(request_id) USING (request_id)
         ) AS retained",
     )
     .bind(requests)
@@ -851,7 +852,7 @@ mod preflight_tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn tool_evidence_preflight_counts_utf8_and_indirect_requests_once()
+    async fn tool_evidence_preflight_charges_every_retained_request_copy()
     -> Result<(), Box<dyn std::error::Error>> {
         let container = Postgres::default()
             .with_tag(super::postgres_test_image::POSTGRES_IMAGE_TAG)
@@ -889,8 +890,17 @@ mod preflight_tests {
             .bind(request)
             .execute(&mut *connection)
             .await?;
-        // One-byte name, eleven-byte JSON argument, four-byte result and three-byte approval.
-        for direct_requests in [Vec::new(), vec![request]] {
+        // Each request copy owns a one-byte name and eleven-byte JSON argument;
+        // the result owns four bytes and the approval owns three bytes.
+        for (case, direct_requests, limit) in [
+            ("result request only", vec![], 19),
+            ("proposal and result request copies", vec![request], 31),
+            (
+                "two direct entries and a result",
+                vec![request, request],
+                43,
+            ),
+        ] {
             assert!(
                 tool_evidence_fits_before_loading(
                     &mut connection,
@@ -898,9 +908,10 @@ mod preflight_tests {
                     &[attempt],
                     &[request],
                     0,
-                    19
+                    limit
                 )
-                .await?
+                .await?,
+                "{case}"
             );
             assert!(
                 !tool_evidence_fits_before_loading(
@@ -909,9 +920,10 @@ mod preflight_tests {
                     &[attempt],
                     &[request],
                     0,
-                    18
+                    limit - 1
                 )
-                .await?
+                .await?,
+                "{case}"
             );
             assert!(
                 !tool_evidence_fits_before_loading(
@@ -920,9 +932,10 @@ mod preflight_tests {
                     &[attempt],
                     &[request],
                     1,
-                    19
+                    limit
                 )
-                .await?
+                .await?,
+                "{case}"
             );
         }
         let resident_text = signalbox_domain::AssistantText::try_new(String::from("resident ☃"))
@@ -948,7 +961,7 @@ mod preflight_tests {
                 &[attempt],
                 &[request],
                 resident,
-                31
+                43
             )
             .await?
         );
@@ -959,7 +972,7 @@ mod preflight_tests {
                 &[attempt],
                 &[request],
                 resident,
-                30
+                42
             )
             .await?
         );

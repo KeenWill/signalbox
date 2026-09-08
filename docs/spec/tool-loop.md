@@ -392,7 +392,8 @@ capability preparation or send.
 At most 256 MiB of projected frontier content may be rendered into one call's
 provider messages. The bound counts cloned content and per-message and per-part
 representation overhead; tool evidence is also checked before its payloads are
-loaded. It is enforced once the projection names its entries and before any
+loaded, charging each request payload for every projected entry that retains a
+copy. It is enforced once the projection names its entries and before any
 content is cloned, so an over-bound frontier is refused rather than
 materialized. The refusal closes the turn through the tool-round-limit terminal
 cause before capability preparation or send.
