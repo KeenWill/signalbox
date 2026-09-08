@@ -69,6 +69,7 @@ const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
         OutboxEventDiscriminator::SessionCreated => SESSION_CREATED_STORAGE_VERSION,
         OutboxEventDiscriminator::SessionStateChanged
         | OutboxEventDiscriminator::SessionTerminal
+        | OutboxEventDiscriminator::CredentialPoolExhausted
         | OutboxEventDiscriminator::TurnTerminal
         | OutboxEventDiscriminator::GoalChanged
         | OutboxEventDiscriminator::CommandSettled
@@ -160,6 +161,8 @@ impl DispatchedOutboxEvent {
 /// Closed typed records currently admitted by outbox storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DispatchedOutboxEventKind {
+    /// Frozen evidence for a pre-call pool exhaustion.
+    CredentialPoolExhausted(Box<crate::credential_pool_exhaustion::CredentialPoolExhaustion>),
     /// A session creation committed.
     SessionCreated(DispatchedSessionCreation),
     /// The session's lifecycle state moved to a non-terminal state.
@@ -1121,6 +1124,27 @@ pub(crate) async fn load_event(
         }
         OutboxEventDiscriminator::SessionTerminal => {
             load_session_terminal(transaction, expected_sequence, stored_session).await?
+        }
+        OutboxEventDiscriminator::CredentialPoolExhausted => {
+            let row: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT h.turn_id, h.terminal_attempt_id FROM credential_pool_exhaustion_outbox_event e JOIN credential_pool_terminal_exhaustion h ON h.terminal_attempt_id = e.terminal_attempt_id AND h.session_id = e.session_id WHERE e.event_sequence = $1 AND e.session_id = $2")
+                .bind(Decimal::from(expected_sequence)).bind(stored_session).fetch_optional(&mut **transaction).await?;
+            let (turn, attempt) = row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            let session = stored_session;
+            let evidence = crate::credential_pool_exhaustion::load(transaction, session, turn)
+                .await
+                .map_err(|error| match error {
+                    crate::credential_pool_exhaustion::CredentialPoolEvidenceError::Database(
+                        error,
+                    ) => OutboxDispatchError::from(error),
+                    crate::credential_pool_exhaustion::CredentialPoolEvidenceError::Corruption => {
+                        OutboxDispatchError::from(OutboxCorruption::InvalidTerminalEventCorrelation)
+                    }
+                })?
+                .ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            if evidence.terminal_attempt_id != attempt {
+                return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+            }
+            DispatchedOutboxEventKind::CredentialPoolExhausted(Box::new(evidence))
         }
         OutboxEventDiscriminator::TurnTerminal => {
             let disposition = header

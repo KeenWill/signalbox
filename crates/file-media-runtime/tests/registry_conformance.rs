@@ -502,9 +502,9 @@ impl FileMediaProcessor for SelectionProcessor {
     }
 }
 
-struct ProvisionalCollisionProcessor;
+struct CollisionProcessor(ProbeStrength);
 
-impl FileMediaProcessor for ProvisionalCollisionProcessor {
+impl FileMediaProcessor for CollisionProcessor {
     fn probe<'a>(
         &'a self,
         reader: &'a ReaderIdentity,
@@ -519,7 +519,7 @@ impl FileMediaProcessor for ProvisionalCollisionProcessor {
             };
             Ok(ProcessorProbeOutput::Candidate {
                 media_type: String::from(media_type),
-                strength: ProbeStrength::ProvisionalStructuralCandidate,
+                strength: self.0,
                 evidence_bytes: 4,
             })
         })
@@ -528,11 +528,21 @@ impl FileMediaProcessor for ProvisionalCollisionProcessor {
     fn validate<'a>(
         &'a self,
         _reader: &'a ReaderIdentity,
-        _request: FileMediaProviderValidationRequest,
+        request: FileMediaProviderValidationRequest,
         _source: &'a dyn VerifiedBlobSource,
         _cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
-        Box::pin(async { Ok(ProcessorValidationOutput::NoMatch) })
+        Box::pin(async move {
+            if self.0 == ProbeStrength::StructuralCandidate {
+                Ok(ProcessorValidationOutput::Validated {
+                    media_type: request.media_type.as_str().to_owned(),
+                    evidence: request.evidence,
+                    metadata_json: String::from(r#"{"synthetic":true}"#),
+                })
+            } else {
+                Ok(ProcessorValidationOutput::NoMatch)
+            }
+        })
     }
 
     fn read<'a>(
@@ -693,11 +703,9 @@ fn structural_candidate_with_actual_probe_inside_validation_ceiling_is_retained(
     );
 }
 
-/// The retained-candidate filter names the envelope validation will actually grant, so a
-/// reader whose declared validation envelope sits below the deployment ceiling cannot keep
-/// evidence that envelope never covers.
+/// A single candidate cannot validate evidence outside the granted envelope.
 #[test]
-fn probe_evidence_outside_the_reader_validation_envelope_is_dropped() {
+fn probe_evidence_outside_the_reader_validation_envelope_cannot_validate() {
     let source = MemorySource::synthetic();
     let ceilings = FileMediaCeilings::version_one();
     // Only the reader's own envelope excludes this evidence; the deployment ceiling admits it.
@@ -713,12 +721,27 @@ fn probe_evidence_outside_the_reader_validation_envelope_is_dropped() {
         validation: SelectionValidation::Validated,
     };
 
-    let outcome = inspect(&registry, &processor, &source, "unknown")
-        .expect("a dropped candidate leaves an ordinary inspection outcome");
+    let outcome = inspect(&registry, &processor, &source, "unknown");
 
-    let FileInspection::Unknown { .. } = outcome else {
-        panic!("evidence outside the reader validation envelope must not be retained");
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+#[test]
+fn strong_candidate_outside_validation_envelope_fails_before_fallbacks() {
+    let registry = selection_registry_with_media_types(
+        &[SYNTHETIC_MEDIA_TYPE, "text/plain"],
+        StreamingTextFallback::Enabled,
+        FileMediaCeilings::version_one(),
+        SELECTION_PROBE_EVIDENCE_BYTES - 1,
+    );
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Strong,
+        validation: SelectionValidation::Validated,
     };
+    for declared in [SYNTHETIC_MEDIA_TYPE, "unknown"] {
+        let outcome = inspect(&registry, &processor, &MemorySource::synthetic(), declared);
+        assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+    }
 }
 
 #[test]
@@ -928,6 +951,70 @@ fn provisional_structural_validation_no_match_resumes_fallback() {
 }
 
 #[test]
+fn strong_claims_remain_ambiguous_above_the_validation_ceiling() {
+    let source = MemorySource::synthetic();
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 2;
+    let registry = FileMediaRegistry::try_new(
+        vec![
+            provider_declaration("first", SYNTHETIC_MEDIA_TYPE),
+            provider_declaration("second", OTHER_SYNTHETIC_MEDIA_TYPE),
+        ],
+        ceilings,
+        ProcessorIsolation::Available,
+    )
+    .expect("distinct strong claims are registrable");
+    let outcome = inspect(
+        &registry,
+        &CollisionProcessor(ProbeStrength::Strong),
+        &source,
+        "unknown",
+    )
+    .expect("claims arbitrate before validation");
+    assert!(
+        matches!(outcome, FileInspection::Ambiguous { media_types, .. } if media_types.len() == 2)
+    );
+}
+
+#[test]
+fn structural_collision_stays_ambiguous_when_one_validation_envelope_is_too_small() {
+    let source = MemorySource::synthetic();
+    for shortened in ["first", "second"] {
+        for reverse in [false, true] {
+            let mut providers = [
+                ("first", SYNTHETIC_MEDIA_TYPE),
+                ("second", OTHER_SYNTHETIC_MEDIA_TYPE),
+            ]
+            .into_iter()
+            .map(|(name, media_type)| {
+                let limit = if name == shortened { 3 } else { 4 };
+                provider_declaration_with_validation(name, media_type, limit)
+            })
+            .collect::<Vec<_>>();
+            if reverse {
+                providers.reverse();
+            }
+            let registry = FileMediaRegistry::try_new(
+                providers,
+                FileMediaCeilings::version_one(),
+                ProcessorIsolation::Available,
+            )
+            .expect("distinct structural claims are registrable");
+            let outcome = inspect(
+                &registry,
+                &CollisionProcessor(ProbeStrength::StructuralCandidate),
+                &source,
+                "unknown",
+            )
+            .expect("the envelope cannot settle a collision");
+            assert!(
+                matches!(outcome, FileInspection::Ambiguous { media_types, .. } if media_types.len() == 2)
+            );
+        }
+    }
+}
+
+#[test]
 fn all_provisional_collision_misses_resume_fallback() {
     let source = MemorySource::synthetic();
     let registry = FileMediaRegistry::try_new(
@@ -942,7 +1029,7 @@ fn all_provisional_collision_misses_resume_fallback() {
 
     let outcome = inspect(
         &registry,
-        &ProvisionalCollisionProcessor,
+        &CollisionProcessor(ProbeStrength::ProvisionalStructuralCandidate),
         &source,
         "unknown",
     )
@@ -1339,6 +1426,14 @@ fn duplicate_static_media_claim_is_rejected() {
 }
 
 fn provider_declaration(name: &str, owned_media_type: &str) -> FileMediaProviderDeclaration {
+    provider_declaration_with_validation(name, owned_media_type, MAX_VALIDATION_SOURCE_BYTES)
+}
+
+fn provider_declaration_with_validation(
+    name: &str,
+    owned_media_type: &str,
+    validation_source_bytes: u64,
+) -> FileMediaProviderDeclaration {
     let provider = FileReaderProviderName::try_new(name).expect("fixture provider name is valid");
     let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
         provider: provider.clone(),
@@ -1352,7 +1447,7 @@ fn provider_declaration(name: &str, owned_media_type: &str) -> FileMediaProvider
             cumulative_bytes: 4,
         }),
         validation: signalbox_file_media_runtime::ValidationDeclaration::new(
-            MAX_VALIDATION_SOURCE_BYTES,
+            validation_source_bytes,
             MAX_VALIDATION_RANGES,
         ),
         views: vec![text_view()],

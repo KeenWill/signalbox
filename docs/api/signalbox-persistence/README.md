@@ -57,11 +57,12 @@
 | startup | 4 | 0 | 0 | [startup](startup.md) |
 | submit_input | 5 | 0 | 0 | [submit_input](submit_input.md) |
 | termination_receipt | 2 | 0 | 1 | [termination_receipt](termination_receipt.md) |
-| test_support | 2 | 0 | 3 | [test_support](test_support.md) |
+| test_support | 2 | 0 | 4 | [test_support](test_support.md) |
 | tool_loop | 3 | 0 | 0 | [tool_loop](tool_loop.md) |
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |
 | workspace | 3 | 0 | 0 | [workspace](workspace.md) |
 | workspace_instructions | 6 | 0 | 0 | [workspace_instructions](workspace_instructions.md) |
+| credential_pool_exhaustion | 4 | 0 | 3 | [credential_pool_exhaustion](credential_pool_exhaustion.md) |
 | reload_configuration | 8 | 0 | 0 | [reload_configuration](reload_configuration.md) |
 | root | 0 | 0 | 10 | [root](root.md) |

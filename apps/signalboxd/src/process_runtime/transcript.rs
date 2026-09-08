@@ -1929,6 +1929,16 @@ pub(super) fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             placement_revision: PositiveCanonicalU64::from(*placement_revision),
             tool_attempt_id: interrupted_tool_attempt.map(|attempt| wire_uuid(attempt.into_uuid())),
         },
+        ProcessTurnState::FailedCredentialPoolExhausted(evidence) => {
+            TurnState::FailedCredentialPoolExhausted {
+                terminal_frontier_id: wire_uuid(evidence.terminal_frontier_id),
+                terminal_attempt_id: wire_uuid(evidence.terminal_attempt_id),
+                failure_entry_id: wire_uuid(evidence.failure_entry_id),
+                pool_policy_id: wire_uuid(evidence.pool_policy_id),
+                policy_members: evidence.policy_members.clone(),
+                members: credential_pool::wire_members(&evidence.members),
+            }
+        }
         ProcessTurnState::Failed {
             terminal_frontier,
             terminal_attempt,

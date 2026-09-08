@@ -56,12 +56,9 @@ through the typed projection-writer port, so a read returns them with a reveal
 address like every other class. A producer adopting the port publishes only text
 its durable contract explicitly supplies, and only after its own source exists.
 
-Active relocation boundary. A replacement staged behind an authorized model call
-appends its placement boundary only after that call's observation commits.
-Active continuation extends the exact boundary after all batch results and
-before the next call. In [runner design's](runner-protocol.md) pre-continuation
-takeover, successor tool execution uses the installed placement fence while the
-entry remains deferred until every batch result is appended. Healthy-session and
+In [runner design's](runner-protocol.md) pre-continuation takeover, successor
+tool execution uses the installed placement fence while the entry remains
+deferred until every batch result is appended. Healthy-session and
 working-directory moves use the same reference-only boundary and
 placement-frontier pointer.
 
