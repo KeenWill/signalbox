@@ -325,7 +325,7 @@ fn commit_rejects_an_oversized_merge_parent_before_parsing() {
         }))
         .expect_err("oversized merge parent rejects before parsing");
 
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
         repository.head().expect("fixture HEAD remains").target(),
         Some(fixture.initial)

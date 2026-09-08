@@ -203,6 +203,9 @@ pub(super) fn diff_object_buffer(
     if mode == GITLINK_MODE {
         return Ok(gitlink_buffer(oid));
     }
+    if crate::bounded::validate_object_header(repository, oid)? != git2::ObjectType::Blob {
+        return Err(LocalGitFailure::Operation);
+    }
     repository
         .find_blob(oid)
         .map(|blob| blob.content().to_vec())

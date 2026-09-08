@@ -4,7 +4,9 @@ use git2::{Buf, Indexer, Odb, PackBuilder, Repository};
 
 use crate::bounded::find_bounded_commit;
 use crate::failure::LocalGitFailure;
-use crate::limits::{GITLINK_MODE, MAX_OBJECT_DATABASE_BYTES, MAX_WORKTREE_INSPECTIONS};
+use crate::limits::{
+    GITLINK_MODE, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES, MAX_WORKTREE_INSPECTIONS,
+};
 use crate::pack_install::{
     ObjectPublicationLock, install_packed_object_pair, pack_installation_mode,
 };
@@ -116,6 +118,9 @@ impl PackTraversalBudget {
             .odb()
             .and_then(|object_database| object_database.read_header(oid))
             .map_err(|_| LocalGitFailure::Operation)?;
+        if bytes > MAX_OBJECT_BYTES {
+            return Err(LocalGitFailure::Operation);
+        }
         self.inspections = self
             .inspections
             .checked_add(1)

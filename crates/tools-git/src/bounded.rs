@@ -61,9 +61,7 @@ pub(super) fn tree_files(
     let mut pending = vec![(root.id(), PathBuf::new())];
     let mut files = BTreeMap::new();
     while let Some((oid, prefix)) = pending.pop() {
-        let tree = repository
-            .find_tree(oid)
-            .map_err(|_| LocalGitFailure::Operation)?;
+        let tree = find_bounded_tree(repository, oid)?;
         for entry in &tree {
             let mut path = prefix.clone();
             path.push(std::ffi::OsStr::from_bytes(entry.name_bytes()));

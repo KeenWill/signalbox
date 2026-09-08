@@ -1232,7 +1232,7 @@ fn object_capture_rejects_an_object_database_symlink_replacement() {
 }
 
 #[test]
-fn object_capture_rejects_a_compressed_loose_object_above_the_decoded_limit() {
+fn loose_object_content_limit_applies_when_the_blob_is_read() {
     let fixture = Fixture::new();
     let content = vec![0_u8; MAX_OBJECT_BYTES + 1];
     let object_path = plant_loose_blob(fixture.root(), &content);
@@ -1245,12 +1245,18 @@ fn object_capture_rejects_a_compressed_loose_object_above_the_decoded_limit() {
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
-    let failure = PinnedObjectDatabase::capture(&authority)
-        .err()
-        .expect("oversized decoded loose object rejects capture");
+    let snapshot = PinnedObjectDatabase::capture(&authority)
+        .expect("unrelated oversized object admits capture");
+    let database = git2::Odb::new().expect("snapshot object database");
+    snapshot.add_to(&database).expect("attach snapshot");
+    let repository = authority.open_repository_shell().expect("repository shell");
+    repository.set_odb(&database).expect("bind snapshot");
+    let oid = git2::Oid::hash_object(ObjectType::Blob, &content).expect("blob id");
+    let failure = crate::diff::diff_object_buffer(&repository, oid, 0o100644)
+        .expect_err("oversized blob content read rejects");
 
     assert!(compressed_bytes < content.len() as u64);
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Operation);
 }
 
 #[test]
@@ -1294,7 +1300,7 @@ fn object_capture_rejects_a_loose_object_stored_under_an_unrelated_id() {
 }
 
 #[test]
-fn object_capture_rejects_a_packed_object_above_the_decoded_limit() {
+fn packed_object_content_limit_applies_when_the_blob_is_read() {
     let fixture = Fixture::new();
     let content = vec![0_u8; MAX_OBJECT_BYTES + 1];
     let pack_path = plant_packed_blob(fixture.root(), &content);
@@ -1307,12 +1313,18 @@ fn object_capture_rejects_a_packed_object_above_the_decoded_limit() {
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
-    let failure = PinnedObjectDatabase::capture(&authority)
-        .err()
-        .expect("oversized decoded packed object rejects capture");
+    let snapshot = PinnedObjectDatabase::capture(&authority)
+        .expect("unrelated oversized object admits capture");
+    let database = git2::Odb::new().expect("snapshot object database");
+    snapshot.add_to(&database).expect("attach snapshot");
+    let repository = authority.open_repository_shell().expect("repository shell");
+    repository.set_odb(&database).expect("bind snapshot");
+    let oid = git2::Oid::hash_object(ObjectType::Blob, &content).expect("blob id");
+    let failure = crate::diff::diff_object_buffer(&repository, oid, 0o100644)
+        .expect_err("oversized blob content read rejects");
 
     assert!(packed_bytes < content.len() as u64);
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Operation);
 }
 
 #[test]

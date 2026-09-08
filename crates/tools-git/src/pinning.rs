@@ -597,7 +597,7 @@ impl PinnedObjectDatabase {
             objects_identity,
             bindings: pinned_children,
         };
-        snapshot.validate_object_sizes(authority.object_format)?;
+        snapshot.validate_object_inventory(authority.object_format)?;
         validate_owned_directory_binding(
             &authority.git_directory,
             OsStr::new("objects"),
@@ -678,39 +678,10 @@ impl PinnedObjectDatabase {
         validate_retained_object_child_bindings(&objects, &self.bindings)
     }
 
-    fn validate_object_sizes(&self, object_format: ObjectFormat) -> Result<(), LocalGitFailure> {
-        let object_database =
-            Odb::new_ext(object_format).map_err(|_| LocalGitFailure::Repository)?;
-        self.add_to(&object_database)?;
-        let object_ids = self.snapshot_object_ids(object_format)?;
-        let mut decoded_total = 0_usize;
-        for object_id in object_ids {
-            let (decoded_bytes, object_type) = object_database
-                .read_header(object_id)
-                .map_err(|_| LocalGitFailure::Repository)?;
-            decoded_total = decoded_total
-                .checked_add(decoded_bytes)
-                .filter(|total| *total <= MAX_OBJECT_DATABASE_BYTES)
-                .ok_or(LocalGitFailure::Repository)?;
-            if decoded_bytes > MAX_OBJECT_BYTES {
-                return Err(LocalGitFailure::Repository);
-            }
-            let object = object_database
-                .read(object_id)
-                .map_err(|_| LocalGitFailure::Repository)?;
-            let verified_id = git2::Oid::hash_object_ext(object_type, object.data(), object_format)
-                .map_err(|_| LocalGitFailure::Repository)?;
-            if object.data().len() != decoded_bytes || verified_id != object_id {
-                return Err(LocalGitFailure::Repository);
-            }
-        }
-        Ok(())
-    }
-
-    fn snapshot_object_ids(
+    fn validate_object_inventory(
         &self,
         object_format: ObjectFormat,
-    ) -> Result<Vec<git2::Oid>, LocalGitFailure> {
+    ) -> Result<(), LocalGitFailure> {
         let mut object_ids = HashSet::new();
         for binding in &self.bindings {
             if binding.name == OsStr::new("pack") {
@@ -730,7 +701,7 @@ impl PinnedObjectDatabase {
                 }
             }
         }
-        Ok(object_ids.into_iter().collect())
+        Ok(())
     }
 }
 
@@ -1233,21 +1204,12 @@ fn validate_loose_object(
         .metadata()
         .map_err(|_| LocalGitFailure::Repository)?
         .len();
-    let decoded_limit = MAX_LOOSE_OBJECT_HEADER_BYTES
-        .saturating_add(MAX_OBJECT_BYTES)
-        .saturating_add(1);
-    let mut decoded = Vec::with_capacity(decoded_limit);
+    let mut decoded = Vec::with_capacity(MAX_LOOSE_OBJECT_HEADER_BYTES + 1);
     let mut decoder = ZlibDecoder::new(&mut *file);
     Read::by_ref(&mut decoder)
-        .take((decoded_limit + 1) as u64)
+        .take((MAX_LOOSE_OBJECT_HEADER_BYTES + 1) as u64)
         .read_to_end(&mut decoded)
         .map_err(|_| LocalGitFailure::Repository)?;
-    let consumed = decoder.total_in();
-    drop(decoder);
-    file.rewind().map_err(|_| LocalGitFailure::Repository)?;
-    if decoded.len() > decoded_limit || consumed != compressed_length {
-        return Err(LocalGitFailure::Repository);
-    }
     let header_end = decoded
         .iter()
         .position(|byte| *byte == 0)
@@ -1263,12 +1225,8 @@ fn validate_loose_object(
     }
     let declared_bytes = declared_text
         .parse::<usize>()
-        .ok()
-        .filter(|bytes| *bytes <= MAX_OBJECT_BYTES)
-        .ok_or(LocalGitFailure::Repository)?;
-    if declared_bytes.to_string() != declared_text
-        || decoded.len() != header_end.saturating_add(1).saturating_add(declared_bytes)
-    {
+        .map_err(|_| LocalGitFailure::Repository)?;
+    if declared_bytes.to_string() != declared_text {
         return Err(LocalGitFailure::Repository);
     }
     let object_type = match kind {
@@ -1278,6 +1236,25 @@ fn validate_loose_object(
         "tag" => git2::ObjectType::Tag,
         _ => return Err(LocalGitFailure::Repository),
     };
+    // Content above the operation read bound can exist in the snapshot. The
+    // operation's object-header check rejects it only if that object is used.
+    if declared_bytes > MAX_OBJECT_BYTES {
+        return Ok(());
+    }
+    let expected_length = header_end + 1 + declared_bytes;
+    let remaining = expected_length
+        .saturating_add(1)
+        .saturating_sub(decoded.len());
+    Read::by_ref(&mut decoder)
+        .take(remaining as u64)
+        .read_to_end(&mut decoded)
+        .map_err(|_| LocalGitFailure::Repository)?;
+    let consumed = decoder.total_in();
+    drop(decoder);
+    file.rewind().map_err(|_| LocalGitFailure::Repository)?;
+    if decoded.len() != expected_length || consumed != compressed_length {
+        return Err(LocalGitFailure::Repository);
+    }
     let object_id =
         git2::Oid::hash_object_ext(object_type, &decoded[header_end + 1..], object_format)
             .map_err(|_| LocalGitFailure::Repository)?;
