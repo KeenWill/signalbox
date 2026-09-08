@@ -112,7 +112,7 @@ pub use settings::{
 pub use sse::{SseFraming, SseFramingError, SsePushOutcome, SseRecord, SseTermination};
 pub use target::{ProviderReportedModel, RequestedTarget, ResolvedTarget};
 pub use tool::{
-    ToolArgumentRedaction, ToolCallId, ToolCallProposal, ToolDecodeFailure, ToolDefinition,
-    ToolName, decode_tool_arguments,
+    ToolCallId, ToolCallProposal, ToolDecodeFailure, ToolDefinition, ToolName,
+    decode_tool_arguments,
 };
 pub use usage::TokenUsage;

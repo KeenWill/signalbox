@@ -22,5 +22,5 @@
 | settings | 7 | 0 | 0 | [settings](settings.md) |
 | sse | 5 | 0 | 0 | [sse](sse.md) |
 | target | 3 | 0 | 0 | [target](target.md) |
-| tool | 6 | 0 | 1 | [tool](tool.md) |
+| tool | 5 | 0 | 1 | [tool](tool.md) |
 | usage | 1 | 0 | 0 | [usage](usage.md) |

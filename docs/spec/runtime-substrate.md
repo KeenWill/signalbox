@@ -105,12 +105,11 @@ enforces exactly one proposal.
 The Anthropic and OpenAI adapters share one shape: at most one POST per
 operation, hand-written wire types with no provider SDK dependency, and typed
 evidence out. The two CLI adapters share the process supervision in
-`cli_process.rs`, a cleared child environment and shape-based redaction of
-everything the child prints. `ScriptedModel` replays caller-declared scripts of
-observation facts and exact terminal evidence through the real runtime surface,
-so fixtures declare their result rather than simulate one. The page also carries
-the one cross-page rule for `OperatorFailureClass`, the closed severity
-classification defined in `crates/application`.
+`cli_process.rs` and a cleared child environment. `ScriptedModel` replays
+caller-declared scripts of observation facts and exact terminal evidence through
+the real runtime surface, so fixtures declare their result rather than simulate
+one. The page also carries the one cross-page rule for `OperatorFailureClass`,
+the closed severity classification defined in `crates/application`.
 
 ## Design decisions
 
@@ -210,9 +209,6 @@ have no Signalbox usage axis and are folded into no other field.
 Exact-value redaction covers the exact credential value, its JSON-string-escaped
 form and chunk-split prefixes of it; a reflection the provider re-encodes in any
 other form passes through unscrubbed.
-
-Shape redaction is a text-shape contract, not cross-field correlation: it never
-associates a credential name in one structural position with a value in another.
 
 Each CLI adapter's supported-version constant is only a claim until three
 statements agree: the version pinned for installation, the version the adapter
@@ -442,14 +438,10 @@ requirement, or an empty or mixed proposal set for a named one, is
 unintelligible-response boundary loss before that decoder runs. A proposal's raw
 argument JSON is kept verbatim and never re-serialized, and the Codex renderer
 carries caller tool schemas and replayed tool arguments into the prompt as raw
-JSON. When a CLI adapter's redaction suppresses a whole argument object, the
-proposal crosses the adapter as typed non-executable material that keeps its
-admitted tool name and withholds only its arguments, so it can neither hide a
-second conflicting value nor satisfy a named tool choice under a foreign name.
-The decoders impose no argument-size ceiling; the normalized-argument ceiling
-[tool-loop](tool-loop.md) states belongs to the bridge, which fails the model
-call as unrepresentable tool material before any tool round rather than reaching
-one as invalid arguments.
+JSON. The decoders impose no argument-size ceiling; the normalized-argument
+ceiling [tool-loop](tool-loop.md) states belongs to the bridge, which fails the
+model call as unrepresentable tool material before any tool round rather than
+reaching one as invalid arguments.
 
 Both HTTP clients force the rustls backend, select the same `ring` crypto
 provider the database stack uses, verify certificate and hostname against
