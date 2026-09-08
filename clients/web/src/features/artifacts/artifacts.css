@@ -382,6 +382,8 @@
 }
 
 .attachment-workbench {
+  container-type: inline-size;
+  container-name: attachments;
   display: grid;
   min-height: 0;
   grid-template-rows: 56px auto minmax(0, 1fr);
@@ -565,15 +567,7 @@
   line-height: 1.45;
 }
 
-@media (max-width: 760px) {
-  .artifact-panel {
-    grid-template-rows: auto auto minmax(0, 1fr);
-  }
-
-  .attachment-workbench {
-    grid-template-rows: auto auto minmax(0, 1fr);
-  }
-
+@container attachments (max-width: 670px) {
   .attachment-layout {
     display: block;
     overflow: auto;
@@ -586,6 +580,23 @@
 
   .attachment-preview {
     overflow: visible;
+  }
+}
+
+@container attachments (max-width: 450px) {
+  .artifact-image-layout,
+  .artifact-placeholder-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .artifact-panel {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .attachment-workbench {
+    grid-template-rows: auto auto minmax(0, 1fr);
   }
 
   .artifact-panel-heading {
