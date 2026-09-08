@@ -7,7 +7,7 @@ use std::{collections::HashMap, path::PathBuf};
 ///
 /// It carries model controls, paths, bounds, and a non-secret credential
 /// references only. OAuth values arrive through the daemon delivery boundary.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexCliConfig {
     /// Exact per-model reasoning, fast-mode, and service-tier capabilities.
     pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
@@ -38,6 +38,29 @@ pub struct CodexCliConfig {
     pub event_limit: usize,
     /// Maximum stderr bytes retained as native failure evidence.
     pub stderr_limit: usize,
+}
+
+impl std::fmt::Debug for CodexCliConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodexCliConfig")
+            .field("model_capabilities", &self.model_capabilities)
+            .field(
+                "model_context_window_overrides",
+                &self.model_context_window_overrides,
+            )
+            .field("executable", &"[redacted]")
+            .field("working_directory", &"[redacted]")
+            .field("credential_reference", &self.credential_reference)
+            .field("credential_home_count", &self.credential_homes.len())
+            .field("oauth_profiles", &self.oauth_profiles)
+            .field("exchange_timeout", &self.exchange_timeout)
+            .field("interrupt_grace", &self.interrupt_grace)
+            .field("post_kill_reap_bound", &self.post_kill_reap_bound)
+            .field("event_limit", &self.event_limit)
+            .field("stderr_limit", &self.stderr_limit)
+            .finish()
+    }
 }
 
 impl CodexCliConfig {
@@ -72,5 +95,28 @@ impl CodexCliConfig {
     ) -> Self {
         self.credential_homes = homes.into_iter().collect();
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configuration_debug_omits_credential_and_host_paths() {
+        let credential_home = PathBuf::from("/synthetic-private-account/login-home");
+        let executable = PathBuf::from("/synthetic-private-install/codex");
+        let workspace = PathBuf::from("/synthetic-private-workspace");
+        let reference = signalbox_model_runtime::CredentialReference::new("fixture-profile");
+        let config = CodexCliConfig::new(&executable, &workspace, reference.clone(), None)
+            .with_credential_homes([(reference, credential_home.clone())]);
+
+        let debug = format!("{config:?}");
+
+        assert!(!debug.contains(credential_home.to_string_lossy().as_ref()));
+        assert!(!debug.contains(executable.to_string_lossy().as_ref()));
+        assert!(!debug.contains(workspace.to_string_lossy().as_ref()));
+        assert!(debug.contains("fixture-profile"));
+        assert!(debug.contains("credential_home_count: 1"));
     }
 }
