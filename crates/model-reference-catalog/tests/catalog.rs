@@ -176,7 +176,7 @@ fn launch_aliases_resolve_their_recorded_snapshot_rates() {
     let catalog = bundled_catalog().unwrap();
     for (alias, date, expected_rate) in [
         ("gpt-4-turbo", "2023-11-06", "oai-gpt4-turbo-launch"),
-        ("gpt-4o", "2024-05-13", "oai-gpt4o-launch"),
+        ("gpt-4o", "2024-05-13", "oai-gpt4o-alias-launch"),
     ] {
         assert_eq!(
             api_model_rate_set_ids(&catalog, alias, date),
@@ -184,6 +184,28 @@ fn launch_aliases_resolve_their_recorded_snapshot_rates() {
             "{alias} at {date}"
         );
     }
+}
+
+#[test]
+fn rolling_gpt4o_stops_using_may_prices_at_the_later_snapshot_window() {
+    let catalog = bundled_catalog().unwrap();
+
+    assert_eq!(
+        api_model_rate_set_ids(&catalog, "gpt-4o", "2024-08-05"),
+        Some(vec![String::from("oai-gpt4o-alias-launch")])
+    );
+    assert_eq!(
+        api_model_rate_set_ids(&catalog, "gpt-4o", "2024-08-06"),
+        None
+    );
+    assert_eq!(
+        api_model_rate_set_ids(&catalog, "gpt-4o", "2024-10-01"),
+        Some(vec![String::from("oai-gpt4o-alias-0806-caching")])
+    );
+    assert_eq!(
+        api_model_rate_set_ids(&catalog, "gpt-4o-2024-05-13", "2024-10-01"),
+        Some(vec![String::from("oai-gpt4o-launch")])
+    );
 }
 
 #[test]
