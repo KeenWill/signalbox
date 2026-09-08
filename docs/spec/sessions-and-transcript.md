@@ -188,7 +188,8 @@ resolution.
 The browser catalog extends the fleet attention projection rather than
 maintaining a second session-state classifier, and sort and filter state are
 client-local inputs, not durable session state. Activating a catalog row opens
-its session workspace directly; browser Back or Escape returns to the catalog.
+its session workspace directly; browser Back or Escape returns to the catalog
+and restores focus to the launching row when it remains in the page.
 Projected-size values on the timeline are loading-policy estimates, not
 encoded-response promises. Text masked before durable storage stays masked:
 detail reads consult no credentials, reconstruct no provider-native material,

@@ -634,8 +634,11 @@ export function ProductApp({
     [],
   )
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
+  const catalogReturnSessionId = useRef<string | undefined>(undefined)
   const updateSessionSearch = useCallback(
     (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
+      if (mode === 'push' && next.workspace && next.session)
+        catalogReturnSessionId.current = next.session
       if (mode === 'close') {
         currentCatalogSession.current = next.session
         if (catalogSessionOpenedHere) {
@@ -961,6 +964,7 @@ export function ProductApp({
       />
     ) : surface === 'sessions' && bootstrap.isSuccess ? (
       <SessionCatalogSurface
+        returnSessionId={catalogReturnSessionId.current}
         state={sessionState}
         onStateChange={updateSessionSearch}
         onTimelineIds={setTimelineIds}

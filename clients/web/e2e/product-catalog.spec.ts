@@ -228,10 +228,28 @@ test('filters and opens a session with Enter, then returns to the catalog', asyn
   await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
     firstSessionId,
   )
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
   await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
   await expect(page).toHaveURL(/q=Release/)
-  await expect(session).toBeVisible()
+  await expect(session).toBeFocused()
   await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns browser Back focus to the row that opened a workspace', async ({
+  page,
+}, testInfo) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  const session = page.getByRole('button', { name: firstPage.summaries[1].title_summary })
+  await session.click()
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await expect(timeline).toBeVisible()
+  await timeline.focus()
+  await page.goBack()
+  await expect(session).toBeFocused()
+  await page.screenshot({ path: testInfo.outputPath('catalog-return-focus.png') })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -456,7 +474,11 @@ test('exposes the server-owned blocked-goal need on its row', async ({ page }) =
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
   await page.goto('/sessions')
-  await expect(page.getByText('Select the authoritative deployment target.')).toBeVisible()
+  await expect(
+    page.getByText('user input required · Select the authoritative deployment target.', {
+      exact: true,
+    }),
+  ).toBeVisible()
   await expect(page.getByText('provide goal need', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

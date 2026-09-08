@@ -34,10 +34,12 @@ const SessionTitle = ({ summary }: { summary: SessionSummary }) => (
 )
 
 export function SessionCatalogSurface({
+  returnSessionId,
   state,
   onStateChange,
   onTimelineIds,
 }: {
+  returnSessionId?: string
   state: ProductSessionState
   onTimelineIds: (ids: readonly string[]) => void
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close' | 'replace') => void
@@ -50,6 +52,7 @@ export function SessionCatalogSurface({
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const errorHeading = useRef<HTMLHeadingElement>(null)
   const restorePageFocus = useRef(false)
+  const pendingReturnFocus = useRef(returnSessionId)
   const [searchError, setSearchError] = useState<string | null>(null)
   const overlay = useAppSelector((root) => root.app.overlay)
   const sessions = useQuery({
@@ -112,6 +115,12 @@ export function SessionCatalogSurface({
     if (keyboardSelection && overlay === null)
       sessionButtons.current.get(keyboardSelection)?.focus()
   }, [keyboardSelection, overlay])
+  useEffect(() => {
+    if (!sessions.data || overlay !== null || !pendingReturnFocus.current) return
+    const target = sessionButtons.current.get(pendingReturnFocus.current)
+    pendingReturnFocus.current = undefined
+    target?.focus()
+  }, [sessions.data, overlay])
   useEffect(() => {
     if (!sessions.data || !restorePageFocus.current) return
     restorePageFocus.current = false
@@ -311,7 +320,11 @@ export function SessionCatalogSurface({
                         </strong>
                         <code>{summary.session_id}</code>
                         {summary.action && <small>{label(summary.action)}</small>}
-                        {summary.goal_block && <small>{summary.goal_block.need_summary}</small>}
+                        {summary.goal_block && (
+                          <small>
+                            {label(summary.goal_block.reason)} · {summary.goal_block.need_summary}
+                          </small>
+                        )}
                       </span>
                       <span
                         className={`state-chip state-${rateById.get(summary.session_id)?.lifecycle_state ?? 'unavailable'}`}
