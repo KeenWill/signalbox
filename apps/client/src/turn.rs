@@ -265,6 +265,51 @@ async fn await_and_report_turn(
 
 /// Supplies one user decision for a pending tool request and validates the
 /// exact recorded receipt.
+pub(crate) async fn override_denial(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    command_id: Option<CommandId>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    arm_override(client, command_id, session_id, tool_request_id).await?;
+    output.tool_denial_overridden(tool_request_id)?;
+    Ok(())
+}
+
+pub(crate) async fn arm_override(
+    client: &mut ProcessClient,
+    command_id: CommandId,
+    session_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+) -> Result<(), ClientError> {
+    let mut connection = client
+        .mutation_request(ClientRequest::OverrideDeniedToolRequest {
+            command_id,
+            session_id,
+            tool_request_id,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::ToolDenialOverridden {
+            tool_request_id: recorded,
+        } if recorded == tool_request_id => Ok(()),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("override returned an unexpected receipt").mutation()),
+    }
+}
+
 pub(crate) async fn decide(
     client: &mut ProcessClient,
     output: &mut Output<'_>,

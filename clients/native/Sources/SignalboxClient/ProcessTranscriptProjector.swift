@@ -496,7 +496,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             turnID: turnID
           )
         case .toolExecutionResult(let requestID, _, _),
-          .toolDenied(let requestID, _), .toolClosed(let requestID, _),
+          .toolDenied(let requestID, _, _), .toolClosed(let requestID, _, _),
           .toolInadmissible(let requestID, _),
           .delegationResult(let requestID, _, _, .foreground, _, _, _, _, _):
           let correlation = ToolCorrelation(
@@ -620,12 +620,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return records.reduce(into: [:]) { positions, record in
       guard case .entry(let message) = record,
         message.sourceSessionID == nativeSourceSessionID,
-        case .assistantToolUse(let turnID, _, let requestID, let toolName, _, _) = message.entry
+        case .assistantToolUse(let turnID, let modelCallID, let requestID, let toolName, _, _) = message.entry
       else {
         return
       }
       positions[requestID] = SignalboxProcessToolRequestPosition(
         turnID: turnID,
+        modelCallID: modelCallID,
         entryIndex: message.entryIndex,
         toolName: toolName,
         toolAttemptID: ambiguousResultRequestIDs.contains(requestID)
@@ -868,15 +869,25 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         output: content,
         status: .completed
       )
-    case .toolDenied(let requestID, let content):
+    case .toolDenied(let requestID, let content, let overrideRecorded):
       return try updateTool(
         sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
         toolAttemptID: nil,
         output: content,
-        status: .denied
+        status: .denied,
+        overrideRecorded: overrideRecorded
       )
-    case .toolClosed(let requestID, let content), .toolInadmissible(let requestID, let content):
+    case .toolClosed(let requestID, let content, let approvedBeforeClose):
+      return try updateTool(
+        sourceSessionID: message.sourceSessionID.rawValue,
+        requestID: requestID.rawValue,
+        toolAttemptID: nil,
+        output: content,
+        status: .closed,
+        approvedBeforeClose: approvedBeforeClose
+      )
+    case .toolInadmissible(let requestID, let content):
       return try updateTool(
         sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
@@ -944,7 +955,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     requestID: String,
     toolAttemptID: SignalboxCanonicalUUID?,
     output: String?,
-    status: SignalboxProcessToolStatus
+    status: SignalboxProcessToolStatus,
+    approvedBeforeClose: Bool? = nil,
+    overrideRecorded: Bool? = nil
   ) throws -> SignalboxStoredEvent {
     let correlation = ToolCorrelation(
       sourceSessionID: sourceSessionID,
@@ -964,7 +977,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       toolName: prior.toolName,
       arguments: prior.arguments,
       output: output,
-      status: status
+      status: status,
+      approvedBeforeClose: approvedBeforeClose,
+      overrideRecorded: overrideRecorded
     )
     toolsByIdentity[identity] = updated
     guard let eventID = presentationIDs[identity.presentationIdentity],
@@ -996,7 +1011,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       toolName: event.toolName,
       arguments: event.arguments,
       output: event.output,
-      status: status
+      status: status,
+      approvedBeforeClose: event.approvedBeforeClose,
+      overrideRecorded: event.overrideRecorded
     )
     return SignalboxStoredEvent(
       eventID: eventID,
@@ -1380,9 +1397,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let requestID: String
     switch message.entry {
     case .toolExecutionResult(let request, _, _),
-      .toolDenied(let request, _),
+      .toolDenied(let request, _, _),
       .toolInadmissible(let request, _),
-      .toolClosed(let request, _):
+      .toolClosed(let request, _, _):
       requestID = request.rawValue
     case .delegationResult(let request, _, _, .foreground, _, _, _, _, _):
       requestID = request.rawValue
@@ -1576,14 +1593,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         attemptID: attemptID,
         closesAttemptWithoutID: false
       )
-    case .toolDenied(let requestID, _), .toolInadmissible(let requestID, _):
+    case .toolDenied(let requestID, _, _), .toolInadmissible(let requestID, _):
       return TerminalToolResultEvidence(
         entryID: message.entryID,
         requestID: requestID.rawValue,
         attemptID: nil,
         closesAttemptWithoutID: false
       )
-    case .toolClosed(let requestID, _):
+    case .toolClosed(let requestID, _, _):
       return TerminalToolResultEvidence(
         entryID: message.entryID,
         requestID: requestID.rawValue,
@@ -1733,9 +1750,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
               return nil
             }
             switch message.entry {
-            case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
+            case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _, _),
               .toolInadmissible(let requestID, _),
-              .toolClosed(let requestID, _),
+              .toolClosed(let requestID, _, _),
               .delegationResult(let requestID, _, _, .foreground, _, _, _, _, _):
               return ToolCorrelation(
                 sourceSessionID: message.sourceSessionID.rawValue,

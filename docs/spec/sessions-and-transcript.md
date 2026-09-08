@@ -187,24 +187,29 @@ resolution.
 
 The browser catalog extends the fleet attention projection rather than
 maintaining a second session-state classifier, and sort and filter state are
-client-local inputs, not durable session state. Projected-size values on the
-timeline are loading-policy estimates, not encoded-response promises. Text
-masked before durable storage stays masked: detail reads consult no credentials,
-reconstruct no provider-native material, and return blob facts as references
-without fetching bytes. Browser search accepts only the lexical strategy and
-passes text to PostgreSQL full-text search, so query operators are not product
-semantics and a future strategy cannot turn the request into a database query
-language. A search is global or scoped to one session, returning that session's
-entries only; a lexical query examines a bounded candidate set, and a term
-absent from the index returns empty at once. The search projection is fed by
-accepted input, steering input, final assistant text, tool arguments and
-results, current session metadata, and compaction summaries, each published in
-the transaction that commits the source text, with no implicit attachment
-reading, OCR, text extraction, or model pass. Attachment filenames, attachment
-media metadata, and derived text artifacts are content classes the schema admits
-and a read returns; a compaction commit publishes its summary as a derived text
-artifact, and no producer publishes the two attachment classes. No browser read
-materializes or scans a session transcript.
+client-local inputs, not durable session state. Activating a catalog row opens
+its session workspace directly; browser Back or Escape returns to the catalog
+with the lifecycle filter and page order retained, and restores focus to the
+launching row when it remains in the page.
+
+Projected-size values on the timeline are loading-policy estimates, not
+encoded-response promises. Text masked before durable storage stays masked:
+detail reads consult no credentials, reconstruct no provider-native material,
+and return blob facts as references without fetching bytes. Browser search
+accepts only the lexical strategy and passes text to PostgreSQL full-text
+search, so query operators are not product semantics and a future strategy
+cannot turn the request into a database query language. A search is global or
+scoped to one session, returning that session's entries only; a lexical query
+examines a bounded candidate set, and a term absent from the index returns empty
+at once. The search projection is fed by accepted input, steering input, final
+assistant text, tool arguments and results, current session metadata, and
+compaction summaries, each published in the transaction that commits the source
+text, with no implicit attachment reading, OCR, text extraction, or model pass.
+Attachment filenames, attachment media metadata, and derived text artifacts are
+content classes the schema admits and a read returns; a compaction commit
+publishes its summary as a derived text artifact, and no producer publishes the
+two attachment classes. No browser read materializes or scans a session
+transcript.
 
 There is no generic text, role, metadata, or other payload; every entry kind is
 a closed semantic fact. Entries reference accepted input and never copy its

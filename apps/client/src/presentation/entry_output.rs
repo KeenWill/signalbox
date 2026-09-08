@@ -491,6 +491,7 @@ impl<'a> Output<'a> {
             SnapshotEntryKind::Marker(TranscriptEntry::ToolDenied {
                 tool_request_id,
                 content,
+                ..
             }) => writeln!(
                 self.stdout,
                 "tool_denied request={tool_request_id} content={} source={} entry={}",
@@ -520,6 +521,7 @@ impl<'a> Output<'a> {
             SnapshotEntryKind::Marker(TranscriptEntry::ToolClosed {
                 tool_request_id,
                 content,
+                ..
             }) => writeln!(
                 self.stdout,
                 "tool_closed request={tool_request_id} content={} source={} entry={}",

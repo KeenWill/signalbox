@@ -154,6 +154,11 @@ pub(crate) enum Command {
         defaults_version: Option<CanonicalU64>,
         descendants: bool,
     },
+    Override {
+        session_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        command_id: Option<CommandId>,
+    },
     Approve {
         session_id: CanonicalUuid,
         tool_request_id: CanonicalUuid,
@@ -548,6 +553,8 @@ enum CliCommand {
     Review(ReviewArguments),
     /// Stop the active turn and continue with standard-input content.
     Stop(StopArguments),
+    /// Arm a one-shot override of a delegate denial; takes effect after an extra model round.
+    Override(DecideArguments),
     /// Approve one pending tool request.
     Approve(DecideArguments),
     /// Deny one pending tool request with an explicit reason.
@@ -1831,10 +1838,10 @@ struct StopArguments {
 
 #[derive(Debug, ClapArgs)]
 struct DecideArguments {
-    /// Session the pending tool request belongs to.
+    /// Session the tool request belongs to.
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
     session_id: CanonicalUuid,
-    /// Pending tool request printed by the transcript.
+    /// Tool request printed by the transcript.
     #[arg(value_name = "TOOL_REQUEST", value_parser = canonical_uuid)]
     tool_request_id: CanonicalUuid,
     /// Reuse an exact non-reserved durable command identity.
@@ -2640,6 +2647,11 @@ pub(crate) fn parse(
             command_id: arguments.command_id,
             defaults_version: arguments.defaults_version,
             descendants: arguments.descendants,
+        },
+        CliCommand::Override(arguments) => Command::Override {
+            session_id: arguments.session_id,
+            tool_request_id: arguments.tool_request_id,
+            command_id: arguments.command_id,
         },
         CliCommand::Approve(arguments) => Command::Approve {
             session_id: arguments.session_id,
@@ -3596,6 +3608,19 @@ mod tests {
                 && tool_request_id.to_string() == tool_request
                 && reason == "writes outside the workspace"
         ));
+    }
+
+    #[test]
+    fn override_binds_session_request_and_replay_identity() {
+        let session = "00000000-0000-0000-0000-000000000001";
+        let request = "00000000-0000-0000-0000-000000000002";
+        let command = "00000000-0000-0000-0000-000000000004";
+        let parsed = parse(["override", session, request, "--command-id", command].map(Into::into));
+
+        assert!(matches!(parsed, Ok(ParseOutcome::Run(Arguments {
+            command: Command::Override { session_id, tool_request_id, command_id: Some(command_id) }, ..
+        })) if session_id.to_string() == session && tool_request_id.to_string() == request
+            && command_id.into_uuid().to_string() == command));
     }
 
     #[test]
