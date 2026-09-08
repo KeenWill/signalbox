@@ -18,4 +18,4 @@ CREATE TRIGGER reload_activation_is_immutable
     BEFORE UPDATE OR DELETE ON reload_activation
     FOR EACH ROW EXECUTE FUNCTION reject_reload_activation_change();
 RESET ROLE;
-SET search_path = public;
+RESET search_path;

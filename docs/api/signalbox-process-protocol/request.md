@@ -11,6 +11,10 @@ pub enum ClientRequest {
         turn_id: CanonicalUuid,
         pool_policy_id: CanonicalUuid,
     },
+    ReadRunnerStatus {
+        page_size: u32,
+        after: option::Option<RunnerStatusCursor>,
+    },
     RegisterWorkspace {
         command_id: CommandId,
         root: string::String,

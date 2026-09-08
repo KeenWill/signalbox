@@ -231,6 +231,8 @@ impl SessionTimelineRepository {
             .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("window totals"))?;
         if item_count > descriptor.sizes.item_count
             || u64::from(projected_bytes) > descriptor.sizes.projected_structured_bytes
+            || (item_count == descriptor.sizes.item_count
+                && u64::from(projected_bytes) != descriptor.sizes.projected_structured_bytes)
         {
             return Err(SessionTimelineCorruption::InvalidOrdinal("window totals").into());
         }
