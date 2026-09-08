@@ -36,6 +36,7 @@
 | program_cancellation | 5 | 0 | 1 | [program_cancellation](program_cancellation.md) |
 | program_journal | 4 | 0 | 0 | [program_journal](program_journal.md) |
 | program_registration | 2 | 0 | 0 | [program_registration](program_registration.md) |
+| program_session | 2 | 0 | 0 | [program_session](program_session.md) |
 | replace_session_defaults | 5 | 0 | 0 | [replace_session_defaults](replace_session_defaults.md) |
 | repo_watch_command | 1 | 0 | 0 | [repo_watch_command](repo_watch_command.md) |
 | review_orchestration | 11 | 0 | 0 | [review_orchestration](review_orchestration.md) |

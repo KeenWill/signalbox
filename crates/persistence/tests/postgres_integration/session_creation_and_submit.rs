@@ -5850,6 +5850,40 @@ async fn program_submit_records_its_run_and_conflicts_with_user_replay()
         Some("submit_input_command_actor_shape")
     );
     earlier_version.rollback().await?;
+    for (issuer, actor, program_run) in [
+        ("operator", "program", Some(run.into_uuid())),
+        ("program", "user", None),
+    ] {
+        let mut corruption = pool.begin().await?;
+        sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER USER")
+            .execute(&mut *corruption)
+            .await?;
+        sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER USER")
+            .execute(&mut *corruption)
+            .await?;
+        sqlx::query("UPDATE durable_command SET issuer_kind = $2 WHERE command_id = $1")
+            .bind(user_command.command_id().into_uuid())
+            .bind(issuer)
+            .execute(&mut *corruption)
+            .await?;
+        sqlx::query("UPDATE submit_input_command SET actor_kind = $2, actor_program_run_id = $3 WHERE command_id = $1")
+            .bind(user_command.command_id().into_uuid()).bind(actor).bind(program_run).execute(&mut *corruption).await?;
+        sqlx::query("ALTER TABLE durable_command ENABLE TRIGGER USER")
+            .execute(&mut *corruption)
+            .await?;
+        sqlx::query("ALTER TABLE submit_input_command ENABLE TRIGGER USER")
+            .execute(&mut *corruption)
+            .await?;
+        corruption.commit().await?;
+        assert!(matches!(
+            repository.load(user_command.command_id()).await,
+            Err(SubmitInputRepositoryError::Corruption(
+                SubmitInputCorruption::Inconsistent("actor and envelope principal")
+            ))
+        ));
+    }
+    pool.close().await;
+
     Ok(())
 }
 

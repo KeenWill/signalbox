@@ -65,6 +65,16 @@ pub enum SessionCreationCause {
         /// The dispatching module and its own durable dispatch identity.
         dispatch: crate::ModuleDispatch,
     },
+    /// One exact program run created this workflow session.
+    ///
+    /// ```compile_fail
+    /// use signalbox_domain::{ProgramRunId, SessionCreationCause};
+    /// fn forge(run: ProgramRunId) { let _ = SessionCreationCause::Workflow { run }; }
+    /// ```
+    Workflow {
+        /// The immutable run that initiated this session.
+        run: crate::ProgramActor,
+    },
     /// One exact logical tool request spawned this delegated child.
     Delegated {
         /// The parent work to which the child must return its result.
@@ -77,7 +87,7 @@ impl SessionCreationCause {
     pub const fn default_ownership(&self) -> crate::SessionOwnership {
         match self {
             Self::Interactive => crate::SessionOwnership::Unmonitored,
-            Self::ModuleDispatched { .. } | Self::Delegated { .. } => {
+            Self::ModuleDispatched { .. } | Self::Delegated { .. } | Self::Workflow { .. } => {
                 crate::SessionOwnership::Owned
             }
         }
@@ -88,7 +98,7 @@ impl SessionCreationCause {
     pub const fn default_finish_condition(&self) -> Option<crate::FinishCondition> {
         match self {
             Self::ModuleDispatched { .. } => Some(crate::FinishCondition::ExternalGate),
-            Self::Interactive | Self::Delegated { .. } => None,
+            Self::Interactive | Self::Delegated { .. } | Self::Workflow { .. } => None,
         }
     }
 }
@@ -209,6 +219,16 @@ impl SessionCreationProvenance {
     /// Pairs the two required independent creation facts.
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self {
         Self { cause, ancestry }
+    }
+
+    /// Creates workflow provenance naming its initiating program run.
+    pub const fn workflow(capability: crate::program_session::ProgramSessionCapability) -> Self {
+        Self {
+            cause: SessionCreationCause::Workflow {
+                run: capability.reference(),
+            },
+            ancestry: TranscriptAncestry::None,
+        }
     }
 
     /// Creates delegated provenance without inferring transcript ancestry.
@@ -1083,7 +1103,10 @@ const fn session_provenance_failure(
             TranscriptAncestry::None | TranscriptAncestry::SingleSource { .. },
         )
         | (SessionCreationCause::Delegated { .. }, TranscriptAncestry::None)
-        | (SessionCreationCause::ModuleDispatched { .. }, TranscriptAncestry::None) => None,
+        | (
+            SessionCreationCause::ModuleDispatched { .. } | SessionCreationCause::Workflow { .. },
+            TranscriptAncestry::None,
+        ) => None,
         (SessionCreationCause::Interactive, TranscriptAncestry::ImportedConversation { .. }) => {
             Some(SessionReconstitutionFailure::ImportedSessionSeedUnavailable)
         }
@@ -1092,6 +1115,11 @@ const fn session_provenance_failure(
             TranscriptAncestry::SingleSource { .. }
             | TranscriptAncestry::ImportedConversation { .. },
         ) => Some(SessionReconstitutionFailure::DelegatedAncestryMismatch),
+        (
+            SessionCreationCause::Workflow { .. },
+            TranscriptAncestry::SingleSource { .. }
+            | TranscriptAncestry::ImportedConversation { .. },
+        ) => Some(SessionReconstitutionFailure::WorkflowAncestryMismatch),
         (
             SessionCreationCause::ModuleDispatched { .. },
             TranscriptAncestry::SingleSource { .. }
@@ -1126,6 +1154,8 @@ pub enum SessionReconstitutionFailure {
     DelegatedTemplateProvenance,
     /// Module-dispatched creation is independently constrained to no ancestry.
     ModuleDispatchedAncestryMismatch,
+    /// Workflow creation is independently constrained to no ancestry.
+    WorkflowAncestryMismatch,
 }
 
 /// A failed current-session reconstitution retaining every typed input
@@ -1270,11 +1300,15 @@ impl CreateSession {
     ) -> Result<PreparedCreateSession, CreateSessionPreparationError> {
         match (self.provenance.cause(), self.provenance.ancestry()) {
             (
-                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
+                SessionCreationCause::Interactive
+                | SessionCreationCause::ModuleDispatched { .. }
+                | SessionCreationCause::Workflow { .. },
                 TranscriptAncestry::None,
             ) => {}
             (
-                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
+                SessionCreationCause::Interactive
+                | SessionCreationCause::ModuleDispatched { .. }
+                | SessionCreationCause::Workflow { .. },
                 TranscriptAncestry::SingleSource { .. }
                 | TranscriptAncestry::ImportedConversation { .. },
             ) => {
@@ -1496,11 +1530,15 @@ impl CreateSessionReconstitutionInput {
         }
         match (self.provenance.cause(), self.provenance.ancestry()) {
             (
-                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
+                SessionCreationCause::Interactive
+                | SessionCreationCause::ModuleDispatched { .. }
+                | SessionCreationCause::Workflow { .. },
                 TranscriptAncestry::None,
             ) => {}
             (
-                SessionCreationCause::Interactive | SessionCreationCause::ModuleDispatched { .. },
+                SessionCreationCause::Interactive
+                | SessionCreationCause::ModuleDispatched { .. }
+                | SessionCreationCause::Workflow { .. },
                 TranscriptAncestry::SingleSource { .. }
                 | TranscriptAncestry::ImportedConversation { .. },
             ) => {

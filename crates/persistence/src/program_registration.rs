@@ -185,6 +185,22 @@ impl ProgramRegistrationRepository {
         Ok(run)
     }
 
+    /// Adopts an immutable registration only when its complete requested content matches.
+    pub async fn find(
+        &self,
+        content: &ProgramRegistrationContent,
+    ) -> Result<Option<ProgramRegistration>, ProgramRegistrationError> {
+        let registered =
+            sqlx::query("SELECT * FROM program_registration WHERE name = $1 AND revision = $2")
+                .bind(&content.name)
+                .bind(&content.revision)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(decode)
+                .transpose()?;
+        Ok(registered.filter(|registration| &registration.content == content))
+    }
+
     pub async fn for_run(
         &self,
         run: ProgramRunId,

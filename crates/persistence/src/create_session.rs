@@ -31,7 +31,8 @@ use crate::mapping::{
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const WRITTEN_STORAGE_VERSION: i16 = 8;
+const WRITTEN_STORAGE_VERSION: i16 = 9;
+pub(crate) const WORKFLOW_FROM_STORAGE_VERSION: i16 = 9;
 const RUNNER_PLACEMENT_FROM_STORAGE_VERSION: i16 = 8;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
@@ -215,7 +216,14 @@ impl CreateSessionRepository {
             None => {}
         }
 
-        let issuer = crate::command_registry::issuer_columns(self.principal);
+        let issuer = if matches!(
+            prepared.command().provenance().cause(),
+            SessionCreationCause::Workflow { .. }
+        ) {
+            ("program", None)
+        } else {
+            crate::command_registry::issuer_columns(self.principal)
+        };
         let claimed = sqlx::query(
             "INSERT INTO durable_command
                 (command_id, command_kind, storage_version, claimed_at,
@@ -442,8 +450,8 @@ pub(crate) async fn insert_prepared(
         "INSERT INTO session
             (session_id, creation_cause, ancestry_kind,
              template_name, template_content_digest,
-             dispatching_module, dispatch_ref)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             dispatching_module, dispatch_ref, creating_program_run_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(session_id_to_uuid(session.id()))
     .bind(session_creation_cause_to_str(&cause))
@@ -460,6 +468,7 @@ pub(crate) async fn insert_prepared(
     )
     .bind(dispatching_module)
     .bind(dispatch_ref)
+    .bind(creating_program_run(cause))
     .execute(&mut *connection)
     .await?;
     crate::session_lifecycle::insert_created(
@@ -589,9 +598,9 @@ async fn insert_command_record(
              result_kind, created_session_id,
              dispatching_module, dispatch_ref,
              start_gate, ownership, finish_condition_kind, finish_condition,
-             runner_selector_kind, runner_selector_id, runner_selector_class, runner_directory_kind, runner_directory, runner_credential_profile, runner_workspace_kind, runner_repository, runner_sandbox, runner_permission_overrides)
+             runner_selector_kind, runner_selector_id, runner_selector_class, runner_directory_kind, runner_directory, runner_credential_profile, runner_workspace_kind, runner_repository, runner_sandbox, runner_permission_overrides, creating_program_run_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-                 $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)",
+                 $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
@@ -648,6 +657,7 @@ async fn insert_command_record(
     .bind(runner_placement.runner_repository)
     .bind(runner_placement.runner_sandbox)
     .bind(runner_placement.runner_permission_overrides)
+    .bind(creating_program_run(cause))
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -712,6 +722,8 @@ async fn load_from_connection(
         "SELECT
             d.command_kind AS registry_kind,
             d.storage_version AS registry_version,
+            d.issuer_kind AS registry_issuer,
+            d.issuer_module AS registry_issuer_module,
             c.command_id AS typed_command_id,
             c.command_kind AS typed_kind,
             c.storage_version AS typed_version,
@@ -726,6 +738,8 @@ async fn load_from_connection(
             c.runner_sandbox,
             c.runner_permission_overrides,
             c.creation_cause AS command_cause,
+            c.creating_program_run_id AS command_program_run,
+            (SELECT run_id FROM program_run_registration WHERE run_id = c.creating_program_run_id) AS command_verified_program_run,
             c.ancestry_kind AS command_ancestry,
             c.dispatching_module AS command_dispatching_module,
             c.dispatch_ref AS command_dispatch_ref,
@@ -748,6 +762,8 @@ async fn load_from_connection(
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
+            s.creating_program_run_id AS stored_program_run,
+            (SELECT run_id FROM program_run_registration WHERE run_id = s.creating_program_run_id) AS stored_verified_program_run,
             s.ancestry_kind AS stored_ancestry,
             s.spawning_tool_request_id AS stored_spawning_request_id,
             s.dispatching_module AS stored_dispatching_module,
@@ -798,10 +814,13 @@ async fn load_from_connection(
     .fetch_optional(&mut *connection)
     .await?;
 
-    row.map(|row| decode_complete(row, command_id)).transpose()
+    match row {
+        Some(row) => decode_complete(row, command_id).await.map(Some),
+        None => Ok(None),
+    }
 }
 
-fn decode_complete(
+async fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
 ) -> Result<ReconstitutedSessionCreation, CreateSessionRepositoryError> {
@@ -819,7 +838,29 @@ fn decode_complete(
         None,
         row.try_get("command_dispatching_module")?,
         row.try_get("command_dispatch_ref")?,
+        crate::program_session::recorded_capability(
+            row.try_get("command_program_run")?,
+            row.try_get("command_verified_program_run")?,
+        )
+        .await
+        .map_err(|()| CreateSessionCorruption::Inconsistent("workflow program reference"))?,
     )?;
+    let workflow = matches!(
+        command_provenance.cause(),
+        SessionCreationCause::Workflow { .. }
+    );
+    let issuer: String = required(&row, "registry_issuer")?;
+    if workflow && typed_version < WORKFLOW_FROM_STORAGE_VERSION
+        || workflow != (issuer == "program")
+        || workflow
+            && row
+                .try_get::<Option<String>, _>("registry_issuer_module")?
+                .is_some()
+    {
+        return Err(
+            CreateSessionCorruption::Inconsistent("workflow command issuer or version").into(),
+        );
+    }
     let initial_version = decode_ordinal(&row, "initial_defaults_version")?;
     if initial_version != SessionConfigurationDefaultsVersion::first() {
         return Err(
@@ -922,6 +963,12 @@ fn decode_complete(
         row.try_get("stored_spawning_request_id")?,
         row.try_get("stored_dispatching_module")?,
         row.try_get("stored_dispatch_ref")?,
+        crate::program_session::recorded_capability(
+            row.try_get("stored_program_run")?,
+            row.try_get("stored_verified_program_run")?,
+        )
+        .await
+        .map_err(|()| CreateSessionCorruption::Inconsistent("workflow program reference"))?,
     )?;
     let stored_template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
@@ -1146,7 +1193,16 @@ fn encode_module_dispatch(cause: SessionCreationCause) -> (Option<&'static str>,
             Some(crate::mapping::dispatching_module_to_str(dispatch.module())),
             Some(module_dispatch_reference(dispatch)),
         ),
-        SessionCreationCause::Interactive | SessionCreationCause::Delegated { .. } => (None, None),
+        SessionCreationCause::Interactive
+        | SessionCreationCause::Delegated { .. }
+        | SessionCreationCause::Workflow { .. } => (None, None),
+    }
+}
+
+pub(crate) const fn creating_program_run(cause: SessionCreationCause) -> Option<Uuid> {
+    match cause {
+        SessionCreationCause::Workflow { run } => Some(run.run().into_uuid()),
+        _ => None,
     }
 }
 
@@ -1163,7 +1219,20 @@ fn decode_provenance(
     spawning_request: Option<Uuid>,
     dispatching_module: Option<String>,
     dispatch_ref: Option<Uuid>,
+    program: Option<signalbox_domain::program_session::ProgramSessionCapability>,
 ) -> Result<SessionCreationProvenance, CreateSessionRepositoryError> {
+    if let Some(program) = program {
+        return if cause == "workflow"
+            && ancestry == NO_ANCESTRY
+            && spawning_request.is_none()
+            && dispatching_module.is_none()
+            && dispatch_ref.is_none()
+        {
+            Ok(SessionCreationProvenance::workflow(program))
+        } else {
+            Err(CreateSessionCorruption::Inconsistent("workflow creation provenance").into())
+        };
+    }
     if ancestry != NO_ANCESTRY {
         return Err(CreateSessionCorruption::Unsupported {
             field: "ancestry kind",
@@ -1362,6 +1431,7 @@ mod tests {
             )),
             String::from(NO_ANCESTRY),
             Some(Uuid::from_u128(1)),
+            None,
             None,
             None,
         )
