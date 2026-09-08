@@ -167,7 +167,9 @@ the policy identity governing their chain. The wait retains its latest frontier,
 complete member exclusion snapshot and optional deadline. A member contributes a
 deadline only when every active exclusion expires: its deadline is their latest
 reset, and the wait's is the earliest member deadline. Chain exclusions,
-displacements and quarantines do not expire by time passage.
+displacements and quarantines do not expire by time passage. If the refreshed
+admission read finds a member admissible, the availability successor continues
+to credential selection instead of terminalizing pool exhaustion.
 
 An eligible wait reruns admission against current exclusions under the session
 lock. Re-parking rewrites the same wait's evidence and deadline without another
@@ -219,5 +221,6 @@ retain the active turn and its slot without rejection detail. Release admission,
 call preparation, and send authorization use the wait's retained effective
 target with its retained policy; a missing current selection leaves the wait
 unconsumed. Release pins a pre-call wait's retained target on its turn, and
-domain call preparation retains that pin across catalog reloads. Parking retains
-the exclusions that selected the wait.
+domain call preparation retains that pin across catalog reloads. The rendered
+provider operation uses that retained target. Parking retains the exclusions
+that selected the wait.

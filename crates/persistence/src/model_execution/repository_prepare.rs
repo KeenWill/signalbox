@@ -737,7 +737,7 @@ impl PostgresModelCallRepository {
                             )),
                         ));
                     }
-                    if let Some(wait) = super::credential_wait::park_failed(
+                    if let Some(outcome) = super::credential_wait::park_failed(
                         &mut transaction,
                         &execution,
                         &policy,
@@ -748,9 +748,7 @@ impl PostgresModelCallRepository {
                     )
                     .await?
                     {
-                        return Ok(Some(ModelCallObservationCommitOutcome::CredentialWait(
-                            wait,
-                        )));
+                        return Ok(Some(outcome));
                     }
                     insert_credential_pool_terminal_exhaustion(
                         &mut transaction,
