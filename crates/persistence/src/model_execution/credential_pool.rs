@@ -238,12 +238,13 @@ pub(super) async fn load_availability_successor_backoff(
 
 /// Every member one pool currently excludes, with the rows a call would satisfy.
 pub(super) struct DurablePoolExclusions {
+    observed_at: sqlx::types::time::OffsetDateTime,
     pub(super) excluded: HashSet<String>,
     pending_consumed_actions: Vec<i64>,
     headroom: HashMap<String, Option<i64>>,
 }
 
-use super::credential_pool_records;
+use super::{credential_pool_evidence, credential_pool_records};
 
 /// Serializes action-head reads and writes for one credential profile.
 ///
@@ -329,17 +330,6 @@ pub(super) async fn load_durable_pool_exclusions(
         .iter()
         .map(|member| member.credential_reference().to_owned())
         .collect::<Vec<_>>();
-    excluded.extend(
-        sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT credential_reference
-              FROM credential_pool_transient_exclusion
-              WHERE credential_reference = ANY($1)
-                AND reset_at > clock_timestamp()",
-        )
-        .bind(&member_references)
-        .fetch_all(&mut *connection)
-        .await?,
-    );
     let completed_references = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT call.credential_reference
            FROM model_call AS call
@@ -404,8 +394,7 @@ pub(super) async fn load_durable_pool_exclusions(
     excluded.extend(sqlx::query_scalar::<_, String>(
         "SELECT profile FROM credential_exclusion_state WHERE active AND kind = 'profile_quarantine' AND origin <> 'pool_trigger' AND profile = ANY($1)")
         .bind(&member_references).fetch_all(&mut *connection).await?);
-    let mut headroom = HashMap::new();
-    let now = std::time::SystemTime::now();
+    let mut snapshots = Vec::new();
     for member in policy.members().iter().filter(|member| {
         policy.tie_break == CredentialPoolRuntimeTieBreak::LeastUsed
             || member
@@ -418,6 +407,25 @@ pub(super) async fn load_durable_pool_exclusions(
             member.credential_reference(),
         )
         .await?;
+        snapshots.push((member, snapshot));
+    }
+    let (observed_at, transient_exclusions): (sqlx::types::time::OffsetDateTime, Vec<String>) =
+        sqlx::query_as(
+            "WITH observation AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
+             SELECT observation.observed_at,
+                    ARRAY(SELECT DISTINCT credential_reference
+                          FROM credential_pool_transient_exclusion
+                          WHERE credential_reference = ANY($1)
+                            AND reset_at > observation.observed_at)
+               FROM observation",
+        )
+        .bind(&member_references)
+        .fetch_one(&mut *connection)
+        .await?;
+    let now = std::time::SystemTime::from(observed_at);
+    excluded.extend(transient_exclusions);
+    let mut headroom = HashMap::new();
+    for (member, snapshot) in snapshots {
         let remaining = snapshot
             .as_ref()
             .and_then(|snapshot| capacity_headroom(snapshot, now));
@@ -432,6 +440,7 @@ pub(super) async fn load_durable_pool_exclusions(
         headroom.insert(member.credential_reference().to_owned(), remaining);
     }
     Ok(DurablePoolExclusions {
+        observed_at,
         excluded,
         pending_consumed_actions,
         headroom,
@@ -550,6 +559,7 @@ pub(super) async fn select_runtime_pool_credential(
         });
     };
     let DurablePoolExclusions {
+        observed_at,
         excluded,
         pending_consumed_actions: next_turn_actions,
         headroom,
@@ -614,6 +624,23 @@ pub(super) async fn select_runtime_pool_credential(
                 })
         })
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
+    if selected.is_none()
+        && policy
+            .members()
+            .iter()
+            .all(|member| excluded.contains(member.credential_reference()))
+    {
+        credential_pool_evidence::record(
+            connection,
+            session,
+            turn,
+            attempt,
+            &policy,
+            observed_at,
+            &headroom,
+        )
+        .await?;
+    }
     let pending_consumed_actions = if selected.is_some() {
         next_turn_actions
     } else {

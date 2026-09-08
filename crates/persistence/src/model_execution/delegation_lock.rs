@@ -8,6 +8,61 @@ use sqlx::postgres::PgRow;
 use sqlx::types::Uuid;
 use sqlx::{PgConnection, Row};
 
+pub(super) async fn retire_logically_terminal_observation(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &signalbox_domain::CorrelatedModelCallTerminalObservation,
+) -> Result<(), ModelCallRepositoryError> {
+    let correlation = observation.correlation();
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT state_kind FROM model_call WHERE model_call_id = $1 AND session_id = $2
+            AND turn_id = $3 AND turn_attempt_id = $4
+            AND resolved_provider_model_identity_id = $5 AND context_frontier_id = $6",
+    )
+    .bind(observation.call().into_uuid())
+    .bind(session.into_uuid())
+    .bind(correlation.turn().into_uuid())
+    .bind(correlation.attempt().into_uuid())
+    .bind(correlation.target().identity().into_uuid())
+    .bind(correlation.frontier().into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    if correlation.session() != session || state.is_none() {
+        return Err(ModelCallRepositoryError::InvalidTransition(
+            "logical terminal observation correlation changed",
+        ));
+    }
+    match state.as_deref() {
+        Some("terminal") => return Ok(()),
+        Some("in_flight" | "cancellation_requested") => {}
+        _ => {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "logical terminal observation lacks issued authority",
+            ));
+        }
+    }
+    sqlx::query(
+        "UPDATE model_call SET state_kind = 'terminal', terminal_disposition_kind = 'cancelled'
+        WHERE model_call_id = $1 AND state_kind IN ('in_flight', 'cancellation_requested')",
+    )
+    .bind(observation.call().into_uuid())
+    .execute(&mut *connection)
+    .await?;
+    crate::outbox::append(
+        connection,
+        crate::outbox::OutboxEvent::ModelCallTransition {
+            session,
+            turn: correlation.turn(),
+            call: observation.call(),
+            state: crate::outbox::ModelCallOutboxState::Terminal(
+                signalbox_domain::ModelCallDisposition::Cancelled,
+            ),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 /// Locks the terminal-observation frontier, then reports whether a cascade
 /// already delivered this delegated turn's logical terminal.
 ///

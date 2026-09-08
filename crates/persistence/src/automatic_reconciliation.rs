@@ -482,6 +482,7 @@ impl PostgresAutomaticReconciliationRepository {
               WHERE session_id = $1
                 AND turn_id = $2
                 AND state_kind = 'active'
+                AND NOT delegation_runtime_terminal
                 AND active_phase_kind = $3
                 AND recovery_model_call_id IS NOT DISTINCT FROM $4
                 AND recovery_tool_attempt_id IS NOT DISTINCT FROM $5",
