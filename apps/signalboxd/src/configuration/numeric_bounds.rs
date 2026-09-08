@@ -256,25 +256,13 @@ impl NumericBoundsConfiguration {
                 field: "repository_watch_webhook_retention",
             });
         }
-        for (field, minimum, maximum) in [
-            (
-                "max_review_findings_per_run",
-                0,
-                signalbox_domain::ReviewProducedFindings::MAXIMUM,
-            ),
-            (
-                "max_imported_conversation_display_title_scalars",
-                1,
-                signalbox_domain::ImportedConversationDisplayTitle::MAX_SCALARS,
-            ),
-        ] {
-            if configuration
-                .integer(field)
-                .flatten()
-                .is_none_or(|value| value < minimum || value > maximum as u64)
-            {
-                return Err(HubModelConfigurationError::InvalidNumericBound { field });
-            }
+        let field = "max_review_findings_per_run";
+        if configuration
+            .integer(field)
+            .flatten()
+            .is_none_or(|value| value > signalbox_domain::ReviewProducedFindings::MAXIMUM as u64)
+        {
+            return Err(HubModelConfigurationError::InvalidNumericBound { field });
         }
         // Replica registration already bounds distinct stores globally. A smaller
         // read policy cannot be maintained by that durable write boundary.

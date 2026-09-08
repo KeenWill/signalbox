@@ -5749,18 +5749,21 @@ fn review_findings_policy_cannot_exceed_domain_admission() {
 }
 
 #[test]
-fn imported_title_projection_policy_cannot_exceed_durable_titles() {
-    for replacement in ["0", "257", "\"none\""] {
+fn imported_title_projection_admits_zero_unbounded_and_above_domain_limits() {
+    for (replacement, expected) in [("0", Some(0)), ("257", Some(257)), ("\"none\"", None)] {
         let document = CONFIGURATION.replace(
             "max_imported_conversation_display_title_scalars = 256",
             &format!("max_imported_conversation_display_title_scalars = {replacement}"),
         );
-        assert!(matches!(
-            HubModelConfiguration::parse(&document),
-            Err(HubModelConfigurationError::InvalidNumericBound {
-                field: "max_imported_conversation_display_title_scalars"
-            })
-        ));
+        let configuration =
+            HubModelConfiguration::parse(&document).expect("valid projection limit");
+        assert_eq!(
+            configuration
+                .numeric_bounds()
+                .integer("max_imported_conversation_display_title_scalars"),
+            Some(expected),
+            "{replacement}",
+        );
     }
 }
 
