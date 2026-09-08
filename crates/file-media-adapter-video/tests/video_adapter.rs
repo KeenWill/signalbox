@@ -1288,3 +1288,32 @@ fn complete_structure(result: FileReadResult) -> Result<serde_json::Value, Box<d
         _ => Err("expected complete structured result".into()),
     }
 }
+
+#[tokio::test]
+async fn recognized_mp4_probe_preserves_malformed_structure() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::truncated_mp4().into_source()?;
+    let declaration = declaration()?;
+    let reader = declaration
+        .readers()
+        .first()
+        .ok_or("MP4 reader is registered")?;
+    let output = VideoProvider::new()
+        .probe(reader.identity(), &source, &NeverCancelled)
+        .await?;
+    assert!(
+        matches!(output, ProcessorProbeOutput::RecognizedMalformed { media_type, reason_code } if media_type == "video/mp4" && reason_code == "malformed_video")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mp4_required_video_fields_are_validated() -> Result<(), Box<dyn Error>> {
+    for fixture in [
+        VideoFixture::mp4_missing_required_video_header(),
+        VideoFixture::mp4_with_zero_next_track_id(),
+        VideoFixture::mp4_with_zero_frame_count(),
+    ] {
+        assert_malformed(fixture, "malformed_video").await?;
+    }
+    Ok(())
+}

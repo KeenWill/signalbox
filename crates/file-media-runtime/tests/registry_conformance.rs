@@ -502,9 +502,9 @@ impl FileMediaProcessor for SelectionProcessor {
     }
 }
 
-struct ProvisionalCollisionProcessor;
+struct CollisionProcessor(ProbeStrength);
 
-impl FileMediaProcessor for ProvisionalCollisionProcessor {
+impl FileMediaProcessor for CollisionProcessor {
     fn probe<'a>(
         &'a self,
         reader: &'a ReaderIdentity,
@@ -519,7 +519,7 @@ impl FileMediaProcessor for ProvisionalCollisionProcessor {
             };
             Ok(ProcessorProbeOutput::Candidate {
                 media_type: String::from(media_type),
-                strength: ProbeStrength::ProvisionalStructuralCandidate,
+                strength: self.0,
                 evidence_bytes: 4,
             })
         })
@@ -676,11 +676,9 @@ fn structural_candidate_with_actual_probe_inside_validation_ceiling_is_retained(
     );
 }
 
-/// The retained-candidate filter names the envelope validation will actually grant, so a
-/// reader whose declared validation envelope sits below the deployment ceiling cannot keep
-/// evidence that envelope never covers.
+/// A single candidate cannot validate evidence outside the granted envelope.
 #[test]
-fn probe_evidence_outside_the_reader_validation_envelope_is_dropped() {
+fn probe_evidence_outside_the_reader_validation_envelope_cannot_validate() {
     let source = MemorySource::synthetic();
     let ceilings = FileMediaCeilings::version_one();
     // Only the reader's own envelope excludes this evidence; the deployment ceiling admits it.
@@ -882,6 +880,32 @@ fn provisional_structural_validation_no_match_resumes_fallback() {
 }
 
 #[test]
+fn strong_claims_remain_ambiguous_above_the_validation_ceiling() {
+    let source = MemorySource::synthetic();
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 2;
+    let registry = FileMediaRegistry::try_new(
+        vec![
+            provider_declaration("first", SYNTHETIC_MEDIA_TYPE),
+            provider_declaration("second", OTHER_SYNTHETIC_MEDIA_TYPE),
+        ],
+        ceilings,
+        ProcessorIsolation::Available,
+    )
+    .expect("distinct strong claims are registrable");
+    let outcome = inspect(
+        &registry,
+        &CollisionProcessor(ProbeStrength::Strong),
+        &source,
+        "unknown",
+    )
+    .expect("claims arbitrate before validation");
+    assert!(
+        matches!(outcome, FileInspection::Ambiguous { media_types, .. } if media_types.len() == 2)
+    );
+}
+
+#[test]
 fn all_provisional_collision_misses_resume_fallback() {
     let source = MemorySource::synthetic();
     let registry = FileMediaRegistry::try_new(
@@ -896,7 +920,7 @@ fn all_provisional_collision_misses_resume_fallback() {
 
     let outcome = inspect(
         &registry,
-        &ProvisionalCollisionProcessor,
+        &CollisionProcessor(ProbeStrength::ProvisionalStructuralCandidate),
         &source,
         "unknown",
     )
