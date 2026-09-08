@@ -262,12 +262,12 @@ impl ProgramHost {
             .load(run)
             .await?
             .ok_or(ProgramHostError::JournalMissing(run))?;
-        if let Some(outcome) = journal.terminal_delivery().and_then(terminal_outcome) {
-            return Ok(outcome);
-        }
         let registration = self.journal.registrations().for_run(run).await?.ok_or(
             signalbox_persistence::program_registration::ProgramRegistrationError::RunMissing,
         )?;
+        if let Some(outcome) = journal.terminal_delivery().and_then(terminal_outcome) {
+            return Ok(outcome);
+        }
         let artifact = ProgramArtifact::new(registration.content.artifact);
         self.execute_loaded(run, journal, &artifact, live_deliveries)
             .await

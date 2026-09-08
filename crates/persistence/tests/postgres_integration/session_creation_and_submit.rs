@@ -5576,6 +5576,51 @@ async fn program_submit_records_its_run_and_conflicts_with_user_replay()
             command_id: user_command.command_id(),
         }
     );
+    let replay_user = SubmitInputRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        user_command.session(),
+        user_command.content().clone(),
+        user_command.delivery(),
+    )?;
+    let replay_user_id = replay_user.command_id();
+    service.execute(replay_user).await?;
+    let recorded_user = repository
+        .load(replay_user_id)
+        .await?
+        .expect("user receipt");
+    for (command, principal) in [
+        (
+            stored.command().clone(),
+            Some(signalbox_domain::CommandPrincipal::Operator),
+        ),
+        (recorded_user.command().clone(), None),
+    ] {
+        let error = repository
+            .handle_with_candidates_alias_resolver_as(
+                command,
+                principal,
+                signalbox_domain::ParentTerminationKind::Cancelled,
+                AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                None,
+                CancelledModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                ),
+                |_| panic!("replay cannot allocate a turn"),
+                |_| panic!("replay cannot cancel a tool"),
+                || panic!("replay cannot settle a closure"),
+                || panic!("replay cannot settle a closure"),
+                |_| None,
+            )
+            .await
+            .expect_err("recorded replay requires actor and principal agreement");
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+                "actor and envelope principal"
+            ))
+        ));
+    }
     let mut earlier_version = pool.begin().await?;
     sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER USER")
         .execute(&mut *earlier_version)

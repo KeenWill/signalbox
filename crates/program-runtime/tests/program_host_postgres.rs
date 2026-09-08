@@ -850,3 +850,28 @@ async fn registered_run_executes_its_stored_artifact() -> Result<(), Box<dyn Err
     pool.close().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_unregistered_run_is_rejected_by_registered_execution()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let run = ProgramRunId::from_uuid(Uuid::now_v7());
+    journal.create_stream(run).await?;
+    journal
+        .append_delivery(run, DeliveryKind::RunCancel(payload(b"cancelled")))
+        .await?;
+    let error = ProgramHost::new(journal)
+        .execute(run, &mut ScriptedDeliveries::new([]))
+        .await
+        .expect_err("terminal streams require the same registration as live execution");
+    assert!(matches!(
+        error,
+        ProgramHostError::Registration(
+            signalbox_persistence::program_registration::ProgramRegistrationError::RunMissing
+        )
+    ));
+    pool.close().await;
+    Ok(())
+}

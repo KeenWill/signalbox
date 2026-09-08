@@ -27,14 +27,14 @@ primitive answerable requests, nondeterminism faults, and user cancellation are
 produced; no executor applies effects, scope cancellation, terminal admission,
 or capability rejection.
 
-Resume discards nothing and restores nothing. A journal that already holds a
-terminal delivery, one that ended the run instead of answering a request, names
-the run's outcome; the host returns that outcome and creates no isolate. Any
-other woken run re-executes its module from the start; `ReplayCursor` answers
-each request from the journal in delivery order, and execution goes live where
-the journal ends. Live requests are answered through the `LiveDeliverySource`
-seam, which receives only the outstanding durable request frames; that seam is
-the boundary later capability executors implement.
+Resume discards nothing and restores nothing. A registered run's journal that
+already holds a terminal delivery, one that ended the run instead of answering a
+request, names the run's outcome; the host returns that outcome and creates no
+isolate. Any other woken run re-executes its module from the start;
+`ReplayCursor` answers each request from the journal in delivery order, and
+execution goes live where the journal ends. Live requests are answered through
+the `LiveDeliverySource` seam, which receives only the outstanding durable
+request frames; that seam is the boundary later capability executors implement.
 
 `ProgramRegistrationRepository` stores immutable registrations keyed by name and
 revision, recording SHA-256 digests of exact source and stripped artifact bytes.
