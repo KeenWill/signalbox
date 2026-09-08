@@ -59,7 +59,7 @@ impl<'ast> Visit<'ast> for Modules<'_> {
             self.module_directory = previous_module;
             self.path_directory = previous_path;
         } else {
-            let candidates = explicit.map_or_else(
+            let candidates = explicit.as_ref().map_or_else(
                 || {
                     vec![
                         self.module_directory.join(format!("{name}.rs")),
@@ -69,7 +69,9 @@ impl<'ast> Visit<'ast> for Modules<'_> {
                 |path| vec![self.path_directory.join(path)],
             );
             for path in candidates {
-                let module_directory = if path.file_name().is_some_and(|name| name == "mod.rs") {
+                let module_directory = if explicit.is_some()
+                    || path.file_name().is_some_and(|name| name == "mod.rs")
+                {
                     path.with_file_name("")
                 } else {
                     path.with_extension("")
