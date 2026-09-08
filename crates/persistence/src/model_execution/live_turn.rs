@@ -260,7 +260,13 @@ pub(super) async fn require_live_execution_with_targets(
         active_turn.consumed_steering(),
     )
     .await?;
-    let attachment_blob_facts = load_attachment_blob_facts(connection, &origin_contents).await?;
+    let attachment_blob_facts = load_attachment_blob_facts(
+        connection,
+        &origin_contents,
+        &frontier_entries,
+        active_turn.pending_steering(),
+    )
+    .await?;
     let tool_result_correlations =
         load_tool_result_correlations(connection, &frontier_entries).await?;
     let tool_inadmissible_correlations =
