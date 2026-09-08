@@ -331,21 +331,6 @@ pub(super) async fn load_durable_pool_exclusions(
         .iter()
         .map(|member| member.credential_reference().to_owned())
         .collect::<Vec<_>>();
-    let (observed_at, transient_exclusions): (sqlx::types::time::OffsetDateTime, Vec<String>) =
-        sqlx::query_as(
-            "WITH observation AS MATERIALIZED (SELECT transaction_timestamp() AS observed_at)
-             SELECT observation.observed_at,
-                    ARRAY(SELECT DISTINCT credential_reference
-                          FROM credential_pool_transient_exclusion
-                          WHERE credential_reference = ANY($1)
-                            AND reset_at > observation.observed_at)
-               FROM observation",
-        )
-        .bind(&member_references)
-        .fetch_one(&mut *connection)
-        .await?;
-    let now = std::time::SystemTime::from(observed_at);
-    excluded.extend(transient_exclusions);
     let completed_references = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT call.credential_reference
            FROM model_call AS call
@@ -363,6 +348,21 @@ pub(super) async fn load_durable_pool_exclusions(
     .into_iter()
     .collect::<HashSet<_>>();
     excluded.extend(crate::oauth_credential::quarantined_profiles(connection, policy).await?);
+    let (observed_at, transient_exclusions): (sqlx::types::time::OffsetDateTime, Vec<String>) =
+        sqlx::query_as(
+            "WITH observation AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
+             SELECT observation.observed_at,
+                    ARRAY(SELECT DISTINCT credential_reference
+                          FROM credential_pool_transient_exclusion
+                          WHERE credential_reference = ANY($1)
+                            AND reset_at > observation.observed_at)
+               FROM observation",
+        )
+        .bind(&member_references)
+        .fetch_one(&mut *connection)
+        .await?;
+    let now = std::time::SystemTime::from(observed_at);
+    excluded.extend(transient_exclusions);
     let actions = sqlx::query_as::<_, (i64, String, String, Uuid, Uuid)>(
         "SELECT action_id, credential_reference, action_kind,
                 observed_session_id, observed_turn_id

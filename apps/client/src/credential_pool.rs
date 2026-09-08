@@ -62,6 +62,30 @@ pub(crate) async fn validate_event(
                 "pool exhaustion event disagrees with its snapshot",
             ));
         }
+    } else if let SessionEvent::TurnFailed {
+        turn_id,
+        failure_entry_id,
+        terminal_frontier_id,
+    } = event
+    {
+        let mut snapshot = crate::transcript_command(client, session_id).await?;
+        let matches_snapshot = match snapshot.turn_state(*turn_id)? {
+            Some(TurnState::FailedCredentialPoolExhausted {
+                failure_entry_id: actual_failure,
+                terminal_frontier_id: actual_frontier,
+                ..
+            }) => actual_failure == *failure_entry_id && actual_frontier == *terminal_frontier_id,
+            Some(TurnState::Failed {
+                terminal_frontier_id: actual_frontier,
+                ..
+            }) => actual_frontier == *terminal_frontier_id,
+            _ => false,
+        };
+        if !matches_snapshot {
+            return Err(ClientError::Protocol(
+                "turn failure event disagrees with its snapshot",
+            ));
+        }
     }
     Ok(())
 }

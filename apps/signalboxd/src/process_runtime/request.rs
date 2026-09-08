@@ -311,6 +311,87 @@ where
         return write_bulk_ingest_rejection(writer, version, request_id, active_kind).await;
     }
     match request {
+        ClientRequest::RegisterWorkspace { command_id, root } => {
+            let root = match tokio::fs::canonicalize(root).await {
+                Ok(path)
+                    if tokio::fs::metadata(&path)
+                        .await
+                        .is_ok_and(|metadata| metadata.is_dir()) =>
+                {
+                    path.to_str()
+                        .map(str::to_owned)
+                        .and_then(|root| signalbox_domain::WorkspaceRootPath::try_new(root).ok())
+                }
+                Ok(_) | Err(_) => None,
+            };
+            let Some(root) = root else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            };
+            handle_workspace(
+                writer,
+                version,
+                request_id,
+                command_id,
+                signalbox_domain::WorkspaceOperation::Register { root },
+                &services.pool,
+            )
+            .await
+        }
+        ClientRequest::MintGitRemote {
+            command_id,
+            workspace_id,
+            name,
+            url,
+        } => {
+            let (Ok(name), Ok(url)) = (
+                signalbox_domain::GitRemoteName::try_new(name),
+                signalbox_domain::GitRemoteUrl::try_new(url),
+            ) else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            };
+            handle_workspace(
+                writer,
+                version,
+                request_id,
+                command_id,
+                signalbox_domain::WorkspaceOperation::MintRemote {
+                    workspace: signalbox_domain::WorkspaceId::from_uuid(workspace_id.into_uuid()),
+                    name,
+                    url,
+                },
+                &services.pool,
+            )
+            .await
+        }
+        ClientRequest::WithdrawGitRemote {
+            command_id,
+            mint_id,
+        } => {
+            handle_workspace(
+                writer,
+                version,
+                request_id,
+                command_id,
+                signalbox_domain::WorkspaceOperation::WithdrawRemote {
+                    mint: signalbox_domain::GitRemoteMintId::from_uuid(mint_id.into_uuid()),
+                },
+                &services.pool,
+            )
+            .await
+        }
+
         ClientRequest::ReloadConfiguration { command_id } => {
             super::reload::handle_reload(writer, version, request_id, command_id, services).await
         }
@@ -1667,4 +1748,64 @@ where
             .await
         }
     }
+}
+
+async fn handle_workspace<Writer: AsyncWrite + Unpin>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: signalbox_process_protocol::CommandId,
+    operation: signalbox_domain::WorkspaceOperation,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError> {
+    use signalbox_domain::{WorkspaceCommand, WorkspaceCommandResult};
+    use signalbox_persistence::workspace::{WorkspaceOutcome, WorkspaceRepository};
+    let result = WorkspaceRepository::new(pool.clone())
+        .handle(
+            WorkspaceCommand::new(
+                DurableCommandId::from_uuid(command_id.into_uuid()),
+                operation,
+            ),
+            &mut signalbox_application::workspace::UuidV7WorkspaceIdentityGenerator,
+        )
+        .await;
+    let error = match result {
+        Ok(WorkspaceOutcome::Applied(result)) => {
+            let message = match result {
+                WorkspaceCommandResult::Registered(id) => ServerMessage::WorkspaceRegistered {
+                    command_id,
+                    workspace_id: CanonicalUuid::from_uuid(id.into_uuid()),
+                },
+                WorkspaceCommandResult::Minted(id) => ServerMessage::GitRemoteMinted {
+                    command_id,
+                    mint_id: CanonicalUuid::from_uuid(id.into_uuid()),
+                },
+                WorkspaceCommandResult::Withdrawn(id) => ServerMessage::GitRemoteWithdrawn {
+                    command_id,
+                    withdrawal_id: CanonicalUuid::from_uuid(id.into_uuid()),
+                },
+            };
+            return write_message(writer, version, request_id, message).await;
+        }
+        Ok(WorkspaceOutcome::ConflictingReuse) => ErrorCode::ConflictingReuse,
+        Err(error) => {
+            use signalbox_persistence::workspace::WorkspaceError;
+            let (failure_class, code) = match error {
+                WorkspaceError::CommitAmbiguous(_) => {
+                    ("commit_ambiguous", ErrorCode::CommitAmbiguous)
+                }
+                WorkspaceError::Database(_) => ("database", ErrorCode::Unavailable),
+                WorkspaceError::Corruption(_) => ("corruption", ErrorCode::Unavailable),
+            };
+            tracing::warn!(failure_class, "workspace command failed");
+            code
+        }
+    };
+    write_error(
+        writer,
+        version,
+        request_id,
+        ProtocolError::without_detail(error),
+    )
+    .await
 }

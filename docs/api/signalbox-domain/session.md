@@ -71,6 +71,11 @@ impl SessionCreationProvenance {
 pub struct CreateSession {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl CreateSession {
+    pub fn with_runner_placement(
+        self,
+        placement: option::Option<SessionRunnerPlacementRequest>,
+    ) -> Self;
+    pub fn runner_placement(&self) -> option::Option<&SessionRunnerPlacementRequest>;
     pub const fn new(
         command_id: DurableCommandId,
         provenance: SessionCreationProvenance,
@@ -146,6 +151,11 @@ impl CreateSessionFromImportedFrontier {
         NextSemanticEntryId: function::FnMut() -> SemanticTranscriptEntryId;
 }
 impl CreateSessionFromImportedFrontier {
+    pub fn with_runner_placement(
+        self,
+        placement: option::Option<SessionRunnerPlacementRequest>,
+    ) -> Self;
+    pub fn runner_placement(&self) -> option::Option<&SessionRunnerPlacementRequest>;
     pub const fn new(
         command_id: DurableCommandId,
         imported_frontier: ImportedTranscriptFrontier,
