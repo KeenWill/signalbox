@@ -736,6 +736,7 @@ fn read_text_with_decoding_budget(
     let mut text = String::new();
     let mut remaining_decoded_bytes = decoding_budget;
     let mut decoded_sizes = BTreeMap::new();
+    let mut charged_fonts = BTreeSet::new();
     for (page_number, page_id) in pages {
         require_active(cancellation)?;
         validate_page_contents(document, *page_id)?;
@@ -753,6 +754,7 @@ fn read_text_with_decoding_budget(
         if !charge_font_decoding(
             document,
             *page_id,
+            &mut charged_fonts,
             &mut remaining_decoded_bytes,
             cancellation,
         )? {
@@ -1187,6 +1189,7 @@ fn charge_page_content_decoding(
 fn charge_font_decoding(
     document: &Document,
     page_id: lopdf::ObjectId,
+    charged_fonts: &mut BTreeSet<*const Dictionary>,
     remaining: &mut usize,
     cancellation: &dyn CancellationSignal,
 ) -> Result<bool, FileMediaProviderFailure> {
@@ -1195,6 +1198,11 @@ fn charge_font_decoding(
         .map_err(|_| FileMediaProviderFailure::Failed)?;
     for font in fonts.values() {
         require_active(cancellation)?;
+        if !font_resolves_through_to_unicode(font, document)
+            || !charged_fonts.insert(std::ptr::from_ref(*font))
+        {
+            continue;
+        }
         if let Ok(stream) = font
             .get_deref(b"ToUnicode", document)
             .and_then(Object::as_stream)
@@ -1206,6 +1214,28 @@ fn charge_font_decoding(
         }
     }
     Ok(true)
+}
+
+// Match the encoding-resolution paths that decode ToUnicode in lopdf.
+fn font_resolves_through_to_unicode(font: &Dictionary, document: &Document) -> bool {
+    if !font.has_type(b"Font") {
+        return false;
+    }
+    let Ok(encoding) = font.get(b"Encoding") else {
+        return true;
+    };
+    let Ok((_, encoding)) = document.dereference(encoding) else {
+        return false;
+    };
+    let name = match encoding {
+        Object::Name(name) => Some(name.as_slice()),
+        Object::Dictionary(dictionary) if dictionary.has_type(b"Encoding") => dictionary
+            .get(b"BaseEncoding")
+            .and_then(Object::as_name)
+            .ok(),
+        _ => None,
+    };
+    matches!(name, Some(b"Identity-H" | b"Identity-V"))
 }
 
 fn decoded_content_stream_size(
@@ -5205,7 +5235,7 @@ endobj",
     }
 
     #[test]
-    fn font_cmaps_spend_the_read_wide_decoding_budget() {
+    fn font_cmaps_charge_once_only_when_encoding_uses_them() {
         let (mut document, pages) = repeated_content_pages(Vec::new(), 2);
         let cmap_content = vec![b' '; 64];
         let cmap_size = cmap_content.len();
@@ -5221,15 +5251,33 @@ endobj",
             "Resources",
             dictionary! { "Font" => dictionary! { "F1" => font_id } },
         );
-        let read = read_text_with_decoding_budget(
-            &document,
-            &pages,
-            &ActiveSignal,
-            cmap_size * pages.len() - 1,
-        )
-        .expect("read");
+        let read = read_text_with_decoding_budget(&document, &pages, &ActiveSignal, cmap_size - 1)
+            .expect("read");
         assert!(matches!(
             read,
+            ProcessorReadOutput::ExpansionLimitExceeded { .. }
+        ));
+        assert!(matches!(
+            read_text_with_decoding_budget(&document, &pages, &ActiveSignal, cmap_size)
+                .expect("shared font fits once"),
+            ProcessorReadOutput::Text { .. }
+        ));
+        document
+            .get_dictionary_mut(font_id)
+            .expect("font")
+            .set("Encoding", "WinAnsiEncoding");
+        assert!(matches!(
+            read_text_with_decoding_budget(&document, &pages, &ActiveSignal, 0)
+                .expect("explicit encoding does not decode CMap"),
+            ProcessorReadOutput::Text { .. }
+        ));
+        document
+            .get_dictionary_mut(font_id)
+            .expect("font")
+            .set("Encoding", "Identity-H");
+        assert!(matches!(
+            read_text_with_decoding_budget(&document, &pages, &ActiveSignal, cmap_size - 1)
+                .expect("identity encoding decodes CMap"),
             ProcessorReadOutput::ExpansionLimitExceeded { .. }
         ));
     }
