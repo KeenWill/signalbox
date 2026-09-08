@@ -16,7 +16,7 @@ async function openDetails(
   mismatch = false,
   override = false,
   creation?: WebTimelineCreationCause,
-  reconciliation = false,
+  outcome?: 'reconciliation' | 'retired',
 ) {
   const items = detailItems.map((item, index) =>
     creation && index === 0
@@ -26,7 +26,7 @@ async function openDetails(
           projected_body_bytes: 128,
           body: { type: 'session_created' as const, cause: creation, imported_evidence: null },
         }
-      : reconciliation && index === 4
+      : outcome === 'reconciliation' && index === 4
         ? {
             ...item,
             kind: 'turn_reconciliation_required' as const,
@@ -37,7 +37,13 @@ async function openDetails(
               operation: { type: 'model_call' as const, model_call_id: detailSessionId },
             },
           }
-        : item,
+        : outcome === 'retired' && index === 4
+          ? {
+              ...item,
+              kind: 'goal_turn_retired' as const,
+              body: { type: 'event_fact' as const, kind: 'goal_turn_retired' as const },
+            }
+          : item,
   )
   const windowItems = detailWindow.items.map((item, index) => ({
     ...item,
@@ -302,7 +308,7 @@ test('reads tool arguments and output in conversation order with events hidden',
 })
 
 test('shows reconciliation-required turn outcomes with events hidden', async ({ page }) => {
-  await openDetails(page, false, false, undefined, true)
+  await openDetails(page, false, false, undefined, 'reconciliation')
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(
@@ -312,4 +318,22 @@ test('shows reconciliation-required turn outcomes with events hidden', async ({ 
   ).toBeVisible()
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
   await page.screenshot({ path: test.info().outputPath('reconciliation-outcome.png') })
+})
+
+test('shows retired goal turns in conversation order with events hidden', async ({ page }) => {
+  await openDetails(page, false, false, undefined, 'retired')
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
+  const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+  await expect(conversation.getByText('Goal turn retired', { exact: true })).toBeVisible()
+  await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
+  await expect
+    .poll(() =>
+      conversation
+        .locator('[data-event-sequence]')
+        .evaluateAll((entries) =>
+          entries.map((entry) => entry.getAttribute('data-event-sequence')),
+        ),
+    )
+    .toEqual(['1', '2', '2', '4', '5'])
+  await page.screenshot({ path: test.info().outputPath('retired-outcome.png') })
 })

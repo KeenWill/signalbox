@@ -51,6 +51,8 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
     )
   if (body.type === 'turn_lifecycle')
     return <p className="session-turn-outcome">Turn {body.cause_code.replaceAll('_', ' ')}</p>
+  if (body.type === 'event_fact' && body.kind === 'goal_turn_retired')
+    return <p className="session-turn-outcome">Goal turn retired</p>
   const excerpt =
     body.type === 'user_input' ? body.text : body.type === 'model_call' ? body.response : null
   if (!excerpt)

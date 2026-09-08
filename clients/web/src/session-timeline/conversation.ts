@@ -32,6 +32,8 @@ export const hasConversationContent = (
       return true
     case 'turn_lifecycle':
       return body.lifecycle === 'terminalized' && body.cause_code !== 'completed'
+    case 'event_fact':
+      return body.kind === 'goal_turn_retired'
     default:
       return false
   }

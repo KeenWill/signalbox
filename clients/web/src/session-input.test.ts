@@ -487,9 +487,9 @@ it('reads only new transcript addresses and keeps appended text within the item 
 it('loads messages beyond metadata-only detail pages within the scan budget', async () => {
   const metadata = Array.from({ length: 4 }, (_, index) => ({
     address: { event_sequence: String(index + 1) },
-    kind: 'goal_turn_retired',
+    kind: 'session_state_changed',
     projected_body_bytes: 128,
-    body: { type: 'event_fact', kind: 'goal_turn_retired' },
+    body: { type: 'session_state', state: 'waiting' },
   }))
   const message = inputPage(1)
   message.items = message.items.map((item) => ({ ...item, address: { event_sequence: '5' } }))
@@ -532,9 +532,9 @@ it.each([
         session_id: sessionId,
         items: Array.from({ length: count }, (_, index) => ({
           address: { event_sequence: String(index + 1) },
-          kind: 'goal_turn_retired',
+          kind: 'session_state_changed',
           projected_body_bytes: bytes / count,
-          body: { type: 'event_fact', kind: 'goal_turn_retired' },
+          body: { type: 'session_state', state: 'waiting' },
         })),
         projected_body_bytes: bytes,
         continuation,
@@ -715,9 +715,9 @@ it('stops a bookkeeping scan at the workspace record budget regardless of histor
       session_id: sessionId,
       items: Array.from({ length: count }, (_, index) => ({
         address: { event_sequence: String(first + index) },
-        kind: 'goal_turn_retired',
+        kind: 'session_state_changed',
         projected_body_bytes: 128,
-        body: { type: 'event_fact', kind: 'goal_turn_retired' },
+        body: { type: 'session_state', state: 'waiting' },
       })),
       projected_body_bytes: count * 128,
       continuation: { type: 'more_at', address: { event_sequence: String(first + count) } },
