@@ -670,6 +670,29 @@ async fn invalid_unanchored_zip_signature_remains_unknown() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn zip_scan_exhaustion_preserves_its_reason_through_registry_inspection()
+-> Result<(), Box<dyn Error>> {
+    // Repeated candidate footers force overlapping central-directory searches.
+    let mut bytes = vec![0; 32];
+    for _ in 0..8_192 {
+        let mut footer = [0_u8; 22];
+        footer[..4].copy_from_slice(b"PK\x05\x06");
+        footer[8..10].copy_from_slice(&1_u16.to_le_bytes());
+        footer[10..12].copy_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&footer);
+    }
+    for source in [
+        MemorySource::unknown(bytes.clone())?,
+        MemorySource::new(bytes, "application/zip")?,
+    ] {
+        let inspection = inspect(&DirectProcessor::new(), &source).await?;
+        assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+        assert_eq!(malformed_reason(&inspection)?, "zip_scan_work_limit");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn oversized_unanchored_zip_signature_remains_unknown() -> Result<(), Box<dyn Error>> {
     let mut bytes = vec![b'x'; 256 * 1_024 + 1];
     bytes[32..36].copy_from_slice(b"PK\x03\x04");

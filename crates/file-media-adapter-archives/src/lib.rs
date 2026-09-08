@@ -24,7 +24,7 @@ use signalbox_file_media_runtime::{
 use zip::{CompressionMethod, ZipArchive};
 
 const PROVIDER_NAME: &str = "archives";
-const READER_REVISION: &str = "zip8-tar04-gz1-zstd013-v2";
+const READER_REVISION: &str = "zip8-tar04-gz1-zstd013-v3";
 const ENTRIES_VIEW: &str = "entries";
 const MALFORMED_REASON: &str = "malformed_archive";
 const ENTRY_COUNT_REASON: &str = "entry_count_limit";
@@ -103,11 +103,15 @@ impl FileMediaProvider for ArchiveProvider {
                     let complete = read_complete_after_prefix(source, prefix).await?;
                     require_active(cancellation)?;
                     let examined = complete.as_bytes().len();
-                    let Some(strength) = kind
-                        .probe_strength_with_complete_bytes(&complete)
-                        .map_err(|_| FileMediaProviderFailure::Failed)?
-                    else {
-                        return Ok(ProcessorProbeOutput::NoMatch);
+                    let strength = match kind.probe_strength_with_complete_bytes(&complete) {
+                        Ok(Some(strength)) => strength,
+                        Ok(None) => return Ok(ProcessorProbeOutput::NoMatch),
+                        Err(issue) => {
+                            return Ok(ProcessorProbeOutput::RecognizedMalformed {
+                                media_type: String::from(kind.media_type()),
+                                reason_code: String::from(issue.reason()),
+                            });
+                        }
                     };
                     (strength, examined)
                 } else {
@@ -153,10 +157,10 @@ impl FileMediaProvider for ArchiveProvider {
                     }
                     let bytes = read_complete_after_prefix(source, prefix).await?;
                     require_active(cancellation)?;
-                    if !structurally_valid_zip(bytes.as_bytes())
-                        .map_err(|_| FileMediaProviderFailure::Failed)?
-                    {
-                        return Ok(ProcessorValidationOutput::NoMatch);
+                    match structurally_valid_zip(bytes.as_bytes()) {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(ProcessorValidationOutput::NoMatch),
+                        Err(issue) => return Ok(malformed_validation(kind, issue.reason())),
                     }
                     complete = Some(bytes.0);
                 } else if source.byte_length().get() <= SOURCE_BYTES {
