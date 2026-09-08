@@ -1488,7 +1488,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, ImportedSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1..=3 | 5) {
+    if command_registry::imported_session_storage_version_is_supported(actual) {
         Ok(actual)
     } else {
         Err(ImportedSessionCorruption::Unsupported {
