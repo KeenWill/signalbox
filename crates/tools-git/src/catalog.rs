@@ -200,6 +200,7 @@ impl<FileSystem: WorkspaceFileSystem> ToolExecutor for LocalGitExecutor<FileSyst
             Err(LocalGitFailure::Operation) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.operation_detail.clone()),
             },
+            Err(LocalGitFailure::Ambiguous) => ToolExecutorEvidence::Ambiguous,
             Err(LocalGitFailure::Encoding) => return Err(LocalGitExecutorError),
         };
         Ok(invocation.bind(evidence))

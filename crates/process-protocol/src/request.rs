@@ -38,6 +38,21 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Reads the immutable policy referenced by one session turn.
+    ReadCredentialPoolPolicy {
+        /// Session the caller is reading.
+        session_id: CanonicalUuid,
+        /// Turn that must reference the policy.
+        turn_id: CanonicalUuid,
+        /// Exact retained policy identity.
+        pool_policy_id: CanonicalUuid,
+    },
+    /// Read one bounded page of current runner facts and retained diagnostics.
+    ReadRunnerStatus {
+        page_size: u32,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        after: Option<crate::RunnerStatusCursor>,
+    },
     /// Register a directory resolved by the daemon operator boundary.
     RegisterWorkspace { command_id: CommandId, root: String },
     /// Mint an HTTPS Git remote for a registered workspace.
@@ -751,6 +766,14 @@ impl ClientRequest {
             | Self::DeleteOauthCredential { profile, .. } => {
                 crate::response::validate_oauth_profile(profile)?;
             }
+            Self::ReadRunnerStatus { page_size, after } => {
+                if !(1..=100).contains(page_size) {
+                    return Err(FrameValidationError::RunnerStatusShape);
+                }
+                if let Some(cursor) = after {
+                    cursor.validate()?;
+                }
+            }
             Self::ListCredentialExclusions { page_size, after } => {
                 if !(1..=100).contains(page_size) {
                     return Err(FrameValidationError::CredentialExclusionShape);
@@ -869,6 +892,7 @@ impl ClientRequest {
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
             | Self::DecideToolRequest { .. }
+            | Self::ReadCredentialPoolPolicy { .. }
             | Self::CancelProgramRun { .. }
             | Self::OverrideDeniedToolRequest { .. } => {}
         }

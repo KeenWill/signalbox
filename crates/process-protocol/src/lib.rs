@@ -16,6 +16,7 @@ mod request;
 mod response;
 mod review;
 mod runner;
+mod runner_status;
 mod scalars;
 mod session;
 mod settings;
@@ -34,6 +35,7 @@ pub use request::*;
 pub use response::*;
 pub use review::*;
 pub use runner::*;
+pub use runner_status::*;
 pub use scalars::*;
 pub use session::*;
 pub use settings::*;
@@ -45,4 +47,10 @@ mod tests;
 
 pub use program::{
     ProgramRunCancellationOutcome, ProgramRunCancelledState, ProgramRunTerminalState,
+};
+
+mod credential_pool;
+pub use credential_pool::{
+    CredentialPoolExclusion, CredentialPoolMemberEvidence, MAX_HEADROOM_RESERVE_PERCENT,
+    valid_credential_pool_evidence, valid_credential_pool_members,
 };

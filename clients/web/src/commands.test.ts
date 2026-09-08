@@ -6,6 +6,21 @@ import { actions, selectApp, store } from './state'
 describe('command registry', () => {
   afterEach(() => vi.unstubAllGlobals())
 
+  it('removes a composer attachment only in a context that supplies removal', () => {
+    const removeAttachment = vi.fn()
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+    }
+    expect(commandById('artifact.attachment.remove').available(context)).toBe(false)
+    invokeCommand('artifact.attachment.remove', { ...context, removeAttachment })
+    expect(removeAttachment).toHaveBeenCalledOnce()
+  })
+
   it('registers every advertised product navigation sequence', () => {
     expect(globalHotkeySequenceBindings).toEqual(
       expect.arrayContaining([
@@ -356,6 +371,26 @@ describe('command registry', () => {
     expect(commandById('detail.full').available({ ...context, timelineIds: ['event-0'] })).toBe(
       true,
     )
+  })
+
+  it('reveals filtered records by changing detail on a loaded empty projection', () => {
+    store.dispatch(actions.detailSet('results'))
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      timelineWindowAvailable: true,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+    }
+
+    invokeCommand('detail.full', context)
+    expect(selectApp(store.getState()).detail).toBe('full')
+    invokeCommand('detail.condensed', context)
+    expect(selectApp(store.getState()).detail).toBe('condensed')
+    invokeCommand('detail.results', context)
+    expect(selectApp(store.getState()).detail).toBe('results')
   })
 
   it('previews pane sizes without writing preferences until commit', () => {

@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import {
+  chmodSync,
   closeSync,
   copyFileSync,
   linkSync,
@@ -92,6 +93,12 @@ const environment = {
   TMPDIR: temporary,
   XDG_CACHE_HOME: join(temporary, 'cache'),
 }
+for (const entry of readdirSync(join(project, 'e2e'), { recursive: true, withFileTypes: true })) {
+  if (entry.isFile() && entry.name.endsWith('.png')) {
+    const path = join(entry.parentPath, entry.name)
+    chmodSync(path, statSync(path).mode | 0o200)
+  }
+}
 const result = spawnSync(
   node,
   [
@@ -104,6 +111,23 @@ const result = spawnSync(
   ],
   { cwd: project, env: environment, stdio: 'inherit' },
 )
+if (
+  result.status === 0 &&
+  process.argv
+    .slice(2)
+    .some(
+      (argument) => argument === '--update-snapshots' || argument.startsWith('--update-snapshots='),
+    )
+) {
+  for (const entry of readdirSync(join(project, 'e2e'), { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name.endsWith('-snapshots')) {
+      materialize(
+        join(project, 'e2e', entry.name),
+        join(evidence, 'updated-snapshots/e2e', entry.name),
+      )
+    }
+  }
+}
 if (result.error) throw result.error
 if (result.signal) throw new Error(`Playwright exited on ${result.signal}`)
 process.exit(result.status ?? 1)

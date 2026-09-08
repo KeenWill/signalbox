@@ -48,6 +48,7 @@ jobs:
   # Report-only home for live tool smokes: fixture drift stays visible but never
   # merge-gates. The whole-daemon exercise extends the existing CI pattern.
   live-smokes:
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && !contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) }}
     name: Tool live smokes (report only)
     continue-on-error: true
     runs-on: signalbox
@@ -92,15 +93,8 @@ jobs:
   # The test process that performs it therefore receives the key in its
   # environment and could read it. The job trusts anyone with write access to
   # this repository, the same trust already required to push executable code to
-  # main. It does not trust fork authors: GitHub withholds secrets from ordinary
-  # fork pull_request runs regardless of environment policy, so a fork run
-  # receives an empty value and takes the skip path below rather than spending
-  # or exposing anything.
-  #
-  # The environment scopes WHICH jobs may read the credential; it makes no
-  # author-trust decision, and its branch availability setting supplies no
-  # security boundary. The exclusion of forks rests on GitHub's secret
-  # withholding described above.
+  # main. The job condition excludes forks and Dependabot/Renovate authors.
+  # The environment scopes credential access but does not decide author trust.
   #
   # The credential is referenced only in the final step, never echoed, never
   # passed in argv, and never written to disk. The test binary is compiled in an
@@ -108,13 +102,9 @@ jobs:
   # procedural macro executes while the key is readable.
   web-smoke:
     name: Web search live smoke (report only)
-    # Skipped: every recent invocation has terminated at ProviderRejected
-    # before exercising anything, so each run burns a runner slot to prove
-    # nothing the last forty runs did not. Delete the `if` line below to
-    # re-enable once the provider credential is serviceable again; the
-    # triggers above are untouched, so coverage resumes with no further
-    # edits.
-    if: ${{ false }}
+    # Disabled until the provider credential is serviceable. Re-enable by
+    # removing only false &&; retain the author gate.
+    if: ${{ false && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && !contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login))) }}
     continue-on-error: true
     permissions:
       contents: read

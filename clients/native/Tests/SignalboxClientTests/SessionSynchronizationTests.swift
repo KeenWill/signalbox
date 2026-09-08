@@ -4,6 +4,44 @@ import XCTest
 @testable import SignalboxNative
 
 final class SessionSynchronizationTests: XCTestCase {
+  func testDelegationAndRetirementEventsPublishWithoutFullRefresh() throws {
+    let parent = try SynchronizationFixture.sessionID()
+    let child = try SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
+    let request = try SignalboxCanonicalUUID(validating: "33333333-3333-4333-8333-333333333333")
+    let events: [SignalboxProcessSessionEvent] = [
+      .goalTurnRetired(turnID: request),
+      .childSpawned(spawningRequestID: request, childSessionID: child, relationship: .background),
+      .childWaiting(awaitRequestID: request, spawningRequestID: request, childSessionID: child, mode: .background),
+      .sessionMessage(spawningRequestID: request, messageID: request, senderSessionID: child,
+        recipientSessionID: parent, ordinal: .init(rawValue: 1), deliverySequence: .init(rawValue: 1), content: "Update"),
+      .childResult(spawningRequestID: request, childSessionID: child, outcome: .returned, content: "Result",
+        reason: .childCompleted, provenance: .childTurn(childSessionID: child, childTurnID: request)),
+      .childLifecycleDisposition(spawningRequestID: request, childSessionID: child,
+        outcome: .cancelled, reason: .parentCancelled,
+        provenance: .parentTurnCommand(parentSessionID: parent, parentTurnID: request,
+          commandID: request, descendantScope: .parentAndDescendants)),
+    ]
+    for event in events {
+      var transport = try SynchronizationFixture.synchronizedTransport(cursor: SynchronizationFixture.initialCursor)
+      let effects = transport.send(.frame(generation: SynchronizationFixture.initialGeneration,
+        message: .sessionEvent(.init(cursor: .init(rawValue: SynchronizationFixture.unknownCursor), sessionID: parent, event: event))))
+      XCTAssertEqual(SynchronizationFixture.effectNames(effects), ["publish_event"], "\(event)")
+    }
+  }
+
+  func testChildTerminalCascadeRequestsAuthoritativeTranscript() throws {
+    let child = try SynchronizationFixture.sessionID()
+    let parent = try SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
+    var transport = try SynchronizationFixture.synchronizedTransport(cursor: SynchronizationFixture.initialCursor)
+    let event = SignalboxProcessSessionEvent.childLifecycleDisposition(
+      spawningRequestID: parent, childSessionID: child, outcome: .cancelled, reason: .parentCancelled,
+      provenance: .parentLifecycleCommand(parentSessionID: parent,
+        commandID: parent, descendantScope: .parentAndDescendants))
+    let effects = transport.send(.frame(generation: SynchronizationFixture.initialGeneration,
+      message: .sessionEvent(.init(cursor: .init(rawValue: SynchronizationFixture.unknownCursor), sessionID: child, event: event))))
+    XCTAssertEqual(SynchronizationFixture.effectNames(effects), ["publish_event", "request_side_snapshot", "arm_deadline"])
+  }
+
   func testScriptedTransportTraversesEverySynchronizationPhase() throws {
     let snapshotCursor = SynchronizationFixture.initialCursor
     var transport = try SynchronizationFixture.transport()
@@ -811,6 +849,16 @@ final class SessionSynchronizationTests: XCTestCase {
       transport.machine.phase,
       .replay(generation: 1, cursor: SignalboxCanonicalUInt64(rawValue: snapshotCursor))
     )
+  }
+
+  func testAmbiguousModelCallReadsTheAuthoritativeRecoveryWait() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(cursor: 10)
+    let effects = transport.send(.frame(
+      generation: 1,
+      message: try SynchronizationFixture.ambiguousModelCallEvent(cursor: 11)))
+
+    XCTAssertEqual(SynchronizationFixture.effectNames(effects),
+      ["publish_event", "request_side_snapshot", "arm_deadline"])
   }
 
   func testFreshSideSnapshotMergesBeforeBufferedStreamEvent() throws {
@@ -2249,7 +2297,7 @@ final class SessionSynchronizationTests: XCTestCase {
     let effects = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.textEntry(
+        message: try SynchronizationFixture.userEntry(
           index: 1,
           entryID: SynchronizationFixture.secondAcceptedInput,
           turnID: SynchronizationFixture.secondTurn,
@@ -2364,37 +2412,44 @@ final class SessionSynchronizationTests: XCTestCase {
     _ = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.secondActiveRunningTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
         message: try SynchronizationFixture.modelCallsEnd(count: 0)
       )
     )
     _ = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.textEntry()
-      )
-    )
-    _ = transport.send(
-      .frame(
-        generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.content()
+        message: try SynchronizationFixture.userEntry(
+          turnID: SynchronizationFixture.secondTurn
+        )
       )
     )
     _ = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
         message: try SynchronizationFixture.modelIdentityMarker(
-          turnID: SynchronizationFixture.turn,
+          turnID: SynchronizationFixture.secondTurn,
           index: 1,
           entryID: SynchronizationFixture.secondAcceptedInput
         )
       )
     )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.history(cursor: SynchronizationFixture.initialCursor)
+    )
     let effects = transport.send(
       .frame(
         generation: SynchronizationFixture.initialGeneration,
-        message: try SynchronizationFixture.textEntry(
+        message: try SynchronizationFixture.userEntry(
           index: 2,
-          entryID: SynchronizationFixture.toolRequest
+          entryID: SynchronizationFixture.toolRequest,
+          turnID: SynchronizationFixture.secondTurn
         )
       )
     )
@@ -3915,6 +3970,27 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func userEntry(
+    index: UInt64 = 0,
+    entryID: String = entry,
+    turnID: String = turn,
+    sourceSessionID: String = session
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_user_entry",
+        "entry_index":"\(index)",
+        "source_session_id":"\(sourceSessionID)",
+        "entry_id":"\(entryID)",
+        "accepted_input_id":"\(acceptedInput)",
+        "turn_id":"\(turnID)",
+        "content":[{"type":"text","text":"fixture user input"}]
+      }
+      """
+    )
+  }
+
   static func textEntry(
     index: UInt64 = 0,
     entryID: String = entry,
@@ -4246,6 +4322,26 @@ private enum SynchronizationFixture {
           "turn_id":"\(turn)",
           "model_call_id":"\(modelCall)",
           "state":{"type":"fixture_future_model_call_state"}
+        }
+      }
+      """
+    )
+  }
+
+  static func ambiguousModelCallEvent(
+    cursor: UInt64
+  ) throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"session_event",
+        "cursor":"\(cursor)",
+        "session_id":"\(session)",
+        "event":{
+          "type":"model_call_transition",
+          "turn_id":"\(turn)",
+          "model_call_id":"\(modelCall)",
+          "state":{"type":"terminal","disposition":"ambiguous"}
         }
       }
       """

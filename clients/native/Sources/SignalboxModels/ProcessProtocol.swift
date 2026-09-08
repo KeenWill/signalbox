@@ -4,6 +4,7 @@ public enum SignalboxProcessProtocol {
   public static let currentVersion = SignalboxProcessProtocolVersion.one
   public static let maximumFrameBytes = 8 * 1024 * 1024
   public static let maximumContentFragmentUTF8Bytes = 1024 * 1024
+  public static let maximumHeadroomReservePercent: UInt8 = 99
   // docs/spec/process-protocol.md owns the metadata and conversation-list bounds.
   public static let maximumMetadataTags = 256
   public static let maximumMetadataAttributes = 256
@@ -563,6 +564,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64
   )
+  case readCredentialPoolPolicy(sessionID: SignalboxCanonicalUUID, turnID: SignalboxCanonicalUUID, poolPolicyID: SignalboxCanonicalUUID)
   case readTranscript(sessionID: SignalboxCanonicalUUID)
   case followSession(sessionID: SignalboxCanonicalUUID)
   case listSessionMetadata(
@@ -586,6 +588,13 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     throughPosition: SignalboxCanonicalUInt64,
     relationship: SignalboxImportedSessionRelationship,
     initialModelSelection: SignalboxModelSelection
+  )
+  case reconcileTurn(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    expectedActiveTurnID: SignalboxCanonicalUUID,
+    content: String,
+    expectedDefaultsVersion: SignalboxCanonicalUInt64
   )
   case stopTurn(
     commandID: SignalboxCommandID,
@@ -632,6 +641,11 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(SignalboxUserInputContent.text(content), forKey: "content")
       try container.encode(expectedVersion, forKey: "expected_defaults_version")
       try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+    case .readCredentialPoolPolicy(let sessionID, let turnID, let poolPolicyID):
+      try container.encode("read_credential_pool_policy", forKey: "type")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(turnID, forKey: "turn_id")
+      try container.encode(poolPolicyID, forKey: "pool_policy_id")
     case .readTranscript(let sessionID):
       try container.encode("read_transcript", forKey: "type")
       try container.encode(sessionID, forKey: "session_id")
@@ -673,6 +687,20 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(throughPosition, forKey: "through_position")
       try container.encode(relationship, forKey: "relationship")
       try container.encode(selection, forKey: "initial_model_selection")
+      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+    case .reconcileTurn(
+      let commandID,
+      let sessionID,
+      let activeTurnID,
+      let content,
+      let expectedDefaultsVersion
+    ):
+      try container.encode("reconcile_turn", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(activeTurnID, forKey: "expected_active_turn_id")
+      try container.encode(SignalboxUserInputContent.text(content), forKey: "content")
+      try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
       try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
     case .stopTurn(
       let commandID,
@@ -1021,6 +1049,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case modelAliasesStart
   case modelAliasSummary(SignalboxModelAliasSummary)
   case modelAliasesEnd(aliasCount: SignalboxCanonicalUInt64)
+  case credentialPoolPolicy(SignalboxCredentialPoolPolicy)
   case transcriptSnapshotStart(SignalboxTranscriptSnapshotBoundary)
   case transcriptTurn(SignalboxTranscriptTurn)
   case transcriptModelCallUsage(SignalboxTranscriptModelCallUsage)
@@ -1149,6 +1178,8 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
       case "model_aliases_end":
         try tagged.rejectUnadmittedFields(["type", "alias_count"], decoder: decoder)
         self = .modelAliasesEnd(aliasCount: try decoder.decode("alias_count"))
+      case "credential_pool_policy":
+        self = .credentialPoolPolicy(try SignalboxCredentialPoolPolicy(from: decoder))
       case "transcript_snapshot_start":
         try tagged.rejectUnadmittedFields(
           ["type", "session_id", "cursor", "runner"],
@@ -2939,6 +2970,7 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
     recoveryToolAttemptID: SignalboxCanonicalUUID,
     automaticReconciliationAttempts: SignalboxCanonicalUInt64,
     operatorActionRequired: Bool)
+  case failedCredentialPoolExhausted(SignalboxCredentialPoolExhaustion)
   case failed(
     terminalFrontierID: SignalboxCanonicalUUID,
     terminalAttemptID: SignalboxCanonicalUUID?,
@@ -3092,6 +3124,9 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
             "automatic_reconciliation_attempts"),
           operatorActionRequired: try decoder.decode("operator_action_required")
         )
+      case "failed_credential_pool_exhausted":
+        try tagged.rejectUnadmittedFields(["type", "terminal_frontier_id", "terminal_attempt_id", "failure_entry_id", "pool_policy_id", "policy_members", "members"], decoder: decoder)
+        self = .failedCredentialPoolExhausted(try SignalboxCredentialPoolExhaustion(from: decoder))
       case "failed":
         try tagged.rejectUnadmittedFields(
           ["type", "terminal_frontier_id", "terminal_attempt_id", "terminal_model_call"],
@@ -3187,13 +3222,7 @@ extension SignalboxTranscriptTurnState {
     default:
       return false
     }
-    switch provenance {
-    case .parentTurnCommand(_, _, _, .parentAndDescendants),
-      .parentGoalCommand(_, _, _, .parentAndDescendants):
-      return true
-    case .childTurn, .parentTurnCommand, .parentGoalCommand:
-      return false
-    }
+    return provenance.hasDelegationCascade
   }
 }
 
@@ -3356,12 +3385,39 @@ public struct SignalboxTranscriptUserEntryMessage: Decodable, Equatable, Sendabl
   }
 }
 
+public enum SignalboxBoundChildAction: String, Decodable, Equatable, Sendable {
+  case keepRunning = "keep_running"
+  case stop
+  case cancel
+}
+
+public enum SignalboxDelegationPolicy: Decodable, Equatable, Sendable {
+  case background
+  case bound(onParentStopped: SignalboxBoundChildAction, onParentCancelled: SignalboxBoundChildAction)
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "background":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+      self = .background
+    case "bound":
+      try tagged.rejectUnadmittedFields(["type", "on_parent_stopped", "on_parent_cancelled"], decoder: decoder)
+      self = .bound(onParentStopped: try decoder.decode("on_parent_stopped"),
+        onParentCancelled: try decoder.decode("on_parent_cancelled"))
+    default:
+      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+        debugDescription: "Unknown delegation policy."))
+    }
+  }
+}
+
 public enum SignalboxDelegationWaitMode: String, Decodable, Equatable, Sendable {
   case foreground
   case background
 }
 
-public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable {
+public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable, CaseIterable {
   case returned
   case failed
   case stopped
@@ -3370,7 +3426,7 @@ public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable {
   case alreadyTerminal = "already_terminal"
 }
 
-public enum SignalboxDelegationReason: String, Decodable, Equatable, Sendable {
+public enum SignalboxDelegationReason: String, Decodable, Equatable, Sendable, CaseIterable {
   case childCompleted = "child_completed"
   case childExecutionFailed = "child_execution_failed"
   case childResultUnavailable = "child_result_unavailable"
@@ -3392,6 +3448,11 @@ public enum SignalboxDelegationProvenance: Decodable, Equatable, Sendable {
     commandID: SignalboxCanonicalUUID,
     descendantScope: SignalboxDescendantTerminationScope)
 
+  case parentLifecycleCommand(
+    parentSessionID: SignalboxCanonicalUUID,
+    commandID: SignalboxCanonicalUUID,
+    descendantScope: SignalboxDescendantTerminationScope)
+
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     switch tagged.kind {
@@ -3408,6 +3469,13 @@ public enum SignalboxDelegationProvenance: Decodable, Equatable, Sendable {
       self = .parentTurnCommand(
         parentSessionID: try decoder.decode("parent_session_id"),
         parentTurnID: try decoder.decode("parent_turn_id"),
+        commandID: try decoder.decode("command_id"),
+        descendantScope: try decoder.decode("descendant_scope"))
+    case "parent_lifecycle_command":
+      try tagged.rejectUnadmittedFields(
+        ["type", "parent_session_id", "command_id", "descendant_scope"], decoder: decoder)
+      self = .parentLifecycleCommand(
+        parentSessionID: try decoder.decode("parent_session_id"),
         commandID: try decoder.decode("command_id"),
         descendantScope: try decoder.decode("descendant_scope"))
     case "parent_goal_command":
@@ -3680,7 +3748,7 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     }
   }
 
-  private static func delegationResultShapeIsValid(
+  fileprivate static func delegationResultShapeIsValid(
     childSessionID: SignalboxCanonicalUUID,
     outcome: SignalboxDelegationOutcome,
     content: String?,
@@ -3698,19 +3766,13 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
       (.stopped, .parentCancelled, let provenance, .none),
       (.cancelled, .parentStopped, let provenance, .none),
       (.cancelled, .parentCancelled, let provenance, .none):
-      switch provenance {
-      case .parentTurnCommand(_, _, _, .parentAndDescendants),
-        .parentGoalCommand(_, _, _, .parentAndDescendants):
-        return true
-      case .childTurn, .parentTurnCommand, .parentGoalCommand:
-        return false
-      }
+      return provenance.hasDelegationCascade
     default:
       return false
     }
   }
 
-  private static func delegationContentIsValid(_ content: String) -> Bool {
+  fileprivate static func delegationContentIsValid(_ content: String) -> Bool {
     !content.isEmpty
       && content.utf8.count <= SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes
       && !content.contains("\0")
@@ -3907,6 +3969,23 @@ public struct SignalboxFollowedSessionEvent: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let event: SignalboxProcessSessionEvent
 
+  init(cursor: SignalboxCanonicalUInt64, sessionID: SignalboxCanonicalUUID,
+    event: SignalboxProcessSessionEvent) {
+    self.cursor = cursor
+    self.sessionID = sessionID
+    self.event = event
+  }
+
+  public init(from decoder: Decoder) throws {
+    cursor = try decoder.decode("cursor")
+    sessionID = try decoder.decode("session_id")
+    event = try decoder.decode("event")
+    guard event.delegationIsValid(sessionID: sessionID) else {
+      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+        debugDescription: "Delegation event correlations or outcome are inconsistent."))
+    }
+  }
+
   private enum CodingKeys: String, CodingKey {
     case cursor
     case sessionID = "session_id"
@@ -4072,6 +4151,12 @@ private struct SignalboxTurnModelSettingsResolvedShape: Decodable {
 }
 
 public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
+  case goalTurnRetired(turnID: SignalboxCanonicalUUID)
+  case childSpawned(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, relationship: SignalboxDelegationPolicy)
+  case childWaiting(awaitRequestID: SignalboxCanonicalUUID, spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, mode: SignalboxDelegationWaitMode)
+  case sessionMessage(spawningRequestID: SignalboxCanonicalUUID, messageID: SignalboxCanonicalUUID, senderSessionID: SignalboxCanonicalUUID, recipientSessionID: SignalboxCanonicalUUID, ordinal: SignalboxCanonicalUInt64, deliverySequence: SignalboxCanonicalUInt64, content: String)
+  case childResult(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, outcome: SignalboxDelegationOutcome, content: String?, reason: SignalboxDelegationReason, provenance: SignalboxDelegationProvenance)
+  case childLifecycleDisposition(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, outcome: SignalboxDelegationOutcome, reason: SignalboxDelegationReason, provenance: SignalboxDelegationProvenance)
   case sessionCreated
   case sessionModelSettingsChanged
   case turnModelSettingsResolved
@@ -4109,6 +4194,7 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   case turnCompleted(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     completionEntryID: SignalboxCanonicalUUID, terminalFrontierID: SignalboxCanonicalUUID)
+  case turnCredentialPoolExhausted(turnID: SignalboxCanonicalUUID, evidence: SignalboxCredentialPoolExhaustion)
   case turnFailed(
     turnID: SignalboxCanonicalUUID, failureEntryID: SignalboxCanonicalUUID,
     terminalFrontierID: SignalboxCanonicalUUID)
@@ -4132,6 +4218,51 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     do {
       switch tagged.kind {
+      case "goal_turn_retired":
+        try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
+        self = .goalTurnRetired(
+          turnID: try decoder.decode("turn_id"))
+      case "child_spawned":
+        try tagged.rejectUnadmittedFields(["type", "spawning_request_id", "child_session_id", "relationship"], decoder: decoder)
+        self = .childSpawned(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id"),
+          relationship: try decoder.decode("relationship"))
+      case "child_waiting":
+        try tagged.rejectUnadmittedFields(["type", "await_request_id", "spawning_request_id", "child_session_id", "mode"], decoder: decoder)
+        self = .childWaiting(
+          awaitRequestID: try decoder.decode("await_request_id"),
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id"),
+          mode: try decoder.decode("mode"))
+      case "session_message":
+        try tagged.rejectUnadmittedFields(["type", "spawning_request_id", "message_id", "sender_session_id", "recipient_session_id", "ordinal", "delivery_sequence", "content"], decoder: decoder)
+        self = .sessionMessage(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          messageID: try decoder.decode("message_id"),
+          senderSessionID: try decoder.decode("sender_session_id"),
+          recipientSessionID: try decoder.decode("recipient_session_id"),
+          ordinal: try decoder.decode("ordinal"),
+          deliverySequence: try decoder.decode("delivery_sequence"),
+          content: try decoder.decode("content"))
+      case "child_result":
+        try tagged.rejectUnadmittedFields(["type", "spawning_request_id", "child_session_id", "outcome", "content", "reason", "provenance"], decoder: decoder)
+        try tagged.requireFields(["content"], decoder: decoder)
+        self = .childResult(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id"),
+          outcome: try decoder.decode("outcome"),
+          content: try decoder.decodeIfPresent("content"),
+          reason: try decoder.decode("reason"),
+          provenance: try decoder.decode("provenance"))
+      case "child_lifecycle_disposition":
+        try tagged.rejectUnadmittedFields(["type", "spawning_request_id", "child_session_id", "outcome", "reason", "provenance"], decoder: decoder)
+        self = .childLifecycleDisposition(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id"),
+          outcome: try decoder.decode("outcome"),
+          reason: try decoder.decode("reason"),
+          provenance: try decoder.decode("provenance"))
       case "session_created":
         try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
         self = .sessionCreated
@@ -4251,6 +4382,9 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
           completionEntryID: try decoder.decode("completion_entry_id"),
           terminalFrontierID: try decoder.decode("terminal_frontier_id")
         )
+      case "turn_credential_pool_exhausted":
+        try tagged.rejectUnadmittedFields(["type", "turn_id", "terminal_frontier_id", "terminal_attempt_id", "failure_entry_id", "pool_policy_id", "policy_members", "members"], decoder: decoder)
+        self = .turnCredentialPoolExhausted(turnID: try decoder.decode("turn_id"), evidence: try SignalboxCredentialPoolExhaustion(from: decoder))
       case "turn_failed":
         try tagged.rejectUnadmittedFields(
           ["type", "turn_id", "failure_entry_id", "terminal_frontier_id"],
@@ -5215,5 +5349,177 @@ extension Decoder {
       Value.self,
       forKey: SignalboxDynamicCodingKey(key)
     )
+  }
+}
+
+
+public enum SignalboxCredentialPoolExclusion: Decodable, Equatable, Sendable {
+  case profileQuarantine(recordGeneration: SignalboxCanonicalUInt64?)
+  case membershipExclusion(recordGeneration: SignalboxCanonicalUInt64?)
+  case sessionDisplacement(recordGeneration: SignalboxCanonicalUInt64?)
+  case chainExclusion(predecessorModelCallID: SignalboxCanonicalUUID)
+  case transientExclusion(observationModelCallID: SignalboxCanonicalUUID)
+  case headroomReserve(observedHeadroomPercent: Int64, reservePercent: UInt8)
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let kind: String = try decoder.decode("kind")
+    switch kind {
+    case "profile_quarantine", "membership_exclusion", "session_displacement":
+      try payload.rejectUnadmittedFields(["kind", "record_generation"], decoder: decoder)
+      try payload.requireFields(["record_generation"], decoder: decoder)
+      let generation: SignalboxCanonicalUInt64? = try decoder.decodeIfPresent("record_generation")
+      if let generation, generation.rawValue == 0 { throw poolEvidenceError(decoder) }
+      switch kind {
+      case "profile_quarantine": self = .profileQuarantine(recordGeneration: generation)
+      case "membership_exclusion": self = .membershipExclusion(recordGeneration: generation)
+      default: self = .sessionDisplacement(recordGeneration: generation)
+      }
+    case "chain_exclusion":
+      try payload.rejectUnadmittedFields(["kind", "predecessor_model_call_id"], decoder: decoder)
+      self = .chainExclusion(predecessorModelCallID: try decoder.decode("predecessor_model_call_id"))
+    case "transient_exclusion":
+      try payload.rejectUnadmittedFields(["kind", "observation_model_call_id"], decoder: decoder)
+      self = .transientExclusion(observationModelCallID: try decoder.decode("observation_model_call_id"))
+    case "headroom_reserve":
+      try payload.rejectUnadmittedFields(["kind", "observed_headroom_percent", "reserve_percent"], decoder: decoder)
+      let observed: Int64 = try decoder.decode("observed_headroom_percent")
+      let reserve: UInt8 = try decoder.decode("reserve_percent")
+      guard reserve <= SignalboxProcessProtocol.maximumHeadroomReservePercent,
+        observed <= Int64(reserve)
+      else { throw poolEvidenceError(decoder) }
+      self = .headroomReserve(observedHeadroomPercent: observed, reservePercent: reserve)
+    default: throw poolEvidenceError(decoder)
+    }
+  }
+}
+
+public struct SignalboxCredentialPoolMemberEvidence: Decodable, Equatable, Sendable {
+  public let profile: String
+  public let resetAtUnixMS: Int64?
+  public let exclusion: SignalboxCredentialPoolExclusion
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(["profile", "reset_at_unix_ms", "exclusion"], decoder: decoder)
+    try payload.requireFields(["reset_at_unix_ms"], decoder: decoder)
+    profile = try decoder.decode("profile")
+    resetAtUnixMS = try decoder.decodeIfPresent("reset_at_unix_ms")
+    exclusion = try decoder.decode("exclusion")
+    switch exclusion {
+    case .profileQuarantine, .membershipExclusion, .sessionDisplacement, .chainExclusion:
+      guard resetAtUnixMS == nil else { throw poolEvidenceError(decoder) }
+    case .transientExclusion, .headroomReserve:
+      guard resetAtUnixMS != nil else { throw poolEvidenceError(decoder) }
+    }
+  }
+}
+
+public struct SignalboxCredentialPoolPolicy: Decodable, Equatable, Sendable {
+  public let poolPolicyID: SignalboxCanonicalUUID
+  public let policyMembers: [String]
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxTaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(["type", "pool_policy_id", "policy_members"], decoder: decoder)
+    poolPolicyID = try decoder.decode("pool_policy_id")
+    policyMembers = try decoder.decode("policy_members")
+    guard validPoolMembers(policyMembers) else { throw poolEvidenceError(decoder) }
+  }
+}
+
+public struct SignalboxCredentialPoolExhaustion: Decodable, Equatable, Sendable {
+  public let terminalFrontierID: SignalboxCanonicalUUID
+  public let terminalAttemptID: SignalboxCanonicalUUID
+  public let failureEntryID: SignalboxCanonicalUUID
+  public let poolPolicyID: SignalboxCanonicalUUID
+  public let policyMembers: [String]
+  public let members: [SignalboxCredentialPoolMemberEvidence]
+
+  public init(from decoder: Decoder) throws {
+    terminalFrontierID = try decoder.decode("terminal_frontier_id")
+    terminalAttemptID = try decoder.decode("terminal_attempt_id")
+    failureEntryID = try decoder.decode("failure_entry_id")
+    poolPolicyID = try decoder.decode("pool_policy_id")
+    policyMembers = try decoder.decode("policy_members")
+    members = try decoder.decode("members")
+    guard validPoolMembers(policyMembers), policyMembers.count == members.count,
+      zip(policyMembers, members).allSatisfy({ $0.0.utf8.elementsEqual($0.1.profile.utf8) })
+    else { throw poolEvidenceError(decoder) }
+  }
+
+  public var retainedUTF8Bytes: UInt {
+    policyMembers.reduce(UInt(0)) { $0 + UInt($1.utf8.count) }
+      + members.reduce(UInt(0)) { $0 + UInt($1.profile.utf8.count) + $1.exclusion.retainedUTF8Bytes }
+      + UInt(members.count * MemoryLayout<SignalboxCredentialPoolMemberEvidence>.stride)
+      + [terminalFrontierID, terminalAttemptID, failureEntryID, poolPolicyID].reduce(UInt(0)) { $0 + UInt($1.rawValue.utf8.count) }
+  }
+}
+
+private func validPoolMembers(_ members: [String]) -> Bool {
+  !members.isEmpty && members.count <= 1024
+    && members.allSatisfy { !$0.isEmpty && $0.utf8.count <= 256 }
+    && Set(members.map { Data($0.utf8) }).count == members.count
+}
+
+private func poolEvidenceError(_ decoder: Decoder) -> DecodingError {
+  .dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid credential pool evidence."))
+}
+
+extension SignalboxCredentialPoolExclusion {
+  fileprivate var retainedUTF8Bytes: UInt {
+    switch self {
+    case .chainExclusion(let identity), .transientExclusion(let identity): return UInt(identity.rawValue.utf8.count)
+    case .profileQuarantine, .membershipExclusion, .sessionDisplacement, .headroomReserve: return 0
+    }
+  }
+}
+
+extension SignalboxProcessSessionEvent {
+  fileprivate func delegationIsValid(sessionID: SignalboxCanonicalUUID) -> Bool {
+    switch self {
+    case .childSpawned(_, let child, _), .childWaiting(_, _, let child, _):
+      return child != sessionID
+    case .sessionMessage(_, _, let sender, let recipient, let ordinal, let delivery, let content):
+      return recipient == sessionID && sender != recipient && ordinal.rawValue > 0
+        && delivery.rawValue > 0 && SignalboxTranscriptEntry.delegationContentIsValid(content)
+    case .childResult(_, let child, let outcome, let content, let reason, let provenance):
+      return child != sessionID
+        && (provenance.delegationParentID.map { $0 == sessionID } ?? true)
+        && SignalboxTranscriptEntry.delegationResultShapeIsValid(
+          childSessionID: child, outcome: outcome, content: content, reason: reason, provenance: provenance)
+        && (content.map(SignalboxTranscriptEntry.delegationContentIsValid) ?? true)
+        && ((outcome == .returned && content != nil)
+          || ([.failed, .stopped, .cancelled].contains(outcome) && content == nil))
+    case .childLifecycleDisposition(_, let child, let outcome, let reason, let provenance):
+      guard [.parentStopped, .parentCancelled].contains(reason), provenance.hasDelegationCascade,
+        let parent = provenance.delegationParentID else { return false }
+      if child == sessionID {
+        return parent != sessionID && [.stopped, .cancelled].contains(outcome)
+      }
+      return parent == sessionID
+        && [.stopped, .cancelled, .alreadyTerminal, .continueRunning].contains(outcome)
+    default: return true
+    }
+  }
+}
+
+extension SignalboxDelegationProvenance {
+  fileprivate var delegationParentID: SignalboxCanonicalUUID? {
+    switch self {
+    case .childTurn: return nil
+    case .parentTurnCommand(let parent, _, _, _), .parentGoalCommand(let parent, _, _, _),
+      .parentLifecycleCommand(let parent, _, _): return parent
+    }
+  }
+
+  fileprivate var hasDelegationCascade: Bool {
+    switch self {
+    case .parentTurnCommand(_, _, _, .parentAndDescendants),
+      .parentLifecycleCommand(_, _, .parentAndDescendants): return true
+    case .parentGoalCommand(_, let generation, _, .parentAndDescendants):
+      return generation.rawValue > 0
+    default: return false
+    }
   }
 }

@@ -940,3 +940,95 @@ async fn review_orchestration_snapshots_respect_configured_connection_capacity()
     );
     Ok(())
 }
+
+/// Records an unsealed concern inventory for the supplied canonical target.
+async fn unsealed_concern_attempt(
+    pool: &PgPool,
+    target: ReviewTargetId,
+) -> Result<(PostgresReviewOrchestrationStore, ReviewOrchestrationAttempt), Box<dyn Error>> {
+    const FIXTURE_TEMPLATE_DIGEST: [u8; 32] = [1; 32];
+    const FIXTURE_CONCERN: &str = "terminal-evidence";
+    const FIXTURE_CONCERN_SET: &str = "terminal-evidence-v1";
+    let digest = ReviewTemplateDigest::new(FIXTURE_TEMPLATE_DIGEST);
+    let attempt = ReviewOrchestrationAttempt::try_new(
+        ReviewOrchestrationAttemptId::from_uuid(Uuid::now_v7()),
+        target,
+        ReviewPolicy::version_one(),
+        key(FIXTURE_CONCERN_SET),
+        ReviewStageTemplateDigests::new(digest, digest, digest, digest),
+        vec![ReviewConcernSpec::new(key(FIXTURE_CONCERN), digest)],
+    )?;
+    let mut store = PostgresReviewOrchestrationStore::new(pool.clone());
+    assert_eq!(
+        store.record_attempt(attempt.clone()).await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    Ok((store, attempt))
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn negative_concern_claims_reject_a_canonical_nonterminal_pass() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let (mut store, attempt) = unsealed_concern_attempt(&pool, fixture.target).await?;
+    let concern = &attempt.concerns()[0];
+    for outcome in [
+        ReviewConcernOutcome::Failed { pass: fixture.pass },
+        ReviewConcernOutcome::Blocked { pass: fixture.pass },
+        ReviewConcernOutcome::Cancelled {
+            pass: Some(fixture.pass),
+        },
+    ] {
+        let claim =
+            ReviewConcernClaim::new(concern.key().clone(), concern.template_digest(), outcome);
+        let error = store
+            .record_concern_claim(attempt.id(), claim.clone())
+            .await
+            .expect_err("the canonical pass is queued, so no terminal claim is authentic");
+        assert!(
+            matches!(error, ReviewOrchestrationStoreError::Corruption(_)),
+            "claim {claim:?}: {error:?}"
+        );
+    }
+    assert!(store.load_concern_claims(attempt.id()).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn failed_concern_claim_admits_matching_terminal_pass_and_run() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = insert_review_pass_fixture(&pool).await;
+    let (_, turn) = start_review_pass(&fixture.store, fixture.pass).await;
+    complete_review_turn(&pool, turn).await;
+    conclude_review_pass(
+        &fixture.store,
+        fixture.pass,
+        ReviewPassState::Failed { turn },
+    )
+    .await;
+    let (mut store, attempt) = unsealed_concern_attempt(&pool, fixture.target).await?;
+    let concern = &attempt.concerns()[0];
+    let claim = ReviewConcernClaim::new(
+        concern.key().clone(),
+        concern.template_digest(),
+        ReviewConcernOutcome::Failed { pass: fixture.pass },
+    );
+    assert_eq!(
+        store
+            .record_concern_claim(attempt.id(), claim.clone())
+            .await?,
+        ReviewDurableSealOutcome::Recorded
+    );
+    assert_eq!(
+        store
+            .record_concern_claim(attempt.id(), claim.clone())
+            .await?,
+        ReviewDurableSealOutcome::EqualReplay
+    );
+    assert_eq!(store.load_concern_claims(attempt.id()).await?, [claim]);
+    Ok(())
+}

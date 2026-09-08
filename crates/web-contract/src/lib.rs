@@ -3054,6 +3054,8 @@ fn runtime_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebContr
 
 const schemas = {schema_values};
 
+export const MAX_SESSION_PAGE_ITEMS = schemas.WebSessionCatalogSnapshot.properties.summaries.maxItems;
+
 function fail(path, expected) {{
   throw new TypeError(`${{path}} must be ${{expected}}`);
 }}
@@ -5089,6 +5091,7 @@ fn declaration_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebC
             schema.decoder, schema.name
         ));
     }
+    output.push_str("export const MAX_SESSION_PAGE_ITEMS: number;\n");
     Ok(output)
 }
 

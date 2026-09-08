@@ -375,15 +375,38 @@ struct ProcessSessionCreationSheet: View {
         if isLoading {
           ProgressView("Reading model aliases")
         } else {
-          Picker("Model alias", selection: $selectedAliasID) {
-            ForEach(aliases) { alias in
-              Text(
-                "\(alias.aliasID.rawValue) → \(alias.selectionID.rawValue.prefix(8))"
-              )
-              .tag(Optional(alias.aliasID))
+          VStack(alignment: .leading, spacing: 8) {
+            Text("Model alias")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            Menu {
+              Picker("Model alias", selection: $selectedAliasID) {
+                ForEach(aliases) { alias in
+                  Text("\(alias.aliasID.rawValue) → \(alias.selectionID.rawValue.prefix(8))")
+                    .tag(Optional(alias.aliasID))
+                }
+              }
+            } label: {
+              VStack(alignment: .leading, spacing: 4) {
+                Text(selectedAliasID?.rawValue ?? "Choose model alias")
+                  .multilineTextAlignment(.leading)
+                  .fixedSize(horizontal: false, vertical: true)
+                if let alias = aliases.first(where: { $0.aliasID == selectedAliasID }) {
+                  Text("Selection \(alias.selectionID.rawValue.prefix(8))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+              }
+              .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .accessibilityLabel("Model alias")
+            .accessibilityValue(
+              aliases.first(where: { $0.aliasID == selectedAliasID }).map { alias in
+                "\(alias.aliasID.rawValue), selection \(alias.selectionID.rawValue)"
+              } ?? "None selected"
+            )
+            .accessibilityIdentifier("model-alias-picker")
           }
-          .accessibilityIdentifier("model-alias-picker")
           TextField("Optional system prompt", text: $systemPrompt, axis: .vertical)
             .lineLimit(3...10)
             .accessibilityIdentifier("system-prompt-field")
@@ -418,7 +441,10 @@ struct ProcessSessionCreationSheet: View {
         await loadAliases()
       }
     }
-    .frame(minWidth: 520, minHeight: 320)
+    .frame(minHeight: 320)
+    #if os(macOS)
+    .frame(minWidth: 520)
+    #endif
     .interactiveDismissDisabled(isCreating)
   }
 
@@ -1254,7 +1280,10 @@ private struct ProcessImportedContinuationSheet: View {
         selectedAliasID = viewModel.aliases.first?.aliasID
       }
     }
-    .frame(minWidth: 520, minHeight: 320)
+    .frame(minHeight: 320)
+    #if os(macOS)
+    .frame(minWidth: 520)
+    #endif
     .interactiveDismissDisabled(viewModel.isContinuing)
   }
 
@@ -1324,6 +1353,18 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  struct DelegationUpdate {
+    let title: String
+    let detail: String
+  }
+
+  @Published private(set) var delegationUpdate: DelegationUpdate?
+
+  private func showDelegationUpdate(_ title: String, _ detail: String) {
+    delegationUpdate = DelegationUpdate(title: title,
+      detail: SignalboxProcessPresentation.retainedLabel(detail))
+  }
+
   @Published private(set) var timeline: [SignalboxTimelineItem] = []
   @Published private(set) var pendingInputs: [SignalboxProcessPendingInput] = []
   @Published private(set) var acceptedInputsAwaitingTranscript: [SignalboxProcessPendingInput] = []
@@ -1347,6 +1388,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var serviceGeneration: UInt64 = 0
   private var unresolvedSubmission: SignalboxPreparedInputSubmission?
   private var unresolvedToolDecision: SignalboxPreparedToolRequestDecision?
+  private var recoverableTurnID: SignalboxCanonicalUUID?
+  private var unresolvedReconciliation: SignalboxPreparedTurnReconciliation?
   private var unresolvedTurnStop: SignalboxPreparedTurnStop?
   private var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
   private var terminalTurnIDs: Set<SignalboxCanonicalUUID> = []
@@ -1627,6 +1670,105 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  func reconcileAndSendSuccessor() async {
+    let content = composerText
+    guard
+      !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      !isSubmitting,
+      canReconcileAndSend,
+      let activeTurnID = hasRetryableReconciliation
+        ? unresolvedReconciliation?.activeTurnID : recoverableTurnID,
+      let service = connectedService
+    else {
+      return
+    }
+    let generation = serviceGeneration
+    isSubmitting = true
+    defer {
+      if serviceGeneration == generation {
+        isSubmitting = false
+      }
+    }
+    var preparedForAttempt: SignalboxPreparedTurnReconciliation?
+    var reusedUnresolvedReconciliation = false
+    do {
+      let prepared: SignalboxPreparedTurnReconciliation
+      if let unresolvedReconciliation,
+        unresolvedReconciliation.sessionID == session.id,
+        hasExactUTF8(unresolvedReconciliation.content, content)
+      {
+        prepared = unresolvedReconciliation
+        reusedUnresolvedReconciliation = true
+      } else {
+        unresolvedReconciliation = nil
+        prepared = try await service.prepareTurnReconciliation(
+          session: session,
+          activeTurnID: activeTurnID,
+          content: content
+        )
+      }
+      preparedForAttempt = prepared
+      guard serviceGeneration == generation else {
+        return
+      }
+      let submitted = try await service.reconcileTurn(prepared)
+      guard serviceGeneration == generation else {
+        return
+      }
+      let acceptedInput = SignalboxProcessPendingInput(
+        id: submitted.acceptedInputID,
+        turnID: submitted.turnID,
+        acceptancePosition: submitted.acceptancePosition,
+        content: prepared.content
+      )
+      pendingInputs.removeAll { $0.id == submitted.acceptedInputID }
+      acceptedInputsAwaitingTranscript.removeAll { $0.id == submitted.acceptedInputID }
+      if !materializedAcceptedInputIDs.contains(submitted.acceptedInputID) {
+        if terminalTurnIDs.contains(submitted.turnID) {
+          retainAcceptedInputAwaitingTranscript(acceptedInput)
+        } else {
+          pendingInputs.append(acceptedInput)
+          pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
+        }
+      }
+      unresolvedReconciliation = nil
+      if recoverableTurnID == prepared.activeTurnID {
+        recoverableTurnID = nil
+      }
+      if hasExactUTF8(composerText, prepared.content) {
+        composerText = ""
+      }
+      errorMessage = nil
+    } catch {
+      guard serviceGeneration == generation else {
+        return
+      }
+      await refreshSessionDefaultsIfNeeded(
+        after: error,
+        using: service,
+        generation: generation
+      )
+      guard serviceGeneration == generation else {
+        return
+      }
+      if error is CancellationError {
+        unresolvedReconciliation = preparedForAttempt
+      } else if let serviceError = error as? SignalboxProcessServiceError,
+        serviceError.retainsPreparedMutationIdentity
+      {
+        unresolvedReconciliation = preparedForAttempt
+      } else if let openError = error as? SignalboxProcessRequestOpenError,
+        case .definitelyUnsent = openError,
+        reusedUnresolvedReconciliation
+      {
+        unresolvedReconciliation = preparedForAttempt
+      } else {
+        unresolvedReconciliation = nil
+      }
+      errorMessage = error.localizedDescription
+    }
+  }
+
   func stopAndSendSuccessor() async {
     let content = composerText
     guard
@@ -1733,7 +1875,28 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   var canSend: Bool {
-    canSubmit && activeTurnID == nil
+    canSubmit && (activeTurnID == nil || hasRetryableSubmission) && !hasRetryableReconciliation
+  }
+
+  private var hasRetryableSubmission: Bool {
+    unresolvedSubmission.map {
+      $0.sessionID == session.id && hasExactUTF8($0.content, composerText)
+    } ?? false
+  }
+
+  private var hasRetryableReconciliation: Bool {
+    unresolvedReconciliation.map {
+      $0.sessionID == session.id && hasExactUTF8($0.content, composerText)
+    } ?? false
+  }
+
+  var showsReconciliation: Bool {
+    unresolvedSubmission == nil && (recoverableTurnID != nil || hasRetryableReconciliation)
+  }
+
+  var canReconcileAndSend: Bool {
+    canSubmit && showsReconciliation
+      && (unresolvedReconciliation == nil || hasRetryableReconciliation)
   }
 
   var canStopAndSend: Bool {
@@ -1759,6 +1922,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .phase(let phase):
         self.phase = phase
       case .authoritativeSnapshot(let snapshot):
+        delegationUpdate = nil
         let projection = try projector.projectAuthoritativeSnapshot(snapshot)
         runner = snapshot.runner
         runnerTransition = nil
@@ -1777,6 +1941,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         materializedAcceptedInputIDs = projection.materializedAcceptedInputIDs
         terminalTurnIDs = terminalTurnIDs(in: snapshot)
         activeTurnID = activeTurnID(in: snapshot)
+        recoverableTurnID = snapshot.records.compactMap { record -> SignalboxCanonicalUUID? in
+          guard case .turn(let turn) = record,
+            case .activeAwaitingModelCallRecovery(_, _, _, true) = turn.state
+          else { return nil }
+          return turn.turnID
+        }.first
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = [:]
         activity = projection.activity
@@ -1805,6 +1975,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           self.activeTurnID = nil
         }
         let wasMutationBlocked = !mutationBlocksByTurnID.isEmpty
+        recoverableTurnID = snapshot.records.compactMap { record -> SignalboxCanonicalUUID? in
+          guard case .turn(let turn) = record,
+            case .activeAwaitingModelCallRecovery(_, _, _, true) = turn.state
+          else { return nil }
+          return turn.turnID
+        }.first
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = Dictionary(
           snapshot.records.compactMap { record in
@@ -1977,7 +2153,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .queued, .queuedDelegated, .queuedDelegationWake:
         break
       case .activeAwaitingChild, .activeAwaitingModelCallRecovery,
-        .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .failed, .completed, .refused,
+        .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .failed,
+        .failedCredentialPoolExhausted, .completed, .refused,
         .cancelled, .delegationTerminated,
         .reconciliationRequired, .toolReconciliationRequired:
         unresolvedUnknownTurnID = nil
@@ -1992,11 +2169,14 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private func resetServiceOwnedPresentation() {
     serviceGeneration &+= 1
     timeline = []
+    delegationUpdate = nil
     pendingInputs = []
     acceptedInputsAwaitingTranscript = []
     acceptedInputTimelineOffsets = [:]
     activity = .unavailable
     activeTurnID = nil
+    recoverableTurnID = nil
+    unresolvedReconciliation = nil
     runner = nil
     runnerTransition = nil
     mutationBlocksByTurnID = [:]
@@ -2024,6 +2204,23 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private func applyLiveEvent(_ followed: SignalboxFollowedSessionEvent) {
     switch followed.event {
+    case .goalTurnRetired(let turnID):
+      pendingInputs.removeAll { $0.turnID == turnID }
+      acceptedInputsAwaitingTranscript.removeAll { $0.turnID == turnID }
+      if pendingInputs.isEmpty, activeTurnID == nil, activity.state == .queued {
+        activity = .unavailable
+      }
+    case .childSpawned(_, let child, _):
+      showDelegationUpdate("Child spawned", "Session \(child.rawValue)")
+    case .childWaiting(_, _, let child, let mode):
+      showDelegationUpdate("Waiting for child", "Session \(child.rawValue) · \(mode.rawValue)")
+    case .sessionMessage(_, _, let sender, _, _, _, let content):
+      showDelegationUpdate("Message from \(sender.rawValue)", content)
+    case .childResult(_, let child, let outcome, let content, let reason, _):
+      showDelegationUpdate("Child \(outcome.rawValue)",
+        "Session \(child.rawValue) · \(reason.rawValue)\n\(content ?? "")")
+    case .childLifecycleDisposition(_, let child, let outcome, let reason, _):
+      showDelegationUpdate("Child \(outcome.rawValue)", "Session \(child.rawValue) · \(reason.rawValue)")
     case .inputAccepted(let acceptedInputID, let turnID, let acceptancePosition, let content):
       if !materializedAcceptedInputIDs.contains(acceptedInputID) {
         let acceptedInput = SignalboxProcessPendingInput(
@@ -2055,6 +2252,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       guard admitsActivation else {
         return
       }
+      recoverableTurnID = nil
       mutationBlocksByTurnID.removeValue(forKey: turnID)
       guard mutationBlocksByTurnID.isEmpty else {
         return
@@ -2122,6 +2320,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         at: followed.cursor,
         terminalActivity: .init(state: .completed, label: "Completed")
       )
+    case .turnCredentialPoolExhausted(let turnID, _):
+      applyTerminalTurn(turnID: turnID, at: followed.cursor, terminalActivity: .init(state: .failed, label: "Credential pool exhausted"))
     case .turnFailed(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,
@@ -2450,6 +2650,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   ) {
     let admitsTerminalState = admitsStateTransition(for: turnID, at: cursor)
     terminalTurnIDs.insert(turnID)
+    if recoverableTurnID == turnID { recoverableTurnID = nil }
     if admitsTerminalState {
       mutationBlocksByTurnID.removeValue(forKey: turnID)
     }
@@ -2500,7 +2701,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           return nil
         }
         switch turn.state {
-        case .failed, .completed, .refused, .cancelled, .delegationTerminated,
+        case .failed, .failedCredentialPoolExhausted, .completed, .refused, .cancelled,
+          .delegationTerminated,
           .reconciliationRequired, .toolReconciliationRequired:
           return turn.turnID
         case .queued, .queuedDelegated, .queuedDelegationWake, .activeRunning,
@@ -2523,7 +2725,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .activeRunning, .activeAwaitingChild, .activeAwaitingToolApproval,
         .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery:
         return turn.turnID
-      case .queued, .queuedDelegated, .queuedDelegationWake, .failed, .completed, .refused,
+      case .queued, .queuedDelegated, .queuedDelegationWake, .failed,
+        .failedCredentialPoolExhausted, .completed, .refused,
         .cancelled, .delegationTerminated,
         .reconciliationRequired, .toolReconciliationRequired, .unknown:
         return nil
@@ -2689,6 +2892,17 @@ struct ProcessSessionDetailScreen: View {
             .background(.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             .accessibilityIdentifier("provider-streamed-text")
           }
+          if let update = viewModel.delegationUpdate {
+            VStack(alignment: .leading, spacing: 6) {
+              Text("Latest delegation update").font(.caption).foregroundStyle(.secondary)
+              Text(update.title).font(.headline)
+              Text(update.detail).textSelection(.enabled)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityIdentifier("delegation-update")
+          }
           if viewModel.timeline.isEmpty && viewModel.pendingInputs.isEmpty
             && viewModel.acceptedInputsAwaitingTranscript.isEmpty
           {
@@ -2806,7 +3020,18 @@ struct ProcessSessionDetailScreen: View {
       )
       .accessibilityLabel("Send")
       .accessibilityIdentifier("send-message-button")
-      if viewModel.activeTurnID != nil {
+      if viewModel.showsReconciliation {
+        Button("Reconcile & Send") {
+          Task { await viewModel.reconcileAndSendSuccessor() }
+        }
+        .buttonStyle(.bordered)
+        .disabled(
+          viewModel.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || viewModel.isSubmitting || !viewModel.canReconcileAndSend
+        )
+        .help("Resolve the interrupted model call and send the composer text as its successor.")
+        .accessibilityIdentifier("reconcile-turn-button")
+      } else if viewModel.activeTurnID != nil {
         Button(role: .destructive) {
           Task { await viewModel.stopAndSendSuccessor() }
         } label: {

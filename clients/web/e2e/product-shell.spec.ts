@@ -1,5 +1,7 @@
-import { expect, type Page, test } from '@playwright/test'
+import { createHash } from 'node:crypto'
+import { ScenarioImportApi } from '../src/imports/scenario'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, test } from './fontTest'
 import { useDeterministicImportApi } from './import-api-fixture'
 
 const importsProductFixture = {
@@ -443,6 +445,23 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   ).toBeChecked()
   await expect(page.getByRole('group', { name: 'Remote media' })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('clears the session inspector description when navigating to Imports', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await useDeterministicImportApi(page)
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('option', { name: /43 turn completed/ }).click()
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector).toContainText(
+    'Bounded server-provided timeline projection for the selected record.',
+  )
+  await page.getByRole('link', { name: /Imports/ }).click()
+  await expect(inspector).toContainText(
+    'Select an available operational record to inspect its server-provided evidence.',
+  )
+  await expect(inspector).not.toContainText('Bounded server-provided timeline projection')
 })
 
 test('opens and inspects a bounded production session without a mouse', async ({ page }) => {
@@ -934,7 +953,7 @@ test('shows transcript-detail commands only on Settings among product routes', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('keeps Settings single-column when a vertical scrollbar reduces content width', async ({
+test('keeps Settings within the pane when a vertical scrollbar reduces content width', async ({
   page,
 }) => {
   const problems = watchBrowser(page)
@@ -947,12 +966,6 @@ test('keeps Settings single-column when a vertical scrollbar reduces content wid
     .nth(0)
   await navigationWidth.fill('360')
 
-  const settingsGrid = page.locator('.settings-grid')
-  expect(
-    await settingsGrid.evaluate(
-      (element) => getComputedStyle(element).gridTemplateColumns.split(' ').length,
-    ),
-  ).toBe(1)
   const settingsSurface = page.locator('.settings-surface')
   expect(
     await settingsSurface.evaluate((element) => element.scrollWidth <= element.clientWidth),
@@ -976,6 +989,47 @@ test('applies saved pane widths to the scenario workspace', async ({ page }) => 
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toBeHidden()
   await page.setViewportSize({ width: 1440, height: 900 })
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toHaveCSS('width', '400px')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('fits Settings inside a narrow primary pane with maximum saved side panes', async ({
+  page,
+}, testInfo) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await page.goto('/settings')
+  const sliders = page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider')
+  await sliders.nth(0).fill('360')
+  await sliders.nth(1).fill('480')
+
+  const settings = page.locator('.settings-surface')
+  await expect(settings).toBeVisible()
+  expect(await settings.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
+  const layoutBox = await page.getByRole('group', { name: 'Workspace layout' }).boundingBox()
+  const densityBox = await page.getByRole('group', { name: 'Visual density' }).boundingBox()
+  expect(densityBox?.y).toBeGreaterThan((layoutBox?.y ?? 0) + (layoutBox?.height ?? 0))
+  await page.screenshot({ path: testInfo.outputPath('settings-pane.png') })
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('compacts the scenario toolbar at its pane width', async ({ page }, testInfo) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 780, height: 720 })
+  await page.goto('/settings')
+  await page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider').nth(0).fill('360')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+
+  const toolbar = page.getByRole('toolbar', { name: 'Workspace controls' })
+  await expect(toolbar).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Transcript detail' })).toBeHidden()
+  expect(await toolbar.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  const toolbarBox = await toolbar.boundingBox()
+  expect((toolbarBox?.x ?? 0) + (toolbarBox?.width ?? 0)).toBeLessThanOrEqual(780)
+  await page.screenshot({ path: testInfo.outputPath('scenario-pane.png') })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect(page.getByRole('group', { name: 'Transcript detail' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -1142,6 +1196,26 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
   await expect(page.locator('.imports-shell-product')).toHaveCount(0)
   expect(importRequests).toBe(0)
   expect(problems.pageErrors).toEqual([])
+})
+
+test('shares expired Imports admission failure with the shell retry state', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.clock.install()
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.clock.fastForward(30_001)
+  await page
+    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
+    .fill('expired-admission')
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry bootstrap' })).toBeVisible()
+  await useDeterministicBootstrap(page)
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
 test('mounts Imports after the daemon contract recovers', async ({ page }) => {
@@ -1353,6 +1427,51 @@ test('locks product navigation while an ambiguous continuation command is retain
   expect(problems.consoleErrors.every((error) => error === expectedResourceError)).toBe(true)
 })
 
+test('retains exact retry after a lost acknowledgement and corrupt continuation receipt', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  const requests: string[] = []
+  await page.route('**/api/imports/*/continuations', (route) => {
+    requests.push(route.request().postData() ?? '')
+    if (requests.length === 1) return route.abort('failed')
+    if (requests.length > 2) return route.fallback()
+    return route.fulfill({
+      status: 500,
+      json: {
+        error: { kind: 'application', code: 'continuation_corrupt', message: 'Corrupt evidence.' },
+      },
+    })
+  })
+  await page.goto(importsProductFixture.path)
+  await page
+    .getByRole('textbox', { name: 'Initial model selection UUID' })
+    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  const corruptReceipt = page.waitForResponse((response) => response.status() === 500)
+  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await corruptReceipt
+  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Settings/ })).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  )
+  await page.getByRole('link', { name: /Settings/ }).click({ force: true })
+  await expect(page).toHaveURL(/\/imports$/)
+  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await expect(page.getByText('Session created:', { exact: false })).toBeVisible()
+  expect(requests).toHaveLength(3)
+  expect(requests[1]).toBe(requests[0])
+  expect(requests[2]).toBe(requests[0])
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toHaveCount(0)
+  expect(problems.pageErrors).toEqual([])
+})
+
 test('runs advertised product navigation sequences', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -1560,4 +1679,56 @@ test('trims the session identity before native form validation', async ({ page }
   await expect(input).toHaveValue(sessionWorkspaceFixture.id)
   await input.press('Enter')
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+})
+
+test('starts the settled exact import filter without the previous page cursor', async ({
+  page,
+}) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  const firstPage = await new ScenarioImportApi().list({ limit: 100 })
+  const requests: { source: string; after: string | null }[] = []
+  await page.route('**/api/imports/searches?**', async (route) => {
+    const url = new URL(route.request().url())
+    const source = route.request().postData() ?? ''
+    const after = url.searchParams.get('after')
+    requests.push({ source, after })
+    const digest = createHash('sha256').update(source).digest('hex')
+    const hasPage = source === 'source-session-0' && after === null
+    await route.fulfill({
+      json: {
+        items: hasPage
+          ? firstPage.items.map((item) => ({
+              ...item,
+              source_session_id: { leading_text: source, completeness: 'complete' },
+              source_session_id_sha256: digest,
+            }))
+          : [],
+        next_cursor: hasPage ? firstPage.next_cursor : undefined,
+        search_correlation: url.searchParams.get('search_correlation'),
+        exact_source_session_id_sha256: digest,
+      },
+    })
+  })
+  await page.goto('/imports')
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  await page.clock.install()
+  await page.clock.pauseAt(new Date(Date.now() + 1_000))
+  const input = page.getByRole('textbox', {
+    name: 'Filter imports by exact source session evidence',
+  })
+  await input.fill('source-session-0')
+  await page.clock.runFor(200)
+  await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
+  await expect.poll(() => requests.at(-1)?.source).toBe('source-session-0')
+  await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled()
+  await input.fill('source-session-1')
+  await page.getByRole('button', { name: 'Next page', exact: true }).click()
+  await expect
+    .poll(() =>
+      requests.some((request) => request.source === 'source-session-0' && request.after !== null),
+    )
+    .toBe(true)
+  await page.clock.runFor(200)
+  await expect.poll(() => requests.at(-1)).toEqual({ source: 'source-session-1', after: null })
 })

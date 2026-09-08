@@ -15,6 +15,7 @@ use signalbox_process_protocol::{
 #[derive(Debug)]
 pub(crate) enum ClientError {
     Io(io::Error),
+    DaemonIo(io::Error),
     SourceFile(io::Error),
     BlobSourceFile {
         path: PathBuf,
@@ -48,6 +49,7 @@ pub(crate) enum ClientError {
     Encode(FrameEncodeError),
     Decode(FrameDecodeError),
     Protocol(&'static str),
+    ConnectionClosed,
     Remote {
         code: ErrorCode,
         message: String,
@@ -147,10 +149,12 @@ impl ClientError {
             | Self::ReviewInputExceedsFrame
             | Self::SourceExceedsFrame => self,
             Self::Io(_)
+            | Self::DaemonIo(_)
             | Self::ScanDirectory(_)
             | Self::ScanIncomplete { .. }
             | Self::Encode(_)
             | Self::Decode(_)
+            | Self::ConnectionClosed
             | Self::Protocol(_)
             | Self::AmbiguousMutation
             | Self::Input(_)
@@ -172,7 +176,10 @@ impl ClientError {
 impl fmt::Display for ClientError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(_) => formatter.write_str("local process communication failed"),
+            Self::ConnectionClosed => formatter.write_str("the daemon connection closed"),
+            Self::Io(_) | Self::DaemonIo(_) => {
+                formatter.write_str("local process communication failed")
+            }
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
             }
@@ -207,9 +214,12 @@ impl fmt::Display for ClientError {
             Self::ReviewInputFile(_) => {
                 formatter.write_str("the review JSON input file could not be read")
             }
-            Self::ReviewInputJson(_) => {
-                formatter.write_str("the review JSON input file is not an exact admitted shape")
-            }
+            Self::ReviewInputJson(source) => write!(
+                formatter,
+                "the review JSON input file is not an exact admitted shape at line {} column {}",
+                source.line(),
+                source.column()
+            ),
             Self::ReviewInputExceedsFrame => {
                 formatter.write_str("the review JSON input exceeds the process frame bound")
             }
@@ -275,6 +285,7 @@ impl Error for ClientError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error)
+            | Self::DaemonIo(error)
             | Self::SourceFile(error)
             | Self::SystemPromptFile(error)
             | Self::GoalTextFile { source: error, .. }
@@ -287,7 +298,8 @@ impl Error for ClientError {
             Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Decode(error) => Some(error),
-            Self::Protocol(_)
+            Self::ConnectionClosed
+            | Self::Protocol(_)
             | Self::Remote { .. }
             | Self::AmbiguousMutation
             | Self::Input(_)
@@ -403,6 +415,14 @@ impl fmt::Display for RejectionDisplay {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
             RejectionDetail::StaleGeneration {} => formatter.write_str("stale_generation"),
+            RejectionDetail::UnknownPoolPolicy {
+                session_id,
+                turn_id,
+                pool_policy_id,
+            } => write!(
+                formatter,
+                "unknown pool policy {pool_policy_id} for session {session_id} turn {turn_id}"
+            ),
             RejectionDetail::UnknownCredentialExclusion {} => {
                 formatter.write_str("unknown_credential_exclusion")
             }
@@ -969,6 +989,24 @@ mod tests {
                 "rejected: delegation message identity collision \
                  (delegation_message_identity_collision message={message_id})"
             )
+        );
+    }
+
+    #[test]
+    fn review_input_json_error_includes_location_without_caller_content() {
+        let source = serde_json::from_str::<u64>(r#""private-review-value""#)
+            .expect_err("a string is not an admitted integer");
+        let expected_source = source.to_string();
+        let expected_location = format!(" at line {} column {}", source.line(), source.column());
+        let error = ClientError::ReviewInputJson(source);
+
+        assert_eq!(
+            error.to_string(),
+            format!("the review JSON input file is not an exact admitted shape{expected_location}")
+        );
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            expected_source
         );
     }
 

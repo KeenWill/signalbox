@@ -215,6 +215,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     ),
                     arguments,
                     || {},
+                    || {},
                 )?);
                 return encode_result(&result);
             }
@@ -274,18 +275,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         repository: &Repository,
         arguments: GitStageArguments,
     ) -> Result<StageResult, LocalGitFailure> {
-        self.stage_with_pre_publish_hook(repository, arguments, || {})
+        self.stage_with_publish_hooks(repository, arguments, || {}, || {})
     }
 
     #[cfg(test)]
-    pub(super) fn stage_with_pre_publish_hook<BeforePublish>(
+    pub(super) fn stage_with_publish_hooks<BeforePublish, AfterPublish>(
         &self,
         repository: &Repository,
         arguments: GitStageArguments,
         before_publish: BeforePublish,
+        after_publish: AfterPublish,
     ) -> Result<StageResult, LocalGitFailure>
     where
         BeforePublish: FnOnce(),
+        AfterPublish: FnOnce(),
     {
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
         let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
@@ -305,18 +308,21 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             ),
             arguments,
             before_publish,
+            after_publish,
         )
     }
 
-    fn stage_with_pinned_objects<BeforePublish>(
+    fn stage_with_pinned_objects<BeforePublish, AfterPublish>(
         &self,
         repository: &Repository,
         object_databases: (&Odb<'_>, &Odb<'_>, &Mempack<'_>, &PinnedObjectDatabase),
         arguments: GitStageArguments,
         before_publish: BeforePublish,
+        after_publish: AfterPublish,
     ) -> Result<StageResult, LocalGitFailure>
     where
         BeforePublish: FnOnce(),
+        AfterPublish: FnOnce(),
     {
         let (persistent_object_database, object_database, _mempack, pinned_objects) =
             object_databases;
@@ -448,7 +454,9 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         drop(index);
         self.validate_current_repository_identity()?;
         index_lock.commit()?;
-        self.validate_current_repository()?;
+        after_publish();
+        self.validate_current_repository()
+            .map_err(|_| LocalGitFailure::Ambiguous)?;
         Ok(StageResult {
             staged_paths: arguments.paths.len(),
         })
@@ -902,7 +910,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .map_err(|_| LocalGitFailure::Operation);
                     let cleanup =
                         restoration.and_then(|()| quarantine.remove_if_empty_and_current());
-                    return Err(cleanup.err().unwrap_or(failure));
+                    return Err(failure.after_rollback(cleanup));
                 }
                 Ok(QuarantinedCheckoutDirectory {
                     quarantine,
@@ -1060,7 +1068,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 first_failure.get_or_insert(failure);
             }
         }
-        first_failure.map_or(Ok(()), Err)
+        first_failure.map_or(Ok(()), |_| Err(LocalGitFailure::Ambiguous))
     }
 
     #[cfg(test)]
@@ -1558,7 +1566,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         );
         if let Err(failure) = target_publication {
             Self::preserve_changed_target_quarantines(&mut quarantined_directories);
-            rollback_checkout_atomically(
+            let worktree_restoration = rollback_checkout_atomically(
                 repository,
                 current_tree.as_ref(),
                 &target_tree,
@@ -1569,12 +1577,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     authority: &self.repository_authority,
                 },
                 Some(&updated_identities.borrow()),
-            )?;
-            self.restore_unmodified_quarantined_directories(
+            );
+            let quarantine_restoration = self.restore_unmodified_quarantined_directories(
                 &mut quarantined_directories,
                 &updated_paths.borrow(),
-            )?;
-            return Err(failure);
+            );
+            return Err(failure.after_rollback(worktree_restoration.and(quarantine_restoration)));
         }
         Self::cleanup_published_quarantines(&mut quarantined_directories);
         drop(quarantined_directories);
@@ -1662,7 +1670,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         }
         let published_index = match index_lock.commit() {
             Ok(published_index) => published_index,
-            Err(_) => {
+            Err(failure) => {
                 rollback_checkout_atomically(
                     repository,
                     current_tree.as_ref(),
@@ -1675,7 +1683,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     },
                     Some(&checkout_identities),
                 )?;
-                return Err(LocalGitFailure::Operation);
+                return Err(failure.operation_class());
             }
         };
         post_index_publish();
@@ -1751,8 +1759,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &original_index_bytes,
                 published_index.file_identity(),
             );
-            worktree_rollback?;
-            index_rollback?;
+            worktree_rollback.map_err(|_| LocalGitFailure::Ambiguous)?;
+            index_rollback.map_err(|_| LocalGitFailure::Ambiguous)?;
             return Err(failure);
         }
         Ok(BranchResult {

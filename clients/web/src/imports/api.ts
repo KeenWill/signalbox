@@ -14,6 +14,7 @@ import {
   type WebImportEntryWindowRequest,
   type WebImportListPage,
   type WebImportListRequest,
+  type WebImportSummary,
 } from '../generated/web-contract.mjs'
 
 export interface ImportApi {
@@ -143,9 +144,20 @@ const correlateListPage = (
   return page
 }
 
-const sha256 = async (value: string): Promise<string> => {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+const sha256 = async (value: string, signal: AbortSignal): Promise<string> => {
+  signal.throwIfAborted()
+  const aborted = Promise.withResolvers<never>()
+  const onAbort = () => aborted.reject(signal.reason)
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    const digest = await Promise.race([
+      crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)),
+      aborted.promise,
+    ])
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
 }
 
 const DEFAULT_IMPORT_LIST_ITEMS = 50
@@ -156,6 +168,10 @@ const DESCRIPTOR_RESPONSE_BYTES = 128 * 1024
 const ENTRY_WINDOW_RESPONSE_BYTES = 2 * 1024 * 1024
 const CONTINUATION_RESPONSE_BYTES = 128 * 1024
 const BOOTSTRAP_VALIDATION_TTL_MS = 30_000
+const IMPORT_REQUEST_TIMEOUT_MS = 30_000
+
+const requestSignal = (signal?: AbortSignal): AbortSignal =>
+  AbortSignal.any([AbortSignal.timeout(IMPORT_REQUEST_TIMEOUT_MS), ...(signal ? [signal] : [])])
 const MAX_IMPORT_TEXT_PREVIEW_BYTES = 512
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SHA256_HEX = /^[0-9a-f]{64}$/
@@ -239,6 +255,7 @@ const decodeResponse = async <Value>(
   if (contentLength !== null) {
     const declaredLength = Number(contentLength)
     if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+      await response.body?.cancel().catch(() => undefined)
       throw new ImportResponseTooLargeError()
     }
   }
@@ -271,8 +288,8 @@ const decodeResponse = async <Value>(
   return decoder(value)
 }
 
-export const validateWebContractBootstrap = async (): Promise<void> => {
-  const response = await fetch('/api/bootstrap')
+export const validateWebContractBootstrap = async (signal?: AbortSignal): Promise<void> => {
+  const response = await fetch('/api/bootstrap', { signal })
   await decodeResponse(response, decodeWebContractBootstrap, BOOTSTRAP_RESPONSE_BYTES)
 }
 
@@ -286,7 +303,6 @@ const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest
 }
 
 export class HttpImportApi implements ImportApi {
-  private bootstrapValidationPromise: Promise<void> | undefined
   private bootstrapValidatedAt: number | undefined
 
   constructor(
@@ -299,41 +315,35 @@ export class HttpImportApi implements ImportApi {
   // The validation lifetime still applies: once it expires, the ordinary path revalidates.
   static withAdmittedBootstrap(
     _bootstrap: WebContractBootstrap,
+    validatedAt: number,
     bootstrapValidation = validateWebContractBootstrap,
     now = Date.now,
   ): HttpImportApi {
     const api = new HttpImportApi(bootstrapValidation, now)
-    api.bootstrapValidationPromise = Promise.resolve()
-    api.bootstrapValidatedAt = now()
+    api.bootstrapValidatedAt = validatedAt
     return api
   }
 
-  private validateBootstrap(): Promise<void> {
+  private async validateBootstrap(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted()
     if (
       this.bootstrapValidatedAt !== undefined &&
-      this.now() - this.bootstrapValidatedAt >= BOOTSTRAP_VALIDATION_TTL_MS
-    ) {
-      this.bootstrapValidationPromise = undefined
-      this.bootstrapValidatedAt = undefined
-    }
-    this.bootstrapValidationPromise ??= this.bootstrapValidation()
-      .then(() => {
-        this.bootstrapValidatedAt = this.now()
-      })
-      .catch((error: unknown) => {
-        this.bootstrapValidationPromise = undefined
-        this.bootstrapValidatedAt = undefined
-        throw error
-      })
-    return this.bootstrapValidationPromise
+      this.now() - this.bootstrapValidatedAt < BOOTSTRAP_VALIDATION_TTL_MS
+    )
+      return
+    await this.bootstrapValidation(signal)
+    signal.throwIfAborted()
+    this.bootstrapValidatedAt = this.now()
   }
 
   async list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage> {
-    await this.validateBootstrap()
+    signal = requestSignal(signal)
+    await this.validateBootstrap(signal)
     if (request.source_session_id !== undefined && request.source_session_id !== null) {
       const { source_session_id: sourceSessionId, ...catalogRequest } = request
       const searchCorrelation = crypto.randomUUID()
-      const exactSourceSessionDigest = await sha256(sourceSessionId)
+      const exactSourceSessionDigest = await sha256(sourceSessionId, signal)
+      signal.throwIfAborted()
       const response = await fetch(
         `/api/imports/searches${queryString({
           ...catalogRequest,
@@ -364,7 +374,8 @@ export class HttpImportApi implements ImportApi {
     importedConversationId: string,
     signal?: AbortSignal,
   ): Promise<WebImportDescriptor> {
-    await this.validateBootstrap()
+    signal = requestSignal(signal)
+    await this.validateBootstrap(signal)
     const response = await fetch(`/api/imports/${encodeURIComponent(importedConversationId)}`, {
       signal,
     })
@@ -397,7 +408,8 @@ export class HttpImportApi implements ImportApi {
     signal?: AbortSignal,
     knownLatestPosition?: number,
   ): Promise<WebImportEntryWindow> {
-    await this.validateBootstrap()
+    signal = requestSignal(signal)
+    await this.validateBootstrap(signal)
     const response = await fetch(
       `/api/imports/${encodeURIComponent(importedConversationId)}/entries${queryString(request)}`,
       { signal },
@@ -414,10 +426,12 @@ export class HttpImportApi implements ImportApi {
     importedConversationId: string,
     request: WebImportContinuationRequest,
   ): Promise<WebImportContinuationResponse> {
-    await this.validateBootstrap()
+    const signal = requestSignal()
+    await this.validateBootstrap(signal)
     const response = await fetch(
       `/api/imports/${encodeURIComponent(importedConversationId)}/continuations`,
       {
+        signal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request),
@@ -441,4 +455,35 @@ export class HttpImportApi implements ImportApi {
     }
     return receipt
   }
+}
+
+export const correlateImportDescriptor = (
+  descriptor: WebImportDescriptor,
+  summary: WebImportSummary,
+): WebImportDescriptor => {
+  if (
+    descriptor.imported_conversation_id !== summary.imported_conversation_id ||
+    descriptor.entry_count !== summary.entry_count ||
+    descriptor.source.format !== summary.format ||
+    (descriptor.display_title ?? null) !== (summary.display_title ?? null) ||
+    (descriptor.source.source_session_id?.leading_text ?? null) !==
+      (summary.source_session_id?.leading_text ?? null) ||
+    (descriptor.source.source_session_id?.completeness ?? null) !==
+      (summary.source_session_id?.completeness ?? null)
+  )
+    throw new ImportDescriptorCorrelationError()
+  return descriptor
+}
+
+export const correlateImportFrontiers = (
+  window: WebImportEntryWindow,
+  timeline: WebImportDescriptor['timeline'],
+): WebImportEntryWindow => {
+  for (const boundary of [timeline.first, timeline.latest]) {
+    const entry = window.items.find((item) => item.frontier.position === boundary.position)
+    if (entry && entry.frontier.imported_entry_id !== boundary.imported_entry_id) {
+      throw new ImportWindowCorrelationError()
+    }
+  }
+  return window
 }

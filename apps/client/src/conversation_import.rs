@@ -148,10 +148,16 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::GitRemoteMinted { .. }
         | ServerMessage::GitRemoteWithdrawn { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::CredentialPoolPolicy { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
         | ServerMessage::CredentialExclusionEnd { .. }
+        | ServerMessage::RunnerStatusStart {}
+        | ServerMessage::RunnerStatus { .. }
+        | ServerMessage::RunnerOperationFailure { .. }
+        | ServerMessage::RunnerWorkspaceLeak { .. }
+        | ServerMessage::RunnerStatusEnd { .. }
         | ServerMessage::CredentialExclusionCleared { .. } => {
             ConversationImportResponse::Unexpected
         }

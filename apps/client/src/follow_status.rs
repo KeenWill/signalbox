@@ -14,7 +14,7 @@ pub(crate) async fn transcript(
     let mut connection = client
         .request(ClientRequest::ReadTranscript { session_id })
         .await?;
-    read_snapshot(&mut connection, session_id).await
+    read_snapshot(client, &mut connection, session_id).await
 }
 
 pub(crate) async fn follow(
@@ -23,64 +23,73 @@ pub(crate) async fn follow(
     session_id: CanonicalUuid,
 ) -> Result<(), ClientError> {
     let mut displayed_entries = SnapshotIdentitySet::new()?;
+    let mut retry = crate::connection::FollowRetry::default();
     loop {
-        let mut connection = client
-            .request(ClientRequest::FollowSession { session_id })
-            .await?;
-        let mut snapshot = read_snapshot(&mut connection, session_id).await?;
-        output.followed_snapshot(&mut snapshot, &mut displayed_entries)?;
-        let mut observed_cursor = snapshot.cursor();
-        loop {
-            match connection.message().await? {
-                ServerMessage::SessionEvent {
-                    cursor,
-                    session_id: event_session,
-                    event,
-                } if event_session == session_id => {
-                    if cursor.value() <= observed_cursor {
-                        continue;
+        let result: Result<(), ClientError> = async {
+            let mut connection = client
+                .request(ClientRequest::FollowSession { session_id })
+                .await?;
+            let mut snapshot = read_snapshot(client, &mut connection, session_id).await?;
+            output.followed_snapshot(&mut snapshot, &mut displayed_entries)?;
+            let mut observed_cursor = snapshot.cursor();
+            loop {
+                match connection.message().await? {
+                    ServerMessage::SessionEvent {
+                        cursor,
+                        session_id: event_session,
+                        event,
+                    } if event_session == session_id => {
+                        if cursor.value() <= observed_cursor {
+                            continue;
+                        }
+                        crate::credential_pool::validate_event(client, session_id, &event).await?;
+                        observed_cursor = cursor.value();
+                        output.event(observed_cursor, session_id, &event)?;
+                        if let Some(selection) = terminal_snapshot_selection(&event, session_id) {
+                            let mut refreshed = transcript(client, session_id).await?;
+                            output.terminal_material(
+                                &mut refreshed,
+                                &mut displayed_entries,
+                                selection,
+                            )?;
+                        }
                     }
-                    observed_cursor = cursor.value();
-                    output.event(observed_cursor, session_id, &event)?;
-                    if let Some(selection) = terminal_snapshot_selection(&event, session_id) {
-                        let mut refreshed = transcript(client, session_id).await?;
-                        output.terminal_material(
-                            &mut refreshed,
-                            &mut displayed_entries,
-                            selection,
-                        )?;
-                    }
-                }
-                ServerMessage::ProviderTextDelta {
-                    session_id: delta_session,
-                    turn_id,
-                    model_call_id,
-                    part_index,
-                    content,
-                } if delta_session == session_id => {
-                    output.provider_text_delta(
-                        session_id,
+                    ServerMessage::ProviderTextDelta {
+                        session_id: delta_session,
                         turn_id,
                         model_call_id,
-                        part_index.value(),
-                        content.as_str(),
-                    )?;
-                }
-                ServerMessage::Error {
-                    code: ErrorCode::ResyncRequired,
-                    ..
-                } => break,
-                ServerMessage::Error {
-                    code,
-                    message,
-                    detail,
-                } => return Err(ClientError::remote(code, message, detail)),
-                _ => {
-                    return Err(ClientError::Protocol(
-                        "follow returned an unexpected response",
-                    ));
+                        part_index,
+                        content,
+                    } if delta_session == session_id => {
+                        output.provider_text_delta(
+                            session_id,
+                            turn_id,
+                            model_call_id,
+                            part_index.value(),
+                            content.as_str(),
+                        )?;
+                    }
+                    ServerMessage::Error {
+                        code: ErrorCode::ResyncRequired,
+                        ..
+                    } => break,
+                    ServerMessage::Error {
+                        code,
+                        message,
+                        detail,
+                    } => return Err(ClientError::remote(code, message, detail)),
+                    _ => {
+                        return Err(ClientError::Protocol(
+                            "follow returned an unexpected response",
+                        ));
+                    }
                 }
             }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            tokio::time::sleep(retry.next_delay(error)?).await;
         }
     }
 }
@@ -105,7 +114,12 @@ pub(crate) fn terminal_snapshot_selection(
             model_call_id: *model_call_id,
             terminal_entry_id: *completion_entry_id,
         }),
-        SessionEvent::TurnFailed {
+        SessionEvent::TurnCredentialPoolExhausted {
+            turn_id,
+            failure_entry_id,
+            ..
+        }
+        | SessionEvent::TurnFailed {
             turn_id,
             failure_entry_id,
             ..

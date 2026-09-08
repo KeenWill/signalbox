@@ -188,6 +188,38 @@ async fn encrypted_mp4_is_terminal_without_a_key_channel() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+async fn encrypted_unrecognized_visual_format_remains_locked() -> Result<(), Box<dyn Error>> {
+    assert_locked(VideoFixture::encrypted_mp4_with_unrecognized_visual_format()).await
+}
+
+#[tokio::test]
+async fn encrypted_visual_entry_with_audio_original_format_is_malformed()
+-> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::encrypted_mp4_with_audio_original_format(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn next_track_id_exceeds_assigned_ids_or_uses_the_sentinel() -> Result<(), Box<dyn Error>> {
+    for next in [1, 2] {
+        assert_malformed(
+            VideoFixture::mp4_with_next_track_id(2, next),
+            "malformed_video",
+        )
+        .await?;
+    }
+    for (track, next) in [(2, 3), (2, u32::MAX), (u32::MAX, u32::MAX)] {
+        let source = VideoFixture::mp4_with_next_track_id(track, next).into_source()?;
+        let inspection = inspect(&DirectProcessor::new(), &source).await?;
+        assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn invalid_encrypted_mp4_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_with_invalid_encrypted_sample_entry(),
@@ -642,6 +674,35 @@ async fn duplicate_mp4_track_ids_are_malformed() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn unrecognized_visual_entry_does_not_conflict_with_supported_video()
+-> Result<(), Box<dyn Error>> {
+    let source =
+        VideoFixture::mp4_with_supported_and_unrecognized_visual_entries().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lone_unrecognized_visual_entry_remains_unclaimed() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_only_unrecognized_visual_entry().into_source()?;
+    for media_type in ["application/octet-stream", "video/mp4"] {
+        let inspection = inspect_as(&DirectProcessor::new(), &source, media_type).await?;
+        assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn clear_audio_entry_conflicts_with_video_in_the_same_track() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_video_track_with_clear_audio_entry(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn duplicate_mp4_sample_descriptions_are_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_with_duplicate_sample_descriptions(),
@@ -1060,8 +1121,8 @@ async fn metadata_read_uses_the_same_source_window_as_validation() -> Result<(),
 }
 
 #[tokio::test]
-async fn probe_evidence_does_not_exceed_the_effective_validation_ceiling()
--> Result<(), Box<dyn Error>> {
+async fn probe_evidence_above_the_effective_validation_ceiling_fails() -> Result<(), Box<dyn Error>>
+{
     let source = VideoFixture::mp4_with_metadata_after_probe_prefix().into_source()?;
     let mut ceilings = FileMediaCeilings::version_one();
     ceilings.validation_source_bytes = 4096;
@@ -1075,9 +1136,9 @@ async fn probe_evidence_does_not_exceed_the_effective_validation_ceiling()
         ProcessorIsolation::Available,
     )?
     .inspect(&DirectProcessor::new(), request, &source, &NeverCancelled)
-    .await?;
+    .await;
 
-    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    assert_eq!(inspection, Err(FileMediaFailure::ProcessorFailed));
     Ok(())
 }
 
@@ -1287,4 +1348,33 @@ fn complete_structure(result: FileReadResult) -> Result<serde_json::Value, Box<d
         } => Ok(body),
         _ => Err("expected complete structured result".into()),
     }
+}
+
+#[tokio::test]
+async fn recognized_mp4_probe_preserves_malformed_structure() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::truncated_mp4().into_source()?;
+    let declaration = declaration()?;
+    let reader = declaration
+        .readers()
+        .first()
+        .ok_or("MP4 reader is registered")?;
+    let output = VideoProvider::new()
+        .probe(reader.identity(), &source, &NeverCancelled)
+        .await?;
+    assert!(
+        matches!(output, ProcessorProbeOutput::RecognizedMalformed { media_type, reason_code } if media_type == "video/mp4" && reason_code == "malformed_video")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mp4_required_video_fields_are_validated() -> Result<(), Box<dyn Error>> {
+    for fixture in [
+        VideoFixture::mp4_missing_required_video_header(),
+        VideoFixture::mp4_with_zero_next_track_id(),
+        VideoFixture::mp4_with_zero_frame_count(),
+    ] {
+        assert_malformed(fixture, "malformed_video").await?;
+    }
+    Ok(())
 }

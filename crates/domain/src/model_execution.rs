@@ -1517,9 +1517,34 @@ fn reconstitute(
             ModelCallExecutionReconstitutionFailure::UnreferencedOriginContent,
         ));
     }
+    let projected =
+        match crate::ContextFrontierProjection::from_complete_entries(&input.frontier_entries) {
+            Ok(projection) => projection.ordered_entries().collect::<BTreeSet<_>>(),
+            Err(_) => {
+                return Err(fail(
+                    input,
+                    ModelCallExecutionReconstitutionFailure::FrontierEntryMismatch,
+                ));
+            }
+        };
+    let rendered_origins = input
+        .frontier_entries
+        .iter()
+        .filter(|entry| projected.contains(&entry.reference()))
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+                Some(*accepted_input)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     let referenced_attachments = origin_contents
-        .values()
-        .flat_map(UserContent::parts)
+        .iter()
+        .filter(|(accepted_input, _)| {
+            rendered_origins.contains(*accepted_input) || pending_inputs.contains(*accepted_input)
+        })
+        .flat_map(|(_, content)| content.parts())
         .filter_map(|part| match part {
             crate::UserContentPart::Attachment { digest, .. } => Some(*digest),
             crate::UserContentPart::Text { .. } => None,
@@ -1604,7 +1629,7 @@ fn reconstitute(
         }
         (Some(stored), Some(_), None, false)
         | (Some(stored), Some(_), None, true)
-        | (Some(stored), None, Some(_), false)
+        | (Some(stored), None, Some(_), _)
         | (Some(stored), None, None, true) => {
             let Some(pinned) = stored.reconstitute_for_turn(turn) else {
                 return Err(fail(
@@ -1614,7 +1639,7 @@ fn reconstitute(
             };
             Some(pinned)
         }
-        (Some(_), Some(_), Some(_), _) | (Some(_), None, Some(_), true) => {
+        (Some(_), Some(_), Some(_), _) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::ContinuationSnapshotUnexpected,
@@ -1982,7 +2007,16 @@ fn frontier_closes_latest_tool_round(
             return Ok(false);
         }
     }
-    Ok(suffix[results_end..].iter().all(|entry| {
+    let mut continuation = &suffix[results_end..];
+    if continuation.first().is_some_and(|entry| {
+        matches!(
+            entry.payload(),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+        )
+    }) {
+        continuation = &continuation[1..];
+    }
+    Ok(continuation.iter().all(|entry| {
         matches!(
             entry.payload(),
             SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }

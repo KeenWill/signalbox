@@ -153,10 +153,16 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::GitRemoteMinted { .. }
         | ServerMessage::GitRemoteWithdrawn { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::CredentialPoolPolicy { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
         | ServerMessage::CredentialExclusionEnd { .. }
+        | ServerMessage::RunnerStatusStart {}
+        | ServerMessage::RunnerStatus { .. }
+        | ServerMessage::RunnerOperationFailure { .. }
+        | ServerMessage::RunnerWorkspaceLeak { .. }
+        | ServerMessage::RunnerStatusEnd { .. }
         | ServerMessage::CredentialExclusionCleared { .. } => BlobUploadResponse::Unexpected,
     }
 }

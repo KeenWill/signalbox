@@ -242,7 +242,7 @@ fn redact_json_stream_fragment(raw: String, credential: &str) -> (String, String
     }
 
     let fallback = |raw: String| {
-        if json_escapes_decode_to_credential(&raw, credential) {
+        if json_escapes_decode_to_credential(RawObserved(&raw), CredentialText(credential)) {
             ("[redacted]".to_string(), String::new())
         } else {
             redact_complete_credentials_and_hold_prefix(raw, credential)
@@ -501,6 +501,12 @@ pub fn redact_evidence(
                 LossCause::ResponseUnintelligible { detail } => LossCause::ResponseUnintelligible {
                     detail: redact(detail),
                 },
+                LossCause::ResponseEnvelopeRejected { stage, detail } => {
+                    LossCause::ResponseEnvelopeRejected {
+                        stage,
+                        detail: redact(detail),
+                    }
+                }
                 LossCause::StreamProtocolViolation { detail } => {
                     LossCause::StreamProtocolViolation {
                         detail: redact(detail),
@@ -638,7 +644,8 @@ fn provider_reasoning_contains_credential(
     let mut matcher = CredentialBoundaryMatcher::new(key);
     content.iter().any(|part| {
         if let AssistantPart::ProviderReasoning { item_json } = part
-            && (item_json.contains(key) || json_escapes_decode_to_credential(item_json, key))
+            && (item_json.contains(key)
+                || json_escapes_decode_to_credential(RawObserved(item_json), CredentialText(key)))
         {
             return true;
         }
@@ -664,7 +671,8 @@ fn provider_compaction_contains_credential(
     let mut matcher = CredentialBoundaryMatcher::new(key);
     content.iter().any(|part| {
         if let AssistantPart::ProviderCompaction { block_json } = part
-            && (block_json.contains(key) || json_escapes_decode_to_credential(block_json, key))
+            && (block_json.contains(key)
+                || json_escapes_decode_to_credential(RawObserved(block_json), CredentialText(key)))
         {
             return true;
         }
@@ -859,7 +867,7 @@ fn redact_native_body(text: String, credential: &CredentialValue) -> String {
         return redact_json(text, credential);
     }
     let key = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
-    if json_escapes_decode_to_credential(&text, key) {
+    if json_escapes_decode_to_credential(RawObserved(&text), CredentialText(key)) {
         return "\"[redacted]\"".to_string();
     }
     let (mut redacted, pending) = redact_complete_credentials_and_hold_prefix(text, key);
@@ -1015,8 +1023,11 @@ fn redact_json_value(raw: &str, credential: &str) -> Result<String, serde_json::
     }
 }
 
-fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
-    decode_json_escapes(raw).contains(credential)
+struct RawObserved<'a>(&'a str);
+struct CredentialText<'a>(&'a str);
+
+fn json_escapes_decode_to_credential(raw: RawObserved<'_>, credential: CredentialText<'_>) -> bool {
+    decode_json_escapes(raw.0).contains(credential.0)
 }
 
 fn decode_json_escapes(raw: &str) -> String {
@@ -1488,6 +1499,33 @@ mod tests {
         // The tool fact carries no provider text, so redaction passes it
         // through rather than weakening it to `Unobserved`.
         assert_eq!(loss.tool_calls, ToolCallsAtLoss::Opened);
+    }
+
+    #[test]
+    fn envelope_rejection_redacts_detail_while_preserving_its_stage() {
+        let key = credential("key_loop");
+        let stage = crate::ResponseEnvelopeRejectionStage::ToolCallId;
+        let evidence = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseEnvelopeRejected {
+                stage,
+                detail: "decode-key_loop".into(),
+            },
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
+            usage: TokenUsage::unreported(),
+        });
+        let TerminalEvidence::BoundaryLoss(loss) = redact_evidence(evidence, &key) else {
+            panic!("boundary loss remains boundary-loss evidence");
+        };
+        assert_eq!(
+            loss.cause,
+            LossCause::ResponseEnvelopeRejected {
+                stage,
+                detail: "decode-[redacted]".into(),
+            }
+        );
     }
 
     #[test]
