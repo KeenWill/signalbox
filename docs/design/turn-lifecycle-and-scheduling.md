@@ -6,10 +6,10 @@ This design is not built; it extends
 ## Goal
 
 This design adds four capabilities. A turn parks durably while no credential in
-its pool is available and resumes when one is. A session whose runner is lost is
-recovered on a replacement runner or abandoned, and a restart reconciles
-retained runner work before the generic scan can end it. Activation freezes the
-session's instruction eligibility for the turn.
+its pool is available and resumes when one is. A runner retry takes over the
+successor placement before continuation, and a restart reconciles retained
+runner work before the generic scan can end it. Activation freezes the session's
+instruction eligibility for the turn.
 
 ## Design
 

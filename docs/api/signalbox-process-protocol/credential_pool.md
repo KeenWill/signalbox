@@ -13,13 +13,13 @@ pub const MAX_HEADROOM_RESERVE_PERCENT: i64;
 ```rust
 pub enum CredentialPoolExclusion {
     ProfileQuarantine {
-        record_generation: option::Option<CanonicalU64>,
+        record_generation: CanonicalU64,
     },
     MembershipExclusion {
-        record_generation: option::Option<CanonicalU64>,
+        record_generation: CanonicalU64,
     },
     SessionDisplacement {
-        record_generation: option::Option<CanonicalU64>,
+        record_generation: CanonicalU64,
     },
     ChainExclusion {
         predecessor_model_call_id: CanonicalUuid,

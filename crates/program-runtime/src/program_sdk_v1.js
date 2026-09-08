@@ -10,6 +10,12 @@
   };
 
   return Object.freeze({
+    effect(capability, method, payload) {
+      if (!(payload instanceof Uint8Array)) {
+        throw new TypeError("program frame payload must be a Uint8Array");
+      }
+      return request({ kind: "effect", capability, method, payload: Array.from(payload) });
+    },
     now(payload) {
       return call("now", payload);
     },

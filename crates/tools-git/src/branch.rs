@@ -6,7 +6,7 @@ use std::{
     path::{Component, Path},
 };
 
-use git2::{Odb, Repository};
+use git2::Odb;
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, openat, renameat_with, unlinkat};
 
 use crate::arguments::GitBranchCreateArguments;
@@ -22,12 +22,12 @@ use crate::limits::MAX_REFERENCE_BYTES;
 use crate::objects::{PackRoot, persist_objects};
 use crate::pack_install::pack_entry_is_owned;
 use crate::packed_reference::packed_reference_exists;
-use crate::pinning::{PinnedObjectDatabase, PinnedRepository};
+use crate::pinning::{PinnedObjectDatabase, PinnedRepository, RepositoryShell};
 use crate::reference_lock::{CreatedReferenceDirectories, reference_installation_modes};
 use crate::result::BranchResult;
 
 pub(super) fn branch_create<ValidateRoot>(
-    repository: &Repository,
+    repository: &RepositoryShell,
     authority: &PinnedRepository,
     captured_objects: &Odb<'_>,
     pinned_objects: &PinnedObjectDatabase,
@@ -250,7 +250,7 @@ pub(super) fn validate_live_branch_target(
         Odb::new_ext(authority.object_format).map_err(|_| LocalGitFailure::Operation)?;
     pinned_objects.add_to(&object_database)?;
     repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .map_err(|_| LocalGitFailure::Operation)?;
     let commit = find_bounded_commit(&repository, target)?;
     let tree = find_bounded_tree(&repository, commit.tree_id())?;

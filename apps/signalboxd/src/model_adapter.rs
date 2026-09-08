@@ -274,7 +274,11 @@ fn omit_unreplayable_provider_reasoning<C>(
         .resolve(&operation.resolved_target)
         .and_then(|selected| {
             selected
-                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
+                .effective_target(
+                    &operation.resolved_target,
+                    operation.settings.fast_mode,
+                    operation.retained_mapped_target.as_ref(),
+                )
                 .ok()
         })
         .map(|(target, _)| target);
@@ -794,7 +798,7 @@ context_window_tokens = 200000
             .expect("the selected target declares fast mode");
 
         assert_eq!(
-            capabilities.effective_target(&selected, settings.fast_mode),
+            capabilities.effective_target(&selected, settings.fast_mode, None),
             Ok((&expected, FastMode::Disabled))
         );
     }

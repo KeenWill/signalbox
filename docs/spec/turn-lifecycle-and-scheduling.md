@@ -216,16 +216,18 @@ prepared model call, and only then activates a queued turn; failure of either
 lookup is an ordinary failed pass, and only a failure after active-turn
 execution begins trips fatal recovery supervision. A pass releases its slot
 during attachment or blob-store I/O and reacquires one before send
-authorization, and its guarded transaction revalidates authority. A
-model-originated blob read authorizes no later send, so it reacquires its slot
-before the correlated tool result commits. A pass that cannot immediately get an
+authorization, and its guarded transaction revalidates authority. Returning
+passes queue for reacquisition ahead of fresh admission. A model-originated blob
+read authorizes no later send, so it reacquires its slot before the correlated
+tool result commits. An ordinary model pass that cannot immediately get an
 attachment-preparation permit ends and leaves only the durable prepared row for
-a later sweep. When a pass exceeds its occupancy bound, the handoff invokes the
-startup-recovery transaction only for a turn whose attempt and turn-progress
-frontier did not change between two observations, and a resumability read that
-does not settle counts as a resumption; a pass that expires inside
-pre-activation compaction instead hands off only the exact compaction call that
-window made durable.
+a later sweep. Prepared compactions retain their call and retry transient
+attachment failures in process, releasing admission while waiting. When a pass
+exceeds its occupancy bound, the handoff invokes the startup-recovery
+transaction only for a turn whose attempt and turn-progress frontier did not
+change between two observations, and a resumability read that does not settle
+counts as a resumption; a pass that expires inside pre-activation compaction
+instead hands off only the exact compaction call that window made durable.
 
 A quiescent candidate is an active turn with an accepted-input origin in the
 running phase, with no tool round, approval, or recovery attempt, and no live

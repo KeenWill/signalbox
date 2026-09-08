@@ -300,9 +300,11 @@ const detailContent = (body: DetailBody): ReactNode => {
             ['Cause', body.cause.type.replaceAll('_', ' ')],
             ...(body.cause.type === 'delegated'
               ? ([['Spawning request', body.cause.spawning_request_id]] as const)
-              : body.cause.type === 'interactive'
-                ? []
-                : ([['Dispatch', body.cause.dispatch_id]] as const)),
+              : body.cause.type === 'workflow'
+                ? ([['Run', body.cause.run_id]] as const)
+                : body.cause.type === 'interactive'
+                  ? []
+                  : ([['Dispatch', body.cause.dispatch_id]] as const)),
             ...(body.imported_evidence
               ? ([
                   ['Origin', 'imported'],

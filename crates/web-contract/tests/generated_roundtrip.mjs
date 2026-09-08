@@ -2391,6 +2391,7 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
     () =>
       decodeWebSessionTimelineDescriptor({
         session_id: "00000000-0000-0000-0000-000000000991",
+        repository_watch: null,
         sizes: {
           item_count: "18446744073709551616",
           projected_text_bytes: "0",
@@ -3047,6 +3048,7 @@ test("generated descriptor decoder rejects an invalid session ID", () => {
     () =>
       decodeWebSessionTimelineDescriptor({
         session_id: "not-a-uuid",
+        repository_watch: null,
         sizes: {
           item_count: "1",
           projected_text_bytes: "0",
@@ -3313,4 +3315,22 @@ test("delegation messages require distinct sender and recipient sessions", () =>
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
   page.items[0].body.detail.sender_session_id = page.session_id;
   assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a session other than the recipient/);
+});
+
+test("repository watch provenance preserves exact ledger identities and rejects unknown events", () => {
+  const descriptor = {
+    session_id: "00000000-0000-0000-0000-000000000001",
+    repository_watch: {
+      dispatch_id: "00000000-0000-0000-0000-000000000063",
+      event_id: "00000000-0000-0000-0000-000000000064",
+      repository: "signalbox/example", rule_id: "review-response", rule_revision: "3",
+      action_ordinal: "2", event_kind: "review_submitted", pull_request: "81",
+    },
+    sizes: { item_count: "1", projected_text_bytes: "0", projected_structured_bytes: "96", referenced_blob_count: "0", referenced_blob_bytes: "0" },
+    first_address: { event_sequence: "1" }, latest_address: { event_sequence: "1" },
+    work: { active_turn_count: "0", queued_turn_count: "0" }, observed_through: "1",
+  };
+  assert.deepEqual(decodeWebSessionTimelineDescriptor(descriptor).repository_watch, descriptor.repository_watch);
+  assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, event_kind: "unknown" } }));
+  assert.throws(() => decodeWebSessionTimelineDescriptor({ ...descriptor, repository_watch: { ...descriptor.repository_watch, action_ordinal: "0" } }));
 });

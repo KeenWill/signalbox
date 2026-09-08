@@ -199,6 +199,11 @@ pub enum RejectionDetail {
         /// Resolved logical tool request.
         tool_request_id: CanonicalUuid,
     },
+    /// The delegated request has no terminal approval-judge evidence yet.
+    ToolRequestAwaitingApprovalJudge {
+        /// Request awaiting its judge.
+        tool_request_id: CanonicalUuid,
+    },
     /// An earlier request in the same batch still awaited its decision.
     ToolRequestNotEarliestUndecided {
         /// Named logical tool request.
@@ -482,6 +487,7 @@ impl RejectionDetail {
             | Self::SafePointUnavailableWhileStopping { .. }
             | Self::ToolRequestNotFound { .. }
             | Self::ToolRequestAlreadyResolved { .. }
+            | Self::ToolRequestAwaitingApprovalJudge { .. }
             | Self::ToolRequestNotEarliestUndecided { .. }
             | Self::ToolRequestNotInSession { .. }
             | Self::ToolRequestNotDelegateDenied { .. }
@@ -606,6 +612,7 @@ pub(crate) fn validate_rejection_detail(
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestAwaitingApprovalJudge { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
         | RejectionDetail::ToolRequestNotDelegateDenied { .. }
@@ -719,6 +726,7 @@ pub(crate) fn validate_conversation_import_detail(
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestAwaitingApprovalJudge { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
         | RejectionDetail::ToolRequestNotDelegateDenied { .. }

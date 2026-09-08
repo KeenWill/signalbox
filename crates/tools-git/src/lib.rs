@@ -24,6 +24,7 @@ mod log;
 mod names;
 mod objects;
 mod pack_install;
+mod pack_read_bounds;
 mod packed_reference;
 mod pinning;
 mod push_arguments;

@@ -150,6 +150,7 @@ const cloneTimelineDescriptor = (
   descriptor: WebSessionTimelineDescriptor,
 ): WebSessionTimelineDescriptor => ({
   ...descriptor,
+  repository_watch: descriptor.repository_watch ? { ...descriptor.repository_watch } : null,
   sizes: { ...descriptor.sizes },
   first_address: { ...descriptor.first_address },
   latest_address: { ...descriptor.latest_address },
@@ -588,6 +589,7 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
   async readDescriptor(sessionId: string): Promise<WebSessionTimelineDescriptor> {
     return decodeWebSessionTimelineDescriptor({
       session_id: sessionId,
+      repository_watch: null,
       sizes: {
         item_count: String(SESSION_FOUNDATION_TOTAL),
         projected_text_bytes: '48000000',

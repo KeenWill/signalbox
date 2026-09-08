@@ -1256,6 +1256,7 @@ async fn queued_send_wait_uses_active_slot_not_acceptance_order_or_terminal_hist
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1418,6 +1419,7 @@ async fn selected_send_polls_after_an_automatic_recovery_transition() -> Result<
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1552,6 +1554,7 @@ async fn selected_send_recovery_poll_is_not_postponed_by_follow_traffic()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1714,6 +1717,7 @@ async fn selected_send_polls_after_an_automatic_tool_recovery_transition()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1854,6 +1858,7 @@ async fn send_wait_continues_after_a_superseded_runner_loss_event() -> Result<()
             };
             let mut response =
                 encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    repository_watch: None,
                     session_id,
                     cursor: CanonicalU64::new(cursor),
                     runner: None,
@@ -1986,6 +1991,7 @@ async fn send_wait_ignores_streamed_text_until_the_durable_terminal_event()
                 .map_err(io::Error::other)
         };
         let mut response = encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+            repository_watch: None,
             session_id,
             cursor: CanonicalU64::new(0),
             runner: None,
@@ -2077,6 +2083,7 @@ async fn send_wait_rejects_streamed_text_for_another_session() -> Result<(), Box
                 .map_err(io::Error::other)
         };
         let mut response = encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+            repository_watch: None,
             session_id,
             cursor: CanonicalU64::new(0),
             runner: None,
@@ -5736,7 +5743,7 @@ async fn pool_projection_rejects_a_foreign_policy_read() -> Result<(), Box<dyn E
         profile: policy_members[0].clone(),
         reset_at_unix_ms: None,
         exclusion: CredentialPoolExclusion::ProfileQuarantine {
-            record_generation: None,
+            record_generation: signalbox_process_protocol::CanonicalU64::new(0),
         },
     }];
     for response in [
@@ -5863,5 +5870,83 @@ async fn reload_configuration_reuses_the_supplied_command_id() -> Result<(), Box
         String::from_utf8(stderr)?,
         format!("command_id={identity}\n")
     );
+    Ok(())
+}
+
+#[test]
+fn credential_wait_terminal_release_finishes_follow_as_failed() {
+    let state = TurnState::FailedAfterCredentialWait {
+        terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+        terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+        predecessor_model_call:
+            signalbox_process_protocol::FailedTerminalModelCall::known_failed_with_cause(
+                CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                signalbox_process_protocol::FailedModelCallCause::QuotaExhausted,
+            ),
+    };
+    assert_eq!(
+        terminal_snapshot_state(Some(&state)).expect("terminal release is readable"),
+        Some(TurnTerminal::Failed)
+    );
+}
+
+#[tokio::test]
+async fn credential_wait_failure_event_requires_its_terminal_snapshot_frontier()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let frontier = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                request.request(),
+                &ClientRequest::ReadTranscript { session_id }
+            );
+            for message in [
+                ServerMessage::TranscriptSnapshotStart { session_id, cursor: CanonicalU64::new(1), runner: None },
+                ServerMessage::TranscriptTurn {
+                    turn_id, acceptance_position: CanonicalU64::new(1), model_settings: None,
+                    state: TurnState::FailedAfterCredentialWait {
+                        terminal_frontier_id: frontier,
+                        terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                        predecessor_model_call: signalbox_process_protocol::FailedTerminalModelCall::known_failed_with_cause(
+                            CanonicalUuid::from_uuid(Uuid::from_u128(5)), signalbox_process_protocol::FailedModelCallCause::QuotaExhausted,
+                        ),
+                    },
+                },
+                ServerMessage::TranscriptModelCallsEnd { model_call_count: CanonicalU64::new(0) },
+                ServerMessage::TranscriptSnapshotEnd { session_id, cursor: CanonicalU64::new(1), turn_count: CanonicalU64::new(1), entry_count: CanonicalU64::new(0) },
+            ] {
+                let frame = ServerFrame::try_new_for_version(request.version(), request.request_id(), message).map_err(io::Error::other)?;
+                writer.write_all(&encode_server_line(&frame).map_err(io::Error::other)?).await?;
+            }
+        }
+        Ok::<_, io::Error>(())
+    });
+    let mut client = ProcessClient::new(socket);
+    let event = SessionEvent::TurnFailed {
+        turn_id,
+        failure_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(6)),
+        terminal_frontier_id: frontier,
+    };
+    crate::credential_pool::validate_event(&mut client, session_id, &event).await?;
+    let foreign_frontier = SessionEvent::TurnFailed {
+        turn_id,
+        failure_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(6)),
+        terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(7)),
+    };
+    assert!(matches!(
+        crate::credential_pool::validate_event(&mut client, session_id, &foreign_frontier).await,
+        Err(ClientError::Protocol(_))
+    ));
+    server.await??;
     Ok(())
 }

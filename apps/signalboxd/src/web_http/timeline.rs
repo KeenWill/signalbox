@@ -139,6 +139,7 @@ impl SessionTimelineRequestError {
 }
 
 pub(super) async fn session_descriptor(
+    reload: Option<axum::Extension<crate::configuration_reload::ConfigurationReload>>,
     State(state): State<WebApiState>,
     Path(session_id): Path<String>,
 ) -> Response {
@@ -155,7 +156,25 @@ pub(super) async fn session_descriptor(
     };
     match repository.read_descriptor(session).await {
         Ok(Some(descriptor)) => match descriptor_dto(descriptor) {
-            Ok(descriptor) => Json(descriptor).into_response(),
+            Ok(mut descriptor) => {
+                let origin = match reload {
+                    Some(axum::Extension(reload)) => {
+                        match reload.repository_watch_origin(session).await {
+                            Ok(origin) => origin,
+                            Err(_) => {
+                                return application_error(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "session_projection_unavailable",
+                                    "repository-watch origin could not be read",
+                                );
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                descriptor.repository_watch = origin.map(repository_watch_origin_dto);
+                Json(descriptor).into_response()
+            }
             Err(error) => error.into_response(),
         },
         Ok(None) => application_error(
@@ -504,6 +523,7 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
+        repository_watch: None,
         session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
@@ -647,6 +667,11 @@ fn detail_body_dto(
                 signalbox_domain::SessionCreationCause::Delegated { spawning_request } => {
                     signalbox_web_contract::WebTimelineCreationCause::Delegated {
                         spawning_request_id: web_uuid(spawning_request.into_uuid()),
+                    }
+                }
+                signalbox_domain::SessionCreationCause::Workflow { run } => {
+                    signalbox_web_contract::WebTimelineCreationCause::Workflow {
+                        run_id: web_uuid(run.run().into_uuid()),
                     }
                 }
             },
@@ -1626,6 +1651,71 @@ fn ownership_detail_dto(value: TimelineOwnershipTransition) -> WebTimelineOwners
     match value {
         TimelineOwnershipTransition::Adopted => WebTimelineOwnershipTransition::Adopted,
         TimelineOwnershipTransition::Released => WebTimelineOwnershipTransition::Released,
+    }
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "checked domain revisions and pull request numbers are positive"
+)]
+fn repository_watch_origin_dto(
+    origin: signalbox_module_repo_watch_v2::RetainedDispatchAction,
+) -> signalbox_web_contract::WebRepositoryWatchProvenance {
+    use signalbox_domain::RepoWatchEventKindNameV1;
+    use signalbox_web_contract::{
+        WebLiveResourceId, WebPositiveU64, WebRepositoryWatchEventKind,
+        WebRepositoryWatchProvenance,
+    };
+    WebRepositoryWatchProvenance {
+        dispatch_id: WebLiveResourceId::from_uuid_bytes(*origin.dispatch().into_uuid().as_bytes()),
+        action_ordinal: WebPositiveU64::from_nonzero(origin.action_ordinal()),
+        repository: origin.repository().as_str().to_owned(),
+        rule_id: origin.rule_id().as_str().to_owned(),
+        rule_revision: WebPositiveU64::from_nonzero(
+            std::num::NonZeroU64::new(origin.rule_revision().get())
+                .expect("rule revision is positive"),
+        ),
+        event_id: WebLiveResourceId::from_uuid_bytes(*origin.event_id().into_uuid().as_bytes()),
+        pull_request: origin.pull_request().map(|number| {
+            WebPositiveU64::from_nonzero(
+                std::num::NonZeroU64::new(number.get()).expect("pull request number is positive"),
+            )
+        }),
+        event_kind: match origin.event_kind() {
+            RepoWatchEventKindNameV1::PullRequestOpened => {
+                WebRepositoryWatchEventKind::PullRequestOpened
+            }
+            RepoWatchEventKindNameV1::PullRequestClosed => {
+                WebRepositoryWatchEventKind::PullRequestClosed
+            }
+            RepoWatchEventKindNameV1::PullRequestMerged => {
+                WebRepositoryWatchEventKind::PullRequestMerged
+            }
+            RepoWatchEventKindNameV1::HeadChanged => WebRepositoryWatchEventKind::HeadChanged,
+            RepoWatchEventKindNameV1::MergeableStateChanged => {
+                WebRepositoryWatchEventKind::MergeableStateChanged
+            }
+            RepoWatchEventKindNameV1::ChecksCompleted => {
+                WebRepositoryWatchEventKind::ChecksCompleted
+            }
+            RepoWatchEventKindNameV1::CheckRunCompleted => {
+                WebRepositoryWatchEventKind::CheckRunCompleted
+            }
+            RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => {
+                WebRepositoryWatchEventKind::BranchWorkflowRunCompleted
+            }
+            RepoWatchEventKindNameV1::ReviewSubmitted => {
+                WebRepositoryWatchEventKind::ReviewSubmitted
+            }
+            RepoWatchEventKindNameV1::ThreadOpened => WebRepositoryWatchEventKind::ThreadOpened,
+            RepoWatchEventKindNameV1::ThreadResolved => WebRepositoryWatchEventKind::ThreadResolved,
+            RepoWatchEventKindNameV1::Labeled => WebRepositoryWatchEventKind::Labeled,
+            RepoWatchEventKindNameV1::Unlabeled => WebRepositoryWatchEventKind::Unlabeled,
+            RepoWatchEventKindNameV1::BaseAdvanced => WebRepositoryWatchEventKind::BaseAdvanced,
+            RepoWatchEventKindNameV1::ReactionChanged => {
+                WebRepositoryWatchEventKind::ReactionChanged
+            }
+        },
     }
 }
 
