@@ -2221,12 +2221,6 @@ async fn reported_usage_activation_preview_never_compacts_without_usage()
     runtime.stop().await
 }
 
-#[derive(Clone, Copy)]
-enum CompactionAttachmentFailure {
-    MissingReplica,
-    CatalogUnavailable,
-}
-
 #[derive(Debug, PartialEq, sqlx::FromRow)]
 struct CompactionAttachmentState {
     call_state: String,
@@ -2235,10 +2229,14 @@ struct CompactionAttachmentState {
     command_result: String,
 }
 
-async fn compaction_attachment_failure_state(
-    failure: CompactionAttachmentFailure,
-) -> Result<CompactionAttachmentState, Box<dyn Error>> {
-    let mut fixture = CommittedBlobReadFixture::start(b"compaction attachment").await?;
+async fn completed_attachment_compaction_fixture(
+    model: Option<ScriptedModel<ModelCallId>>,
+) -> Result<(CommittedBlobReadFixture, CanonicalUuid), Box<dyn Error>> {
+    let runtime =
+        RunningRuntime::start_with_options(model, BlobStorageFixtureMode::Enabled, None, None)
+            .await?;
+    let mut fixture =
+        CommittedBlobReadFixture::from_runtime(runtime, b"compaction attachment").await?;
     let session_id = create_alias_session(&mut fixture.connection).await?;
     fixture
         .connection
@@ -2283,14 +2281,31 @@ async fn compaction_attachment_failure_state(
         turn,
     )
     .await?;
-    match failure {
-        CompactionAttachmentFailure::MissingReplica => fs::remove_file(fixture.object_path())?,
-        CompactionAttachmentFailure::CatalogUnavailable => {
-            sqlx::query("ALTER TABLE blob_replica RENAME TO fixture_unavailable_blob_replica")
-                .execute(&fixture.runtime.pool)
-                .await?;
-        }
-    }
+    Ok((fixture, session_id))
+}
+
+async fn compaction_attachment_state(
+    pool: &PgPool,
+    command: CommandId,
+) -> Result<CompactionAttachmentState, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT call.state_kind AS call_state, call.terminal_disposition_kind AS disposition,
+                call.in_flight_at IS NULL AS unsent, command.result_kind AS command_result
+           FROM context_compaction_model_call AS call
+           JOIN compact_session_command AS command
+             ON command.session_id = call.session_id AND command.model_call_id = call.model_call_id
+          WHERE command.command_id = $1",
+    )
+    .bind(command.into_uuid())
+    .fetch_one(pool)
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn compaction_missing_attachment_never_authorizes() -> Result<(), Box<dyn Error>> {
+    let (mut fixture, session_id) = completed_attachment_compaction_fixture(None).await?;
+    fs::remove_file(fixture.object_path())?;
     let compaction_command = command()?;
     fixture
         .connection
@@ -2304,32 +2319,8 @@ async fn compaction_attachment_failure_state(
         )
         .await?;
     let response = response_within(&mut fixture.connection).await?;
-    if matches!(failure, CompactionAttachmentFailure::CatalogUnavailable) {
-        sqlx::query("ALTER TABLE fixture_unavailable_blob_replica RENAME TO blob_replica")
-            .execute(&fixture.runtime.pool)
-            .await?;
-    }
     assert!(matches!(response.message(), ServerMessage::Error { .. }));
-    let state: CompactionAttachmentState = sqlx::query_as(
-        "SELECT call.state_kind AS call_state, call.terminal_disposition_kind AS disposition,
-                call.in_flight_at IS NULL AS unsent, command.result_kind AS command_result
-           FROM context_compaction_model_call AS call
-           JOIN compact_session_command AS command
-             ON command.session_id = call.session_id AND command.model_call_id = call.model_call_id
-          WHERE command.command_id = $1",
-    )
-    .bind(compaction_command.into_uuid())
-    .fetch_one(&fixture.runtime.pool)
-    .await?;
-    fixture.stop().await?;
-    Ok(state)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn compaction_missing_attachment_never_authorizes() -> Result<(), Box<dyn Error>> {
-    let state =
-        compaction_attachment_failure_state(CompactionAttachmentFailure::MissingReplica).await?;
+    let state = compaction_attachment_state(&fixture.runtime.pool, compaction_command).await?;
     assert_eq!(
         state,
         CompactionAttachmentState {
@@ -2339,17 +2330,58 @@ async fn compaction_missing_attachment_never_authorizes() -> Result<(), Box<dyn 
             command_result: String::from("failed"),
         }
     );
-    Ok(())
+    fixture.stop().await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn compaction_catalog_failure_retains_prepared_command() -> Result<(), Box<dyn Error>> {
-    let state =
-        compaction_attachment_failure_state(CompactionAttachmentFailure::CatalogUnavailable)
+async fn explicit_compaction_retries_its_prepared_call_after_catalog_recovery()
+-> Result<(), Box<dyn Error>> {
+    let model = ScriptedModel::following([completed_script(
+        "fixture-model",
+        "attachment summary",
+        TokenUsage::unreported(),
+    )]);
+    let probe = model.clone();
+    let (mut fixture, session_id) = completed_attachment_compaction_fixture(Some(model)).await?;
+    sqlx::query("ALTER TABLE blob_replica RENAME TO fixture_unavailable_blob_replica")
+        .execute(&fixture.runtime.pool)
+        .await?;
+    let compaction_command = command()?;
+    fixture
+        .connection
+        .request(
+            5,
+            ClientRequest::CompactSession {
+                command_id: compaction_command,
+                session_id,
+                through_position: None,
+            },
+        )
+        .await?;
+    let prepared_call: Uuid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let call = sqlx::query_scalar::<_, Uuid>(
+                "SELECT model_call_id FROM compact_session_command WHERE command_id = $1",
+            )
+            .bind(compaction_command.into_uuid())
+            .fetch_optional(&fixture.runtime.pool)
             .await?;
+            if let Some(call) = call {
+                break Ok::<_, sqlx::Error>(call);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), fixture.connection.response())
+            .await
+            .is_err()
+    );
+    assert_eq!(probe.received_operations().len(), 0);
     assert_eq!(
-        state,
+        compaction_attachment_state(&fixture.runtime.pool, compaction_command).await?,
         CompactionAttachmentState {
             call_state: String::from("prepared"),
             disposition: None,
@@ -2357,13 +2389,37 @@ async fn compaction_catalog_failure_retains_prepared_command() -> Result<(), Box
             command_result: String::from("pending"),
         }
     );
-    Ok(())
+
+    sqlx::query("ALTER TABLE fixture_unavailable_blob_replica RENAME TO blob_replica")
+        .execute(&fixture.runtime.pool)
+        .await?;
+    let response = response_within(&mut fixture.connection).await?;
+
+    assert!(
+        matches!(response.message(), ServerMessage::SessionCompacted { .. }),
+        "{response:?}"
+    );
+    assert_eq!(probe.received_operations().len(), 1);
+    let completed_call: Uuid = sqlx::query_scalar(
+        "SELECT model_call_id FROM compact_session_command WHERE command_id = $1",
+    )
+    .bind(compaction_command.into_uuid())
+    .fetch_one(&fixture.runtime.pool)
+    .await?;
+    assert_eq!(completed_call, prepared_call);
+    assert_eq!(
+        compaction_attachment_state(&fixture.runtime.pool, compaction_command)
+            .await?
+            .command_result,
+        "applied"
+    );
+    fixture.stop().await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn unavailable_automatic_compaction_preserves_its_queued_turn() -> Result<(), Box<dyn Error>>
-{
+async fn automatic_compaction_retries_its_prepared_call_after_attachment_recovery()
+-> Result<(), Box<dyn Error>> {
     let mut fixture = CommittedBlobReadFixture::start(b"compaction attachment").await?;
     let session_id = create_alias_session(&mut fixture.connection).await?;
     fixture
@@ -2448,7 +2504,11 @@ async fn unavailable_automatic_compaction_preserves_its_queued_turn() -> Result<
         })
     ));
     let runtime_models = configuration.runtime_model_catalog();
-    let summary_runtime = ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>());
+    let summary_runtime = ScriptedModel::<ModelCallId>::following([completed_script(
+        "fixture-model",
+        "attachment summary",
+        TokenUsage::unreported(),
+    )]);
     let summary_probe = summary_runtime.clone();
     let model = Arc::new(RuntimeContextCompactionModel::new(
         summary_runtime,
@@ -2470,22 +2530,31 @@ async fn unavailable_automatic_compaction_preserves_its_queued_turn() -> Result<
     )
     .with_blob_store_registry(Some(Arc::new(registry)));
 
-    let outcome = compaction
-        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
-        .await;
-
-    assert!(
-        matches!(
-            outcome,
-            Err(ReportedUsageCompactionError::Compaction {
-                cause_code: "context_compaction_attachment_unavailable",
-                ..
-            })
+    let prepared_calls = Mutex::new(Vec::new());
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        compaction.compact_if_needed(
+            SessionId::from_uuid(session_id.into_uuid()),
+            Some(&|call| prepared_calls.lock().expect("prepared calls").push(call)),
         ),
-        "{outcome:?}"
+    )
+    .await??;
+
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert_eq!(summary_probe.received_operations().len(), 1);
+    let observed = prepared_calls.lock().expect("prepared calls").clone();
+    assert_eq!(
+        observed.len(),
+        1,
+        "retry must retain the same prepared call"
     );
-    assert_eq!(reads.load(Ordering::SeqCst), 1);
-    assert_eq!(summary_probe.received_operations().len(), 0);
+    let stored_call: Uuid = sqlx::query_scalar(
+        "SELECT model_call_id FROM compact_session_command WHERE automatic_for_turn_id = $1",
+    )
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&fixture.runtime.pool)
+    .await?;
+    assert_eq!(stored_call, observed[0].into_uuid());
     let state: (String, Option<String>, bool, String) = sqlx::query_as(
         "SELECT call.state_kind, call.terminal_disposition_kind, call.in_flight_at IS NULL,
                 turn.state_kind
@@ -2500,7 +2569,12 @@ async fn unavailable_automatic_compaction_preserves_its_queued_turn() -> Result<
     .await?;
     assert_eq!(
         state,
-        (String::from("prepared"), None, true, String::from("queued"))
+        (
+            String::from("terminal"),
+            Some(String::from("completed")),
+            false,
+            String::from("queued")
+        )
     );
     fixture.stop().await
 }

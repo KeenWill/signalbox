@@ -818,6 +818,22 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn prepared_compaction_retries_attachment_admission_before_returning_its_range() {
+        let expected_range = String::from("verified compaction range");
+        let mut outcomes = VecDeque::from([
+            Err(ContextCompactionRangeLoadError::AttachmentUnavailable),
+            Ok(expected_range.clone()),
+        ]);
+        let began = tokio::time::Instant::now();
+        let loaded = super::compaction::retry_prepared_context_compaction_range(|| {
+            std::future::ready(outcomes.pop_front().expect("one refusal then success"))
+        }).await.expect("attachment admission resumes the retained call");
+        assert_eq!(loaded, expected_range);
+        assert!(outcomes.is_empty());
+        assert!(began.elapsed() >= super::CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn rejected_attachment_admission_does_not_retry_database_reads() {
         let mut attempts = 0;
         let result = tokio::time::timeout(

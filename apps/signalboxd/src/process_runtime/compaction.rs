@@ -243,11 +243,13 @@ where
             }
         }
     };
-    let rendered_range = match load_context_compaction_range(
-        &services.pool,
-        &prepared,
-        services.blob_store_registry.as_deref(),
-    )
+    let rendered_range = match retry_prepared_context_compaction_range(|| {
+        load_context_compaction_range(
+            &services.pool,
+            &prepared,
+            services.blob_store_registry.as_deref(),
+        )
+    })
     .await
     {
         Ok(rendered) => rendered,
@@ -705,7 +707,7 @@ pub(crate) async fn compact_automatically(
             Err(error) => return Err(AutomaticContextCompactionError::Repository(error)),
         }
     };
-    let rendered_range = match retry_context_compaction_range_database_reads(|| {
+    let rendered_range = match retry_prepared_context_compaction_range(|| {
         load_context_compaction_range(model_calls.pool(), &prepared, blob_registry)
     })
     .await
@@ -845,6 +847,26 @@ pub(super) fn attachment_verification_range_error(
         }
         _ => ContextCompactionRangeLoadError::Integrity,
     }
+}
+
+pub(super) async fn retry_prepared_context_compaction_range<Load, LoadFuture>(
+    mut load: Load,
+) -> Result<String, ContextCompactionRangeLoadError>
+where
+    Load: FnMut() -> LoadFuture,
+    LoadFuture: Future<Output = Result<String, ContextCompactionRangeLoadError>>,
+{
+    signalbox_application::with_scheduler_slot_released(async {
+        loop {
+            match retry_context_compaction_range_database_reads(&mut load).await {
+                Err(ContextCompactionRangeLoadError::AttachmentUnavailable) => {
+                    sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
+                }
+                result => return result,
+            }
+        }
+    })
+    .await
 }
 
 pub(super) async fn retry_context_compaction_range_database_reads<Load, LoadFuture>(
