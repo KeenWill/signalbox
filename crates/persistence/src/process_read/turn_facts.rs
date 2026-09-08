@@ -339,6 +339,9 @@ pub(super) async fn load_next_transcript_turn(
             turn.starting_frontier_id,
             turn.terminal_frontier_id,
             turn.active_phase_kind,
+            credential_wait.wait_attempt_id AS credential_wait_attempt_id,
+            credential_wait.frontier_id AS credential_wait_frontier_id,
+            credential_wait.cause AS credential_wait_cause,
             turn.child_wait_request_id,
             turn.current_attempt_id,
             turn.terminal_disposition_kind,
@@ -488,6 +491,9 @@ pub(super) async fn load_next_transcript_turn(
            LEFT JOIN automatic_reconciliation AS automatic_reconciliation
              ON automatic_reconciliation.turn_id = turn.turn_id
             AND automatic_reconciliation.session_id = turn.session_id
+           LEFT JOIN credential_availability_wait AS credential_wait
+             ON credential_wait.turn_id = turn.turn_id AND credential_wait.session_id = turn.session_id
+            AND credential_wait.consumed_by_attempt_id IS NULL
            LEFT JOIN model_call AS terminal_call
              ON terminal_call.model_call_id = turn.terminal_model_call_id
             AND terminal_call.turn_attempt_id = turn.terminal_attempt_id

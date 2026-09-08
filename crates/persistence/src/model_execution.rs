@@ -615,6 +615,7 @@ pub(crate) struct ModelCallOutboxOrderGuard {
 }
 
 pub(crate) enum CountedActivationCheckpointOutcome {
+    CredentialWait,
     Prepared,
     PoolExhausted(CredentialPoolRuntimePolicy),
 }

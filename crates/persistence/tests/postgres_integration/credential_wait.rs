@@ -98,6 +98,13 @@ async fn exercise_wait(stop: bool) -> Result<(), Box<dyn Error>> {
         panic!("exhaustion must park")
     };
     assert_eq!(wait.cause(), CredentialAvailabilityWaitCause::Exhausted);
+    let snapshot = signalbox_persistence::process_read::ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("parked session stays readable");
+    assert!(
+        matches!(snapshot.turns()[0].state(), signalbox_persistence::process_read::ProcessTurnState::ActiveAwaitingCredentialAvailability { wait: projected } if *projected == wait)
+    );
     let phase: String =
         sqlx::query_scalar("SELECT active_phase_kind FROM turn_lifecycle WHERE turn_id = $1")
             .bind(turn.into_uuid())

@@ -936,7 +936,8 @@ where
                                 })?;
                             match committed {
                                 CommitCountedAttachmentFailurePreviewOutcome::Stale => continue,
-                                CommitCountedAttachmentFailurePreviewOutcome::Failed(failed_turn) => {
+                                CommitCountedAttachmentFailurePreviewOutcome::Failed(failed_turn)
+                                | CommitCountedAttachmentFailurePreviewOutcome::CredentialWait(failed_turn) => {
                                     observe_turn(failed_turn);
                                     report_guarded_turn_activation(session, failed_turn);
                                     return Ok(());

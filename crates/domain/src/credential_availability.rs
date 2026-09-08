@@ -5,8 +5,6 @@ use crate::{ContextFrontierId, TurnAttemptId};
 /// Why credential admission retains a turn without issuing a call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialAvailabilityWaitCause {
-    /// Every otherwise-admissible member has its invocation capacity reserved.
-    Contended,
     /// Every member is excluded and at least one can become available again.
     Exhausted,
 }

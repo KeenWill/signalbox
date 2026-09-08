@@ -202,6 +202,10 @@ admission reruns the exhaustion policy and converts to exhausted-wait in place
 or terminalizes. Startup re-evaluates contended waits against current
 registrations and retained reservations; restart alone grants no eligibility.
 
+A parked turn projects `active_awaiting_credential_availability` with its ended
+wait attempt and closed cause. Transcript reads and initial follow snapshots
+retain the active turn and its slot without rejection detail.
+
 ## Planned
 
 - The typed wait projection ([design](../design/credential-availability.md)).

@@ -20,5 +20,5 @@
 | scalars | 28 | 0 | 3 | [scalars](scalars.md) |
 | session | 12 | 0 | 0 | [session](session.md) |
 | settings | 17 | 0 | 0 | [settings](settings.md) |
-| transcript | 15 | 0 | 0 | [transcript](transcript.md) |
+| transcript | 16 | 0 | 0 | [transcript](transcript.md) |
 | user_input | 3 | 0 | 0 | [user_input](user_input.md) |

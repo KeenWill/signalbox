@@ -226,6 +226,17 @@ async fn oauth_quarantine_committing_during_selection_prevents_a_call_checkpoint
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Result<(), Box<dyn Error>>
 {
+    exercise_counted_attachment_pool_race(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_pool_counted_attachment_failure_preserves_a_selected_wait()
+-> Result<(), Box<dyn Error>> {
+    exercise_counted_attachment_pool_race(true).await
+}
+
+async fn exercise_counted_attachment_pool_race(park: bool) -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xcd50_0000_u128;
     let pool_name = "counted-attachment-race-pool";
@@ -239,6 +250,16 @@ async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Resul
         CredentialPoolRuntimeAction::Quarantine,
     )
     .await?;
+    let repository = if park {
+        repository.with_credential_pools(HashMap::from([(
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+                seed + 4,
+            ))),
+            credential_wait::park_policy(pool_name, &[member]),
+        )]))
+    } else {
+        repository
+    };
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 3));
     let target_session = SessionId::from_uuid(Uuid::from_u128(seed + 50));
     let target_turn = TurnId::from_uuid(Uuid::from_u128(seed + 51));
@@ -314,7 +335,11 @@ async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Resul
         .await?;
     assert_eq!(
         outcome,
-        CommitCountedAttachmentFailurePreviewOutcome::Failed(target_turn)
+        if park {
+            CommitCountedAttachmentFailurePreviewOutcome::CredentialWait(target_turn)
+        } else {
+            CommitCountedAttachmentFailurePreviewOutcome::Failed(target_turn)
+        }
     );
     let durable: (String, Option<String>, i64, i64) = sqlx::query_as(
         "SELECT lifecycle.state_kind, lifecycle.terminal_cause_kind,
@@ -331,12 +356,16 @@ async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Resul
     .await?;
     assert_eq!(
         durable,
-        (
-            String::from("terminal"),
-            Some(String::from("credential_pool_exhausted")),
-            0,
-            1,
-        )
+        if park {
+            (String::from("active"), None, 0, 0)
+        } else {
+            (
+                String::from("terminal"),
+                Some(String::from("credential_pool_exhausted")),
+                0,
+                1,
+            )
+        }
     );
 
     pool.close().await;
