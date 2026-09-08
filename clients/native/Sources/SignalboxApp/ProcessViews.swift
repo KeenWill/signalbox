@@ -2492,7 +2492,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
     for denied in tools where armedToolDenials.contains(denied.toolRequestID.rawValue) {
       for later in tools {
-        guard toolWasApproved(later),
+        guard toolRetiresMatchingOverride(later),
           later.toolName == denied.toolName,
           let arguments = denied.arguments,
           later.arguments == arguments,
@@ -2507,13 +2507,13 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
-  private func toolWasApproved(_ tool: SignalboxProcessToolEvent) -> Bool {
+  private func toolRetiresMatchingOverride(_ tool: SignalboxProcessToolEvent) -> Bool {
     if let approval = toolApprovalDecisionsByRequestID[tool.toolRequestID.rawValue],
       case .approve = approval.decision
     {
       return true
     }
-    return tool.status == .completed
+    return tool.status == .completed || tool.status == .closed
   }
 
   private func approvalFollowsDenial(

@@ -3204,6 +3204,40 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testLaterClosedAutomaticApprovalRetiresArmedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithLaterUserApproval(
+      approvalMember: "",
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessProjectionFixture.reconciliationClosedEntry)",
+          "entry":{
+            "type":"tool_closed",
+            "tool_request_id":"\(ProcessProjectionFixture.closedToolID)",
+            "content":"Closed before execution"
+          }
+        }
+        """
+      ]
+    )))
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
   func testSameRoundApprovalDoesNotRetireArmedOverride() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -8581,7 +8615,8 @@ private enum ProcessProjectionFixture {
     modelCallID: String = laterTurnModelCall,
     toolName: String = proposedToolName,
     arguments: String = "{}",
-    approvalMember: String = laterUserApprovalMember
+    approvalMember: String = laterUserApprovalMember,
+    resultEntries: [String] = []
   ) throws -> SignalboxSynchronizationSnapshot {
     let encodedArguments = String(decoding: try JSONEncoder().encode(arguments), as: UTF8.self)
     return try snapshotWithProposedTool(
@@ -8614,7 +8649,7 @@ private enum ProcessProjectionFixture {
           }
         }
         """
-      ]
+      ] + resultEntries
     )
   }
 
