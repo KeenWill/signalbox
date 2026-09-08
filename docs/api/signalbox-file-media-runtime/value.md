@@ -268,13 +268,29 @@ pub struct JsonParseLimits {
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
+## JsonParseError
+
+```rust
+pub enum JsonParseError {
+    ContainerEntryLimit,
+    Invalid(error::Error),
+}
+// derives: fmt::Debug
+impl fmt::Display for JsonParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for JsonParseError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+```
+
 ## parse_json_without_duplicate_members_bounded
 
 ```rust
 pub fn parse_json_without_duplicate_members_bounded(
     value: &str,
     limits: JsonParseLimits,
-) -> result::Result<value::Value, error::Error>;
+) -> result::Result<value::Value, JsonParseError>;
 ```
 
 ## VisiblePartSelector

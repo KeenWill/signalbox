@@ -73,8 +73,11 @@ and any probe completion order.
 
 The service repeats inspection for every read, and `file_read` accepts no
 model-supplied media type or reader identity. Why: no classification from an
-earlier call is trusted. Image metadata views use the canonical metadata from
-that inspection; absent image fields fail without a second decode.
+earlier call is trusted. A registered streaming-text reader is selected through
+streaming validation even for declared `text/plain`. JSON container-entry
+ceilings are enforced while parsing, before constructing an excessive tree.
+Image metadata views use the canonical metadata from that inspection; absent
+image fields fail without a second decode.
 
 Validation and read requests carry effective `maximum_image_axis` and
 `maximum_decoded_image_pixels` ceilings. Image decoding clamps both to the
@@ -123,6 +126,10 @@ future adapter.
 The daemon owns three deadlines: one wall deadline for each worker invocation,
 one across all serial reader probes of an inspection, and one across the
 isolation probes of every configured worker. No test covers the set.
+
+Archive validation fits the effective source-byte and range ceilings; entry
+decoding uses the remaining aggregate expansion allowance, with one byte to
+detect exhaustion.
 
 A stored source may be larger than a view's envelope. A streaming view requests
 it in bounded frames within its declared source work; a whole-decode view may
