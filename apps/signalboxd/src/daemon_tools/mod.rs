@@ -11,6 +11,7 @@ mod executor;
 mod families;
 mod pinned_file_system;
 mod retained_workspaces;
+mod session_status;
 mod session_workspace_roots;
 mod shared_executor;
 #[cfg(test)]
@@ -33,6 +34,7 @@ use families::{ComposedToolFamilies, ConfiguredWorkspaceComposition, WorkspaceBo
 pub use pinned_file_system::{PinFurtherWorkspaceRoot, PinnedWorkspaceFileSystem};
 #[cfg(test)]
 use retained_workspaces::{RetainedInFlight, RetainedSessionWorkspaces};
+pub use session_status::{PostgresSessionStatusWriter, PostgresSessionStatusWriterError};
 #[cfg(test)]
 use session_workspace_roots::{
     ComposedRootIdentity, GIT_ADMINISTRATION_DIRECTORY, MAX_RETAINED_SESSION_WORKSPACES,
@@ -58,9 +60,7 @@ use signalbox_persistence::plan::SessionPlanRepository;
 use signalbox_tools_basic::{
     CURRENT_TIME_NAME, ECHO_NAME, SESSION_STATUS_UPDATE_NAME, SessionStatusWriter,
 };
-use signalbox_tools_basic::{
-    CurrentTimeTool, EchoTool, PostgresSessionStatusWriter, SessionStatusTool,
-};
+use signalbox_tools_basic::{CurrentTimeTool, EchoTool, SessionStatusTool};
 #[cfg(test)]
 use signalbox_tools_code_host::CodeHostTransport;
 use signalbox_tools_code_host::{CodeHostTools, GitHubCodeHostTransport};
@@ -164,7 +164,7 @@ impl<Clock>
             WebSearchConfiguration::new(WebSearchProvider::Brave),
         )
         .map_err(|_| DaemonToolsConstructionError::WebSearch)?;
-        let status = SessionStatusTool::try_new_postgres(pool.clone())
+        let status = SessionStatusTool::try_new(PostgresSessionStatusWriter::new(pool.clone()))
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
         let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
@@ -237,7 +237,7 @@ impl<Clock>
             WebSearchConfiguration::new(WebSearchProvider::Brave),
         )
         .map_err(|_| DaemonToolsConstructionError::WebSearch)?;
-        let status = SessionStatusTool::try_new_postgres(pool.clone())
+        let status = SessionStatusTool::try_new(PostgresSessionStatusWriter::new(pool.clone()))
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
         let goal = GoalDeclarationTool::try_new(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;

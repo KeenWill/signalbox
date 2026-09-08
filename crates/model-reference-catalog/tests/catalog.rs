@@ -310,7 +310,7 @@ fn codex_subscription_model_resolves_only_to_approximate_api_analogue() {
 }
 
 #[test]
-fn historical_o3_price_changes_at_published_transition() {
+fn historical_o3_price_requires_verified_source_authorship() {
     let catalog = bundled_catalog().unwrap();
 
     let before = catalog
@@ -319,17 +319,11 @@ fn historical_o3_price_changes_at_published_transition() {
     let after = catalog
         .resolve(Provider::Openai, "o3", "2025-06-10", CommercialChannel::Api)
         .unwrap();
-    let before_input = before.price().unwrap().resolved_rate_sets().unwrap()[0]
-        .rate(RateDimension::Input, "tier=standard, region=global")
-        .unwrap();
     let after_input = after.price().unwrap().resolved_rate_sets().unwrap()[0]
         .rate(RateDimension::Input, "tier=standard, region=global")
         .unwrap();
 
-    assert_eq!(
-        before_input.usd_per_million_tokens,
-        Some(Decimal::new(10, 0))
-    );
+    assert_eq!(before.price(), Some(&PriceResolution::Unknown));
     assert_eq!(after_input.usd_per_million_tokens, Some(Decimal::new(2, 0)));
 }
 
@@ -452,10 +446,11 @@ fn uncertain_launch_interval_remains_unknown_before_first_observation() {
 #[test]
 fn observation_bounded_price_transition_returns_ambiguity() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
-    assert_eq!(raw["rate_sets"][37]["id"], "oai-gpt56-sol-current");
-    raw["rate_sets"][37]["window"]["precision"] = Value::String(String::from("observation_window"));
-    raw["rate_sets"][37]["window"]["effective_from"] = Value::Null;
-    raw["rate_sets"][37]["window"]["first_observed_new_rate"] =
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["window"]["precision"] =
+        Value::String(String::from("observation_window"));
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["window"]["effective_from"] =
+        Value::Null;
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["window"]["first_observed_new_rate"] =
         Value::String(String::from("2026-08-24"));
     let catalog = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
 
@@ -484,12 +479,13 @@ fn observation_bounded_price_transition_returns_ambiguity() {
 #[test]
 fn expired_rate_does_not_support_a_later_transition_observation() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
-    assert_eq!(raw["rate_sets"][36]["id"], "oai-gpt56-sol-launch");
-    assert_eq!(raw["rate_sets"][37]["id"], "oai-gpt56-sol-current");
-    raw["rate_sets"][36]["window"]["effective_until"] = Value::String(String::from("2026-08-01"));
-    raw["rate_sets"][37]["window"]["precision"] = Value::String(String::from("observation_window"));
-    raw["rate_sets"][37]["window"]["effective_from"] = Value::Null;
-    raw["rate_sets"][37]["window"]["first_observed_new_rate"] =
+    rate_set_mut(&mut raw, "oai-gpt56-sol-launch").unwrap()["window"]["effective_until"] =
+        Value::String(String::from("2026-08-01"));
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["window"]["precision"] =
+        Value::String(String::from("observation_window"));
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["window"]["effective_from"] =
+        Value::Null;
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["window"]["first_observed_new_rate"] =
         Value::String(String::from("2026-08-24"));
     let catalog = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
 
@@ -508,18 +504,19 @@ fn expired_rate_does_not_support_a_later_transition_observation() {
 #[test]
 fn unrelated_rate_overlays_do_not_form_a_transition() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
-    assert_eq!(raw["rate_sets"][37]["id"], "oai-gpt56-sol-current");
-    raw["rate_sets"][37]["window"]["precision"] = Value::String(String::from("observation_window"));
-    raw["rate_sets"][37]["window"]["effective_from"] = Value::Null;
-    raw["rate_sets"][37]["window"]["first_observed_new_rate"] =
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["window"]["precision"] =
+        Value::String(String::from("observation_window"));
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["window"]["effective_from"] =
+        Value::Null;
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["window"]["first_observed_new_rate"] =
         Value::String(String::from("2026-08-24"));
-    raw["rate_sets"][37]["rates"][0]["qualifier"]["service_tier"] =
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["rates"][0]["qualifier"]["service_tier"] =
         Value::String(String::from("unrelated"));
-    raw["rate_sets"][37]["rates"][1]["qualifier"]["service_tier"] =
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["rates"][1]["qualifier"]["service_tier"] =
         Value::String(String::from("unrelated"));
-    raw["rate_sets"][37]["rates"][2]["qualifier"]["service_tier"] =
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["rates"][2]["qualifier"]["service_tier"] =
         Value::String(String::from("unrelated"));
-    raw["rate_sets"][37]["rates"][3]["qualifier"]["service_tier"] =
+    rate_set_mut(&mut raw, "oai-gpt56-sol-current").unwrap()["rates"][3]["qualifier"]["service_tier"] =
         Value::String(String::from("unrelated"));
     let catalog = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
 
@@ -820,8 +817,7 @@ fn consumer_mapping_cannot_start_after_model_retirement() {
 #[test]
 fn exact_day_observation_boundary_must_be_ordered() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
-    assert_eq!(raw["rate_sets"][15]["id"], "oai-o3-reduced");
-    raw["rate_sets"][15]["window"]["last_observed_old_rate"] =
+    rate_set_mut(&mut raw, "oai-o3-reduced").unwrap()["window"]["last_observed_old_rate"] =
         Value::String(String::from("2025-06-11"));
 
     let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
@@ -1109,4 +1105,88 @@ fn checked_in_inspection_tables_match_canonical_data() {
         projections[4].contents,
         include_str!("../projections/sources.md")
     );
+}
+
+#[test]
+fn self_referencing_family_is_rejected() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    raw["models"][0]["family"] = raw["models"][0]["id"].clone();
+    let error = Catalog::from_json(&raw.to_string()).unwrap_err();
+    assert!(error.to_string().contains("cyclic family reference"));
+}
+
+#[test]
+fn mutually_referencing_families_are_rejected() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    let mut family = raw["models"][0].clone();
+    family["id"] = serde_json::json!("openai:cycle-family");
+    family["family"] = raw["models"][0]["id"].clone();
+    raw["models"][0]["family"] = family["id"].clone();
+    raw["models"].as_array_mut().unwrap().push(family);
+    let error = Catalog::from_json(&raw.to_string()).unwrap_err();
+    assert!(error.to_string().contains("cyclic family reference"));
+}
+
+#[test]
+fn overlapping_token_prices_compare_normalized_values() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    let mut overlap = raw["rate_sets"][0].clone();
+    overlap["id"] = serde_json::json!("equivalent-overlap");
+    overlap["rates"][0]["usd_per_million_tokens"] = serde_json::json!("2.00");
+    overlap["rates"][0]["original"]["amount"] = serde_json::json!("2.0");
+    overlap["rates"][0]["original"]["unit"] = serde_json::json!("usd_per_million_tokens");
+    raw["rate_sets"].as_array_mut().unwrap().push(overlap);
+    assert!(Catalog::from_json(&raw.to_string()).is_ok());
+}
+
+#[test]
+fn community_user_post_cannot_supply_first_party_provenance() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    raw["sources"][0]["url"] = serde_json::json!(
+        "https://community.openai.com/t/announcement-release-of-o3-and-o4-mini-april-16-2025/1230164/6"
+    );
+    let error = Catalog::from_json(&raw.to_string()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not a recognized first-party URL")
+    );
+}
+
+#[test]
+fn reply_to_staff_announcement_does_not_inherit_its_authorship() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    raw["sources"][0]["url"] =
+        serde_json::json!("https://community.openai.com/t/announcing-gpt-4o-in-the-api/744700/6");
+    let error = Catalog::from_json(&raw.to_string()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not a recognized first-party URL")
+    );
+}
+
+#[test]
+fn unverified_launch_prices_remain_unknown() {
+    let catalog = bundled_catalog().unwrap();
+    let o3 = catalog
+        .resolve(Provider::Openai, "o3", "2025-05-01", CommercialChannel::Api)
+        .unwrap();
+    let o4 = catalog
+        .resolve(
+            Provider::Openai,
+            "o4-mini",
+            "2025-05-01",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    assert_eq!(o3.price(), Some(&PriceResolution::Unknown));
+    assert_eq!(o4.price(), Some(&PriceResolution::Unknown));
+}
+
+fn rate_set_mut<'a>(raw: &'a mut Value, id: &str) -> Option<&'a mut Value> {
+    raw["rate_sets"]
+        .as_array_mut()?
+        .iter_mut()
+        .find(|rate| rate["id"] == id)
 }
