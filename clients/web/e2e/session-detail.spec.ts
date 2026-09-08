@@ -16,6 +16,7 @@ async function openDetails(
   mismatch = false,
   override = false,
   creation?: WebTimelineCreationCause,
+  reconciliation = false,
 ) {
   const items = detailItems.map((item, index) =>
     creation && index === 0
@@ -25,7 +26,18 @@ async function openDetails(
           projected_body_bytes: 128,
           body: { type: 'session_created' as const, cause: creation, imported_evidence: null },
         }
-      : item,
+      : reconciliation && index === 4
+        ? {
+            ...item,
+            kind: 'turn_reconciliation_required' as const,
+            body: {
+              type: 'reconciliation' as const,
+              turn_id: detailSessionId,
+              terminal_frontier_id: detailSessionId,
+              operation: { type: 'model_call' as const, model_call_id: detailSessionId },
+            },
+          }
+        : item,
   )
   const windowItems = detailWindow.items.map((item, index) => ({
     ...item,
@@ -287,4 +299,17 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(conversation).toBeFocused()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(toolRow(page)).toBeVisible()
+})
+
+test('shows reconciliation-required turn outcomes with events hidden', async ({ page }) => {
+  await openDetails(page, false, false, undefined, true)
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
+  const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+  await expect(
+    conversation.getByText('Turn reconciliation required · model call', {
+      exact: true,
+    }),
+  ).toBeVisible()
+  await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
+  await page.screenshot({ path: test.info().outputPath('reconciliation-outcome.png') })
 })

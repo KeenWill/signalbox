@@ -1,4 +1,10 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import {
+  detailItems,
+  detailPage,
+  resultCursor,
+  toolResultItem,
+} from '../e2e/session-detail-fixture'
 import type { WebTimelineDetailContinuation } from './generated/web-contract.mjs'
 import bootstrapFixture from './generated/web-contract-bootstrap.json' with { type: 'json' }
 import {
@@ -767,5 +773,56 @@ it.each(['unchanged', 'body facts', 'byte total'] as const)(
     if (change === 'unchanged') await expect(result).resolves.toMatchObject({ page: next })
     else await expect(result).rejects.toThrow('Continued detail changed')
     expect(fetch).toHaveBeenCalledTimes(2)
+  },
+)
+
+it.each(['retained', 'outside the window'] as const)(
+  'deduplicates appended tool arguments against requests %s',
+  async (prior) => {
+    const argumentsItem = structuredClone(detailItems[1])!
+    if (argumentsItem.body.type !== 'tool_batch') throw new Error('tool fixture missing')
+    const proposal = {
+      ...argumentsItem,
+      address: { event_sequence: '1' },
+      body: {
+        ...argumentsItem.body,
+        state: { type: 'proposed' as const, frontier_id: sessionId },
+        tools: argumentsItem.body.tools.map((tool) => ({
+          ...tool,
+          evidence: { ...tool.evidence, result_present: false },
+        })),
+      },
+    }
+    const message = { ...detailItems[0]!, address: { event_sequence: '2' } }
+    const repeated = { ...argumentsItem, address: { event_sequence: '3' } }
+    const output = { ...toolResultItem(), address: { event_sequence: '3' } }
+    const cursor = {
+      ...resultCursor,
+      body: { ...resultCursor.body, address: { event_sequence: '3' } },
+    }
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(detailPage([proposal, message])))
+      .mockResolvedValueOnce(Response.json(detailPage([repeated], cursor)))
+      .mockResolvedValueOnce(Response.json(detailPage([output])))
+    vi.stubGlobal('fetch', fetch)
+    const held = await readExtendedSessionTranscript(
+      { sessionId, first: '1', through: '2' },
+      null,
+      limits,
+      null,
+    )
+    const result = await readExtendedSessionTranscript(
+      { sessionId, first: prior === 'retained' ? '1' : '2', through: '3' },
+      null,
+      limits,
+      held,
+    )
+    expect(result.page.items).toEqual(
+      prior === 'retained' ? [proposal, message, output] : [message, repeated, output],
+    )
+    expect(result.page.projected_body_bytes).toBe(
+      result.page.items.reduce((sum, item) => sum + item.projected_body_bytes, 0),
+    )
   },
 )

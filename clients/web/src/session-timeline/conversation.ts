@@ -28,6 +28,8 @@ export const hasConversationContent = (
           )
         )
       })
+    case 'reconciliation':
+      return true
     case 'turn_lifecycle':
       return body.lifecycle === 'terminalized' && body.cause_code !== 'completed'
     default:

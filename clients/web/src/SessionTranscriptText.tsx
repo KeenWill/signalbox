@@ -43,6 +43,12 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
         })}
       </>
     )
+  if (body.type === 'reconciliation')
+    return (
+      <p className="session-turn-outcome">
+        Turn reconciliation required · {body.operation.type.replaceAll('_', ' ')}
+      </p>
+    )
   if (body.type === 'turn_lifecycle')
     return <p className="session-turn-outcome">Turn {body.cause_code.replaceAll('_', ' ')}</p>
   const excerpt =

@@ -1234,6 +1234,7 @@ async function readSessionTextPage(
   limits: SessionTranscriptLimits,
   signal?: AbortSignal,
   previous?: WebSessionTimelineDetailPage,
+  retained: WebSessionTimelineDetailPage['items'] = [],
 ) {
   const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
   const maxScannedItems = Math.min(SESSION_WINDOW_ITEMS, limits.max_timeline_detail_items)
@@ -1264,7 +1265,7 @@ async function readSessionTextPage(
     scannedBytes += page.projected_body_bytes
     previous = page
     for (const item of page.items) {
-      if (hasConversationContent(item, items)) {
+      if (hasConversationContent(item, [...retained, ...items])) {
         items.push(item)
         bytes += item.projected_body_bytes
       }
@@ -1318,6 +1319,9 @@ export async function readExtendedSessionTranscript(
     BigInt(window.first) <= BigInt(held.through) &&
     BigInt(held.through) <= BigInt(window.through) &&
     held.page.continuation === null
+  const retained = append
+    ? held.page.items.filter((item) => BigInt(item.address.event_sequence) >= BigInt(window.first))
+    : []
   const page =
     append && held.through === window.through
       ? { ...held.page, items: [], projected_body_bytes: 0 }
@@ -1334,14 +1338,10 @@ export async function readExtendedSessionTranscript(
             held.through === window.through
             ? held.page
             : undefined,
+          retained,
         )
   if (!append) return { ...window, page, continuation, omittedThrough: null }
-  const items = [
-    ...held.page.items.filter(
-      (item) => BigInt(item.address.event_sequence) >= BigInt(window.first),
-    ),
-    ...page.items,
-  ]
+  const items = [...retained, ...page.items]
   let bytes = items.reduce((sum, item) => sum + item.projected_body_bytes, 0)
   let omittedThrough = held.omittedThrough
   while (
