@@ -166,8 +166,9 @@ where
 /// Decodes one JSON text into the contracted type, distinguishing syntax,
 /// schema, and domain failure classes.
 ///
-/// The schema class is decided by deserialization into `T`: it catches
-/// missing fields, wrong types, and every other shape `T` rejects.
+/// The schema class rejects reserved serde JSON discriminator objects that serde can reshape,
+/// then deserializes into `T` to catch missing fields, wrong types, and every
+/// other shape `T` rejects.
 /// Schema-annotation constraints that deserialization cannot see (string
 /// length bounds, numeric ranges) are the provider's wire contract to
 /// honor; a caller that must enforce them locally states them in its
@@ -180,10 +181,16 @@ where
     T: DeserializeOwned,
     V: DomainValidator<T>,
 {
-    let value: serde_json::Value =
-        serde_json::from_str(json_text).map_err(|error| StructuredDecodeFailure::JsonSyntax {
+    let value = crate::provider_json::parse_json_value(json_text).map_err(|error| {
+        StructuredDecodeFailure::JsonSyntax {
             detail: error.to_string(),
-        })?;
+        }
+    })?;
+    if crate::provider_json::has_reserved_json_key(&value) {
+        return Err(StructuredDecodeFailure::SchemaMismatch {
+            detail: "reserved serde JSON discriminator objects cannot retain their identity through typed deserialization".to_owned(),
+        });
+    }
     let typed: T =
         serde_json::from_value(value).map_err(|error| StructuredDecodeFailure::SchemaMismatch {
             detail: error.to_string(),
@@ -207,6 +214,38 @@ mod tests {
     struct Verdict {
         approved: bool,
         score: i64,
+    }
+
+    #[test]
+    fn structured_values_reject_reserved_number_key_objects() {
+        for input in [
+            r#"{"$serde_json::private::Number":"1"}"#,
+            r#"{"nested":[{"\u0024serde_json::private::Number":"1","tail":true}]}"#,
+        ] {
+            let result =
+                decode_structured_json::<serde_json::Value, _>(input, &NoDomainConstraints);
+
+            assert!(
+                matches!(result, Err(StructuredDecodeFailure::SchemaMismatch { .. })),
+                "{input}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_values_reject_raw_value_key_smuggling() {
+        for input in [
+            r#"{"$serde_json::private::RawValue":"{\"recommendation\":\"approve\",\"rationale\":\"smuggled\"}"}"#,
+            r#"{"nested":[{"\u0024serde_json::private::RawValue":"{\"approved\":true}"}]}"#,
+        ] {
+            let result =
+                decode_structured_json::<serde_json::Value, _>(input, &NoDomainConstraints);
+
+            assert!(
+                matches!(result, Err(StructuredDecodeFailure::SchemaMismatch { .. })),
+                "{input}: {result:?}"
+            );
+        }
     }
 
     /// Rejects any verdict whose score is negative.

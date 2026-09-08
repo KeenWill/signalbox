@@ -272,3 +272,19 @@ async fn registry_sanitizer_rejects_nul_bearing_decoder_output() -> Result<(), B
     support::assert_processor_failed(result);
     Ok(())
 }
+
+#[tokio::test]
+async fn missing_image_metadata_fails_without_decoding_again() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::valid(FixtureFormat::Png)?);
+    let result = support::read(
+        &source,
+        "image/png",
+        &DirectProcessor::with_missing_metadata(),
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(signalbox_file_media_runtime::FileMediaFailure::ProcessorFailed)
+    );
+    Ok(())
+}

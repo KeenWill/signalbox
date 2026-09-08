@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -18,14 +20,12 @@ from postgres_integration_suites import (
     cargo_test_arguments,
     documentation_disagreements,
     documented_ignored_commands,
-    invokes_reader,
     manifest_line,
     parse_suites,
     run_matrix,
+    run_suite,
     runs_ignored_tests,
-    simple_commands,
     workflow_disagreements,
-    workflow_shell_commands,
 )
 
 READER = Path(__file__).absolute().parent / "postgres_integration_suites.py"
@@ -222,10 +222,7 @@ class RunMatrixTests(unittest.TestCase):
         self.assertEqual(len(rows), 7)
         alpha = [row for row in rows if row["suite"] == "alpha"]
         self.assertEqual([row["shard_index"] for row in alpha], [0, 1, 2, 3, 4, 5])
-        self.assertEqual({row["shard_count"] for row in alpha}, {6})
-        self.assertEqual({row["target"] for row in alpha}, {"//:postgres_alpha"})
-        self.assertEqual(rows[-1], {"suite": "terminal-client", "target": "//:postgres_terminal_client",
-                                    "shard_count": 1, "shard_index": 0})
+        self.assertEqual(rows[-1], {"suite": "terminal-client", "shard_index": 0})
 
 
 class WorkflowAgreementTests(unittest.TestCase):
@@ -241,29 +238,19 @@ class WorkflowAgreementTests(unittest.TestCase):
     def test_repository_workflows_agree(self):
         self.assertEqual(self.disagreements(), [])
 
-    def test_missing_reader_is_rejected(self):
-        text = (ROOT / ".github/workflows/bazel.yml").read_text().replace("python3 scripts/postgres_integration_suites.py --matrix", "echo ignored")
-        self.assertTrue(any("executes no" in failure for failure in self.disagreements(bazel=text)))
-
-    def test_fixed_target_is_rejected(self):
-        text = (ROOT / ".github/workflows/bazel.yml").read_text().replace('"$BAZEL_POSTGRES_TARGET"', '"//:postgres_persistence"')
-        self.assertTrue(any("blocking" in failure for failure in self.disagreements(bazel=text)))
+    def test_shell_bodies_are_not_interpreted(self):
+        import yaml
+        text = (ROOT / ".github/workflows/bazel.yml").read_text()
+        document = yaml.safe_load(text)
+        for job in document["jobs"].values():
+            for step in job.get("steps", []):
+                if "run" in step:
+                    step["run"] = "arbitrary shell text $(with syntax); not a suite declaration"
+        self.assertEqual(self.disagreements(bazel=yaml.safe_dump(document)), [])
 
     def test_allowed_failure_is_rejected(self):
         text = (ROOT / ".github/workflows/bazel.yml").read_text().replace("  bazel-postgres:\n", "  bazel-postgres:\n    continue-on-error: true\n")
         self.assertTrue(any("blocking" in failure for failure in self.disagreements(bazel=text)))
-
-    def test_each_worker_cannot_run_all_shards(self):
-        text = (ROOT / ".github/workflows/bazel.yml").read_text().replace("--test_sharding_strategy=disabled", "")
-        self.assertTrue(any("matrix shard" in failure for failure in self.disagreements(bazel=text)))
-
-    def test_worker_index_must_reach_the_native_wrapper(self):
-        text = (ROOT / ".github/workflows/bazel.yml").read_text().replace('"$BAZEL_POSTGRES_SHARD_INDEX"', '0')
-        self.assertTrue(any("matrix shard" in failure for failure in self.disagreements(bazel=text)))
-
-    def test_missing_aggregate_assertion_is_rejected(self):
-        text = (ROOT / ".github/workflows/rust.yml").read_text().replace('test "$BAZEL_RESULT" = success', 'echo done')
-        self.assertTrue(any("assert Bazel success" in failure for failure in self.disagreements(rust=text)))
 
     def test_aggregate_cannot_skip_on_dependency_failure(self):
         text = (ROOT / ".github/workflows/rust.yml").read_text().replace('if: ${{ always() }}', 'if: success()')
@@ -272,6 +259,35 @@ class WorkflowAgreementTests(unittest.TestCase):
     def test_postgres_needs_docker_pool(self):
         text = (ROOT / ".github/workflows/bazel.yml").read_text().replace("'signalbox-docker'", "'signalbox'")
         self.assertTrue(any("signalbox-docker" in failure for failure in self.disagreements(bazel=text)))
+
+
+class SuiteExecutionTests(unittest.TestCase):
+    def test_manifest_selects_target_and_partition_and_preserves_failure(self):
+        with patch("postgres_integration_suites.subprocess.run") as execute:
+            execute.return_value.returncode = 23
+            result = run_suite((suite(name="terminal-client", shards=3),), "terminal-client", 2)
+        self.assertEqual(result, 23)
+        arguments = execute.call_args.args[0]
+        self.assertEqual(arguments[-1], "//:postgres_terminal_client")
+        self.assertIn("--test_env=SIGNALBOX_TEST_SHARD_INDEX=2", arguments)
+        self.assertIn("--test_env=SIGNALBOX_TEST_TOTAL_SHARDS=3", arguments)
+        self.assertIn("--test_sharding_strategy=disabled", arguments)
+
+    def test_unknown_suite_or_partition_executes_nothing(self):
+        with patch("postgres_integration_suites.subprocess.run") as execute:
+            for name, index in (("absent", 0), ("alpha", -1), ("alpha", 3)):
+                with self.subTest(name=name, index=index), self.assertRaises(ManifestError):
+                    run_suite((suite(name="alpha", shards=3),), name, index)
+            execute.assert_not_called()
+
+    def test_cache_is_one_argument_only_on_self_hosted_runners(self):
+        for runner in ("self-hosted", "github-hosted"):
+            with self.subTest(runner=runner), patch.dict(os.environ, {
+                "RUNNER_ENVIRONMENT": runner, "BAZEL_REMOTE_CACHE": "https://cache.example/path with spaces"
+            }), patch("postgres_integration_suites.subprocess.run") as execute:
+                run_suite((suite(name="alpha"),), "alpha", 0)
+                cache = [arg for arg in execute.call_args.args[0] if arg.startswith("--remote_cache=")]
+                self.assertEqual(cache, ["--remote_cache=https://cache.example/path with spaces"] if runner == "self-hosted" else [])
 
 
 class DocumentedCommandTests(unittest.TestCase):
@@ -562,7 +578,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertTrue(matrix["include"])
         self.assertEqual(
             sorted(matrix["include"][0]),
-            ["shard_count", "shard_index", "suite", "target"],
+            ["shard_index", "suite"],
         )
 
     def test_check_reports_the_resolved_topology(self) -> None:
