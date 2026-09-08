@@ -2,6 +2,70 @@
 
 # root: types-2
 
+## WebUsageCost
+
+```rust
+pub enum WebUsageCost {
+    Derived {
+        amount_usd: WebDollarAmount,
+        rate_version: WebUsageRateVersion,
+        label: WebUsageCostLabel,
+    },
+    Unavailable {
+        reason: WebUsageCostUnavailableReason,
+    },
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebUsageProfileId
+
+```rust
+pub struct WebUsageProfileId(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebUsageProfileId {
+    #[must_use]
+    pub fn from_bounded(value: string::String) -> Self;
+}
+impl<'de> de::Deserialize<'de> for WebUsageProfileId {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
+    where
+        D: de::Deserializer<'de>;
+}
+```
+
+## WebUsageCallCount
+
+```rust
+pub struct WebUsageCallCount(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebUsageCallCount {
+    #[must_use]
+    pub fn from_positive(value: u64) -> Self;
+}
+impl<'de> de::Deserialize<'de> for WebUsageCallCount {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
+    where
+        D: de::Deserializer<'de>;
+}
+```
+
+## WebUsageTimestampMicros
+
+```rust
+pub struct WebUsageTimestampMicros(/* private */);
+// derives: clone::Clone, fmt::Debug, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+impl WebUsageTimestampMicros {
+    #[must_use]
+    pub fn from_application(value: u64) -> Self;
+}
+impl<'de> de::Deserialize<'de> for WebUsageTimestampMicros {
+    fn deserialize<D>(deserializer: D) -> result::Result<Self, <D as de::Deserializer>::Error>
+    where
+        D: de::Deserializer<'de>;
+}
+```
+
 ## WebUsageAggregateGroup
 
 ```rust
@@ -382,4 +446,85 @@ impl fmt::Display for GenerateWebContractError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for GenerateWebContractError {}
+```
+
+## WebRepositoryWatchProvenance
+
+```rust
+pub struct WebRepositoryWatchProvenance {
+    pub dispatch_id: WebLiveResourceId,
+    pub action_ordinal: WebPositiveU64,
+    pub repository: string::String,
+    pub rule_id: string::String,
+    pub rule_revision: WebPositiveU64,
+    pub event_id: WebLiveResourceId,
+    pub event_kind: WebRepositoryWatchEventKind,
+    pub pull_request: option::Option<WebPositiveU64>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebRepositoryWatchEventKind
+
+```rust
+pub enum WebRepositoryWatchEventKind {
+    PullRequestOpened,
+    PullRequestClosed,
+    PullRequestMerged,
+    HeadChanged,
+    MergeableStateChanged,
+    ChecksCompleted,
+    CheckRunCompleted,
+    BranchWorkflowRunCompleted,
+    ReviewSubmitted,
+    ThreadOpened,
+    ThreadResolved,
+    Labeled,
+    Unlabeled,
+    BaseAdvanced,
+    ReactionChanged,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineSessionState
+
+```rust
+pub enum WebTimelineSessionState {
+    Created,
+    Dispatched,
+    Active,
+    Waiting,
+    Recovering,
+    Blocked,
+    Parked,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineSessionOutcome
+
+```rust
+pub enum WebTimelineSessionOutcome {
+    AchievedVerified,
+    AchievedDeclared,
+    FailedRetryable,
+    FailedStructural,
+    FailedUnknown,
+    Stopped,
+    Superseded,
+    Abandoned,
+    Retired,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebTimelineOwnershipTransition
+
+```rust
+pub enum WebTimelineOwnershipTransition {
+    Adopted,
+    Released,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

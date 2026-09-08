@@ -257,15 +257,13 @@ export function SearchSurface({
                 setQueryOverflow(bounded.overflow)
                 setDraftIsInvalid(false)
               }}
-              placeholder="Natural language terms"
+              placeholder="Search"
               required
             />
           </span>
         </label>
         <label>
-          <span>
-            Exact session <small>optional</small>
-          </span>
+          <span>Session ID</span>
           <input
             name="session"
             value={draftSession}
@@ -274,7 +272,7 @@ export function SearchSurface({
               setDraftSession(event.currentTarget.value.slice(0, MAX_SESSION_DRAFT_LENGTH))
               setDraftIsInvalid(false)
             }}
-            placeholder="Session UUID"
+            placeholder="All sessions"
           />
         </label>
         <button type="submit" disabled={bootstrap === undefined}>
@@ -283,40 +281,25 @@ export function SearchSurface({
       </form>
       {(draftIsInvalid || queryOverflow || sessionOverflow) && !routeValidationIsVisible && (
         <p className="search-notice" role="alert">
-          Search parameters are malformed or outside the contract bounds.
+          Invalid search parameters.
         </p>
       )}
       {routeValidationIsVisible && (
         <p className="search-notice" ref={routeValidationRef} role="alert" tabIndex={-1}>
-          Search parameters are malformed or outside the contract bounds. Search text uses{' '}
-          {queryBytes} of {queryLimit} allowed UTF-8 bytes.
+          Invalid search parameters. Query: {queryBytes}/{queryLimit} bytes.
         </p>
-      )}
-      {!queryText && state.queryParameterIsValid !== false && (
-        <section className="search-zero">
-          <span className="eyebrow">Bounded lexical index</span>
-          <h2>Search durable text without loading transcripts</h2>
-          <p>
-            Results preserve their session, typed source, content class, and logical timeline
-            address for a direct history reveal.
-          </p>
-        </section>
       )}
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {searchIsFetching
           ? results.isLoading
-            ? 'Searching the durable projection.'
-            : 'Refreshing the durable projection.'
+            ? 'Searching.'
+            : 'Refreshing.'
           : searchData
             ? `${searchData.results.length} results loaded on this page.`
             : ''}
       </p>
       {searchIsFetching && (
-        <p className="search-notice">
-          {results.isLoading
-            ? 'Searching the durable projection…'
-            : 'Refreshing the durable projection…'}
-        </p>
+        <p className="search-notice">{results.isLoading ? 'Searching…' : 'Refreshing…'}</p>
       )}
       {requestIsValid && results.isError && (
         <section className="surface-empty" role="alert">
@@ -348,9 +331,8 @@ export function SearchSurface({
         <section className="search-results" aria-labelledby="search-results-heading">
           <header>
             <div>
-              <span className="eyebrow">Newest logical address first</span>
               <h2 id="search-results-heading" ref={resultsHeadingRef} tabIndex={-1}>
-                {searchData.results.length} results on this page
+                {searchData.results.length} {searchData.results.length === 1 ? 'result' : 'results'}
               </h2>
             </div>
             {searchData.continuation && (
@@ -372,12 +354,12 @@ export function SearchSurface({
                   })
                 }}
               >
-                Next page <ArrowRight aria-hidden="true" />
+                Next <ArrowRight aria-hidden="true" />
               </button>
             )}
           </header>
           {searchData.results.length === 0 ? (
-            <p className="search-notice">No indexed durable text matched this query.</p>
+            <p className="search-notice">No results</p>
           ) : (
             <>
               {/* biome-ignore lint/a11y/noRedundantRoles: Safari/VoiceOver needs an explicit role when CSS removes markers. */}
@@ -393,7 +375,6 @@ export function SearchSurface({
                     <p>{highlightedSnippet(result)}</p>
                     <div className="search-result-footer">
                       <span>{result.session_id}</span>
-                      <span>Session reveal unavailable</span>
                     </div>
                   </li>
                 ))}

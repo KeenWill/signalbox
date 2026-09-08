@@ -3,7 +3,8 @@ use super::{
     ModelCallCredentialReference, ModelConversationMessage, ModelFrontierRenderingError,
     ModelUserContentPart, PreparedModelCallRequest, ProviderReasoningProvenance,
     ResolvedToolConversationEntry, SessionSystemPrompt, ToolDefinition,
-    projected_frontier_content_bytes, render_frontier_messages_with_placements,
+    projected_frontier_container_bytes, projected_frontier_content_bytes,
+    render_frontier_messages_with_placements,
 };
 
 /// A checked prepared call plus its provider-neutral ordered messages.
@@ -11,6 +12,8 @@ use super::{
 pub struct PreparedModelOperation {
     request: PreparedModelCallRequest,
     credential_reference: ModelCallCredentialReference,
+    pub(super) retained_mapped_target: Option<signalbox_domain::ResolvedProviderTarget>,
+    pub(super) invocation_capacity_reserved: bool,
     system_prompt: Option<SessionSystemPrompt>,
     messages: Box<[ModelConversationMessage]>,
     reasoning_provenance: Box<[ProviderReasoningProvenance]>,
@@ -91,6 +94,11 @@ impl PreparedModelOperation {
             |accepted_input| request.origin_content(accepted_input),
             projected_tool_entries.clone(),
         );
+        let container_bytes = projected_frontier_container_bytes(
+            projected_entries.iter().map(|(_, payload)| *payload),
+            |accepted_input| request.origin_content(accepted_input),
+        );
+        let observed_bytes = observed_bytes.saturating_add(container_bytes);
         if observed_bytes > retained_frontier_content_limit {
             return Err(
                 ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {
@@ -139,6 +147,8 @@ impl PreparedModelOperation {
             }
         }
         Ok(Self {
+            retained_mapped_target: None,
+            invocation_capacity_reserved: false,
             request,
             credential_reference,
             system_prompt,
@@ -146,6 +156,16 @@ impl PreparedModelOperation {
             reasoning_provenance: retained_provenance.into_boxed_slice(),
             tools,
         })
+    }
+
+    /// Returns a retained serving target with its fast-mode mapping already applied.
+    pub const fn retained_mapped_target(&self) -> Option<signalbox_domain::ResolvedProviderTarget> {
+        self.retained_mapped_target
+    }
+
+    /// Returns whether this call holds a durable invocation-capacity reservation.
+    pub const fn invocation_capacity_reserved(&self) -> bool {
+        self.invocation_capacity_reserved
     }
 
     /// Borrows the checked durable request facts.

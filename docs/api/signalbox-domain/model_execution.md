@@ -22,10 +22,13 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         correlations: vec::Vec<ToolResultAttemptCorrelation>,
     ) -> Self;
-    pub fn with_tool_inadmissible_correlations(self, requests: vec::Vec<ToolRequest>) -> Self;
+    pub fn with_tool_inadmissible_correlations(
+        self,
+        requests: vec::Vec<ToolInadmissibleCorrelation>,
+    ) -> Self;
     pub fn with_tool_denial_correlations(
         self,
-        correlations: vec::Vec<ToolApprovalResolution>,
+        correlations: vec::Vec<ToolDenialCorrelation>,
     ) -> Self;
     pub fn with_uncommitted_tool_result_projection(
         self,
@@ -44,6 +47,32 @@ impl ModelCallExecutionReconstitutionInput {
         self,
     ) -> result::Result<ModelCallExecution, ModelCallExecutionReconstitutionError>;
 }
+```
+
+## ToolDenialCorrelation
+
+```rust
+pub struct ToolDenialCorrelation {
+    pub request: ToolRequestId,
+    pub denied: bool,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl convert::From<ToolApprovalResolution> for ToolDenialCorrelation {
+    fn from(resolution: ToolApprovalResolution) -> Self;
+}
+```
+
+## ToolInadmissibleCorrelation
+
+```rust
+pub struct ToolInadmissibleCorrelation {
+    pub request: ToolRequestId,
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub producing_call: ModelCallId,
+    pub inadmissible: bool,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ToolResultAttemptCorrelation
@@ -777,6 +806,11 @@ pub enum ModelCallTerminalIdentities {
     Ambiguous(AmbiguousModelCallTurnIdentities),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallTerminalIdentities {
+    pub fn frontier_identity_candidates(
+        &self,
+    ) -> (vec::Vec<SemanticTranscriptEntryId>, ContextFrontierId);
+}
 ```
 
 ## ModelCallTerminalOutcome

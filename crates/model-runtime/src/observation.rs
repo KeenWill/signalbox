@@ -77,6 +77,15 @@ pub enum ObservationFact {
 /// Delivery is synchronous and in order; an adapter emits each observation
 /// before the fact's successor is processed.
 pub trait ObservationSink<C> {
+    /// Retains the spawned process group before its request is delivered.
+    fn register_process(
+        &mut self,
+        _correlation: C,
+        _process_group: u32,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(async { true })
+    }
+
     /// Receives one observation.
     fn observe(&mut self, observation: Observation<C>);
 

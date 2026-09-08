@@ -21,7 +21,7 @@ fn exhaustion_state(exclusion: serde_json::Value) -> serde_json::Value {
 fn pool_exhaustion_accepts_each_closed_exclusion_arm() {
     for (exclusion, reset_at_unix_ms) in [
         (
-            serde_json::json!({"kind":"profile_quarantine","record_generation":null}),
+            serde_json::json!({"kind":"profile_quarantine","record_generation":"0"}),
             None,
         ),
         (
@@ -29,7 +29,7 @@ fn pool_exhaustion_accepts_each_closed_exclusion_arm() {
             None,
         ),
         (
-            serde_json::json!({"kind":"session_displacement","record_generation":null}),
+            serde_json::json!({"kind":"session_displacement","record_generation":"0"}),
             None,
         ),
         (
@@ -67,7 +67,7 @@ fn pool_exhaustion_accepts_each_closed_exclusion_arm() {
 #[test]
 fn pool_exhaustion_rejects_partial_reordered_and_duplicate_members() {
     let baseline =
-        exhaustion_state(serde_json::json!({"kind":"profile_quarantine","record_generation":null}));
+        exhaustion_state(serde_json::json!({"kind":"profile_quarantine","record_generation":"0"}));
     let mut partial = baseline.clone();
     partial["members"]
         .as_array_mut()
@@ -103,11 +103,11 @@ fn pool_exhaustion_rejects_unknown_exclusions_and_invalid_generations() {
         (serde_json::json!({"kind":"future_exclusion"}), None),
         (serde_json::json!({"kind":"profile_quarantine"}), None),
         (
-            serde_json::json!({"kind":"profile_quarantine","record_generation":"0"}),
+            serde_json::json!({"kind":"profile_quarantine","record_generation":null}),
             None,
         ),
         (
-            serde_json::json!({"kind":"profile_quarantine","record_generation":null,"secret":"unexpected"}),
+            serde_json::json!({"kind":"profile_quarantine","record_generation":"0","secret":"unexpected"}),
             None,
         ),
         (
@@ -133,7 +133,7 @@ fn pool_exhaustion_rejects_reset_presence_inconsistent_with_exclusion() {
     // Arbitrary reset timestamp: only its presence is under test.
     for (exclusion, reset_at_unix_ms) in [
         (
-            serde_json::json!({"kind":"profile_quarantine","record_generation":null}),
+            serde_json::json!({"kind":"profile_quarantine","record_generation":"0"}),
             Some(1_000),
         ),
         (
@@ -141,7 +141,7 @@ fn pool_exhaustion_rejects_reset_presence_inconsistent_with_exclusion() {
             Some(1_000),
         ),
         (
-            serde_json::json!({"kind":"session_displacement","record_generation":null}),
+            serde_json::json!({"kind":"session_displacement","record_generation":"0"}),
             Some(1_000),
         ),
         (

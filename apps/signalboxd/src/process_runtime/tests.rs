@@ -817,6 +817,43 @@ mod tests {
         SessionId::from_uuid(Uuid::from_u128(1))
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn prepared_compaction_retries_attachment_admission_before_returning_its_range() {
+        let expected_range = String::from("verified compaction range");
+        let mut outcomes = VecDeque::from([
+            Err(ContextCompactionRangeLoadError::AttachmentUnavailable),
+            Ok(expected_range.clone()),
+        ]);
+        let began = tokio::time::Instant::now();
+        let loaded = super::compaction::retry_prepared_context_compaction_range(|| {
+            std::future::ready(outcomes.pop_front().expect("one refusal then success"))
+        }).await.expect("attachment admission resumes the retained call");
+        assert_eq!(loaded, expected_range);
+        assert!(outcomes.is_empty());
+        assert!(began.elapsed() >= super::CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejected_attachment_admission_does_not_retry_database_reads() {
+        let mut attempts = 0;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            retry_context_compaction_range_database_reads(|| {
+                attempts += 1;
+                std::future::ready(Err(super::compaction::attachment_verification_range_error(
+                    signalbox_application::AttachmentPreparationFailure::Unavailable,
+                )))
+            }),
+        )
+        .await
+        .expect("attachment admission must return immediately");
+        assert!(matches!(
+            result,
+            Err(ContextCompactionRangeLoadError::AttachmentUnavailable)
+        ));
+        assert_eq!(attempts, 1, "an admission refusal is not a retriable database read");
+    }
+
     /// an explicit compaction whose commit outcome cannot be decided raises the same fatal recovery
     /// signal its automatic sibling raises through the scheduler pass, and still answers the client
     /// with the stable ambiguous code.

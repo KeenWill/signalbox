@@ -56,6 +56,7 @@ pub struct ModelOperation<C> {
     pub credential_reference: CredentialReference,
     pub requested_target: RequestedTarget,
     pub resolved_target: ResolvedTarget,
+    pub retained_mapped_target: option::Option<ResolvedTarget>,
     pub system: option::Option<string::String>,
     pub messages: vec::Vec<ConversationMessage>,
     pub settings: ModelSettings,

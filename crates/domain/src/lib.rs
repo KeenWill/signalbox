@@ -25,6 +25,7 @@ mod model_call;
 mod model_execution;
 mod model_settings;
 mod program_journal;
+pub mod program_registration;
 /// Host-verified program session attribution.
 pub mod program_session;
 mod provider_evidence;
@@ -157,8 +158,9 @@ pub use model_execution::{
     ProviderModelCallFailureCause, ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
     ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
     RefusedModelCallTurnIdentities, ResolvedModelSelection, StopRequestedModelCallTurn,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,
-    ToolResultAttemptCorrelation, ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolDenialCorrelation,
+    ToolInadmissibleCorrelation, ToolResponsePartIdentity, ToolResultAttemptCorrelation,
+    ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
 };
 pub use model_settings::{
     AdjustedModelSettings, AnthropicServiceTier, CodexCliServiceTier, CompatibleModelSettings,
@@ -568,6 +570,11 @@ define_identity!(
 define_identity!(
     /// Identifies one command-bound runner workspace provisioning authorization.
     RunnerProvisioningAuthorizationId
+);
+
+define_identity!(
+    /// Identifies one immutable program registration.
+    ProgramRegistrationId
 );
 
 define_identity!(

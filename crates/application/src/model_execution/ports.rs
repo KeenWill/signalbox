@@ -25,12 +25,23 @@ pub enum PrepareModelCallOutcome {
     PoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
     /// A new exact `Prepared` call committed; this invocation stops here.
     Checkpointed(ModelCallId),
+    /// A prepared call's retained tool evidence exceeds the rendering ceiling.
+    RetainedContentLimitExceeded {
+        /// Turn that must close through the tool-round-limit terminal cause.
+        turn: TurnId,
+        /// Prepared call whose capability must not be created.
+        call: ModelCallId,
+    },
     /// A previously committed `Prepared` request may prepare its capability.
     Ready {
         /// Checked durable request facts.
         request: Box<PreparedModelCallRequest>,
         /// Non-secret credential reference captured with the call.
         credential_reference: ModelCallCredentialReference,
+        /// Retained mapped serving target whose fast-mode mapping is already applied.
+        retained_mapped_target: Option<signalbox_domain::ResolvedProviderTarget>,
+        /// Whether this exact call holds a durable invocation-capacity reservation.
+        invocation_capacity_reserved: bool,
         /// Frozen dangerous blanket posture for initial request decisions.
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         /// Recorded, not-yet-consumed user overrides of delegate denials, frozen

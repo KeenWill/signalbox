@@ -117,6 +117,7 @@ export type WebContractLimits = {
   readonly max_timeline_window_items: number;
   readonly max_usage_aggregate_groups: number;
   readonly max_usage_call_page_items: number;
+  readonly min_timeline_detail_bytes: number;
 };
 
 export type WebDollarAmount = string;
@@ -206,6 +207,8 @@ export type WebNullableU64 = WebU64 | null;
 export type WebPositiveU64 = string;
 
 export type WebProviderModelCallFailureCause = "credential_rejected" | "permission_denied" | "invalid_request" | "target_not_found" | "request_too_large" | "rate_limited" | "quota_exhausted" | "overloaded" | "provider_internal" | "unrecognized";
+
+export type WebRepositoryWatchEventKind = "pull_request_opened" | "pull_request_closed" | "pull_request_merged" | "head_changed" | "mergeable_state_changed" | "checks_completed" | "check_run_completed" | "branch_workflow_run_completed" | "review_submitted" | "thread_opened" | "thread_resolved" | "labeled" | "unlabeled" | "base_advanced" | "reaction_changed";
 
 export type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
 
@@ -330,6 +333,35 @@ export type WebSessionTimelineDetail = {
 };
 
 export type WebSessionTimelineDetailBody = {
+  readonly state: WebTimelineSessionState;
+  readonly type: "session_state";
+} | {
+  readonly outcome: WebTimelineSessionOutcome;
+  readonly type: "session_terminal";
+} | {
+  readonly command_id: WebSessionId;
+  readonly rejection?: string | null;
+  readonly type: "command_settlement";
+} | {
+  readonly command_id: WebSessionId;
+  readonly delivered: boolean;
+  readonly rejection?: string | null;
+  readonly turn_id?: WebSessionId | null;
+  readonly type: "injection_settlement";
+} | {
+  readonly transition: WebTimelineOwnershipTransition;
+  readonly type: "ownership";
+} | {
+  readonly kind: WebSessionTimelineEventKind;
+  readonly type: "event_fact";
+} | {
+  readonly cause: WebTimelineCreationCause;
+  readonly imported_evidence?: WebTimelineImportedEvidence | null;
+  readonly type: "session_created";
+} | {
+  readonly detail: WebTimelineModelSettingsDetail;
+  readonly type: "model_settings";
+} | {
   readonly attachments: ReadonlyArray<WebTimelineBlobReference>;
   readonly text: WebTimelineTextExcerpt;
   readonly turn_id: WebSessionId;
@@ -345,13 +377,54 @@ export type WebSessionTimelineDetailBody = {
   readonly type: "model_call";
   readonly usage: WebTimelineModelUsage;
 } | {
+  readonly goal_events: ReadonlyArray<WebTimelineGoalEvent>;
+  readonly producing_model_call_id: WebSessionId;
+  readonly projected_member_index?: number | null;
+  readonly state: WebTimelineToolBatchState;
+  readonly tools: ReadonlyArray<WebTimelineToolAttempt>;
+  readonly turn_id: WebSessionId;
+  readonly type: "tool_batch";
+} | {
+  readonly actor: WebTimelineApprovalActor;
+  readonly approval_judge_escalated: boolean;
+  readonly decision: WebTimelineApprovalDecision;
+  readonly rationale?: WebTimelineTextExcerpt | null;
+  readonly request_id: WebSessionId;
+  readonly tool_name: WebToolName;
+  readonly turn_id: WebSessionId;
+  readonly type: "tool_approval_decision";
+} | {
+  readonly event: WebTimelineGoalEvent;
+  readonly session_id: WebSessionId;
+  readonly type: "goal_event";
+} | {
+  readonly compaction_id: WebSessionId;
+  readonly model_call_id: WebSessionId;
+  readonly result_frontier_id: WebSessionId;
+  readonly summary: WebTimelineTextExcerpt;
+  readonly summary_entry_id: WebSessionId;
+  readonly through_position: WebU64;
+  readonly type: "context_compaction";
+} | {
   readonly cause_code: string;
   readonly lifecycle: WebTimelineTurnLifecycleKind;
   readonly turn_id: WebSessionId;
   readonly type: "turn_lifecycle";
 } | {
-  readonly kind: WebSessionTimelineEventKind;
-  readonly type: "event_fact";
+  readonly operation: WebTimelineReconciliationOperation;
+  readonly terminal_frontier_id: WebSessionId;
+  readonly turn_id: WebSessionId;
+  readonly type: "reconciliation";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebSessionId;
+  readonly sandbox_posture: WebTimelineRunnerSandboxPosture;
+  readonly state: WebTimelineRunnerState;
+  readonly type: "runner";
+  readonly working_directory?: string | null;
+} | {
+  readonly detail: WebTimelineDelegationDetail;
+  readonly type: "delegation";
 };
 
 export type WebSessionTimelineEventKind = "session_created" | "session_state_changed" | "session_terminal" | "goal_changed" | "command_settled" | "injection_settled" | "session_ownership_changed" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
@@ -379,6 +452,25 @@ export type WebTimelineAddress = {
   readonly event_sequence: WebTimelineEventSequence;
 };
 
+export type WebTimelineAnthropicServiceTier = "auto" | "standard_only";
+
+export type WebTimelineApprovalActor = {
+  readonly type: "policy";
+} | {
+  readonly command_id: WebSessionId;
+  readonly type: "user";
+} | {
+  readonly command_id: WebSessionId;
+  readonly denied_request_id: WebSessionId;
+  readonly type: "user_override";
+} | {
+  readonly model_call_id: WebSessionId;
+  readonly model_selection_id: WebSessionId;
+  readonly type: "delegate";
+};
+
+export type WebTimelineApprovalDecision = "approve" | "deny";
+
 export type WebTimelineBlobReference = {
   readonly blob_id: WebBlobId;
   readonly length_bytes: WebU64;
@@ -392,7 +484,107 @@ export type WebTimelineBodyContinuation = {
   readonly offset_bytes: WebU64;
 };
 
-export type WebTimelineBodyField = "input_text" | "model_response";
+export type WebTimelineBodyField = "input_text" | "model_response" | "tool_arguments" | "tool_result" | "tool_failure" | "approval_rationale" | "goal_text" | "compaction_summary" | "delegation_content";
+
+export type WebTimelineBoundChildAction = "keep_running" | "stop" | "cancel";
+
+export type WebTimelineCodexCliServiceTier = "default" | "priority" | "flex";
+
+export type WebTimelineCreationCause = {
+  readonly type: "interactive";
+} | {
+  readonly dispatch_id: WebSessionId;
+  readonly type: "repository_watch";
+} | {
+  readonly dispatch_id: WebSessionId;
+  readonly type: "commissioned";
+} | {
+  readonly program_run_id: WebSessionId;
+  readonly type: "workflow";
+} | {
+  readonly spawning_request_id: WebSessionId;
+  readonly type: "delegated";
+};
+
+export type WebTimelineDelegationDetail = {
+  readonly child_session_id: WebSessionId;
+  readonly policy: WebTimelineDelegationPolicy;
+  readonly relationship_id: WebSessionId;
+  readonly type: "child_spawned";
+} | {
+  readonly awaiting_request_id: WebSessionId;
+  readonly child_session_id: WebSessionId;
+  readonly mode: WebTimelineDelegationWaitMode;
+  readonly relationship_id: WebSessionId;
+  readonly type: "child_waiting";
+} | {
+  readonly child_session_id: WebSessionId;
+  readonly event_ordinal: WebPositiveU64;
+  readonly outcome: WebTimelineDelegationOutcome;
+  readonly provenance: WebTimelineDelegationProvenance;
+  readonly reason: WebTimelineDelegationReason;
+  readonly relationship_id: WebSessionId;
+  readonly type: "child_lifecycle_disposition";
+} | {
+  readonly child_session_id: WebSessionId;
+  readonly content?: WebTimelineTextExcerpt | null;
+  readonly outcome: WebTimelineDelegationOutcome;
+  readonly provenance: WebTimelineDelegationProvenance;
+  readonly reason: WebTimelineDelegationReason;
+  readonly relationship_id: WebSessionId;
+  readonly type: "child_result";
+} | {
+  readonly content: WebTimelineTextExcerpt;
+  readonly delivery_sequence: WebPositiveU64;
+  readonly message_id: WebSessionId;
+  readonly message_ordinal: WebPositiveU64;
+  readonly recipient_session_id: WebSessionId;
+  readonly relationship_id: WebSessionId;
+  readonly sender_session_id: WebSessionId;
+  readonly type: "session_message";
+} | {
+  readonly awaiting_request_id?: WebSessionId | null;
+  readonly relationship_id: WebSessionId;
+  readonly type: "result_wake";
+} | {
+  readonly message_id: WebSessionId;
+  readonly relationship_id: WebSessionId;
+  readonly type: "message_wake";
+};
+
+export type WebTimelineDelegationOutcome = "result_returned" | "child_failed" | "child_stopped" | "child_cancelled" | "continue_running" | "already_terminal";
+
+export type WebTimelineDelegationPolicy = {
+  readonly type: "background";
+} | {
+  readonly on_parent_cancelled: WebTimelineBoundChildAction;
+  readonly on_parent_stopped: WebTimelineBoundChildAction;
+  readonly type: "bound";
+};
+
+export type WebTimelineDelegationProvenance = {
+  readonly command_id: WebSessionId;
+  readonly session_id: WebSessionId;
+  readonly type: "parent_lifecycle_command";
+} | {
+  readonly session_id: WebSessionId;
+  readonly turn_id: WebSessionId;
+  readonly type: "child_turn";
+} | {
+  readonly command_id: WebSessionId;
+  readonly session_id: WebSessionId;
+  readonly turn_id: WebSessionId;
+  readonly type: "parent_turn_command";
+} | {
+  readonly command_id: WebSessionId;
+  readonly goal_generation: WebPositiveU64;
+  readonly session_id: WebSessionId;
+  readonly type: "parent_goal_command";
+};
+
+export type WebTimelineDelegationReason = "child_completed" | "child_execution_failed" | "child_result_unavailable" | "child_cancelled" | "parent_stopped_with_descendants" | "parent_cancelled_with_descendants";
+
+export type WebTimelineDelegationWaitMode = "foreground" | "background";
 
 export type WebTimelineDetailContinuation = {
   readonly address: WebTimelineAddress;
@@ -402,7 +594,63 @@ export type WebTimelineDetailContinuation = {
   readonly type: "more_body";
 };
 
+export type WebTimelineEffectiveModelSettings = {
+  readonly fast_mode: WebTimelineFastMode;
+  readonly reasoning_level?: WebTimelineReasoningLevel | null;
+  readonly service_tier?: WebTimelineServiceTier | null;
+};
+
 export type WebTimelineEventSequence = string;
+
+export type WebTimelineFastMode = "disabled" | "enabled";
+
+export type WebTimelineFastModeOverlay = {
+  readonly kind: "inherit";
+} | {
+  readonly kind: "value";
+  readonly value: WebTimelineFastMode;
+};
+
+export type WebTimelineGoalBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure" | "finish_check_failed";
+
+export type WebTimelineGoalEvent = {
+  readonly generation: WebPositiveU64;
+  readonly text: WebTimelineTextExcerpt;
+  readonly type: "commissioned";
+} | {
+  readonly generation: WebPositiveU64;
+  readonly reason: WebTimelineGoalBlockedReason;
+  readonly text: WebTimelineTextExcerpt;
+  readonly type: "blocked";
+} | {
+  readonly generation: WebPositiveU64;
+  readonly text?: WebTimelineTextExcerpt | null;
+  readonly type: "resumed";
+} | {
+  readonly generation: WebPositiveU64;
+  readonly text: WebTimelineTextExcerpt;
+  readonly type: "achieved";
+} | {
+  readonly generation: WebPositiveU64;
+  readonly type: "user_stopped";
+} | {
+  readonly generation: WebPositiveU64;
+  readonly outcome: WebTimelineSessionOutcome;
+  readonly type: "session_closed";
+} | {
+  readonly generation: WebPositiveU64;
+  readonly text: WebTimelineTextExcerpt;
+  readonly type: "superseded";
+};
+
+export type WebTimelineImportedEvidence = {
+  readonly imported_conversation_id: WebSessionId;
+  readonly imported_entry_id: WebSessionId;
+  readonly imported_position: WebU64;
+  readonly relationship: WebTimelineImportedRelationship;
+};
+
+export type WebTimelineImportedRelationship = "resume" | "fork";
 
 export type WebTimelineModelCallDisposition = "completed" | "known_failed" | "refused" | "cancelled" | "ambiguous";
 
@@ -417,11 +665,132 @@ export type WebTimelineModelCallState = {
   readonly type: "terminal";
 };
 
+export type WebTimelineModelChangeAdjustment = {
+  readonly from: WebTimelineReasoningLevel;
+  readonly to: WebTimelineReasoningLevel;
+  readonly type: "reasoning_level_clamped";
+} | {
+  readonly from: WebTimelineReasoningLevel;
+  readonly type: "reasoning_level_cleared";
+} | {
+  readonly type: "fast_mode_disabled";
+} | {
+  readonly from: WebTimelineServiceTier;
+  readonly type: "service_tier_cleared";
+};
+
+export type WebTimelineModelSelection = {
+  readonly kind: "direct";
+  readonly selection_id: WebSessionId;
+} | {
+  readonly alias_id: WebSessionId;
+  readonly kind: "alias";
+};
+
+export type WebTimelineModelSettingSource = "per_call" | "session" | "profile" | "global_default";
+
+export type WebTimelineModelSettingsDetail = {
+  readonly adjustments: ReadonlyArray<WebTimelineModelChangeAdjustment>;
+  readonly caller_override: WebTimelineModelSettingsOverlay;
+  readonly command_id: WebSessionId;
+  readonly installed_defaults_version: WebU64;
+  readonly installed_model: WebTimelineModelSelection;
+  readonly installed_settings: WebTimelineModelSettingsSnapshot;
+  readonly prior_defaults_version: WebU64;
+  readonly prior_model: WebTimelineModelSelection;
+  readonly prior_settings: WebTimelineModelSettingsSnapshot;
+  readonly type: "session_defaults_changed";
+} | {
+  readonly accepted_input_id: WebSessionId;
+  readonly adjusted_from_selection_id?: WebSessionId | null;
+  readonly adjustments: ReadonlyArray<WebTimelineModelChangeAdjustment>;
+  readonly defaults_version: WebU64;
+  readonly per_call_override: WebTimelineModelSettingsOverlay;
+  readonly requested_model: WebTimelineModelSelection;
+  readonly selected_direct_id: WebSessionId;
+  readonly settings: WebTimelineModelSettingsSnapshot;
+  readonly turn_id: WebSessionId;
+  readonly type: "turn_resolved";
+};
+
+export type WebTimelineModelSettingsOverlay = {
+  readonly fast_mode: WebTimelineFastModeOverlay;
+  readonly reasoning_level: WebTimelineSettingOverlay;
+  readonly service_tier: WebTimelineSettingOverlay2;
+};
+
+export type WebTimelineModelSettingsPrecedence = {
+  readonly global_default: WebTimelineModelSettingsOverlay;
+  readonly per_call: WebTimelineModelSettingsOverlay;
+  readonly profile: WebTimelineModelSettingsOverlay;
+  readonly session: WebTimelineModelSettingsOverlay;
+};
+
+export type WebTimelineModelSettingsSnapshot = {
+  readonly effective: WebTimelineEffectiveModelSettings;
+  readonly fast_mode_source?: WebTimelineModelSettingSource | null;
+  readonly precedence: WebTimelineModelSettingsPrecedence;
+  readonly reasoning_source?: WebTimelineModelSettingSource | null;
+  readonly service_tier_source?: WebTimelineModelSettingSource | null;
+  readonly validated_for_selection_id?: WebSessionId | null;
+};
+
 export type WebTimelineModelUsage = {
   readonly cache_creation_input_tokens?: WebU64 | null;
   readonly cache_read_input_tokens?: WebU64 | null;
   readonly input_tokens?: WebU64 | null;
   readonly output_tokens?: WebU64 | null;
+};
+
+export type WebTimelineOpenAiServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | "fast";
+
+export type WebTimelineOwnershipTransition = "adopted" | "released";
+
+export type WebTimelineReasoningLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+
+export type WebTimelineReconciliationOperation = {
+  readonly model_call_id: WebSessionId;
+  readonly type: "model_call";
+} | {
+  readonly tool_attempt_id: WebSessionId;
+  readonly type: "tool_attempt";
+};
+
+export type WebTimelineRunnerSandboxPosture = "unsandboxed" | "sandboxed";
+
+export type WebTimelineRunnerState = "pinned" | "suspect" | "connected" | "runner_lost_before_pin" | "runner_lost" | "replaced" | "working_directory_changed" | "abandoned";
+
+export type WebTimelineServiceTier = {
+  readonly provider: "anthropic";
+  readonly value: WebTimelineAnthropicServiceTier;
+} | {
+  readonly provider: "open_ai";
+  readonly value: WebTimelineOpenAiServiceTier;
+} | {
+  readonly provider: "codex_cli";
+  readonly value: WebTimelineCodexCliServiceTier;
+};
+
+export type WebTimelineSessionOutcome = "achieved_verified" | "achieved_declared" | "failed_retryable" | "failed_structural" | "failed_unknown" | "stopped" | "superseded" | "abandoned" | "retired";
+
+export type WebTimelineSessionState = "created" | "dispatched" | "active" | "waiting" | "recovering" | "blocked" | "parked";
+
+export type WebTimelineSettingOverlay = {
+  readonly kind: "inherit";
+} | {
+  readonly kind: "provider_default";
+} | {
+  readonly kind: "value";
+  readonly value: WebTimelineReasoningLevel;
+};
+
+export type WebTimelineSettingOverlay2 = {
+  readonly kind: "inherit";
+} | {
+  readonly kind: "provider_default";
+} | {
+  readonly kind: "value";
+  readonly value: WebTimelineServiceTier;
 };
 
 export type WebTimelineTextExcerpt = {
@@ -431,7 +800,54 @@ export type WebTimelineTextExcerpt = {
   readonly total_bytes: WebU64;
 };
 
+export type WebTimelineToolApprovalPosture = "auto" | "delegated" | "human";
+
+export type WebTimelineToolAttempt = {
+  readonly approval_judge_escalated: boolean;
+  readonly approval_posture: WebTimelineToolApprovalPosture;
+  readonly arguments?: WebTimelineTextExcerpt | null;
+  readonly evidence: WebTimelineToolAttemptEvidence;
+  readonly request_id: WebSessionId;
+  readonly tool_name: WebToolName;
+};
+
+export type WebTimelineToolAttemptEvidence = {
+  readonly type: "request_only";
+} | {
+  readonly attempt_id: WebSessionId;
+  readonly cause?: WebTimelineToolFailureCause | null;
+  readonly effect_posture: WebTimelineToolEffectPosture;
+  readonly failure?: WebTimelineTextExcerpt | null;
+  readonly failure_present: boolean;
+  readonly result?: WebTimelineTextExcerpt | null;
+  readonly result_present: boolean;
+  readonly sandbox_posture?: WebTimelineToolSandboxPosture | null;
+  readonly state: WebTimelineToolState;
+  readonly type: "physical_attempt";
+};
+
+export type WebTimelineToolBatchState = {
+  readonly frontier_id: WebSessionId;
+  readonly type: "proposed";
+} | {
+  readonly frontier_id: WebSessionId;
+  readonly type: "results_projected";
+} | {
+  readonly tool_attempt_id: WebSessionId;
+  readonly type: "recovery_required";
+};
+
+export type WebTimelineToolEffectPosture = "effect_free" | "external_effect";
+
+export type WebTimelineToolFailureCause = "preauthorization_rejected" | "unknown_tool" | "invalid_arguments" | "execution_failed" | "result_too_large" | "crash_lost";
+
+export type WebTimelineToolSandboxPosture = "unsandboxed" | "sandboxed";
+
+export type WebTimelineToolState = "prepared" | "in_flight" | "awaiting_child" | "completed" | "known_failed" | "ambiguous";
+
 export type WebTimelineTurnLifecycleKind = "activated" | "terminalized";
+
+export type WebToolName = string;
 
 export type WebTurnId = string;
 
@@ -548,6 +964,16 @@ export type WebSessionTimelineDescriptor = {
   readonly first_address: WebTimelineAddress;
   readonly latest_address: WebTimelineAddress;
   readonly observed_through: WebU64;
+  readonly repository_watch: {
+  readonly action_ordinal: WebPositiveU64;
+  readonly dispatch_id: WebLiveResourceId;
+  readonly event_id: WebLiveResourceId;
+  readonly event_kind: WebRepositoryWatchEventKind;
+  readonly pull_request: string | null;
+  readonly repository: string;
+  readonly rule_id: string;
+  readonly rule_revision: WebPositiveU64;
+} | null;
   readonly session_id: WebSessionId;
   readonly sizes: WebSessionTimelineSizeFacts;
   readonly work: WebSessionWorkFacts;

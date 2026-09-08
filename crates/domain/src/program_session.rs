@@ -69,3 +69,43 @@ impl ProgramSessionCapability {
         }
     }
 }
+
+use crate::{
+    AcceptedInputId, DurableCommandId, PerInputConfigurationChoices, SessionId, TurnId,
+    UserContent, program_registration::ProgramContentDigest,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgramSessionTurn {
+    pub command: DurableCommandId,
+    pub session: SessionId,
+    pub content: UserContent,
+    pub configuration: PerInputConfigurationChoices,
+}
+
+/// A terminal turn's authenticated metadata; no transcript payload is retained.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgramSessionOutcome {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub accepted_input: AcceptedInputId,
+    pub digest: ProgramContentDigest,
+    pub disposition: ProgramSessionDisposition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProgramSessionDisposition {
+    Completed,
+    Refused,
+    Failed,
+    Cancelled,
+    Retired,
+    Ambiguous,
+}
+
+/// Initial defaults and durable identity for a program-created session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProgramSessionCreate {
+    pub command: crate::DurableCommandId,
+    pub defaults: crate::SessionConfigurationDefaults,
+}

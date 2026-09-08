@@ -75,7 +75,11 @@ pub(crate) async fn validate_event(
                 terminal_frontier_id: actual_frontier,
                 ..
             }) => actual_failure == *failure_entry_id && actual_frontier == *terminal_frontier_id,
-            Some(TurnState::Failed {
+            Some(TurnState::FailedAfterCredentialWait {
+                terminal_frontier_id: actual_frontier,
+                ..
+            })
+            | Some(TurnState::Failed {
                 terminal_frontier_id: actual_frontier,
                 ..
             }) => actual_frontier == *terminal_frontier_id,

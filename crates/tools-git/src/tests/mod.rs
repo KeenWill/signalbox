@@ -16,6 +16,7 @@ mod log;
 mod object_database;
 mod operation_review;
 mod pack_install;
+mod pack_reads;
 mod packed_reference;
 mod planting;
 mod push;

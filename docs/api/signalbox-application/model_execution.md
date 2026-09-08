@@ -8,6 +8,12 @@
 pub const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize;
 ```
 
+## MAX_RETAINED_FRONTIER_CONTENT_BYTES
+
+```rust
+pub const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize;
+```
+
 ## ModelCallCredentialReference
 
 ```rust
@@ -289,9 +295,15 @@ pub enum PrepareModelCallOutcome {
     RetryBackoff(time::Duration),
     PoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
     Checkpointed(signalbox_domain::ModelCallId),
+    RetainedContentLimitExceeded {
+        turn: signalbox_domain::TurnId,
+        call: signalbox_domain::ModelCallId,
+    },
     Ready {
         request: boxed::Box<signalbox_domain::PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,
+        retained_mapped_target: option::Option<signalbox_domain::ResolvedProviderTarget>,
+        invocation_capacity_reserved: bool,
         dangerous_tool_auto_approval: signalbox_domain::DangerousToolAutoApproval,
         recorded_user_overrides: boxed::Box<[signalbox_domain::RecordedUserOverride]>,
         system_prompt: option::Option<signalbox_domain::SessionSystemPrompt>,
@@ -622,6 +634,10 @@ impl PreparedModelOperation {
         tool_entries: &[ResolvedToolConversationEntry],
         reasoning_provenance: &[ProviderReasoningProvenance],
     ) -> result::Result<Self, ModelFrontierRenderingError>;
+    pub const fn retained_mapped_target(
+        &self,
+    ) -> option::Option<signalbox_domain::ResolvedProviderTarget>;
+    pub const fn invocation_capacity_reserved(&self) -> bool;
     pub const fn request(&self) -> &signalbox_domain::PreparedModelCallRequest;
     pub fn reasoning_provenance(&self) -> &[ProviderReasoningProvenance];
     pub const fn credential_reference(&self) -> &ModelCallCredentialReference;
@@ -739,6 +755,34 @@ pub fn render_model_user_content(
         signalbox_domain::BlobDigest,
     ) -> option::Option<nonzero::NonZeroU64>,
 ) -> result::Result<ModelUserContent, ModelFrontierRenderingError>;
+```
+
+## projected_frontier_container_bytes
+
+```rust
+pub fn projected_frontier_container_bytes<'a>(
+    entries: impl collect::IntoIterator<Item = &'a signalbox_domain::SemanticTranscriptEntryPayload>,
+    origin_content: impl function::FnMut(
+        signalbox_domain::AcceptedInputId,
+    ) -> option::Option<&'a signalbox_domain::UserContent>,
+) -> usize;
+```
+
+## projected_frontier_content_bytes
+
+```rust
+pub fn projected_frontier_content_bytes<'a>(
+    entries: impl collect::IntoIterator<
+        Item = (
+            signalbox_domain::SemanticTranscriptEntryRef,
+            &'a signalbox_domain::SemanticTranscriptEntryPayload,
+        ),
+    >,
+    origin_content: impl function::FnMut(
+        signalbox_domain::AcceptedInputId,
+    ) -> option::Option<&'a signalbox_domain::UserContent>,
+    tool_entries: impl collect::IntoIterator<Item = &'a ResolvedToolConversationEntry>,
+) -> usize;
 ```
 
 ## ModelFrontierRenderingError

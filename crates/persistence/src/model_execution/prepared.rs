@@ -227,6 +227,8 @@ pub(crate) async fn insert_prepared_call(
     .bind(instruction_manifest_id.into_uuid())
     .execute(&mut *connection)
     .await?;
+    crate::credential_invocations::reserve(connection, call.id(), credential_reference.as_str())
+        .await?;
     freeze_recorded_user_overrides(connection, prepared.session(), call.id()).await?;
     if let Some(policy) = credential_pool_policy {
         persist_call_pool_policy(connection, call.id(), policy).await?;
@@ -349,23 +351,66 @@ pub(super) async fn load_provider_reasoning_provenance(
 pub(super) async fn load_tool_conversation_entries(
     connection: &mut PgConnection,
     request: &PreparedModelCallRequest,
-) -> Result<Box<[ResolvedToolConversationEntry]>, ModelCallRepositoryError> {
-    let mut request_ids = BTreeSet::new();
-    let mut attempt_ids = BTreeSet::new();
-    let mut approval_ids = BTreeSet::new();
-    for entry in request.frontier_entries() {
+) -> Result<Option<Box<[ResolvedToolConversationEntry]>>, ModelCallRepositoryError> {
+    let projection = signalbox_domain::ContextFrontierProjection::from_complete_entries(
+        request.frontier_entry_slice(),
+    )
+    .map_err(|_| ModelCallCorruption::Inconsistent("prepared frontier projection"))?;
+    let projected = projection.ordered_entries().collect::<BTreeSet<_>>();
+    let projected_entries = request
+        .frontier_entry_slice()
+        .iter()
+        .filter(|entry| projected.contains(&entry.reference()));
+    let non_tool_bytes = signalbox_application::projected_frontier_content_bytes(
+        projected_entries
+            .clone()
+            .map(|entry| (entry.reference(), entry.payload())),
+        |accepted| request.origin_content(accepted),
+        std::iter::empty(),
+    );
+    let container_bytes = signalbox_application::projected_frontier_container_bytes(
+        projected_entries.clone().map(|entry| entry.payload()),
+        |accepted| request.origin_content(accepted),
+    );
+    let resident_bytes = projected_entries.fold(
+        non_tool_bytes.saturating_add(container_bytes),
+        |bytes, entry| {
+            let tool_entry_bytes = match entry.payload() {
+                SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
+                | SemanticTranscriptEntryPayload::ToolClosed { .. } => {
+                    std::mem::size_of::<ResolvedToolConversationEntry>()
+                }
+                _ => 0,
+            };
+            bytes.saturating_add(tool_entry_bytes)
+        },
+    );
+    let limit_bytes = signalbox_application::MAX_RETAINED_FRONTIER_CONTENT_BYTES;
+    if resident_bytes > limit_bytes {
+        return Ok(None);
+    }
+    let mut request_ids = Vec::new();
+    let mut attempt_ids = Vec::new();
+    let mut approval_ids = Vec::new();
+    for entry in request
+        .frontier_entries()
+        .filter(|entry| projected.contains(&entry.reference()))
+    {
         match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. }
             | SemanticTranscriptEntryPayload::ToolInadmissible { request }
             | SemanticTranscriptEntryPayload::ToolClosed { request } => {
-                request_ids.insert(*request);
+                request_ids.push(*request);
             }
             SemanticTranscriptEntryPayload::ToolDenied { request } => {
-                request_ids.insert(*request);
-                approval_ids.insert(*request);
+                request_ids.push(*request);
+                approval_ids.push(*request);
             }
             SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
-                attempt_ids.insert(*attempt);
+                attempt_ids.push(*attempt);
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::DelegatedTask { .. }
@@ -384,12 +429,34 @@ pub(super) async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
     }
-    let attempts = crate::tool_loop::load_attempts_by_id(
+    if request_ids.is_empty() && attempt_ids.is_empty() {
+        return Ok(Some(Box::new([])));
+    }
+    if !tool_evidence_fits_before_loading(
         connection,
-        &attempt_ids.iter().copied().collect::<Vec<_>>(),
+        &request_ids
+            .iter()
+            .map(|id: &signalbox_domain::ToolRequestId| id.into_uuid())
+            .collect::<Vec<_>>(),
+        &attempt_ids
+            .iter()
+            .map(|id: &signalbox_domain::ToolAttemptId| id.into_uuid())
+            .collect::<Vec<_>>(),
+        &approval_ids
+            .iter()
+            .map(|id: &signalbox_domain::ToolRequestId| id.into_uuid())
+            .collect::<Vec<_>>(),
+        resident_bytes,
+        limit_bytes,
     )
-    .await
-    .map_err(map_tool_evidence_error)?;
+    .await?
+    {
+        return Ok(None);
+    }
+    let attempts = crate::tool_loop::load_attempts_by_id(connection, &attempt_ids)
+        .await
+        .map_err(map_tool_evidence_error)?;
+    let mut request_ids = request_ids.into_iter().collect::<BTreeSet<_>>();
     for attempt in attempts.values() {
         let request = match attempt {
             signalbox_domain::ReconstitutedToolAttempt::Current(current) => current.request(),
@@ -403,15 +470,15 @@ pub(super) async fn load_tool_conversation_entries(
     )
     .await
     .map_err(map_tool_evidence_error)?;
-    let approvals = crate::tool_loop::load_approvals_by_request(
-        connection,
-        &approval_ids.iter().copied().collect::<Vec<_>>(),
-    )
-    .await
-    .map_err(map_tool_evidence_error)?;
+    let approvals = crate::tool_loop::load_approvals_by_request(connection, &approval_ids)
+        .await
+        .map_err(map_tool_evidence_error)?;
 
     let mut resolved = Vec::new();
-    for entry in request.frontier_entries() {
+    for entry in request
+        .frontier_entries()
+        .filter(|entry| projected.contains(&entry.reference()))
+    {
         let source = entry.reference();
         match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse {
@@ -496,7 +563,47 @@ pub(super) async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
     }
-    Ok(resolved.into_boxed_slice())
+    Ok(Some(resolved.into_boxed_slice()))
+}
+
+async fn tool_evidence_fits_before_loading(
+    connection: &mut PgConnection,
+    requests: &[Uuid],
+    attempts: &[Uuid],
+    approvals: &[Uuid],
+    resident_bytes: usize,
+    limit_bytes: usize,
+) -> Result<bool, ModelCallRepositoryError> {
+    let content_bytes: Decimal = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(bytes), 0) FROM (
+            SELECT octet_length(tool_name)::bigint + octet_length(arguments_text)
+                   + COALESCE(octet_length(inadmissible_reason), 0) AS bytes
+              FROM tool_request
+              JOIN (
+                  SELECT request_id FROM unnest($1::uuid[]) AS projected(request_id)
+                  UNION ALL
+                  SELECT tool_attempt.request_id FROM tool_attempt
+                  JOIN unnest($2::uuid[]) AS projected(attempt_id) USING (attempt_id)
+              ) AS retained_requests USING (request_id)
+            UNION ALL
+            SELECT COALESCE(octet_length(result_text), 0)::bigint
+                   + COALESCE(octet_length(error_detail), 0)
+              FROM tool_attempt
+              JOIN unnest($2::uuid[]) AS projected(attempt_id) USING (attempt_id)
+            UNION ALL
+            SELECT COALESCE(octet_length(denial_reason), 0)::bigint
+                   + COALESCE(octet_length(rationale), 0)
+              FROM tool_approval_decision
+              JOIN unnest($3::uuid[]) AS projected(request_id) USING (request_id)
+        ) AS retained",
+    )
+    .bind(requests)
+    .bind(attempts)
+    .bind(approvals)
+    .fetch_one(connection)
+    .await?;
+    let content_bytes = usize::try_from(content_bytes).unwrap_or(usize::MAX);
+    Ok(resident_bytes.saturating_add(content_bytes) <= limit_bytes)
 }
 
 pub(super) fn map_tool_evidence_error(
@@ -729,4 +836,195 @@ pub(super) async fn load_frozen_epoch_system_prompt(
             .map_err(|_| ModelCallCorruption::Inconsistent("system prompt admission").into())
     })
     .transpose()
+}
+
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "../../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+
+#[cfg(all(test, feature = "postgres-integration"))]
+mod preflight_tests {
+    use super::*;
+    use testcontainers_modules::{
+        postgres::Postgres,
+        testcontainers::{ImageExt, runners::AsyncRunner},
+    };
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn tool_evidence_preflight_charges_every_retained_request_copy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let container = Postgres::default()
+            .with_tag(super::postgres_test_image::POSTGRES_IMAGE_TAG)
+            .with_cmd(crate::disposable_postgres_server_args())
+            .with_mount(crate::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(crate::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(crate::local_test_connection_options(&url)?)
+            .await?;
+        let mut connection = pool.acquire().await?;
+        sqlx::raw_sql(
+            "CREATE TEMP TABLE tool_request (request_id uuid, tool_name text, arguments_text text, inadmissible_reason text);
+             CREATE TEMP TABLE tool_attempt (attempt_id uuid, request_id uuid, result_text text, error_detail text);
+             CREATE TEMP TABLE tool_approval_decision (request_id uuid, denial_reason text, rationale text);",
+        ).execute(&mut *connection).await?;
+        let request = Uuid::from_u128(1);
+        let unrelated = Uuid::from_u128(2);
+        let attempt = Uuid::from_u128(3);
+        sqlx::query(r#"INSERT INTO tool_request VALUES ($1, 't', '{"x":"☃"}', NULL), ($2, 'unrelated', '{"x":"' || repeat('x', 1000) || '"}', NULL)"#)
+            .bind(request).bind(unrelated).execute(&mut *connection).await?;
+        sqlx::query("INSERT INTO tool_attempt VALUES ($1, $2, '🦀', NULL)")
+            .bind(attempt)
+            .bind(request)
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("INSERT INTO tool_approval_decision VALUES ($1, 'é', 'a')")
+            .bind(request)
+            .execute(&mut *connection)
+            .await?;
+        // Each request copy owns a one-byte name and eleven-byte JSON argument;
+        // the result owns four bytes and the approval owns three bytes.
+        for (case, direct_requests, limit) in [
+            ("result request only", vec![], 19),
+            ("proposal and result request copies", vec![request], 31),
+            (
+                "two direct entries and a result",
+                vec![request, request],
+                43,
+            ),
+        ] {
+            assert!(
+                tool_evidence_fits_before_loading(
+                    &mut connection,
+                    &direct_requests,
+                    &[attempt],
+                    &[request],
+                    0,
+                    limit
+                )
+                .await?,
+                "{case}"
+            );
+            assert!(
+                !tool_evidence_fits_before_loading(
+                    &mut connection,
+                    &direct_requests,
+                    &[attempt],
+                    &[request],
+                    0,
+                    limit - 1
+                )
+                .await?,
+                "{case}"
+            );
+            assert!(
+                !tool_evidence_fits_before_loading(
+                    &mut connection,
+                    &direct_requests,
+                    &[attempt],
+                    &[request],
+                    1,
+                    limit
+                )
+                .await?,
+                "{case}"
+            );
+        }
+        let resident_text = signalbox_domain::AssistantText::try_new(String::from("resident ☃"))
+            .expect("nonempty fixture text");
+        let payload = SemanticTranscriptEntryPayload::AssistantText {
+            producing_call: ModelCallId::from_uuid(Uuid::from_u128(9)),
+            value: resident_text,
+        };
+        let source = SemanticTranscriptEntryRef::from_source(
+            SessionId::from_uuid(Uuid::from_u128(4)),
+            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(5)),
+        );
+        let resident = signalbox_application::projected_frontier_content_bytes(
+            [(source, &payload)],
+            |_| None,
+            std::iter::empty(),
+        );
+        assert_eq!(resident, 12);
+        assert!(
+            tool_evidence_fits_before_loading(
+                &mut connection,
+                &[request],
+                &[attempt],
+                &[request],
+                resident,
+                43
+            )
+            .await?
+        );
+        assert!(
+            !tool_evidence_fits_before_loading(
+                &mut connection,
+                &[request],
+                &[attempt],
+                &[request],
+                resident,
+                42
+            )
+            .await?
+        );
+
+        sqlx::raw_sql(
+            "DROP TABLE tool_request; DROP TABLE tool_approval_decision;
+             CREATE FUNCTION pg_temp.forbidden_payload() RETURNS text STABLE LANGUAGE plpgsql AS $$
+             BEGIN RAISE EXCEPTION 'tool payload was materialized'; END; $$;
+             CREATE TEMP TABLE request_facts (request_id uuid, session_id uuid, turn_id uuid, producing_model_call_id uuid, inadmissible_reason text);
+             CREATE TEMP VIEW tool_request AS SELECT facts.*, pg_temp.forbidden_payload() AS arguments_text FROM request_facts AS facts;
+             CREATE TEMP TABLE decision_facts (request_id uuid, decision_kind text);
+             CREATE TEMP VIEW tool_approval_decision AS SELECT facts.*, pg_temp.forbidden_payload() AS denial_reason, pg_temp.forbidden_payload() AS rationale FROM decision_facts AS facts;",
+        ).execute(&mut *connection).await?;
+        let owner = Uuid::from_u128(6);
+        let turn = Uuid::from_u128(7);
+        let call = Uuid::from_u128(8);
+        sqlx::query("INSERT INTO request_facts VALUES ($1, $2, $3, $4, 'not callable')")
+            .bind(request)
+            .bind(owner)
+            .bind(turn)
+            .bind(call)
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("INSERT INTO decision_facts VALUES ($1, 'deny')")
+            .bind(request)
+            .execute(&mut *connection)
+            .await?;
+        let inadmissible =
+            super::super::live_turn::load_tool_inadmissibility_facts(&mut connection, &[request])
+                .await?;
+        assert_eq!(
+            inadmissible,
+            vec![signalbox_domain::ToolInadmissibleCorrelation {
+                request: signalbox_domain::ToolRequestId::from_uuid(request),
+                session: SessionId::from_uuid(owner),
+                turn: signalbox_domain::TurnId::from_uuid(turn),
+                producing_call: ModelCallId::from_uuid(call),
+                inadmissible: true,
+            }]
+        );
+        let denied =
+            super::super::live_turn::load_tool_denial_facts(&mut connection, &[request]).await?;
+        assert_eq!(
+            denied,
+            vec![signalbox_domain::ToolDenialCorrelation {
+                request: signalbox_domain::ToolRequestId::from_uuid(request),
+                denied: true,
+            }]
+        );
+        drop(connection);
+        pool.close().await;
+        drop(container);
+        Ok(())
+    }
 }

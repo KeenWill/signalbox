@@ -569,7 +569,15 @@ pub(super) async fn select_runtime_pool_credential(
     };
     let durable = load_durable_pool_exclusions(connection, session, turn, &policy).await?;
     let observed_at = durable.observed_at;
-    let excluded = &durable.excluded;
+    let profiles = policy
+        .members()
+        .iter()
+        .map(CredentialPoolRuntimeMember::credential_reference)
+        .collect::<Vec<_>>();
+    let mut bounded = crate::credential_invocations::bounded_members(connection, &profiles).await?;
+    bounded.retain(|member| !durable.excluded.contains(&member.profile));
+    let mut excluded = durable.excluded.clone();
+    excluded.extend(bounded.iter().map(|member| member.profile.clone()));
     let headroom = &durable.headroom;
     let sticky_reference = match predecessor_reference {
         // An availability successor continues its predecessor's chain, so the
@@ -631,14 +639,20 @@ pub(super) async fn select_runtime_pool_credential(
                 })
         })
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
-    let wait = if selected.is_none() && !(predecessor_reference.is_some() && !predecessor_rotated) {
-        super::credential_wait::exhaustion_snapshot(
+    let retry_contended = predecessor_reference
+        .as_deref()
+        .is_some_and(|reference| bounded.iter().any(|member| member.profile == reference));
+    let wait = if selected.is_none()
+        && (predecessor_reference.is_none() || predecessor_rotated || retry_contended)
+    {
+        super::credential_wait::admission_snapshot(
             connection,
             session,
             turn,
             &policy,
             serving_evidence.effective_target,
             &durable,
+            bounded,
         )
         .await?
     } else {
@@ -865,6 +879,15 @@ pub(super) async fn retain_call_capacity_policy_observation(
     acquire_model_call_outbox_order_guard(connection).await?;
     if let Some(policy) = &policy {
         lock_credential_pool_action_heads(connection, policy).await?;
+        crate::credential_invocations::lock_profiles(
+            connection,
+            &policy
+                .members()
+                .iter()
+                .map(CredentialPoolRuntimeMember::credential_reference)
+                .collect::<Vec<_>>(),
+        )
+        .await?;
     }
     let retained = crate::credential_capacity::retain_call_rate_limits(
         connection,

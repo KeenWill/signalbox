@@ -398,9 +398,22 @@ where
                 Ok(PrepareModelCallOutcome::Checkpointed(call)) => {
                     return Ok(ModelCallExecutionOutcome::Checkpointed(call));
                 }
+                Ok(PrepareModelCallOutcome::RetainedContentLimitExceeded { turn, call }) => {
+                    return self
+                        .commit_prepared_failure(
+                            session,
+                            turn,
+                            call,
+                            PreparedModelCallFailureCause::ToolRoundLimitReached,
+                            None,
+                        )
+                        .await;
+                }
                 Ok(PrepareModelCallOutcome::Ready {
                     request,
                     credential_reference,
+                    retained_mapped_target,
+                    invocation_capacity_reserved,
                     dangerous_tool_auto_approval,
                     recorded_user_overrides,
                     system_prompt,
@@ -410,6 +423,8 @@ where
                     break (
                         request,
                         credential_reference,
+                        retained_mapped_target,
+                        invocation_capacity_reserved,
                         dangerous_tool_auto_approval,
                         recorded_user_overrides,
                         system_prompt,
@@ -438,6 +453,8 @@ where
         let (
             prepared,
             credential_reference,
+            retained_mapped_target,
+            invocation_capacity_reserved,
             dangerous_tool_auto_approval,
             recorded_user_overrides,
             system_prompt,
@@ -447,7 +464,6 @@ where
         let call = prepared.call().id();
         let attempt = prepared.attempt();
         let turn = prepared.turn();
-        let prepared_request = (*prepared).clone();
         let advertised_tools = self.catalog.definitions();
         let operation = match PreparedModelOperation::render_within(
             *prepared,
@@ -458,7 +474,11 @@ where
             &reasoning_provenance,
             self.retained_frontier_content_limit,
         ) {
-            Ok(operation) => operation,
+            Ok(mut operation) => {
+                operation.retained_mapped_target = retained_mapped_target;
+                operation.invocation_capacity_reserved = invocation_capacity_reserved;
+                operation
+            }
             // The retained-content ceiling is a safety bound on the same
             // automatic tool loop the round ceiling bounds, so it closes the
             // checkpoint through the same terminal contract rather than
@@ -492,6 +512,7 @@ where
         // loop bounded by the retained-content ceiling above and by the turn's
         // own liveness watchdogs, so an absent limit admits the round rather than
         // substituting one the operator did not ask for.
+        let prepared_request = operation.request().clone();
         let observed_tool_rounds = automatic_tool_round_count(turn, operation.messages());
         if let Some(tool_round_limit) = self.max_automatic_tool_rounds_per_turn
             && observed_tool_rounds >= tool_round_limit

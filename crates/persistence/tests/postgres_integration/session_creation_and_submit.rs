@@ -3539,7 +3539,7 @@ async fn unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Er
     assert_eq!(
         durable,
         (
-            3,
+            4,
             String::from("attachment_blob_not_found"),
             fixture.digest.as_bytes().to_vec()
         )
@@ -5650,108 +5650,37 @@ async fn missing_attachment_receipt_without_prefix_survives_migration() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn pinned_target_without_a_tool_batch_rolls_back_attachment_submission()
--> Result<(), Box<dyn Error>> {
-    let (_container, pool, _) = migrated_postgres().await?;
-    // Arbitrary fixture identities; only the retained pin without a call is malformed.
-    let seed = 0xb3a0;
-    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
-    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 3));
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(prepared(seed, seed + 1, direct(seed + 2)))
-        .await?;
-    SubmitInputRepository::new(pool.clone())
-        .handle(
-            start_input(
-                seed + 0x10,
-                seed + 1,
-                "activate the pin fixture",
-                1,
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 4)),
-            Some(turn),
-        )
-        .await?;
-    activate_earliest_queued_turn(
-        &pool,
-        EarliestQueuedTurnActivation {
-            session: session.into_uuid(),
-            origin_entry: Uuid::from_u128(seed + 6),
-            starting_frontier: Uuid::from_u128(seed + 7),
-            initial_attempt: Uuid::from_u128(seed + 5),
-        },
-    )
-    .await?;
-    let digest = BlobDigest::digest(b"attachment admitted only without corruption");
-    catalog_verified_blob(
-        &pool,
-        digest,
-        7,
-        "pin_fixture",
-        Uuid::from_u128(seed + 0x23),
-        "attachment",
-    )
-    .await?;
-    // Bypass the disposable database's write guards to exercise a corrupt reread.
-    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query(
-        "UPDATE turn_lifecycle SET pinned_provider_model_identity_id = $2 WHERE turn_id = $1",
-    )
-    .bind(turn.into_uuid())
-    .bind(Uuid::from_u128(seed + 0x20))
-    .execute(&pool)
-    .await?;
-    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    let command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21));
-    let accepted = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x22));
-    let error = SubmitInputRepository::new(pool.clone())
-        .with_attachment_maximum_bytes(10)
-        .handle(
-            SubmitInput::new(
-                command,
-                session,
-                attachment_content(digest),
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn,
-                },
-            ),
-            accepted,
-            None,
-        )
-        .await
-        .expect_err("a retained pin without a call or executing batch is corruption");
-    assert!(
-        matches!(error, SubmitInputRepositoryError::ModelExecution(error)
-        if matches!(*error, ModelCallRepositoryError::Corruption(ModelCallCorruption::Execution(
-            signalbox_domain::ModelCallExecutionReconstitutionFailure::PinnedTargetUnexpected))))
-    );
-    let leaked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1) OR EXISTS (SELECT 1 FROM accepted_input WHERE accepted_input_id = $2)")
-        .bind(command.into_uuid()).bind(accepted.into_uuid()).fetch_one(&pool).await?;
-    assert!(
-        !leaked,
-        "the provisional command and accepted input roll back together"
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
 async fn program_submit_records_its_run_and_conflicts_with_user_replay()
 -> Result<(), Box<dyn Error>> {
-    use signalbox_domain::{Actor, ProgramRunId};
+    use signalbox_domain::Actor;
     let (_container, pool, _database_url) = migrated_postgres().await?;
     // These values are arbitrary, independent fixture identities.
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x5701, 0x5702, direct(0x5703)))
         .await?;
-    let run = ProgramRunId::from_uuid(next_test_submit_uuid());
-    signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone())
-        .create_stream(run)
+    let registrations =
+        signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
+            pool.clone(),
+        );
+    let registration = registrations
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            signalbox_domain::program_registration::ProgramRegistrationRequest {
+                name: "program-submit-fixture".into(),
+                revision: "fixture-revision".into(),
+                source: Vec::new(),
+                artifact: String::new(),
+                grants: signalbox_domain::program_registration::ProgramGrants::new([
+                    signalbox_domain::ProgramCapability::Session,
+                ]),
+            },
+        )
+        .await?;
+    let run = registrations
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            registration.id,
+        )
         .await?;
     let capability = signalbox_persistence::program_journal::ProgramSessionHost::new(
         signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone()),
@@ -5859,6 +5788,51 @@ async fn program_submit_records_its_run_and_conflicts_with_user_replay()
             command_id: user_command.command_id(),
         }
     );
+    let replay_user = SubmitInputRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        user_command.session(),
+        user_command.content().clone(),
+        user_command.delivery(),
+    )?;
+    let replay_user_id = replay_user.command_id();
+    service.execute(replay_user).await?;
+    let recorded_user = repository
+        .load(replay_user_id)
+        .await?
+        .expect("user receipt");
+    for (command, principal) in [
+        (
+            stored.command().clone(),
+            Some(signalbox_domain::CommandPrincipal::Operator),
+        ),
+        (recorded_user.command().clone(), None),
+    ] {
+        let error = repository
+            .handle_with_candidates_alias_resolver_as(
+                command,
+                principal,
+                signalbox_domain::ParentTerminationKind::Cancelled,
+                AcceptedInputId::from_uuid(next_test_submit_uuid()),
+                None,
+                CancelledModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(next_test_submit_uuid()),
+                    ContextFrontierId::from_uuid(next_test_submit_uuid()),
+                ),
+                |_| panic!("replay cannot allocate a turn"),
+                |_| panic!("replay cannot cancel a tool"),
+                || panic!("replay cannot settle a closure"),
+                || panic!("replay cannot settle a closure"),
+                |_| None,
+            )
+            .await
+            .expect_err("recorded replay requires actor and principal agreement");
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+                "actor and envelope principal"
+            ))
+        ));
+    }
     let mut earlier_version = pool.begin().await?;
     sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER USER")
         .execute(&mut *earlier_version)
@@ -5876,6 +5850,131 @@ async fn program_submit_records_its_run_and_conflicts_with_user_replay()
         Some("submit_input_command_actor_shape")
     );
     earlier_version.rollback().await?;
+    for (issuer, actor, program_run) in [
+        ("operator", "program", Some(run.into_uuid())),
+        ("program", "user", None),
+    ] {
+        let mut corruption = pool.begin().await?;
+        sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER USER")
+            .execute(&mut *corruption)
+            .await?;
+        sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER USER")
+            .execute(&mut *corruption)
+            .await?;
+        sqlx::query("UPDATE durable_command SET issuer_kind = $2 WHERE command_id = $1")
+            .bind(user_command.command_id().into_uuid())
+            .bind(issuer)
+            .execute(&mut *corruption)
+            .await?;
+        sqlx::query("UPDATE submit_input_command SET actor_kind = $2, actor_program_run_id = $3 WHERE command_id = $1")
+            .bind(user_command.command_id().into_uuid()).bind(actor).bind(program_run).execute(&mut *corruption).await?;
+        sqlx::query("ALTER TABLE durable_command ENABLE TRIGGER USER")
+            .execute(&mut *corruption)
+            .await?;
+        sqlx::query("ALTER TABLE submit_input_command ENABLE TRIGGER USER")
+            .execute(&mut *corruption)
+            .await?;
+        corruption.commit().await?;
+        assert!(matches!(
+            repository.load(user_command.command_id()).await,
+            Err(SubmitInputRepositoryError::Corruption(
+                SubmitInputCorruption::Inconsistent("actor and envelope principal")
+            ))
+        ));
+    }
+    pool.close().await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pinned_target_without_a_tool_batch_rolls_back_attachment_submission()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    // Arbitrary fixture identities; only the retained pin without a call is malformed.
+    let seed = 0xb3a0;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 3));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed, seed + 1, direct(seed + 2)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x10,
+                seed + 1,
+                "activate the pin fixture",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 4)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 6),
+            starting_frontier: Uuid::from_u128(seed + 7),
+            initial_attempt: Uuid::from_u128(seed + 5),
+        },
+    )
+    .await?;
+    let digest = BlobDigest::digest(b"attachment admitted only without corruption");
+    catalog_verified_blob(
+        &pool,
+        digest,
+        7,
+        "pin_fixture",
+        Uuid::from_u128(seed + 0x23),
+        "attachment",
+    )
+    .await?;
+    // Bypass the disposable database's write guards to exercise a corrupt reread.
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle SET pinned_provider_model_identity_id = $2 WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .bind(Uuid::from_u128(seed + 0x20))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21));
+    let accepted = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x22));
+    let error = SubmitInputRepository::new(pool.clone())
+        .with_attachment_maximum_bytes(10)
+        .handle(
+            SubmitInput::new(
+                command,
+                session,
+                attachment_content(digest),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            accepted,
+            None,
+        )
+        .await
+        .expect_err("a retained pin without a call or executing batch is corruption");
+    assert!(
+        matches!(error, SubmitInputRepositoryError::ModelExecution(error)
+        if matches!(*error, ModelCallRepositoryError::Corruption(ModelCallCorruption::Execution(
+            signalbox_domain::ModelCallExecutionReconstitutionFailure::PinnedTargetUnexpected))))
+    );
+    let leaked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1) OR EXISTS (SELECT 1 FROM accepted_input WHERE accepted_input_id = $2)")
+        .bind(command.into_uuid()).bind(accepted.into_uuid()).fetch_one(&pool).await?;
+    assert!(
+        !leaked,
+        "the provisional command and accepted input roll back together"
+    );
     Ok(())
 }
 
@@ -5887,7 +5986,25 @@ async fn submit_replay_requires_the_actor_principal_pair() -> Result<(), Box<dyn
     let journal =
         signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone());
     let run = ProgramRunId::from_uuid(next_test_submit_uuid());
-    journal.create_stream(run).await?;
+    let registrations =
+        signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
+            pool.clone(),
+        );
+    let registration = registrations
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(next_test_submit_uuid()),
+            signalbox_domain::program_registration::ProgramRegistrationRequest {
+                name: run.into_uuid().to_string(),
+                revision: "fixture-revision".into(),
+                source: Vec::new(),
+                artifact: String::new(),
+                grants: signalbox_domain::program_registration::ProgramGrants::new([
+                    signalbox_domain::ProgramCapability::Session,
+                ]),
+            },
+        )
+        .await?;
+    registrations.start_run(run, registration.id).await?;
     let capability = signalbox_persistence::program_journal::ProgramSessionHost::new(journal)
         .session_capability(run)
         .await?

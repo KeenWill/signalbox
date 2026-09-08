@@ -4,7 +4,8 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
-| program_session | 2 | 1 | 0 | [program_session](program_session.md) |
+| program_registration | 5 | 0 | 0 | [program_registration](program_registration.md) |
+| program_session | 6 | 1 | 0 | [program_session](program_session.md) |
 | accepted_input | 5 | 0 | 0 | [accepted_input](accepted_input.md) |
 | actor | 2 | 0 | 0 | [actor](actor.md) |
 | applied_interrupt | 2 | 0 | 0 | [applied_interrupt](applied_interrupt.md) |
@@ -20,7 +21,7 @@
 | imported_conversation | 32 | 0 | 5 | [imported_conversation](imported_conversation.md) |
 | imported_session | 20 | 0 | 0 | [imported_session](imported_session.md) |
 | model_call | 12 | 0 | 0 | [model_call](model_call.md) |
-| model_execution | 54 | 0 | 0 | [model_execution](model_execution.md) |
+| model_execution | 56 | 0 | 0 | [model_execution](model_execution.md) |
 | model_settings | 25 | 0 | 0 | [model_settings](model_settings.md) |
 | program_journal | 25 | 0 | 0 | [program_journal](program_journal.md) |
 | provider_evidence | 5 | 0 | 0 | [provider_evidence](provider_evidence.md) |
@@ -49,4 +50,4 @@
 | workspace | 4 | 0 | 0 | [workspace](workspace.md) |
 | workspace_command | 3 | 0 | 0 | [workspace_command](workspace_command.md) |
 | workspace_instruction | 18 | 0 | 0 | [workspace_instruction](workspace_instruction.md) |
-| root | 32 | 0 | 0 | [root](root.md) |
+| root | 33 | 0 | 0 | [root](root.md) |

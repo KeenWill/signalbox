@@ -5,6 +5,7 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | workspace | 1 | 1 | 0 | [workspace](workspace.md) |
+| scheduler_slot | 0 | 0 | 1 | [scheduler_slot](scheduler_slot.md) |
 | program_session | 0 | 0 | 0 | [program_session](program_session.md) |
 | approval_judge | 7 | 1 | 0 | [approval_judge](approval_judge.md) |
 | attention | 16 | 1 | 6 | [attention](attention.md) |
@@ -15,7 +16,7 @@
 | create_session_from_imported_frontier | 4 | 2 | 0 | [create_session_from_imported_frontier](create_session_from_imported_frontier.md) |
 | list_conversations | 6 | 2 | 0 | [list_conversations](list_conversations.md) |
 | load_session | 1 | 1 | 0 | [load_session](load_session.md) |
-| model_execution | 33 | 8 | 1 | [model_execution](model_execution.md) |
+| model_execution | 33 | 8 | 3 | [model_execution](model_execution.md) |
 | operator_failure | 1 | 1 | 0 | [operator_failure](operator_failure.md) |
 | replace_session_defaults | 4 | 1 | 0 | [replace_session_defaults](replace_session_defaults.md) |
 | repo_watch | 29 | 1 | 3 | [repo_watch](repo_watch.md) |
@@ -26,7 +27,7 @@
 | session_delegation | 0 | 1 | 0 | [session_delegation](session_delegation.md) |
 | session_live | 8 | 1 | 1 | [session_live](session_live.md) |
 | session_metadata | 8 | 4 | 0 | [session_metadata](session_metadata.md) |
-| session_timeline | 28 | 1 | 7 | [session_timeline](session_timeline.md) |
+| session_timeline | 53 | 1 | 7 | [session_timeline](session_timeline.md) |
 | start_eligible_turn | 3 | 2 | 0 | [start_eligible_turn](start_eligible_turn.md) |
 | startup_scan | 5 | 2 | 0 | [startup_scan](startup_scan.md) |
 | submit_input | 5 | 2 | 0 | [submit_input](submit_input.md) |

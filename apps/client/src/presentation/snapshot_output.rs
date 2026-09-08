@@ -157,6 +157,7 @@ impl<'a> Output<'a> {
         let mut rendered_snapshot = tempfile::tempfile()?;
         {
             let mut staged = Output::new(&mut rendered_snapshot, &mut *self.stderr, self.raw);
+            staged.snapshot_repository_watch(snapshot.repository_watch())?;
             staged.snapshot_runner(snapshot.runner())?;
             staged.render_snapshot(snapshot, None, SnapshotSelection::All, true)?;
             staged.render_usage(snapshot)?;
@@ -171,8 +172,33 @@ impl<'a> Output<'a> {
         snapshot: &mut TranscriptSnapshot,
         displayed: &mut SnapshotIdentitySet,
     ) -> Result<(), ClientError> {
+        self.snapshot_repository_watch(snapshot.repository_watch())?;
         self.snapshot_runner(snapshot.runner())?;
         self.render_snapshot(snapshot, Some(displayed), SnapshotSelection::All, true)
+    }
+
+    fn snapshot_repository_watch(
+        &mut self,
+        origin: Option<&signalbox_process_protocol::RepositoryWatchProvenance>,
+    ) -> io::Result<()> {
+        let Some(origin) = origin else {
+            return Ok(());
+        };
+        write!(
+            self.stdout,
+            "creation_cause=module_dispatched actor=repo_watch repository={} rule={} revision={} dispatch={} action={} event={} event_kind={:?}",
+            self.render_field(&origin.repository, TextField::DelimitedOnLine),
+            self.render_field(&origin.rule_id, TextField::DelimitedOnLine),
+            origin.rule_revision.value(),
+            origin.dispatch_id,
+            origin.action_ordinal.value(),
+            origin.event_id,
+            origin.event_kind
+        )?;
+        if let Some(number) = origin.pull_request {
+            write!(self.stdout, " pull_request={}", number.value())?;
+        }
+        writeln!(self.stdout)
     }
 
     fn snapshot_runner(&mut self, runner: Option<&RunnerProjection>) -> io::Result<()> {
