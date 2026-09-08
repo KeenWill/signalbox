@@ -1453,6 +1453,167 @@ async fn selected_send_polls_after_an_automatic_recovery_transition() -> Result<
 }
 
 #[tokio::test]
+async fn selected_send_recovery_poll_is_not_postponed_by_follow_traffic()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let attempt_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+    let model_call_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+    let server = tokio::spawn(async move {
+        let snapshot = |version, request_id, cursor, state| -> io::Result<Vec<u8>> {
+            let frame = |message| {
+                ServerFrame::try_new_for_version(version, request_id, message)
+                    .map_err(io::Error::other)
+            };
+            let mut response =
+                encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                    session_id,
+                    cursor: CanonicalU64::new(cursor),
+                    runner: None,
+                })?)
+                .map_err(io::Error::other)?;
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                    turn_id,
+                    acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
+                    state,
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptModelCallsEnd {
+                    model_call_count: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            response.extend_from_slice(
+                &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                    session_id,
+                    cursor: CanonicalU64::new(cursor),
+                    turn_count: CanonicalU64::new(1),
+                    entry_count: CanonicalU64::new(0),
+                })?)
+                .map_err(io::Error::other)?,
+            );
+            Ok(response)
+        };
+
+        let (stream, mut writer) = listener.accept().await?.0.into_split();
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        let follow_request = decode_client_line(&line).map_err(io::Error::other)?;
+        let mut initial = snapshot(
+            follow_request.version(),
+            follow_request.request_id(),
+            0,
+            TurnState::ActiveRunning {
+                current_attempt_id: attempt_id,
+                current_model_call: None,
+            },
+        )?;
+        initial.extend_from_slice(
+            &encode_server_line(
+                &ServerFrame::try_new_for_version(
+                    follow_request.version(),
+                    follow_request.request_id(),
+                    ServerMessage::SessionEvent {
+                        cursor: CanonicalU64::new(1),
+                        session_id,
+                        event: SessionEvent::ModelCallTransition {
+                            turn_id,
+                            model_call_id,
+                            state: ModelCallState::Terminal {
+                                disposition: ModelCallDisposition::Ambiguous,
+                            },
+                        },
+                    },
+                )
+                .map_err(io::Error::other)?,
+            )
+            .map_err(io::Error::other)?,
+        );
+        writer.write_all(&initial).await?;
+
+        let (refresh_stream, mut refresh_writer) = listener.accept().await?.0.into_split();
+        let mut refresh_reader = BufReader::new(refresh_stream);
+        let mut refresh_line = Vec::new();
+        refresh_reader.read_until(b'\n', &mut refresh_line).await?;
+        let refresh_request = decode_client_line(&refresh_line).map_err(io::Error::other)?;
+        refresh_writer
+            .write_all(&snapshot(
+                refresh_request.version(),
+                refresh_request.request_id(),
+                1,
+                TurnState::ActiveAwaitingModelCallRecovery {
+                    ended_attempt_id: attempt_id,
+                    recovery_model_call_id: model_call_id,
+                    automatic_reconciliation_attempts: CanonicalU64::new(0),
+                    operator_action_required: false,
+                },
+            )?)
+            .await?;
+
+        let traffic = encode_server_line(
+            &ServerFrame::try_new_for_version(
+                follow_request.version(),
+                follow_request.request_id(),
+                ServerMessage::ProviderTextDelta {
+                    session_id,
+                    turn_id,
+                    model_call_id,
+                    part_index: CanonicalU64::new(0),
+                    content: ContentFragment::try_new(String::from("busy follow traffic"))
+                        .map_err(io::Error::other)?,
+                },
+            )
+            .map_err(io::Error::other)?,
+        )
+        .map_err(io::Error::other)?;
+        let mut traffic_interval = tokio::time::interval(Duration::from_millis(10));
+        let poll_stream = timeout(Duration::from_secs(1), async {
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => break accepted,
+                    _ = traffic_interval.tick() => writer.write_all(&traffic).await?,
+                }
+            }
+        })
+        .await??
+        .0;
+        let (poll_stream, mut poll_writer) = poll_stream.into_split();
+        let mut poll_reader = BufReader::new(poll_stream);
+        let mut poll_line = Vec::new();
+        poll_reader.read_until(b'\n', &mut poll_line).await?;
+        let poll_request = decode_client_line(&poll_line).map_err(io::Error::other)?;
+        poll_writer
+            .write_all(&snapshot(
+                poll_request.version(),
+                poll_request.request_id(),
+                1,
+                TurnState::ReconciliationRequired {
+                    terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                    terminal_attempt_id: attempt_id,
+                    terminal_model_call_id: model_call_id,
+                },
+            )?)
+            .await?;
+        Ok::<(), io::Error>(())
+    });
+
+    let mut client = ProcessClient::new(socket);
+    let terminal = await_turn_terminal(&mut client, session_id, turn_id).await?;
+
+    assert_eq!(terminal, TurnTerminal::ReconciliationRequired);
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn selected_send_polls_after_an_automatic_tool_recovery_transition()
 -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
