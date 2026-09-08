@@ -6,10 +6,9 @@ This design is not built; it extends
 ## Goal
 
 Build the items the identity and command subsystem has committed to but lacks:
-registry kinds and typed records for runner recovery, production generators for
-the four identity types that lack one, and the optional runner placement the two
-creation payloads lack. `Actor` gains a program arm that submit-input records,
-and create-session adoption stays an explicit maintainer choice, so a
+registry kinds and typed records for runner recovery and a production generator
+for provider-target evidence. `Actor` gains a program arm that submit-input
+records, and create-session adoption stays an explicit maintainer choice, so a
 program-driven turn is never recorded as user-issued.
 
 ## Design
@@ -20,21 +19,7 @@ retires at the [turn-lifecycle boundary](turn-lifecycle-and-scheduling.md).
 `ProviderTargetEvidenceId` gains a UUIDv7 generator with the durable
 provider-target evidence that
 [model-call-execution](../spec/model-call-execution.md) defers; no slice writes
-that evidence today. `WorkspaceId`, `GitRemoteMintId`, and
-`GitRemoteWithdrawalId` gain write paths and generators in the workspace store
-and its operator verbs; their registry kinds and tables already exist. Each
-generator mints immediately before the domain transition that creates the fact,
-as the spec page requires of every generator.
-
-The optional runner placement enters the imported-creation and create-session
-payloads at a new storage version above each kind's current maximum, and every
-later version carries it. A row carrying a placement is written only from that
-version on, so a reader that predates the field rejects the row instead of
-reconstructing a placement-less payload. A row at an earlier version
-reconstitutes with no placement. The placement is a caller-supplied semantic
-field, so it participates in replay equality in both creation modes, including
-template-derived creation. A replay carrying a different placement, or a
-placement where the first handling had none, is conflicting reuse.
+that evidence today.
 
 `Actor` gains a program arm: a verified reference to the issuing program run,
 constructible only by the program substrate's host-side session capability, with
@@ -62,8 +47,6 @@ that adds the field states how each earlier version reconstitutes.
   assumes the submit-input actor is always the user.
 - Replace-session-defaults gains no actor field until a non-user boundary issues
   it.
-- Imported-creation version 4 and create-session version 5 stay unwritten; no
-  writer uses either number and the decoders keep rejecting them.
 - Workspace-provisioning or staged replacement may span claim and
   terminal-result transactions; every other new kind is one
   claim-and-terminal-result transaction.
@@ -78,15 +61,8 @@ that adds the field states how each earlier version reconstitutes.
   the pending disposition; after the result row commits it returns that result.
 - A runner replacement claimed but unterminated at process exit is resumed at
   startup before clients are admitted, and terminates under its own identifier.
-- The workspace store and its operator verbs write `WorkspaceId`,
-  `GitRemoteMintId`, and `GitRemoteWithdrawalId` rows from production
-  generators, and no Postgres column gained an identity-generating default.
 - `ProviderTargetEvidenceId` has a production generator once durable
   provider-target evidence lands.
-- The new imported-creation and create-session versions decode a placement, and
-  versions 4 and 5 stay unsupported.
-- Every version from the new one on carries the placement, rows at earlier
-  versions reconstitute it absent, and replay equality compares it.
 - A program-issued submit-input records the program actor, and replaying its
   identifier under the user actor is conflicting reuse.
 - Submit-input writes the program actor only at storage version 4, and version-3

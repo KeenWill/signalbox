@@ -110,6 +110,21 @@ pub enum GoalTransitionOutcome {
     NotCurrentGoalTurn,
 }
 
+/// Durable progress of a session's goal recovery cycles across its lineage.
+#[cfg(feature = "test-support")]
+#[derive(signalbox_derive::Accessors, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GoalRecoveryProgress {
+    /// Returns the number of durable resume events.
+    #[get(copy)]
+    resumptions: i64,
+    /// Returns the number of durable execution-failure blocks.
+    #[get(copy)]
+    execution_failure_blocks: i64,
+    /// Returns the number of goal-owned turns.
+    #[get(copy)]
+    turns: i64,
+}
+
 #[derive(signalbox_derive::Accessors)]
 /// One latest execution-failure block selected for daemon reconciliation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -577,6 +592,31 @@ impl GoalRepository {
     pub async fn load_goal(&self, session: SessionId) -> Result<Option<Goal>, GoalRepositoryError> {
         let mut connection = self.pool.acquire().await?;
         load_goal_from_connection(&mut connection, session).await
+    }
+
+    /// Reads durable resume, execution-failure block, and turn counts in one snapshot.
+    #[cfg(feature = "test-support")]
+    pub async fn recovery_progress(
+        &self,
+        session: SessionId,
+    ) -> Result<GoalRecoveryProgress, GoalRepositoryError> {
+        let row = sqlx::query(
+            "SELECT count(*) FILTER (WHERE event_kind = 'resumed') AS resumptions,
+                    count(*) FILTER (WHERE event_kind = 'blocked'
+                                      AND blocked_reason = 'execution_failure')
+                        AS execution_failure_blocks,
+                    (SELECT count(*) FROM goal_turn WHERE session_id = $1) AS turns
+               FROM goal_event
+              WHERE session_id = $1",
+        )
+        .bind(session_id_to_uuid(session))
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(GoalRecoveryProgress {
+            resumptions: row.try_get("resumptions")?,
+            execution_failure_blocks: row.try_get("execution_failure_blocks")?,
+            turns: row.try_get("turns")?,
+        })
     }
 
     /// Whether the daemon holds the session's liveness obligation: an

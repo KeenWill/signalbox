@@ -25,6 +25,8 @@ use signalbox_persistence::{
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
 };
 use sqlx::PgPool;
+#[cfg(feature = "test-support")]
+use tokio::sync::Barrier;
 use uuid::Uuid;
 
 use crate::HubModelConfiguration;
@@ -538,6 +540,8 @@ pub struct PostgresGoalPassDisposition {
     configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     eligibility_nudge: InProcessEligibilityNudge,
     numeric_bounds: GoalModeNumericBounds,
+    #[cfg(feature = "test-support")]
+    startup_resume_barrier: Option<Arc<Barrier>>,
 }
 
 impl PostgresGoalPassDisposition {
@@ -554,7 +558,16 @@ impl PostgresGoalPassDisposition {
             configuration_reload: None,
             eligibility_nudge,
             numeric_bounds,
+            #[cfg(feature = "test-support")]
+            startup_resume_barrier: None,
         }
+    }
+
+    /// Holds spawned startup resumptions until a test releases the barrier.
+    #[cfg(feature = "test-support")]
+    pub fn with_startup_resume_barrier(mut self, barrier: Arc<Barrier>) -> Self {
+        self.startup_resume_barrier = Some(barrier);
+        self
     }
 
     pub fn with_configuration_reload(
@@ -618,6 +631,10 @@ impl PostgresGoalPassDisposition {
         for candidate in pending {
             let adapter = self.clone();
             drop(tokio::spawn(async move {
+                #[cfg(feature = "test-support")]
+                if let Some(barrier) = &adapter.startup_resume_barrier {
+                    barrier.wait().await;
+                }
                 adapter
                     .resume_after_execution_failure(candidate.session(), candidate.blocked())
                     .await;
@@ -1527,8 +1544,43 @@ mod tests {
     use super::*;
     use std::num::NonZeroU64;
 
+    use signalbox_application::InProcessEligibilityWorkSource;
     use signalbox_domain::{GoalStatement, GoalUserProvenance, ToolRequestId};
-    use signalbox_persistence::goal::GoalCorruption;
+    use signalbox_persistence::{goal::GoalCorruption, scheduler::PostgresEligibilitySweep};
+    use sqlx::postgres::PgPoolOptions;
+
+    const GOAL_TEST_CONFIGURATION: &str = r#"
+version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+adapter = "anthropic"
+billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_pool = "anthropic-main"
+
+[compaction]
+prompt = "Summarize faithfully."
+
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000002001"
+target_id = "00000000-0000-0000-0000-000000002004"
+model_family = "anthropic"
+provider_model = "claude-haiku-4-5"
+max_output_tokens = 64
+context_window_tokens = 200000
+"#;
 
     fn arguments(value: &str) -> NormalizedToolArguments {
         NormalizedToolArguments::try_from_provider_text(value.to_owned())
@@ -1537,6 +1589,22 @@ mod tests {
 
     fn fixture_session() -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(0x5e))
+    }
+
+    async fn disposition_with_closed_pool() -> PostgresGoalPassDisposition {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:signalbox-test-only@127.0.0.1/signalbox")
+            .expect("the fixture database URL is valid");
+        pool.close().await;
+        let (nudge, _work_source) =
+            InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+        PostgresGoalPassDisposition::new(
+            pool,
+            HubModelConfiguration::parse_test_fixture(GOAL_TEST_CONFIGURATION)
+                .expect("the fixture model configuration is valid"),
+            nudge,
+            example_numeric_bounds(),
+        )
     }
 
     fn pursuing_goal() -> Goal {
@@ -1683,6 +1751,47 @@ mod tests {
             automatic_resume_failure_turns(&after_second_resume, Some(second_failure)),
             vec![second_failure, first_failure]
         );
+    }
+
+    #[test]
+    fn an_unanswered_resume_spends_no_automatic_attempt() {
+        const INITIAL_FAILURE: u128 = 0x01;
+        let unanswered = automatically_resumed(failed(pursuing_goal(), INITIAL_FAILURE));
+
+        assert!(automatic_resume_failure_turns(&unanswered, None).is_empty());
+    }
+
+    #[test]
+    fn a_resumed_model_block_spends_no_automatic_attempt() {
+        const RESUMED_FAILURE: u128 = 0x02;
+        let resumed_model_block = automatically_resumed(model_blocked(pursuing_goal()));
+        let failed_after_model_block = failed(resumed_model_block, RESUMED_FAILURE);
+        assert!(automatic_resume_failure_turns(&failed_after_model_block, None).is_empty());
+    }
+
+    #[test]
+    fn a_prior_goal_generation_cannot_spend_the_current_resume_budget() {
+        const INITIAL_FAILURE: u128 = 0x01;
+        const RESUMED_FAILURE: u128 = 0x02;
+        const SUPERSEDING_COMMAND: u128 = 0xc1;
+        const CURRENT_FAILURE: u128 = 0xc2;
+        let spent = failed(
+            automatically_resumed(failed(pursuing_goal(), INITIAL_FAILURE)),
+            RESUMED_FAILURE,
+        );
+        assert_eq!(spent_automatic_resume_attempts(&spent), 1);
+        let superseded = spent
+            .supersede(
+                GoalStatement::try_new(String::from("replacement fixture goal"))
+                    .expect("the replacement statement is admitted"),
+                GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(
+                    SUPERSEDING_COMMAND,
+                ))),
+            )
+            .expect("the blocked fixture goal can be superseded");
+        let current_failure = TurnId::from_uuid(Uuid::from_u128(CURRENT_FAILURE));
+
+        assert!(automatic_resume_failure_turns(&superseded, Some(current_failure)).is_empty());
     }
 
     #[test]
@@ -2072,6 +2181,35 @@ mod tests {
         };
     }
 
+    #[test]
+    fn every_model_selectable_block_reason_maps_to_its_domain_reason() {
+        #[derive(serde::Serialize)]
+        struct ReasonMapping {
+            declaration: String,
+            domain: String,
+        }
+        let rows = [
+            GoalDeclarationBlockedReason::UserInput,
+            GoalDeclarationBlockedReason::ExternalChange,
+            GoalDeclarationBlockedReason::Authorization,
+        ]
+        .map(|reason| ReasonMapping {
+            declaration: format!("{reason:?}"),
+            domain: format!("{:?}", GoalModelBlockedReasonKind::from(reason)),
+        });
+
+        expect_test::expect![[r#"
+            ┌────────────────┬────────────────────────┐
+            │ declaration    │ domain                 │
+            ├────────────────┼────────────────────────┤
+            │ UserInput      │ UserInputRequired      │
+            │ ExternalChange │ ExternalChangeRequired │
+            │ Authorization  │ AuthorizationRequired  │
+            └────────────────┴────────────────────────┘
+        "#]]
+        .assert_eq(&expectable::print(&rows));
+    }
+
     /// Rooting the advertised schema in an object widened what the *schema*
     /// permits, not what serde decodes: the argument type is unchanged, so
     /// both transitions still decode exactly as before and every combination
@@ -2124,11 +2262,47 @@ mod tests {
     }
 
     #[test]
+    fn goal_declaration_construction_errors_name_each_static_boundary() {
+        let output = [
+            GoalDeclarationToolConstructionError::Name,
+            GoalDeclarationToolConstructionError::Schema,
+            GoalDeclarationToolConstructionError::ErrorDetail,
+            GoalDeclarationToolConstructionError::Duplicate,
+        ]
+        .map(|error| error.to_string())
+        .join("\n");
+
+        expect_test::expect![[r#"
+            goal_declare static name is invalid
+            goal_declare static schema is invalid
+            goal_declare static error detail is invalid
+            goal_declare catalog is duplicated"#]]
+        .assert_eq(&output);
+    }
+
+    #[test]
+    fn goal_declaration_validator_returns_its_bounded_static_failure() {
+        let failure = ToolExecutionErrorDetail::try_new(String::from("fixture invalid arguments"))
+            .expect("the fixture detail is admitted");
+        let validator = GoalDeclarationArgumentValidator {
+            invalid_arguments: failure.clone(),
+        };
+        let valid = arguments(r#"{"transition":"achieved"}"#);
+        let invalid = arguments(r#"{"transition":"blocked"}"#);
+
+        assert_eq!(validator.validate(&valid), Ok(()));
+        assert_eq!(validator.validate(&invalid), Err(failure));
+    }
+
+    #[test]
     fn goal_disposition_error_displays_distinguish_static_and_repository_failures() {
         let repository = PostgresGoalPassDispositionError::Repository(
             GoalRepositoryError::Corruption(GoalCorruption::Missing("turn")),
         );
         let invalid_static_need = PostgresGoalPassDispositionError::InvalidStaticNeed;
+        let unknown_alias = PostgresGoalPassDispositionError::UnknownModelAlias;
+        let event_ordinal = PostgresGoalPassDispositionError::EventOrdinalExhausted;
+        let acceptance_position = PostgresGoalPassDispositionError::AcceptancePositionExhausted;
 
         assert_eq!(
             repository.to_string(),
@@ -2137,6 +2311,18 @@ mod tests {
         assert_eq!(
             invalid_static_need.to_string(),
             "goal scheduler disposition static execution-failure need is invalid"
+        );
+        assert_eq!(
+            unknown_alias.to_string(),
+            "goal continuation selected an unavailable model alias"
+        );
+        assert_eq!(
+            event_ordinal.to_string(),
+            "goal continuation event ordinal is exhausted"
+        );
+        assert_eq!(
+            acceptance_position.to_string(),
+            "goal continuation acceptance position is exhausted"
         );
     }
 
@@ -2171,6 +2357,13 @@ mod tests {
     }
 
     #[test]
+    fn an_already_scheduled_continuation_owes_no_new_disposition() {
+        let undisposed = continuation_disposition(GoalTurnContinuationOutcome::AlreadyScheduled)
+            .expect("an already scheduled continuation owes no new work");
+        assert_eq!(undisposed, ContinuationDisposition::Undisposed);
+    }
+
+    #[test]
     fn goal_repository_corruption_classifies_fail_closed_at_both_runtime_seams() {
         let declaration = GoalDeclarationExecutorError::Repository(
             GoalRepositoryError::Corruption(GoalCorruption::Missing("event")),
@@ -2186,6 +2379,287 @@ mod tests {
         assert_eq!(
             disposition.operator_failure_class(),
             OperatorFailureClass::FailClosedCorruption
+        );
+    }
+
+    #[test]
+    fn goal_declaration_failures_map_to_operator_classes() {
+        let argument_drift = GoalDeclarationExecutorError::ArgumentValidationDrift;
+        let database = GoalDeclarationExecutorError::Repository(GoalRepositoryError::Database(
+            sqlx::Error::PoolClosed,
+        ));
+        let ambiguous = GoalDeclarationExecutorError::Repository(
+            GoalRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+        );
+        // Arbitrary identity for a command recorded with another kind.
+        const WRONG_COMMAND_ID: u128 = 0xd1;
+        let wrong_command =
+            GoalDeclarationExecutorError::Repository(GoalRepositoryError::DifferentCommandKind {
+                command_id: DurableCommandId::from_uuid(Uuid::from_u128(WRONG_COMMAND_ID)),
+            });
+
+        assert_eq!(
+            argument_drift.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
+        assert_eq!(
+            database.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
+        assert_eq!(
+            ambiguous.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+        assert_eq!(
+            wrong_command.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
+    }
+
+    #[test]
+    fn goal_declaration_failures_expose_repository_sources() {
+        let argument_drift = GoalDeclarationExecutorError::ArgumentValidationDrift;
+        let database = GoalDeclarationExecutorError::Repository(GoalRepositoryError::Database(
+            sqlx::Error::PoolClosed,
+        ));
+
+        assert!(argument_drift.source().is_none());
+        assert!(database.source().is_some());
+    }
+
+    #[test]
+    fn goal_declaration_failure_display_names_execution_failure() {
+        let argument_drift = GoalDeclarationExecutorError::ArgumentValidationDrift;
+
+        expect_test::expect![["goal declaration execution failed"]]
+            .assert_eq(&argument_drift.to_string());
+    }
+
+    #[test]
+    fn goal_disposition_failures_keep_operator_class_and_cause_code_distinct() {
+        let database = PostgresGoalPassDispositionError::Repository(GoalRepositoryError::Database(
+            sqlx::Error::PoolClosed,
+        ));
+        let ambiguous = PostgresGoalPassDispositionError::Repository(
+            GoalRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+        );
+        let wrong_command = PostgresGoalPassDispositionError::Repository(
+            GoalRepositoryError::DifferentCommandKind {
+                command_id: DurableCommandId::from_uuid(Uuid::from_u128(0xd2)),
+            },
+        );
+        let unavailable_alias = PostgresGoalPassDispositionError::UnknownModelAlias;
+        let static_need = PostgresGoalPassDispositionError::InvalidStaticNeed;
+        let corruption = PostgresGoalPassDispositionError::Repository(
+            GoalRepositoryError::Corruption(GoalCorruption::Missing("event")),
+        );
+
+        assert_eq!(
+            database.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
+        assert_eq!(
+            ambiguous.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+        assert_eq!(
+            wrong_command.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
+        assert_eq!(
+            unavailable_alias.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
+        assert_eq!(
+            database.operator_failure_cause_code(),
+            "goal_disposition_database"
+        );
+        assert_eq!(
+            ambiguous.operator_failure_cause_code(),
+            "goal_disposition_commit_ambiguous"
+        );
+        assert_eq!(
+            wrong_command.operator_failure_cause_code(),
+            "goal_disposition_command_kind"
+        );
+        assert_eq!(
+            unavailable_alias.operator_failure_cause_code(),
+            "goal_continuation_unknown_model_alias"
+        );
+        assert_eq!(
+            static_need.operator_failure_cause_code(),
+            "goal_disposition_static_need"
+        );
+        assert_eq!(
+            corruption.operator_failure_cause_code(),
+            "goal_disposition_corruption"
+        );
+        assert!(database.source().is_some());
+        assert!(unavailable_alias.source().is_none());
+    }
+
+    /// A simulated database outage ends inventory retries at the configured bound.
+    #[tokio::test(start_paused = true)]
+    async fn restart_inventory_database_failure_retries_to_the_bound() {
+        let disposition = disposition_with_closed_pool().await;
+        let started = tokio::time::Instant::now();
+
+        disposition
+            .reconcile_automatic_resumptions_after_restart()
+            .await
+            .expect_err("a closed pool cannot inventory pending resumptions");
+
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            disposition
+                .numeric_bounds
+                .startup_retry_delay
+                .expect("fixture startup delay")
+                .saturating_mul(AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_inventory_surfaces_a_goal_database_failure() {
+        let disposition = disposition_with_closed_pool().await;
+
+        let error = disposition
+            .reconcile_automatic_resumptions_after_restart()
+            .await
+            .expect_err("a closed pool cannot inventory pending resumptions");
+
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "goal_disposition_database"
+        );
+    }
+
+    /// A database outage cannot leave one automatic attempt retrying forever.
+    #[tokio::test(start_paused = true)]
+    async fn automatic_resume_database_failure_stops_after_the_retry_bound() {
+        let disposition = disposition_with_closed_pool().await;
+        let started = tokio::time::Instant::now();
+
+        disposition
+            .resume_after_execution_failure(
+                fixture_session(),
+                GoalEventOrdinal::new(NonZeroU64::MIN),
+            )
+            .await;
+
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            disposition
+                .numeric_bounds
+                .base_backoff
+                .expect("fixture base backoff")
+                .saturating_mul(AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES)
+        );
+    }
+
+    /// An ambiguous block whose database stays unavailable is retried only to
+    /// the same finite infrastructure bound.
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_block_database_failure_stops_after_the_retry_bound() {
+        let disposition = disposition_with_closed_pool().await;
+        let started = tokio::time::Instant::now();
+
+        disposition
+            .reconcile_ambiguous_block(fixture_session())
+            .await;
+
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            disposition
+                .numeric_bounds
+                .base_backoff
+                .expect("fixture base backoff")
+                .saturating_mul(AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES)
+        );
+    }
+
+    /// Exhaustion is a permanent operator block and therefore never leaves a
+    /// delayed task that can resume it after the budget is spent.
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_automatic_resume_budget_arms_no_delayed_attempt() {
+        let disposition = disposition_with_closed_pool().await;
+        let output = tempfile::NamedTempFile::new().expect("capture recovery activity");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(output.reopen().expect("capture writer"))
+            .finish();
+        let _capture = tracing::subscriber::set_default(subscriber);
+        tokio::task::yield_now().await;
+        let runtime = tokio::runtime::Handle::current();
+        let tasks_before = runtime.metrics().num_alive_tasks();
+
+        disposition.arm_automatic_resumption(
+            fixture_session(),
+            GoalEventOrdinal::new(NonZeroU64::MIN),
+            AutomaticResumption::Exhausted {
+                attempt_budget: example_attempt_budget(),
+            },
+        );
+        tokio::task::yield_now().await;
+        tokio::time::advance(
+            disposition
+                .numeric_bounds
+                .base_backoff
+                .expect("fixture delay"),
+        )
+        .await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            runtime.metrics().num_alive_tasks(),
+            tasks_before,
+            "exhaustion must not retain a delayed recovery task"
+        );
+        assert!(
+            std::fs::read_to_string(output.path())
+                .expect("captured activity")
+                .is_empty(),
+            "exhaustion must not attempt recovery against the closed database"
+        );
+    }
+
+    #[tokio::test]
+    async fn success_disposition_surfaces_a_goal_database_failure() {
+        let disposition = disposition_with_closed_pool().await;
+
+        let error = disposition
+            .reconcile_success(fixture_session())
+            .await
+            .expect_err("a closed pool cannot reconcile a successful turn");
+
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "goal_disposition_database"
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_failure_disposition_surfaces_a_goal_database_failure() {
+        let disposition = disposition_with_closed_pool().await;
+
+        let error = disposition
+            .block_execution_failure(fixture_session(), TurnId::from_uuid(Uuid::from_u128(0xf1)))
+            .await
+            .expect_err("a closed pool cannot block a failed turn");
+
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "goal_disposition_database"
         );
     }
 }

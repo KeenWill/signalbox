@@ -5,6 +5,7 @@
 
 mod command_registry;
 mod conversation_import_codec;
+mod creation_runner_placement;
 mod lock_inventory;
 mod model_settings_resolution;
 mod user_content;
@@ -66,6 +67,7 @@ pub mod test_support;
 pub mod tool_loop;
 pub mod turn_liveness;
 pub mod usage;
+pub mod workspace;
 pub mod workspace_instructions;
 
 pub use session_credentials::{

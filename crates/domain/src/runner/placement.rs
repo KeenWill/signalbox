@@ -74,7 +74,7 @@ pub struct ProvisionedWorkspace {
 }
 
 /// Complete requested placement axes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SessionRunnerPlacementRequest {
     /// The runner selector that placement must satisfy.
     pub selector: RunnerSelector,

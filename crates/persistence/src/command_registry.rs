@@ -67,11 +67,11 @@ pub(crate) const fn issuer_columns(
 }
 
 pub(crate) const fn create_session_storage_version_is_supported(version: i16) -> bool {
-    matches!(version, 1..=4 | 6..=7)
+    matches!(version, 1..=4 | 6..=8)
 }
 
 pub(crate) const fn imported_session_storage_version_is_supported(version: i16) -> bool {
-    matches!(version, 1..=3 | 5)
+    matches!(version, 1..=3 | 5..=6)
 }
 
 #[derive(Clone, Copy)]
@@ -138,14 +138,14 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 25] = [
         spelling: CREATE_SESSION_KIND,
         typed_table: "create_session_command",
         minimum_version: 1,
-        maximum_version: 7,
+        maximum_version: 8,
     },
     CommandKindDefinition {
         kind: CommandKind::CreateSessionFromImportedFrontier,
         spelling: CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
         typed_table: "create_session_from_imported_frontier_command",
         minimum_version: 1,
-        maximum_version: 5,
+        maximum_version: 6,
     },
     CommandKindDefinition {
         kind: CommandKind::ReplaceSessionDefaults,
