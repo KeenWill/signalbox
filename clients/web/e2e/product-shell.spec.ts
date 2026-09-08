@@ -1144,6 +1144,24 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
   expect(problems.pageErrors).toEqual([])
 })
 
+test('shares expired Imports admission failure with the shell retry state', async ({ page }) => {
+  await page.clock.install()
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.clock.fastForward(30_001)
+  await page
+    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
+    .fill('expired-admission')
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry bootstrap' })).toBeVisible()
+  await useDeterministicBootstrap(page)
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+})
+
 test('mounts Imports after the daemon contract recovers', async ({ page }) => {
   const problems = watchBrowser(page)
   const admission = await useBootstrapRecoveringAfterOneOutage(page)

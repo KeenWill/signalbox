@@ -654,10 +654,15 @@ export function ProductApp({
     : null
   const inspectorInSheet = app.layout === 'focus' || narrowInspector
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.
+  const revalidateBootstrap = bootstrap.refetch
   const productImportApi = useMemo(
     () =>
-      bootstrap.data === undefined ? null : HttpImportApi.withAdmittedBootstrap(bootstrap.data),
-    [bootstrap.data],
+      bootstrap.data === undefined
+        ? null
+        : HttpImportApi.withAdmittedBootstrap(bootstrap.data, async () => {
+            await revalidateBootstrap({ throwOnError: true })
+          }),
+    [bootstrap.data, revalidateBootstrap],
   )
   const context = useMemo<ProductCommandContext>(() => {
     // `productCommandRegistry` already carries the `imports.*` family behind `available()` gates;
