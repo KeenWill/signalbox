@@ -2961,7 +2961,6 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await viewModel.connect()
     viewModel.composerText = ProcessSubmissionFixture.content
     await viewModel.send()
-    let unresolvedError = viewModel.errorMessage
     viewModel.apply(.authoritativeSnapshot(
       try ProcessProjectionFixture.snapshotWithKnownRecoveryTurn(cursor: 0, turnID: ProcessSubmissionFixture.acceptedTurnID)))
     viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
@@ -2970,7 +2969,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertFalse(viewModel.canReconcileAndSend)
     XCTAssertTrue(viewModel.canSend)
     await viewModel.reconcileAndSendSuccessor()
-    XCTAssertEqual(viewModel.errorMessage, unresolvedError)
+    XCTAssertNil(viewModel.errorMessage)
     await viewModel.send()
     let submittedCommandIDs = await service.submittedCommandIDs
     XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
