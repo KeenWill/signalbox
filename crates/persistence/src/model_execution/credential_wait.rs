@@ -79,7 +79,7 @@ pub(super) async fn park_initial(
         execution.admission_snapshot().frontier().snapshot(),
         CredentialAvailabilityWaitCause::Exhausted,
     );
-    let predecessor: Option<(Uuid, bool)> = sqlx::query_as("SELECT predecessor_model_call_id, non_acceptance_proven FROM credential_pool_availability_successor WHERE successor_turn_attempt_id = $1")
+    let predecessor: Option<(Uuid, bool)> = sqlx::query_as("SELECT predecessor_model_call_id, COALESCE(non_acceptance_proven, false) AS non_acceptance_proven FROM credential_pool_availability_successor WHERE successor_turn_attempt_id = $1")
         .bind(ended.id().into_uuid()).fetch_optional(&mut *connection).await?;
     let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
     let deadline = snapshot
