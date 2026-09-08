@@ -2360,7 +2360,10 @@ fn parse_review_thread_comment(
         .map(|author| required_string(author, "login"))
         .transpose()?;
     ReviewThreadComment::try_new(
-        bounds,
+        CodeHostNumericBounds {
+            result_text_bytes: Some(MAX_ENCODED_RESULT_BYTES),
+            ..bounds
+        },
         required_string(object, "id")?,
         author,
         required_string(object, "body")?,
@@ -4747,6 +4750,41 @@ mod tests {
             parse_changed_file(crate::code_host::test_numeric_bounds(), &value),
             Ok((expected_file, None))
         );
+    }
+
+    #[test]
+    fn oversized_review_comment_is_removed_by_the_aggregate_budget() {
+        let bounds = CodeHostNumericBounds {
+            result_text_bytes: Some(512),
+            ..crate::code_host::test_numeric_bounds()
+        };
+        let thread = parse_review_thread(
+            bounds,
+            &serde_json::json!({
+                "id": "PRRT_fixture", "isResolved": false, "isOutdated": false,
+                "path": "src/lib.rs", "line": 1,
+                "comments": {
+                    "pageInfo": {"hasNextPage": false},
+                    "nodes": [{
+                        "id": "PRRC_fixture", "author": {"login": "reviewer"},
+                        "body": "x".repeat(513), "url": "https://github.com/owner/repo/pull/1"
+                    }]
+                }
+            }),
+        )
+        .expect("comment fits the transport structural ceiling");
+        let result = ReviewThreadsResult::try_new(
+            bounds,
+            vec![thread],
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("a truncated thread fits the configured aggregate budget");
+        let value = CodeHostResult::ReviewThreads(result).into_json_value();
+
+        assert_eq!(value["threads"][0]["comments"], serde_json::json!([]));
+        assert_eq!(value["threads"][0]["comments_truncated"], true);
+        assert_eq!(value["truncated"], false);
+        assert!(serde_json::to_vec(&value).unwrap().len() <= 512);
     }
 
     /// Paths returned by GitHub retain canonical repository-relative
