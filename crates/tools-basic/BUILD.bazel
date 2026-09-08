@@ -14,7 +14,6 @@ rust_library(
     deps = [
         "//crates/application:signalbox_application",
         "//crates/domain:signalbox_domain",
-        "//crates/persistence:signalbox_persistence",
         "//crates/tool-contract:signalbox_tool_contract",
     ],
 )
