@@ -29,7 +29,8 @@ keyed by the record's identity, not its path.
 
 A mutation reports ambiguous evidence when publication fails and rollback does
 not establish restoration of its reference, reflog, index, or worktree changes.
-Failures before publication retain their known-failure classification.
+Repository validation failure after index publication is ambiguous. Failures
+before publication retain their known-failure classification.
 
 ## Design decisions
 

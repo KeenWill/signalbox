@@ -215,6 +215,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     ),
                     arguments,
                     || {},
+                    || {},
                 )?);
                 return encode_result(&result);
             }
@@ -274,18 +275,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         repository: &Repository,
         arguments: GitStageArguments,
     ) -> Result<StageResult, LocalGitFailure> {
-        self.stage_with_pre_publish_hook(repository, arguments, || {})
+        self.stage_with_publish_hooks(repository, arguments, || {}, || {})
     }
 
     #[cfg(test)]
-    pub(super) fn stage_with_pre_publish_hook<BeforePublish>(
+    pub(super) fn stage_with_publish_hooks<BeforePublish, AfterPublish>(
         &self,
         repository: &Repository,
         arguments: GitStageArguments,
         before_publish: BeforePublish,
+        after_publish: AfterPublish,
     ) -> Result<StageResult, LocalGitFailure>
     where
         BeforePublish: FnOnce(),
+        AfterPublish: FnOnce(),
     {
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
         let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
@@ -305,18 +308,21 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             ),
             arguments,
             before_publish,
+            after_publish,
         )
     }
 
-    fn stage_with_pinned_objects<BeforePublish>(
+    fn stage_with_pinned_objects<BeforePublish, AfterPublish>(
         &self,
         repository: &Repository,
         object_databases: (&Odb<'_>, &Odb<'_>, &Mempack<'_>, &PinnedObjectDatabase),
         arguments: GitStageArguments,
         before_publish: BeforePublish,
+        after_publish: AfterPublish,
     ) -> Result<StageResult, LocalGitFailure>
     where
         BeforePublish: FnOnce(),
+        AfterPublish: FnOnce(),
     {
         let (persistent_object_database, object_database, _mempack, pinned_objects) =
             object_databases;
@@ -448,7 +454,9 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         drop(index);
         self.validate_current_repository_identity()?;
         index_lock.commit()?;
-        self.validate_current_repository()?;
+        after_publish();
+        self.validate_current_repository()
+            .map_err(|_| LocalGitFailure::Ambiguous)?;
         Ok(StageResult {
             staged_paths: arguments.paths.len(),
         })

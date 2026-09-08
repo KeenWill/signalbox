@@ -1323,12 +1323,13 @@ fn stage_rejects_when_a_captured_live_object_disappears_before_publication() {
     let executor = fixture.executor();
 
     let failure = executor
-        .stage_with_pre_publish_hook(
+        .stage_with_publish_hooks(
             &repository,
             GitStageArguments {
                 paths: vec![TRACKED_PATH.to_owned()],
             },
             || fs::remove_file(&initial_blob_path).expect("captured live blob removes"),
+            || {},
         )
         .expect_err("missing captured object rejects index publication");
     let observed_index = Repository::open(fixture.root())
@@ -1360,12 +1361,13 @@ fn stage_rejects_when_its_new_object_pack_disappears_before_publication() {
     let executor = fixture.executor();
 
     let failure = executor
-        .stage_with_pre_publish_hook(
+        .stage_with_publish_hooks(
             &repository,
             GitStageArguments {
                 paths: vec![TRACKED_PATH.to_owned()],
             },
             || remove_first_installed_pack(fixture.root()),
+            || {},
         )
         .expect_err("missing newly installed objects reject index publication");
     let observed_index = Repository::open(fixture.root())
