@@ -567,6 +567,7 @@ struct GoalFailureFixture<Pass, Probe> {
 /// releases its activated first turn before that turn finishes unsuccessfully.
 async fn goal_failure_block_after_success(
     ownership: signalbox_domain::SessionOwnership,
+    failure: Script,
 ) -> Result<
     GoalFailureFixture<
         impl signalbox_application::EligibilityPass<Error: ClassifyOperatorFailure + Send + 'static>
@@ -575,6 +576,12 @@ async fn goal_failure_block_after_success(
     >,
     Box<dyn Error>,
 > {
+    let runtime = match ownership {
+        signalbox_domain::SessionOwnership::Owned => {
+            ScriptedModel::following([goal_completion_script(), failure.clone(), failure])
+        }
+        signalbox_domain::SessionOwnership::Unmonitored => ScriptedModel::following([failure]),
+    };
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
@@ -611,16 +618,6 @@ async fn goal_failure_block_after_success(
     let restart_nudge = nudge.clone();
     let _ = nudge.nudge(session);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
-    let runtime = match ownership {
-        signalbox_domain::SessionOwnership::Owned => ScriptedModel::following([
-            goal_completion_script(),
-            goal_refusal_script(),
-            goal_refusal_script(),
-        ]),
-        signalbox_domain::SessionOwnership::Unmonitored => {
-            ScriptedModel::following([goal_refusal_script()])
-        }
-    };
     let provider =
         RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog(), None);
     let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
@@ -751,7 +748,11 @@ async fn s_goal_success_continues_and_unsuccessful_turn_blocks_without_retry()
         pool,
         goal,
         ..
-    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
+    } = goal_failure_block_after_success(
+        signalbox_domain::SessionOwnership::Owned,
+        goal_refusal_script(),
+    )
+    .await?;
     assert_execution_failure_blocked(&goal);
     pool.close().await;
     drop(container);
@@ -775,7 +776,11 @@ async fn repeated_reconciliation_resumes_a_blocked_goal_once() -> Result<(), Box
         operation_count,
         nudge,
         fatal,
-    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
+    } = goal_failure_block_after_success(
+        signalbox_domain::SessionOwnership::Owned,
+        goal_refusal_script(),
+    )
+    .await?;
     let session = goal.session();
     assert_execution_failure_blocked(&goal);
     // The two spawned resumptions and this test release recovery together.
@@ -862,7 +867,11 @@ async fn an_unmonitored_sessions_failure_block_schedules_no_resumption()
         pool,
         goal,
         ..
-    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    } = goal_failure_block_after_success(
+        signalbox_domain::SessionOwnership::Unmonitored,
+        goal_refusal_script(),
+    )
+    .await?;
     let GoalState::Blocked { need, .. } = goal.current().state() else {
         panic!("the unmonitored goal must be blocked");
     };
@@ -1121,7 +1130,11 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
         pool,
         goal,
         ..
-    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    } = goal_failure_block_after_success(
+        signalbox_domain::SessionOwnership::Unmonitored,
+        goal_refusal_script(),
+    )
+    .await?;
     let session = goal.session();
     adopt_session(&pool, session).await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
@@ -1144,6 +1157,112 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
     Ok(())
 }
 
+/// Reads the input durably queued by the last resumption event.
+async fn resumed_goal_input(pool: &PgPool, resumed: &Goal) -> Result<String, Box<dyn Error>> {
+    Ok(sqlx::query_scalar(
+        "SELECT part.text_value
+           FROM goal_turn AS turn
+           JOIN accepted_input_content_part AS part
+             ON part.accepted_input_id = turn.accepted_input_id
+          WHERE turn.session_id = $1 AND turn.source_event_ordinal = $2",
+    )
+    .bind(resumed.session().into_uuid())
+    .bind(rust_decimal::Decimal::from(
+        resumed
+            .events()
+            .last()
+            .expect("resumed event exists")
+            .ordinal()
+            .get(),
+    ))
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn automatic_resume_persists_strategy_guidance_for_a_chargeable_failure()
+-> Result<(), Box<dyn Error>> {
+    let GoalFailureFixture {
+        container: _container,
+        pool,
+        goal: blocked,
+        ..
+    } = goal_failure_block_after_success(
+        signalbox_domain::SessionOwnership::Unmonitored,
+        goal_refusal_script(),
+    )
+    .await?;
+    let session = blocked.session();
+    adopt_session(&pool, session).await?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
+    let (nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
+    )
+    .arm_blocked_goal_resumption(session);
+
+    let resumed = resumed_goal(&pool, session).await?;
+    let input = resumed_goal_input(&pool, &resumed).await?;
+
+    assert_eq!(
+        input,
+        "Continue pursuing the commissioned goal. The preceding turn failed to execute. Inspect the durable session state and choose a different safe approach before repeating the failed operation."
+    );
+    assert_ne!(input, blocked.current().statement().as_str());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn automatic_resume_preserves_the_statement_for_an_exempt_provider_failure()
+-> Result<(), Box<dyn Error>> {
+    let overloaded = Script::delivering(TerminalEvidence::ProviderError(
+        signalbox_model_runtime::ProviderErrorEvidence {
+            exchange: ExchangeFacts::default(),
+            reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
+            kind: signalbox_model_runtime::ProviderErrorKind::Overloaded,
+            non_acceptance_proven: false,
+            native: signalbox_model_runtime::NativeErrorFacts::default(),
+            usage: TokenUsage::unreported(),
+        },
+    ));
+    let GoalFailureFixture {
+        container: _container,
+        pool,
+        goal: blocked,
+        ..
+    } = goal_failure_block_after_success(
+        signalbox_domain::SessionOwnership::Unmonitored,
+        overloaded,
+    )
+    .await?;
+    let session = blocked.session();
+    adopt_session(&pool, session).await?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
+    let (nudge, _work_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge,
+        GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
+    )
+    .arm_blocked_goal_resumption(session);
+
+    let resumed = resumed_goal(&pool, session).await?;
+    let input = resumed_goal_input(&pool, &resumed).await?;
+
+    assert_eq!(input, blocked.current().statement().as_str());
+    pool.close().await;
+    Ok(())
+}
+
 /// Adoption durably changes the unmonitored block's effective need before
 /// the configured backoff elapses.
 #[tokio::test(flavor = "multi_thread")]
@@ -1154,7 +1273,11 @@ async fn adopting_a_blocked_goal_persists_its_scheduled_need() -> Result<(), Box
         pool,
         goal,
         ..
-    } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Unmonitored).await?;
+    } = goal_failure_block_after_success(
+        signalbox_domain::SessionOwnership::Unmonitored,
+        goal_refusal_script(),
+    )
+    .await?;
     let session = goal.session();
     adopt_session(&pool, session).await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
