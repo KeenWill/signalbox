@@ -693,6 +693,8 @@ pub enum ProcessTranscriptEntry {
         request: ToolRequestId,
         /// Exact provider-visible denial content.
         content: String,
+        /// Whether this denial already has its one permitted user override.
+        override_recorded: bool,
     },
     /// The turn ended before one tool request resolved ordinarily.
     ToolInadmissible {

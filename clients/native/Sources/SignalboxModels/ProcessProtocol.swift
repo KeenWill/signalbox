@@ -3529,7 +3529,7 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     approval: SignalboxTranscriptToolApproval?)
   case toolExecutionResult(
     toolRequestID: SignalboxCanonicalUUID, toolAttemptID: SignalboxCanonicalUUID, content: String)
-  case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String)
+  case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String, overrideRecorded: Bool)
   case toolInadmissible(toolRequestID: SignalboxCanonicalUUID, content: String)
   case toolClosed(
     toolRequestID: SignalboxCanonicalUUID, content: String, approvedBeforeClose: Bool
@@ -3693,12 +3693,13 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         )
       case "tool_denied":
         try tagged.rejectUnadmittedFields(
-          ["type", "tool_request_id", "content"],
+          ["type", "tool_request_id", "content", "override_recorded"],
           decoder: decoder
         )
         self = .toolDenied(
           toolRequestID: try decoder.decode("tool_request_id"),
-          content: try decoder.decode("content"))
+          content: try decoder.decode("content"),
+          overrideRecorded: try decoder.decode("override_recorded"))
       case "tool_inadmissible":
         try tagged.rejectUnadmittedFields(
           ["type", "tool_request_id", "content"],

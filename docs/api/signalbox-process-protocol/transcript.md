@@ -290,6 +290,7 @@ pub enum TranscriptEntry {
     ToolDenied {
         tool_request_id: CanonicalUuid,
         content: string::String,
+        override_recorded: bool,
     },
     ToolInadmissible {
         tool_request_id: CanonicalUuid,

@@ -1931,7 +1931,7 @@ extension SignalboxTranscriptEntry {
         .saturatedAdding(UInt(arguments.utf8.count))
         .saturatedAdding(approvalBytes)
     case .toolExecutionResult(_, _, let content),
-      .toolDenied(_, let content),
+      .toolDenied(_, let content, _),
       .toolInadmissible(_, let content),
       .toolClosed(_, let content, _):
       return UInt(content.utf8.count)

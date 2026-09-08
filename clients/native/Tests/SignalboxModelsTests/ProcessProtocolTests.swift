@@ -61,6 +61,32 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertNotNil(diagnostic)
   }
 
+  func testToolDenialDecodesRecordedOverrideEvidence() throws {
+    for overrideRecorded in [true, false] {
+      let entry = try SignalboxJSONCoding.decoder().decode(
+        SignalboxTranscriptEntry.self,
+        from: Data(
+          #"{"type":"tool_denied","tool_request_id":"\#(toolRequestID)","content":"denied","override_recorded":\#(overrideRecorded)}"#.utf8)
+      )
+      XCTAssertEqual(entry, .toolDenied(
+        toolRequestID: try SignalboxCanonicalUUID(validating: toolRequestID),
+        content: "denied", overrideRecorded: overrideRecorded
+      ))
+    }
+  }
+
+  func testToolDenialRequiresRecordedOverrideEvidence() throws {
+    let entry = try SignalboxJSONCoding.decoder().decode(
+      SignalboxTranscriptEntry.self,
+      from: Data(
+        #"{"type":"tool_denied","tool_request_id":"\#(toolRequestID)","content":"denied"}"#.utf8)
+    )
+    guard case .unknown(_, _, let diagnostic) = entry else {
+      return XCTFail("A denial requires evidence of its recorded override.")
+    }
+    XCTAssertNotNil(diagnostic)
+  }
+
   func testToolInadmissibleDecodesItsRequestAndResult() throws {
     let content = "execution_failed: placement_lost"
     let entry = try SignalboxJSONCoding.decoder().decode(

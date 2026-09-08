@@ -2519,6 +2519,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
       return tool
     }
+    for tool in tools where tool.overrideRecorded == true {
+      if !retiredToolDenials.contains(tool.toolRequestID.rawValue) {
+        armedToolDenials.insert(tool.toolRequestID.rawValue)
+      }
+    }
     for denied in tools where armedToolDenials.contains(denied.toolRequestID.rawValue) {
       for later in tools {
         guard toolRetiresMatchingOverride(later),

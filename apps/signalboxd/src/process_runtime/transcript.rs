@@ -891,6 +891,7 @@ where
             .await
         }
         ProcessTranscriptEntry::ToolDenied {
+            override_recorded,
             entry_index,
             source_session,
             entry,
@@ -906,6 +907,7 @@ where
                     source_session_id: wire_uuid(source_session.into_uuid()),
                     entry_id: wire_uuid(entry.into_uuid()),
                     entry: TranscriptEntry::ToolDenied {
+                        override_recorded: *override_recorded,
                         tool_request_id: wire_uuid(request.into_uuid()),
                         content: content.clone(),
                     },

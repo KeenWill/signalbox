@@ -2906,6 +2906,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_denial_preserves_recorded_override_on_the_wire() -> Result<(), Box<dyn Error>> {
+        let request_id = RequestId::try_new(11)?;
+        let source_session = SessionId::from_uuid(Uuid::from_u128(1));
+        let entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(2));
+        let tool_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(3));
+        for override_recorded in [true, false] {
+            let (mut writer, mut reader) = duplex(4_096);
+            write_transcript_entry(
+                &mut writer,
+                ProtocolVersion::One,
+                request_id,
+                &ProcessTranscriptEntry::ToolDenied {
+                    entry_index: 0,
+                    source_session,
+                    entry,
+                    request: tool_request,
+                    content: String::from("denied"),
+                    override_recorded,
+                },
+            )
+            .await?;
+            drop(writer);
+            let mut encoded = Vec::new();
+            reader.read_to_end(&mut encoded).await?;
+            let frame = decode_server_line(&encoded)?;
+            assert!(matches!(
+                frame.message(),
+                ServerMessage::TranscriptEntry {
+                    entry: signalbox_process_protocol::TranscriptEntry::ToolDenied {
+                        override_recorded: actual,
+                        ..
+                    },
+                    ..
+                } if *actual == override_recorded
+            ), "recorded override {override_recorded} must survive wire projection");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn imported_entries_map_only_to_conservative_shapes() -> Result<(), Box<dyn Error>> {
         let request_id = RequestId::try_new(11)?;
         let source_session = SessionId::from_uuid(Uuid::from_u128(1));

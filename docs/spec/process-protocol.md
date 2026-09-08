@@ -293,7 +293,9 @@ tool attempt never becomes an execution result; it projects as `tool_closed`,
 carrying the tool request identity, closure content, and required Boolean
 `approved_before_close`, and omitting the attempt identity.
 `approved_before_close` is true exactly when the request had a recorded approval
-before closure; an undecided request closed by turn end carries false.
+before closure; an undecided request closed by turn end carries false. A
+`tool_denied` entry carries required Boolean `override_recorded`, true when that
+denial has its one permitted user override, including after retirement.
 `operator_action_required` is false while automatic recovery is scheduled or
 attempting and true only after the recovery budget in
 [turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md) is

@@ -905,6 +905,8 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact provider-visible denial content.
         content: String,
+        /// Whether this denial already has its one permitted user override.
+        override_recorded: bool,
     },
     /// One logical tool request resolved before dispatch.
     ToolInadmissible {

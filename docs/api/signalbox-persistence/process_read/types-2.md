@@ -120,6 +120,7 @@ pub enum ProcessTranscriptEntry {
         entry: signalbox_domain::SemanticTranscriptEntryId,
         request: signalbox_domain::ToolRequestId,
         content: string::String,
+        override_recorded: bool,
     },
     ToolInadmissible {
         entry_index: u64,

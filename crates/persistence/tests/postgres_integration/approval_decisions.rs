@@ -2533,10 +2533,52 @@ async fn override_command_replay_returns_the_recorded_receipt() -> Result<(), Bo
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf0));
     let override_command = OverrideDeniedToolRequest::try_new(command_id, fixture.session, request)
         .expect("the fixture command identity is admitted");
+    let before = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the terminal denial is readable before arming");
+    assert!(before.entries().iter().any(|entry| matches!(
+        entry,
+        ProcessTranscriptEntry::ToolDenied {
+            request: denied, override_recorded: false, ..
+        } if *denied == request
+    )));
     let applied = repository.override_denied(override_command.clone()).await?;
     assert!(matches!(
         applied.result(),
         OverrideDeniedToolRequestResult::Applied(_)
+    ));
+
+    let restored = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("a fresh reader restores the recorded override");
+    let denial_entry = restored
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            ProcessTranscriptEntry::ToolDenied {
+                source_session,
+                entry,
+                request: denied,
+                override_recorded: true,
+                ..
+            } if *denied == request => Some(SemanticTranscriptEntryRef::from_source(
+                *source_session,
+                *entry,
+            )),
+            _ => None,
+        })
+        .expect("the snapshot records the armed override on its denial");
+    let selected = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[denial_entry])
+        .await?;
+    assert!(matches!(
+        selected.as_ref(),
+        [ProcessTranscriptEntry::ToolDenied {
+            override_recorded: true,
+            ..
+        }]
     ));
 
     let replayed = repository.override_denied(override_command).await?;
@@ -2838,6 +2880,17 @@ async fn recorded_override_pre_approves_a_call_prepared_after_it() -> Result<(),
             denied_request: request,
         })
     );
+
+    let restored = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the consumed override remains visible to a fresh reader");
+    assert!(restored.entries().iter().any(|entry| matches!(
+        entry,
+        ProcessTranscriptEntry::ToolDenied {
+            request: denied, override_recorded: true, ..
+        } if *denied == request
+    )));
 
     let stored: (String, String, Uuid) = sqlx::query_as(
         "SELECT decision_kind, decision_source, override_denied_request_id

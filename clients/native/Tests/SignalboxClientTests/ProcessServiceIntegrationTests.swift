@@ -3126,6 +3126,86 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testReopenedViewRestoresRecordedOverrideWithoutResubmitting() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: true)
+    ))
+
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertFalse(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
+  func testServiceReplacementRestoresRecordedOverrideFromItsSnapshot() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let original = AmbiguousThenAcceptingToolDecisionProcessService()
+    let replacement = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { original }
+    await viewModel.connect()
+    let snapshot = try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: true)
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+    viewModel.replaceServiceProvider { replacement }
+    await viewModel.connect(replacingService: true)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submitted = await replacement.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
+  func testReopenedViewRestoresConsumedOverrideAsRetired() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    viewModel.apply(.authoritativeSnapshot(
+      try ProcessProjectionFixture.snapshotWithConsumedOverride(overrideRecorded: true)
+    ))
+
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
+  func testRecordedOverrideSnapshotDoesNotRearmAConsumedOverride() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    let snapshot = try ProcessProjectionFixture.snapshotWithDelegateDenial(overrideRecorded: true)
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+    viewModel.apply(.event(try ProcessProjectionFixture.overrideConsumptionEvent()))
+    viewModel.apply(.authoritativeSnapshot(snapshot))
+
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    XCTAssertTrue(viewModel.retiredToolDenials.contains(invocationID.rawValue))
+    await viewModel.overrideToolDenial(invocationID)
+    let submitted = await service.submittedCommandIDs
+    XCTAssertTrue(submitted.isEmpty)
+  }
+
+  @MainActor
   func testOverrideConsumptionEventRetiresArmedMarker() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -8614,7 +8694,7 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithConsumedOverride() throws -> SignalboxSynchronizationSnapshot {
+  static func snapshotWithConsumedOverride(overrideRecorded: Bool? = nil) throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithProposedTool(
       turnEvidence: [], usageEvidence: [],
       resultEntries: [
@@ -8643,7 +8723,12 @@ private enum ProcessProjectionFixture {
           }
         }
         """
-      ]
+      ] + (overrideRecorded.map { recorded in
+        [toolDeniedMessage(
+          index: 3, entryID: reconciliationClosedEntry, requestID: proposedToolRequest,
+          overrideRecorded: recorded
+        )]
+      } ?? [])
     )
   }
 
@@ -8656,6 +8741,7 @@ private enum ProcessProjectionFixture {
   ) throws -> SignalboxSynchronizationSnapshot {
     let encodedArguments = String(decoding: try JSONEncoder().encode(arguments), as: UTF8.self)
     return try snapshotWithProposedTool(
+      turnEvidence: [], usageEvidence: [],
       approvalMember:
         """
         ,"approval":{
@@ -8712,8 +8798,11 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithDelegateDenial() throws -> SignalboxSynchronizationSnapshot {
+  static func snapshotWithDelegateDenial(
+    overrideRecorded: Bool? = nil
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithProposedTool(
+      turnEvidence: [], usageEvidence: [],
       approvalMember:
         """
         ,"approval":{
@@ -8725,7 +8814,13 @@ private enum ProcessProjectionFixture {
           },
           "rationale":"\(delegateRationale)"
         }
-        """
+        """,
+      resultEntries: overrideRecorded.map { recorded in
+        [toolDeniedMessage(
+          index: 2, entryID: reconciliationClosedEntry, requestID: proposedToolRequest,
+          overrideRecorded: recorded
+        )]
+      } ?? []
     )
   }
 
@@ -11116,7 +11211,8 @@ private enum ProcessProjectionFixture {
   private static func toolDeniedMessage(
     index: UInt64,
     entryID: String,
-    requestID: String
+    requestID: String,
+    overrideRecorded: Bool = false
   ) -> String {
     """
     {
@@ -11126,6 +11222,7 @@ private enum ProcessProjectionFixture {
       "entry_id":"\(entryID)",
       "entry":{
         "type":"tool_denied",
+        "override_recorded":\(overrideRecorded),
         "tool_request_id":"\(requestID)",
         "content":"\(reconciliationDeniedOutput)"
       }

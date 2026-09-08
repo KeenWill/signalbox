@@ -694,3 +694,32 @@ fn tool_closure_distinguishes_approved_and_undecided_requests()
     }
     Ok(())
 }
+
+#[test]
+fn tool_denial_carries_required_recorded_override_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    for override_recorded in [false, true] {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(1),
+            entry_id: uuid(2),
+            entry: TranscriptEntry::ToolDenied {
+                tool_request_id: uuid(3),
+                content: String::from("denied"),
+                override_recorded,
+            },
+        };
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        let mut missing: serde_json::Value = serde_json::from_slice(&encoded)?;
+        missing["message"]["entry"]
+            .as_object_mut()
+            .expect("entry object")
+            .remove("override_recorded");
+        let mut missing = serde_json::to_vec(&missing)?;
+        missing.push(b'\n');
+        assert!(decode_server_line(&missing).is_err());
+    }
+    Ok(())
+}

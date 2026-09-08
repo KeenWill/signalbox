@@ -556,6 +556,7 @@ pub(super) fn decode_transcript_entry(
                 return Err(ProcessReadCorruption::Inconsistent("tool denial decision").into());
             }
             ProcessTranscriptEntry::ToolDenied {
+                override_recorded: row.try_get("transcript_override_recorded")?,
                 entry_index,
                 source_session,
                 entry,
