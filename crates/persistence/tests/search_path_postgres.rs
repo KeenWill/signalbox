@@ -21,7 +21,11 @@
 //! to its end rather than one hop deep. The lexical classifier recognizes
 //! quoted identifiers and comments between a function name and its opening
 //! parenthesis while excluding names inside comments and strings and bare
-//! aliases. The test also fails when discovery returns nothing: the schema's
+//! aliases, including explicit column aliases and CTE column lists. Strings
+//! use PostgreSQL's standard-conforming semantics unless prefixed with `E`.
+//! Dynamic SQL inside strings, Unicode escape identifiers, and non-ASCII
+//! unquoted identifiers are outside this lexical discovery's supported syntax.
+//! The test also fails when discovery returns nothing: the schema's
 //! check constraints do reach functions, so an empty set means the discovery
 //! query broke, not that nothing needs pinning.
 
@@ -216,33 +220,74 @@ fn restore_reachable_function_pins(
 }
 
 fn body_call_names(source: &str) -> BTreeSet<String> {
+    let tokens = body_tokens(source);
+    let cte_names = cte_name_positions(&tokens);
+    tokens
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, pair)| match pair {
+            [BodyToken::Identifier(name), BodyToken::Open]
+                if !cte_names.contains(&index)
+                    && !follows_relation_name(&tokens, index)
+                    && !matches!(
+                        index.checked_sub(1).map(|previous| &tokens[previous]),
+                        Some(BodyToken::As | BodyToken::Close)
+                    ) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Debug, PartialEq)]
+enum BodyToken {
+    Identifier(String),
+    With,
+    Recursive,
+    As,
+    Not,
+    Materialized,
+    From,
+    Join,
+    Dot,
+    Open,
+    Close,
+    Comma,
+    Other,
+}
+
+fn body_tokens(source: &str) -> Vec<BodyToken> {
     let bytes = source.as_bytes();
     let mut cursor = 0;
-    let mut preceding_identifier = None;
-    let mut calls = BTreeSet::new();
+    let mut tokens = Vec::new();
     while cursor < bytes.len() {
         cursor = skip_sql_trivia(bytes, cursor);
         if cursor >= bytes.len() {
             break;
         }
         match bytes[cursor] {
+            b'e' | b'E' if bytes.get(cursor + 1) == Some(&b'\'') => {
+                cursor = skip_single_quoted(bytes, cursor + 1, StringSyntax::Escape);
+                tokens.push(BodyToken::Other);
+            }
             b'\'' => {
-                cursor = skip_single_quoted(bytes, cursor);
-                preceding_identifier = None;
+                cursor = skip_single_quoted(bytes, cursor, StringSyntax::Standard);
+                tokens.push(BodyToken::Other);
             }
             b'$' => {
                 if let Some(after) = skip_dollar_quoted(source, cursor) {
                     cursor = after;
-                    preceding_identifier = None;
                 } else {
                     cursor += 1;
-                    preceding_identifier = None;
                 }
+                tokens.push(BodyToken::Other);
             }
             b'"' => {
                 let (identifier, after) = quoted_identifier(source, cursor);
                 cursor = after;
-                preceding_identifier = identifier;
+                tokens.push(identifier.map_or(BodyToken::Other, BodyToken::Identifier));
             }
             byte if is_identifier_start(byte) => {
                 let start = cursor;
@@ -250,21 +295,112 @@ fn body_call_names(source: &str) -> BTreeSet<String> {
                 while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
                     cursor += 1;
                 }
-                preceding_identifier = Some(source[start..cursor].to_ascii_lowercase());
+                let identifier = source[start..cursor].to_ascii_lowercase();
+                tokens.push(match identifier.as_str() {
+                    "with" => BodyToken::With,
+                    "recursive" => BodyToken::Recursive,
+                    "as" => BodyToken::As,
+                    "not" => BodyToken::Not,
+                    "materialized" => BodyToken::Materialized,
+                    "from" => BodyToken::From,
+                    "join" => BodyToken::Join,
+                    _ => BodyToken::Identifier(identifier),
+                });
             }
-            b'(' => {
-                if let Some(identifier) = preceding_identifier.take() {
-                    calls.insert(identifier);
-                }
+            punctuation @ (b'(' | b')' | b',' | b'.') => {
+                tokens.push(match punctuation {
+                    b'(' => BodyToken::Open,
+                    b')' => BodyToken::Close,
+                    b'.' => BodyToken::Dot,
+                    _ => BodyToken::Comma,
+                });
                 cursor += 1;
             }
             _ => {
                 cursor += 1;
-                preceding_identifier = None;
+                tokens.push(BodyToken::Other);
             }
         }
     }
-    calls
+    tokens
+}
+
+fn follows_relation_name(tokens: &[BodyToken], mut index: usize) -> bool {
+    while index > 0 && matches!(tokens[index - 1], BodyToken::Identifier(_)) {
+        index -= 1;
+        if index == 0 {
+            return false;
+        }
+        match tokens[index - 1] {
+            BodyToken::From | BodyToken::Join => return true,
+            BodyToken::Dot => index -= 1,
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn cte_name_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
+    let mut names = BTreeSet::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if *token != BodyToken::With {
+            continue;
+        }
+        let mut cursor = index + 1;
+        if tokens.get(cursor) == Some(&BodyToken::Recursive) {
+            cursor += 1;
+        }
+        while matches!(tokens.get(cursor), Some(BodyToken::Identifier(_))) {
+            let name = cursor;
+            cursor += 1;
+            if tokens.get(cursor) == Some(&BodyToken::Open) {
+                let Some(after) = after_parenthesized(tokens, cursor) else {
+                    break;
+                };
+                cursor = after;
+            }
+            if tokens.get(cursor) != Some(&BodyToken::As) {
+                break;
+            }
+            cursor += 1;
+            if tokens.get(cursor) == Some(&BodyToken::Not) {
+                cursor += 1;
+            }
+            if tokens.get(cursor) == Some(&BodyToken::Materialized) {
+                cursor += 1;
+            }
+            let Some(after) = after_parenthesized(tokens, cursor) else {
+                break;
+            };
+            names.insert(name);
+            cursor = after;
+            if tokens.get(cursor) != Some(&BodyToken::Comma) {
+                break;
+            }
+            cursor += 1;
+        }
+    }
+    names
+}
+
+fn after_parenthesized(tokens: &[BodyToken], start: usize) -> Option<usize> {
+    if tokens.get(start) != Some(&BodyToken::Open) {
+        return None;
+    }
+    let mut depth = 0;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match token {
+            BodyToken::Open => depth += 1,
+            BodyToken::Close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 const fn is_identifier_start(byte: u8) -> bool {
@@ -306,10 +442,15 @@ fn skip_sql_trivia(bytes: &[u8], mut cursor: usize) -> usize {
     }
 }
 
-fn skip_single_quoted(bytes: &[u8], mut cursor: usize) -> usize {
+enum StringSyntax {
+    Standard,
+    Escape,
+}
+
+fn skip_single_quoted(bytes: &[u8], mut cursor: usize, syntax: StringSyntax) -> usize {
     cursor += 1;
     while cursor < bytes.len() {
-        if bytes[cursor] == b'\\' {
+        if matches!(syntax, StringSyntax::Escape) && bytes[cursor] == b'\\' {
             cursor = (cursor + 2).min(bytes.len());
         } else if bytes[cursor] == b'\'' && bytes.get(cursor + 1) == Some(&b'\'') {
             cursor += 2;
@@ -519,4 +660,99 @@ fn call_shaped_name_inside_a_string_is_not_a_call_edge() {
 #[test]
 fn call_shaped_name_inside_a_dollar_quoted_string_is_not_a_call_edge() {
     assert!(body_call_names("SELECT $body$restore_probe_tail()$body$").is_empty());
+}
+
+#[test]
+fn standard_string_backslash_does_not_hide_following_calls() {
+    assert_eq!(
+        body_call_names(r"SELECT '\', restore_probe_tail()"),
+        BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
+    );
+}
+
+#[test]
+fn escape_strings_skip_escaped_quotes_without_inventing_calls() {
+    for source in [
+        r"SELECT E'it\'s restore_probe_head()', restore_probe_tail()",
+        r"SELECT e'it\'s restore_probe_head()', restore_probe_tail()",
+        r"SELECT E'\\', restore_probe_tail()",
+    ] {
+        assert_eq!(
+            body_call_names(source),
+            BTreeSet::from([String::from(RESTORE_PROBE_TAIL)]),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn doubled_standard_quotes_keep_call_shaped_string_content_hidden() {
+    assert_eq!(
+        body_call_names("SELECT 'it''s restore_probe_head()', restore_probe_tail()"),
+        BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
+    );
+}
+
+#[test]
+fn column_alias_lists_do_not_add_call_edges() {
+    for source in [
+        "SELECT * FROM restore_probe_tail() AS restore_probe_head(value)",
+        r#"SELECT * FROM restore_probe_tail() AS "restore_probe_head"(value)"#,
+        "SELECT * FROM restore_probe_tail() restore_probe_head(value)",
+        "SELECT * FROM (SELECT restore_probe_tail()) AS restore_probe_head(value)",
+    ] {
+        assert_eq!(
+            body_call_names(source),
+            BTreeSet::from([String::from(RESTORE_PROBE_TAIL)]),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn table_alias_column_lists_do_not_add_call_edges() {
+    for source in [
+        "SELECT restore_probe_tail() FROM records restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM public.records restore_probe_head(value)",
+        "SELECT restore_probe_tail() FROM records JOIN public.records restore_probe_head(value) ON true",
+    ] {
+        assert_eq!(
+            body_call_names(source),
+            BTreeSet::from([String::from(RESTORE_PROBE_TAIL)]),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn function_sources_remain_call_edges() {
+    assert_eq!(
+        body_call_names("SELECT * FROM public.restore_probe_tail()"),
+        BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
+    );
+}
+
+#[test]
+fn cte_column_lists_preserve_calls_inside_each_body() {
+    assert_eq!(
+        body_call_names(
+            "WITH RECURSIVE restore_probe_head(value) AS MATERIALIZED (
+                 SELECT restore_probe_tail()
+             ), restore_probe_middle(value) AS NOT MATERIALIZED (
+                 SELECT restore_probe_tail() FROM restore_probe_head
+             ) SELECT * FROM restore_probe_middle"
+        ),
+        BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
+    );
+}
+
+#[test]
+fn parenthesized_body_ends_after_nested_groups() {
+    let tokens = body_tokens("(value, (nested)) remaining");
+    assert_eq!(after_parenthesized(&tokens, 0), Some(7));
+}
+
+#[test]
+fn unterminated_parenthesized_body_has_no_end() {
+    assert_eq!(after_parenthesized(&body_tokens("(value"), 0), None);
 }
