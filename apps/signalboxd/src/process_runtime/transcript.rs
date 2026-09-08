@@ -1920,6 +1920,16 @@ pub(super) fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             )),
             operator_action_required: *operator_action_required,
         },
+        ProcessTurnState::ActiveAwaitingCredentialAvailability { wait } => {
+            TurnState::ActiveAwaitingCredentialAvailability {
+                wait_attempt_id: wire_uuid(wait.attempt().into_uuid()),
+                cause: match wait.cause() {
+                    signalbox_domain::CredentialAvailabilityWaitCause::Exhausted => {
+                        signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted
+                    }
+                },
+            }
+        }
         ProcessTurnState::ActiveAwaitingRunnerRecovery {
             runner,
             placement_revision,

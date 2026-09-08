@@ -490,35 +490,104 @@ async fn client_learns_the_exact_deployment_limits_over_the_connection()
 }
 
 #[test]
-fn learned_limits_enforce_finite_policy_and_admit_unbounded_policy() {
-    let finite = ClientDeploymentLimits {
+fn message_policy_rejects_above_finite_limit() {
+    let limits = ClientDeploymentLimits {
         max_message_utf8_bytes: Some(3),
-        max_system_prompt_utf8_bytes: Some(3),
-        min_metadata_page_size: Some(2),
-        max_metadata_page_size: Some(4),
-        max_review_findings_per_run: Some(2),
         ..ClientDeploymentLimits::unbounded()
     };
-    let system_prompt = SystemPromptText::try_new(String::from("four"))
-        .expect("fixture prompt is structurally valid");
+    assert!(validate_message_policy("four", Some(limits)).is_err());
+}
 
-    assert!(validate_message_policy("four", Some(finite)).is_err());
-    assert!(validate_system_prompt_policy(&system_prompt, Some(finite)).is_err());
-    assert!(validate_metadata_page_policy(CanonicalU64::new(1), Some(finite)).is_err());
-    assert!(validate_metadata_page_policy(CanonicalU64::new(5), Some(finite)).is_err());
-    assert!(validate_review_finding_count(3, Some(finite)).is_err());
-    assert!(validate_message_policy("four", Some(ClientDeploymentLimits::unbounded())).is_ok());
+#[test]
+fn message_policy_admits_unbounded_input() {
+    let limits = ClientDeploymentLimits::unbounded();
+    assert!(validate_message_policy("four", Some(limits)).is_ok());
+}
+
+#[test]
+fn system_prompt_policy_rejects_above_finite_limit() {
+    let limits = ClientDeploymentLimits {
+        max_system_prompt_utf8_bytes: Some(3),
+        ..ClientDeploymentLimits::unbounded()
+    };
     assert!(
-        validate_metadata_page_policy(
-            CanonicalU64::new(u64::MAX),
-            Some(ClientDeploymentLimits::unbounded()),
+        validate_system_prompt_policy(
+            &SystemPromptText::try_new(String::from("four")).expect("valid prompt"),
+            Some(limits)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn system_prompt_policy_admits_unbounded_input() {
+    let limits = ClientDeploymentLimits::unbounded();
+    assert!(
+        validate_system_prompt_policy(
+            &SystemPromptText::try_new(String::from("four")).expect("valid prompt"),
+            Some(limits)
         )
         .is_ok()
     );
+}
+
+#[test]
+fn finding_count_policy_rejects_above_finite_limit() {
+    let limits = ClientDeploymentLimits {
+        max_review_findings_per_run: Some(3),
+        ..ClientDeploymentLimits::unbounded()
+    };
+    assert!(validate_review_finding_count(4, Some(limits)).is_err());
+}
+
+#[test]
+fn finding_count_policy_admits_unbounded_input() {
+    let limits = ClientDeploymentLimits::unbounded();
+    assert!(validate_review_finding_count(4, Some(limits)).is_ok());
+}
+
+#[test]
+fn metadata_policy_rejects_outside_finite_range() {
+    let limits = ClientDeploymentLimits {
+        min_metadata_page_size: Some(2),
+        max_metadata_page_size: Some(4),
+        ..ClientDeploymentLimits::unbounded()
+    };
+    for size in [1, 5] {
+        assert!(validate_metadata_page_policy(CanonicalU64::new(size), Some(limits)).is_err());
+    }
+}
+
+#[test]
+fn metadata_policy_admits_positive_unbounded_pages() {
     assert!(
-        validate_review_finding_count(usize::MAX, Some(ClientDeploymentLimits::unbounded()))
-            .is_ok()
+        validate_metadata_page_policy(
+            CanonicalU64::new(u64::MAX),
+            Some(ClientDeploymentLimits::unbounded())
+        )
+        .is_ok()
     );
+}
+
+#[test]
+fn finding_inventory_cannot_exceed_the_storage_seal() {
+    let structural_maximum = signalbox_process_protocol::MAX_REVIEW_PRODUCED_FINDINGS;
+    for maximum in [None, Some(structural_maximum as u64 + 1)] {
+        let limits = ClientDeploymentLimits {
+            max_review_findings_per_run: maximum,
+            ..ClientDeploymentLimits::unbounded()
+        };
+        assert!(validate_review_finding_count(structural_maximum, Some(limits)).is_ok());
+        assert!(validate_review_finding_count(structural_maximum + 1, Some(limits)).is_err());
+    }
+}
+
+#[test]
+fn escaped_standard_input_is_rejected_before_request_preparation() {
+    for byte in [b'"', b'\\', 1] {
+        let input = vec![byte; MAX_INPUT_CONTENT_FRAME_BYTES / 2 + 1];
+        assert!(read_input(&mut Cursor::new(input)).is_err(), "byte {byte}");
+    }
 }
 
 fn client_arguments(socket: &Path, command: &[&str]) -> Vec<OsString> {
@@ -1083,6 +1152,19 @@ fn queued_send_fails_when_its_tool_recovery_blocker_requires_operator_action() {
         blocker_recovery_snapshot_state(&blocker),
         Err(ClientError::TurnRecoveryRequired)
     ));
+}
+
+#[test]
+fn credential_wait_keeps_send_and_queued_follow_nonterminal() {
+    let state = TurnState::ActiveAwaitingCredentialAvailability {
+        wait_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+        cause: signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted,
+    };
+    assert_eq!(
+        terminal_snapshot_state(Some(&state)).expect("credential wait is readable"),
+        None
+    );
+    assert!(blocker_recovery_snapshot_state(&state).is_ok());
 }
 
 #[test]
@@ -4057,7 +4139,60 @@ async fn review_list_rejects_terminal_count_before_writing_items() -> Result<(),
 }
 
 #[tokio::test]
-async fn review_list_rejects_an_over_bound_inventory_before_writing_items()
+async fn review_list_rejects_structural_overflow_without_waiting_for_the_end()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let count = signalbox_process_protocol::MAX_REVIEW_PRODUCED_FINDINGS as u64 + 1;
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        let request = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(
+            request.request(),
+            &ClientRequest::ListReviewFindings { run_id }
+        );
+        let response =
+            review_finding_items_response(&request, run_id, count).map_err(io::Error::other)?;
+        writer.write_all(&response).await?;
+        // Keep the connection open without an end marker until the client rejects it.
+        let _ = finished.await;
+        Ok::<(), io::Error>(())
+    });
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut output = Output::new(&mut stdout, &mut stderr, false);
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        review(
+            &mut client,
+            &mut output,
+            ReviewCommand::ListFindings { run_id },
+            None,
+        ),
+    )
+    .await?
+    .expect_err("the shared structural limit must reject an unterminated oversized list");
+    assert_eq!(
+        error.to_string(),
+        "the server violated the process protocol: review finding list exceeded its structural count limit"
+    );
+    assert!(stdout.is_empty());
+    assert!(stderr.is_empty());
+    let _ = done.send(());
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn review_list_remains_readable_after_admission_limit_is_lowered()
 -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("client.sock");
@@ -4074,9 +4209,18 @@ async fn review_list_rejects_an_over_bound_inventory_before_writing_items()
             request.request(),
             &ClientRequest::ListReviewFindings { run_id }
         );
-        let response =
-            over_bound_review_findings_response(&request, run_id, REVIEW_FINDING_LIMIT_FIXTURE)
-                .map_err(io::Error::other)?;
+        let count = REVIEW_FINDING_LIMIT_FIXTURE + 1;
+        let mut response =
+            review_finding_items_response(&request, run_id, count).map_err(io::Error::other)?;
+        let end = ServerFrame::try_new_for_version(
+            request.version(),
+            request.request_id(),
+            ServerMessage::ReviewFindingsEnd {
+                finding_count: CanonicalU64::new(count),
+            },
+        )
+        .map_err(io::Error::other)?;
+        response.extend_from_slice(&encode_server_line(&end).map_err(io::Error::other)?);
         writer.write_all(&response).await?;
         Ok::<(), io::Error>(())
     });
@@ -4085,7 +4229,7 @@ async fn review_list_rejects_an_over_bound_inventory_before_writing_items()
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut output = Output::new(&mut stdout, &mut stderr, false);
-    let error = review(
+    review(
         &mut client,
         &mut output,
         ReviewCommand::ListFindings { run_id },
@@ -4094,14 +4238,9 @@ async fn review_list_rejects_an_over_bound_inventory_before_writing_items()
             ..ClientDeploymentLimits::unbounded()
         }),
     )
-    .await
-    .expect_err("the over-bound finding inventory must be rejected");
+    .await?;
 
-    assert_eq!(
-        error.to_string(),
-        "the server violated the process protocol: review finding list exceeded its admitted bound"
-    );
-    assert!(stdout.is_empty());
+    assert!(!stdout.is_empty());
     assert!(stderr.is_empty());
     server.await??;
     Ok(())
@@ -5346,10 +5485,10 @@ async fn delegation_message_rejects_self_peer() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn over_bound_review_findings_response(
+fn review_finding_items_response(
     request: &ClientFrame,
     run_id: CanonicalUuid,
-    maximum: u64,
+    count: u64,
 ) -> Result<Vec<u8>, FrameEncodeError> {
     const FIRST_FINDING_IDENTITY: u128 = 10;
 
@@ -5357,7 +5496,7 @@ fn over_bound_review_findings_response(
         ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
     };
     let mut response = encode_server_line(&frame(ServerMessage::ReviewFindingsStart { run_id })?)?;
-    for offset in 0..=maximum {
+    for offset in 0..count {
         let finding_id =
             CanonicalUuid::from_uuid(Uuid::from_u128(FIRST_FINDING_IDENTITY + u128::from(offset)));
         let finding = ReviewFindingSnapshot {
@@ -5370,8 +5509,8 @@ fn over_bound_review_findings_response(
                 line_start: None,
                 line_end: None,
                 diff_side: None,
-                title: String::from("Bound the list"),
-                body: String::from("The client must reject an over-bound inventory."),
+                title: String::from("Read the durable finding"),
+                body: String::from("Admission policy does not invalidate stored findings."),
                 severity: ReviewSeverity::High,
                 is_real_confidence: CanonicalU64::new(9_000),
                 severity_label_confidence: CanonicalU64::new(8_500),
@@ -5385,11 +5524,6 @@ fn over_bound_review_findings_response(
             ServerMessage::ReviewFindingItem { finding },
         )?)?);
     }
-    response.extend_from_slice(&encode_server_line(&frame(
-        ServerMessage::ReviewFindingsEnd {
-            finding_count: CanonicalU64::new(maximum + 1),
-        },
-    )?)?);
     Ok(response)
 }
 

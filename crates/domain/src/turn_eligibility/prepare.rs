@@ -85,7 +85,8 @@ pub(super) fn prepare_active_turn_lost_failure(
             ActiveTurnPhase::AwaitingApproval { .. }
             | ActiveTurnPhase::AwaitingChild { .. }
             | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-            | ActiveTurnPhase::AwaitingRunnerRecovery { .. },
+            | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+            | ActiveTurnPhase::AwaitingCredentialAvailability { .. },
         )
         | None => {
             return Err(fail(

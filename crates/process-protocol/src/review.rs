@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CanonicalDigest, CanonicalU64, CanonicalUuid, deserialize_required_nullable};
 
+/// Maximum findings in one produced review inventory, owned by the domain.
+pub const MAX_REVIEW_PRODUCED_FINDINGS: usize = signalbox_domain::ReviewProducedFindings::MAXIMUM;
+
 /// One closed review target subject at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
