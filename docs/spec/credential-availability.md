@@ -197,7 +197,10 @@ wait attempt and closed cause. Transcript reads and initial follow snapshots
 retain the active turn and its slot without rejection detail. Release admission,
 call preparation, and send authorization use the wait's retained effective
 target with its retained policy; a missing current selection leaves the wait
-unconsumed. Parking retains the exclusions that selected the wait.
+unconsumed. Release pins a pre-call wait's retained target on its turn, and
+domain call preparation retains that pin across catalog reloads. The rendered
+provider operation uses that retained target. Parking retains the exclusions
+that selected the wait.
 
 ## Planned
 

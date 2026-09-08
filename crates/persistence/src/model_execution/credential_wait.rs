@@ -185,6 +185,36 @@ pub(super) async fn retain_serving_target<'a>(
     Ok(serving)
 }
 
+pub(super) async fn retain_target_catalog(
+    connection: &mut PgConnection,
+    turn: TurnId,
+    selection: signalbox_domain::FrozenModelSelection,
+    targets: &ModelTargetCatalog,
+) -> Result<ModelTargetCatalog, ModelCallRepositoryError> {
+    let target: Option<Uuid> = sqlx::query_scalar(
+        "SELECT pinned_provider_model_identity_id FROM turn_lifecycle
+         WHERE turn_id = $1 AND pinned_provider_model_identity_id IS NOT NULL
+           AND EXISTS (SELECT 1 FROM credential_availability_wait WHERE turn_id = $1)",
+    )
+    .bind(turn.into_uuid())
+    .fetch_optional(connection)
+    .await?;
+    let Some(target) = target else {
+        return Ok(targets.clone());
+    };
+    let direct = match selection {
+        signalbox_domain::FrozenModelSelection::Direct(direct) => direct,
+        signalbox_domain::FrozenModelSelection::FrozenAlias { definition, .. } => {
+            definition.selected()
+        }
+    };
+    ModelTargetCatalog::try_from_definitions([signalbox_domain::ModelTargetDefinition::new(
+        direct,
+        ResolvedProviderTarget::naming(signalbox_domain::ProviderModelIdentity::from_uuid(target)),
+    )])
+    .map_err(|_| ModelCallCorruption::Inconsistent("credential wait target catalog").into())
+}
+
 pub(super) async fn prepare_release(
     connection: &mut PgConnection,
     repository: &PostgresModelCallRepository,
@@ -319,6 +349,8 @@ async fn consume_wait(
         .bind(wait.attempt().into_uuid()).bind(successor.into_uuid()).execute(&mut *connection).await?;
     sqlx::query("UPDATE turn_lifecycle SET active_phase_kind = 'running', current_attempt_id = $2 WHERE turn_id = $1")
         .bind(turn.into_uuid()).bind(successor.into_uuid()).execute(&mut *connection).await?;
+    sqlx::query("UPDATE turn_lifecycle AS turn SET pinned_provider_model_identity_id = waiting.effective_target_id FROM credential_availability_wait AS waiting WHERE turn.turn_id = $1 AND waiting.wait_attempt_id = $2 AND turn.pinned_provider_model_identity_id IS NULL")
+        .bind(turn.into_uuid()).bind(wait.attempt().into_uuid()).execute(&mut *connection).await?;
     Ok(())
 }
 

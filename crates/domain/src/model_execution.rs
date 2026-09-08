@@ -201,7 +201,7 @@ impl ModelCallExecutionReconstitutionInput {
     }
 
     /// Supplies durable proof that a call-free pinned attempt is the distinct
-    /// successor of an availability-failed predecessor.
+    /// successor of an availability-failed predecessor or a durable credential wait.
     pub fn with_availability_successor(mut self) -> Self {
         self.availability_successor = true;
         self
