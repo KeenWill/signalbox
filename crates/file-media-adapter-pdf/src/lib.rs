@@ -1201,7 +1201,7 @@ fn charge_font_decoding(
         if let Ok(stream) = font
             .get_deref(b"ToUnicode", document)
             .and_then(Object::as_stream)
-            && !charge_cmap_decoding(stream, remaining)?
+            && !charge_cmap_decoding(stream, remaining)
         {
             return Ok(false);
         }
@@ -1209,17 +1209,14 @@ fn charge_font_decoding(
     Ok(true)
 }
 
-fn charge_cmap_decoding(
-    stream: &Stream,
-    remaining: &mut usize,
-) -> Result<bool, FileMediaProviderFailure> {
+fn charge_cmap_decoding(stream: &Stream, remaining: &mut usize) -> bool {
     let filters = stream.filters().unwrap_or_default();
     if filters.is_empty() {
         if stream.content.len() > MAX_DECOMPRESSED_PAGE_BYTES.min(*remaining) {
-            return Ok(false);
+            return false;
         }
         *remaining -= stream.content.len();
-        return Ok(true);
+        return true;
     }
     let mut decoder = stream.clone();
     for filter in filters {
@@ -1229,12 +1226,13 @@ fn charge_cmap_decoding(
                 *remaining -= decoded.len();
                 decoder.set_content(decoded);
             }
-            Err(LopdfError::Unimplemented(_)) => return Ok(true),
-            Err(LopdfError::Decompress(_)) => return Ok(false),
-            Err(_) => return Err(FileMediaProviderFailure::Failed),
+            Err(LopdfError::Decompress(lopdf::DecompressError::MemoryLimitExceeded { .. })) => {
+                return false;
+            }
+            Err(_) => return true,
         }
     }
-    Ok(true)
+    true
 }
 
 // Match the encoding-resolution paths that decode ToUnicode in lopdf.
@@ -5364,6 +5362,28 @@ endobj",
         );
         assert!(matches!(
             read_text(&document, &pages, &ActiveSignal).expect("unsupported CMap is not fatal"),
+            ProcessorReadOutput::Text { body, .. } if body.contains("visible")
+        ));
+    }
+
+    #[test]
+    fn malformed_ascii85_cmap_uses_standard_encoding_fallback() {
+        let (mut document, pages) =
+            repeated_content_pages(b"BT /F1 12 Tf (visible) Tj ET".to_vec(), 1);
+        let cmap = document.add_object(Stream::new(
+            dictionary! { "Filter" => "ASCII85Decode" },
+            b"uuuuu~>".to_vec(),
+        ));
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type0", "Encoding" => "Identity-H",
+            "ToUnicode" => cmap,
+        });
+        document.get_dictionary_mut(pages[0].1).expect("page").set(
+            "Resources",
+            dictionary! { "Font" => dictionary! { "F1" => font } },
+        );
+        assert!(matches!(
+            read_text(&document, &pages, &ActiveSignal).expect("invalid CMap falls back"),
             ProcessorReadOutput::Text { body, .. } if body.contains("visible")
         ));
     }
