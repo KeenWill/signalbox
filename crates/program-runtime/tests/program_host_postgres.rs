@@ -760,13 +760,16 @@ async fn registration_fixture(
     use signalbox_persistence::program_registration::ProgramRegistrationRepository;
     let repository = ProgramRegistrationRepository::new(pool.clone());
     let registration = repository
-        .register_user(ProgramRegistrationRequest {
-            name: Uuid::now_v7().to_string(),
-            revision: "fixture-revision".into(),
-            source: artifact.as_bytes().to_vec(),
-            artifact: artifact.into(),
-            grants,
-        })
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            ProgramRegistrationRequest {
+                name: Uuid::now_v7().to_string(),
+                revision: "fixture-revision".into(),
+                source: artifact.as_bytes().to_vec(),
+                artifact: artifact.into(),
+                grants,
+            },
+        )
         .await?;
     Ok(repository
         .start_run(

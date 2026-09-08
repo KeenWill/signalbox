@@ -10,6 +10,9 @@ pub enum ProgramRegistrationError {
         source: error::Error,
         commit_ambiguous: bool,
     },
+    RegistrationConflict {
+        registration: signalbox_domain::ProgramRegistrationId,
+    },
     RunConflict {
         run: signalbox_domain::ProgramRunId,
     },
@@ -38,6 +41,7 @@ impl program_registration::ProgramRegistrationRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub async fn register_user(
         &self,
+        registration: signalbox_domain::ProgramRegistrationId,
         request: signalbox_domain::program_registration::ProgramRegistrationRequest,
     ) -> result::Result<
         signalbox_domain::program_registration::ProgramRegistration,
@@ -46,6 +50,7 @@ impl program_registration::ProgramRegistrationRepository {
     pub async fn register_child(
         &self,
         registrant: signalbox_domain::ProgramRunId,
+        registration: signalbox_domain::ProgramRegistrationId,
         request: signalbox_domain::program_registration::ProgramRegistrationRequest,
     ) -> result::Result<
         signalbox_domain::program_registration::ProgramRegistration,
