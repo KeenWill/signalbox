@@ -589,6 +589,7 @@ const readBoundedJson = async (
 ): Promise<unknown> => {
   const declaredLength = Number(response.headers.get('content-length'))
   if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    await response.body?.cancel()
     throw new Error('response exceeded the product JSON byte limit')
   }
 
