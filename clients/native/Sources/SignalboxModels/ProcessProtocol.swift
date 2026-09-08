@@ -3187,14 +3187,7 @@ extension SignalboxTranscriptTurnState {
     default:
       return false
     }
-    switch provenance {
-    case .parentTurnCommand(_, _, _, .parentAndDescendants),
-      .parentGoalCommand(_, _, _, .parentAndDescendants),
-      .parentLifecycleCommand(_, _, .parentAndDescendants):
-      return true
-    case .childTurn, .parentTurnCommand, .parentGoalCommand, .parentLifecycleCommand:
-      return false
-    }
+    return provenance.hasDelegationCascade
   }
 }
 
@@ -3738,14 +3731,7 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
       (.stopped, .parentCancelled, let provenance, .none),
       (.cancelled, .parentStopped, let provenance, .none),
       (.cancelled, .parentCancelled, let provenance, .none):
-      switch provenance {
-      case .parentTurnCommand(_, _, _, .parentAndDescendants),
-        .parentGoalCommand(_, _, _, .parentAndDescendants),
-      .parentLifecycleCommand(_, _, .parentAndDescendants):
-        return true
-      case .childTurn, .parentTurnCommand, .parentGoalCommand, .parentLifecycleCommand:
-        return false
-      }
+      return provenance.hasDelegationCascade
     default:
       return false
     }
@@ -5368,8 +5354,9 @@ extension SignalboxDelegationProvenance {
   fileprivate var hasDelegationCascade: Bool {
     switch self {
     case .parentTurnCommand(_, _, _, .parentAndDescendants),
-      .parentGoalCommand(_, _, _, .parentAndDescendants),
       .parentLifecycleCommand(_, _, .parentAndDescendants): return true
+    case .parentGoalCommand(_, let generation, _, .parentAndDescendants):
+      return generation.rawValue > 0
     default: return false
     }
   }

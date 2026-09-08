@@ -79,6 +79,21 @@ final class DelegationEventTests: XCTestCase {
     XCTAssertThrowsError(try decode(event.replacingOccurrences(of: "parent_and_descendants", with: "parent_alone")))
   }
 
+  func testGoalCommandCascadesRequireAPositiveGeneration() throws {
+    for kind in ["child_result", "child_lifecycle_disposition"] {
+      let content = kind == "child_result" ? #","content":null"# : ""
+      func event(generation: UInt64) -> String {
+        #"{"type":"\#(kind)","spawning_request_id":"\#(request)","child_session_id":"\#(child)","outcome":"cancelled"\#(content),"reason":"parent_cancelled","provenance":{"type":"parent_goal_command","parent_session_id":"\#(parent)","goal_generation":"\#(generation)","command_id":"\#(request)","descendant_scope":"parent_and_descendants"}}"#
+      }
+      XCTAssertThrowsError(try decode(event(generation: 0)))
+      XCTAssertNoThrow(try decode(event(generation: 1)))
+      if kind == "child_lifecycle_disposition" {
+        XCTAssertThrowsError(try decode(event(generation: 0), recipient: child))
+        XCTAssertNoThrow(try decode(event(generation: 1), recipient: child))
+      }
+    }
+  }
+
   private var lifecycleProvenance: String {
     #"{"type":"parent_lifecycle_command","parent_session_id":"\#(parent)","command_id":"\#(request)","descendant_scope":"parent_and_descendants"}"#
   }
