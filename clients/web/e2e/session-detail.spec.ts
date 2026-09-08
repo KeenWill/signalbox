@@ -127,7 +127,8 @@ test('opens tool arguments and follows the typed result continuation', async ({ 
   expect(reads.at(-1)?.searchParams.get('cursor_member')).toBe('0')
   await expect(page.getByRole('region', { name: 'Tool arguments' })).toHaveCount(0)
   await expect(toolRow(page)).toContainText('Tool result')
-  await page.getByRole('button', { name: 'Return to event' }).click()
+  await expect(page.getByRole('button', { name: 'Return to event' })).toBeFocused()
+  await page.keyboard.press('Enter')
   await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeFocused()
 })
 

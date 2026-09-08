@@ -562,38 +562,37 @@ export function SessionItemDetail({
       ),
     gcTime: 0,
   })
-  if (detail.isError) return <p role="alert">Detail unavailable: {detail.error.message}</p>
-  if (!detail.data) return <p role="status">Loading typed detail…</p>
-  const record = detail.data.items[0]
-  if (!record || record.kind !== item.kind || !isCompatibleDetailBody(record.kind, record.body))
-    return (
+  const record = detail.data?.items[0]
+  const compatible =
+    record && record.kind === item.kind && isCompatibleDetailBody(record.kind, record.body)
+  const continuation = compatible ? detail.data?.continuation : null
+  let content: ReactNode
+  if (detail.isError) content = <p role="alert">Detail unavailable: {detail.error.message}</p>
+  else if (!detail.data) content = <p role="status">Loading typed detail…</p>
+  else if (!compatible)
+    content = (
       <p role="alert">
         Detail rejected because its event kind or body did not match the selected header.
       </p>
     )
+  else content = detailContent(record.body)
   return (
     <article aria-label={`${item.kind.replaceAll('_', ' ')} detail`}>
-      {detailContent(record.body)}
-      {detail.data.continuation ? (
+      {content}
+      {continuation || cursor ? (
         <button
           type="button"
+          aria-disabled={detail.isPending || undefined}
           onClick={(event) => {
             event.stopPropagation()
-            previous.current = detail.data
-            setCursor(detail.data.continuation)
+            if (detail.isPending) return
+            if (continuation) {
+              previous.current = detail.data
+              setCursor(continuation)
+            } else onComplete()
           }}
         >
-          Load next detail chunk
-        </button>
-      ) : cursor ? (
-        <button
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation()
-            onComplete()
-          }}
-        >
-          Return to event
+          {detail.isPending || continuation ? 'Load next detail chunk' : 'Return to event'}
         </button>
       ) : null}
     </article>
