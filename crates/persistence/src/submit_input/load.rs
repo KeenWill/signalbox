@@ -117,6 +117,7 @@ pub(super) async fn load_complete_rows(
             typed.result_last_position,
             typed.result_existing_interrupt_command_id,
             typed.result_attachment_digest,
+            typed.result_attachment_verified_prefix,
             typed.result_attachment_maximum_bytes,
             accepted.accepting_command_id,
             accepted.accepted_input_id,
