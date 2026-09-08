@@ -349,11 +349,27 @@ pub(super) async fn load_provider_reasoning_provenance(
 pub(super) async fn load_tool_conversation_entries(
     connection: &mut PgConnection,
     request: &PreparedModelCallRequest,
-) -> Result<Box<[ResolvedToolConversationEntry]>, ModelCallRepositoryError> {
+) -> Result<Option<Box<[ResolvedToolConversationEntry]>>, ModelCallRepositoryError> {
+    let projection = signalbox_domain::ContextFrontierProjection::from_complete_entries(
+        request.frontier_entry_slice(),
+    )
+    .map_err(|_| ModelCallCorruption::Inconsistent("prepared frontier projection"))?;
+    let container_bytes = projection
+        .ordered_entries()
+        .count()
+        .saturating_mul(std::mem::size_of::<ResolvedToolConversationEntry>());
+    let limit_bytes = signalbox_application::MAX_RETAINED_FRONTIER_CONTENT_BYTES;
+    if container_bytes > limit_bytes {
+        return Ok(None);
+    }
+    let projected = projection.ordered_entries().collect::<BTreeSet<_>>();
     let mut request_ids = BTreeSet::new();
     let mut attempt_ids = BTreeSet::new();
     let mut approval_ids = BTreeSet::new();
-    for entry in request.frontier_entries() {
+    for entry in request
+        .frontier_entries()
+        .filter(|entry| projected.contains(&entry.reference()))
+    {
         match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. }
             | SemanticTranscriptEntryPayload::ToolInadmissible { request }
@@ -384,6 +400,30 @@ pub(super) async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
     }
+    if request_ids.is_empty() && attempt_ids.is_empty() {
+        return Ok(Some(Box::new([])));
+    }
+    if !tool_evidence_fits_before_loading(
+        connection,
+        &request_ids
+            .iter()
+            .map(|id: &signalbox_domain::ToolRequestId| id.into_uuid())
+            .collect::<Vec<_>>(),
+        &attempt_ids
+            .iter()
+            .map(|id: &signalbox_domain::ToolAttemptId| id.into_uuid())
+            .collect::<Vec<_>>(),
+        &approval_ids
+            .iter()
+            .map(|id: &signalbox_domain::ToolRequestId| id.into_uuid())
+            .collect::<Vec<_>>(),
+        container_bytes,
+        limit_bytes,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
     let attempts = crate::tool_loop::load_attempts_by_id(
         connection,
         &attempt_ids.iter().copied().collect::<Vec<_>>(),
@@ -411,7 +451,10 @@ pub(super) async fn load_tool_conversation_entries(
     .map_err(map_tool_evidence_error)?;
 
     let mut resolved = Vec::new();
-    for entry in request.frontier_entries() {
+    for entry in request
+        .frontier_entries()
+        .filter(|entry| projected.contains(&entry.reference()))
+    {
         let source = entry.reference();
         match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse {
@@ -496,7 +539,41 @@ pub(super) async fn load_tool_conversation_entries(
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
     }
-    Ok(resolved.into_boxed_slice())
+    Ok(Some(resolved.into_boxed_slice()))
+}
+
+async fn tool_evidence_fits_before_loading(
+    connection: &mut PgConnection,
+    requests: &[Uuid],
+    attempts: &[Uuid],
+    approvals: &[Uuid],
+    container_bytes: usize,
+    limit_bytes: usize,
+) -> Result<bool, ModelCallRepositoryError> {
+    let content_bytes: Decimal = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(bytes), 0) FROM (
+            SELECT octet_length(tool_name)::bigint + octet_length(arguments_text)
+                   + COALESCE(octet_length(inadmissible_reason), 0) AS bytes
+              FROM tool_request
+             WHERE request_id = ANY($1)
+                OR request_id IN (SELECT request_id FROM tool_attempt WHERE attempt_id = ANY($2))
+            UNION ALL
+            SELECT COALESCE(octet_length(result_text), 0)::bigint
+                   + COALESCE(octet_length(error_detail), 0)
+              FROM tool_attempt WHERE attempt_id = ANY($2)
+            UNION ALL
+            SELECT COALESCE(octet_length(denial_reason), 0)::bigint
+                   + COALESCE(octet_length(rationale), 0)
+              FROM tool_approval_decision WHERE request_id = ANY($3)
+        ) AS retained",
+    )
+    .bind(requests)
+    .bind(attempts)
+    .bind(approvals)
+    .fetch_one(connection)
+    .await?;
+    let content_bytes = usize::try_from(content_bytes).unwrap_or(usize::MAX);
+    Ok(container_bytes.saturating_add(content_bytes) <= limit_bytes)
 }
 
 pub(super) fn map_tool_evidence_error(
@@ -729,4 +806,99 @@ pub(super) async fn load_frozen_epoch_system_prompt(
             .map_err(|_| ModelCallCorruption::Inconsistent("system prompt admission").into())
     })
     .transpose()
+}
+
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "../../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+
+#[cfg(all(test, feature = "postgres-integration"))]
+mod preflight_tests {
+    use super::*;
+    use testcontainers_modules::{
+        postgres::Postgres,
+        testcontainers::{ImageExt, runners::AsyncRunner},
+    };
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn tool_evidence_preflight_counts_utf8_and_indirect_requests_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let container = Postgres::default()
+            .with_tag(super::postgres_test_image::POSTGRES_IMAGE_TAG)
+            .with_cmd(crate::disposable_postgres_server_args())
+            .with_mount(crate::disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(crate::disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(crate::local_test_connection_options(&url)?)
+            .await?;
+        let mut connection = pool.acquire().await?;
+        sqlx::raw_sql(
+            "CREATE TEMP TABLE tool_request (request_id uuid, tool_name text, arguments_text text, inadmissible_reason text);
+             CREATE TEMP TABLE tool_attempt (attempt_id uuid, request_id uuid, result_text text, error_detail text);
+             CREATE TEMP TABLE tool_approval_decision (request_id uuid, denial_reason text, rationale text);",
+        ).execute(&mut *connection).await?;
+        let request = Uuid::from_u128(1);
+        let unrelated = Uuid::from_u128(2);
+        let attempt = Uuid::from_u128(3);
+        sqlx::query(r#"INSERT INTO tool_request VALUES ($1, 't', '{"x":"☃"}', NULL), ($2, 'unrelated', '{"x":"' || repeat('x', 1000) || '"}', NULL)"#)
+            .bind(request).bind(unrelated).execute(&mut *connection).await?;
+        sqlx::query("INSERT INTO tool_attempt VALUES ($1, $2, '🦀', NULL)")
+            .bind(attempt)
+            .bind(request)
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("INSERT INTO tool_approval_decision VALUES ($1, 'é', 'a')")
+            .bind(request)
+            .execute(&mut *connection)
+            .await?;
+        // One-byte name, eleven-byte JSON argument, four-byte result and three-byte approval.
+        for direct_requests in [Vec::new(), vec![request]] {
+            assert!(
+                tool_evidence_fits_before_loading(
+                    &mut connection,
+                    &direct_requests,
+                    &[attempt],
+                    &[request],
+                    0,
+                    19
+                )
+                .await?
+            );
+            assert!(
+                !tool_evidence_fits_before_loading(
+                    &mut connection,
+                    &direct_requests,
+                    &[attempt],
+                    &[request],
+                    0,
+                    18
+                )
+                .await?
+            );
+            assert!(
+                !tool_evidence_fits_before_loading(
+                    &mut connection,
+                    &direct_requests,
+                    &[attempt],
+                    &[request],
+                    1,
+                    19
+                )
+                .await?
+            );
+        }
+        drop(connection);
+        pool.close().await;
+        drop(container);
+        Ok(())
+    }
 }

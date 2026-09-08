@@ -2,6 +2,12 @@
 
 # model_execution
 
+## MAX_RETAINED_FRONTIER_CONTENT_BYTES
+
+```rust
+pub const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize;
+```
+
 ## ModelCallCredentialReference
 
 ```rust
@@ -280,6 +286,10 @@ pub enum PrepareModelCallOutcome {
     RetryBackoff(time::Duration),
     PoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
     Checkpointed(signalbox_domain::ModelCallId),
+    RetainedContentLimitExceeded {
+        turn: signalbox_domain::TurnId,
+        call: signalbox_domain::ModelCallId,
+    },
     Ready {
         request: boxed::Box<signalbox_domain::PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,

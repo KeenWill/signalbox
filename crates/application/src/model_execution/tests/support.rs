@@ -222,6 +222,15 @@ pub(super) fn failed_turn_fixture() -> FailedModelCallTurn {
 }
 
 pub(super) fn prepared_execution_fixture() -> signalbox_domain::ModelCallExecution {
+    prepared_execution_with_content_fixture(
+        UserContent::try_text(String::from("exact user request"))
+            .expect("fixture content is valid"),
+    )
+}
+
+pub(super) fn prepared_execution_with_content_fixture(
+    content: UserContent,
+) -> signalbox_domain::ModelCallExecution {
     let session_id = identity(1, SessionId::from_uuid);
     let direct = identity(2, DirectModelSelection::from_uuid);
     let accepted_input = identity(3, AcceptedInputId::from_uuid);
@@ -254,8 +263,6 @@ pub(super) fn prepared_execution_fixture() -> signalbox_domain::ModelCallExecuti
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
         configuration: choices,
     };
-    let content = UserContent::try_text(String::from("exact user request"))
-        .expect("fixture content is valid");
     let command = SubmitInput::new(command_id, session_id, content.clone(), delivery);
     let position = SessionInputPosition::first();
     let order = AcceptedInputQueueOrder::ordinary(position);

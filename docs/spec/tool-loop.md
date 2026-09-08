@@ -389,11 +389,12 @@ its `Prepared` call, and model execution closes that call `KnownFailed` before
 capability preparation or send.
 
 At most 256 MiB of projected frontier content may be rendered into one call's
-provider messages. The bound counts every kind of content the render clones, not
-tool evidence alone, and it is enforced once the projection names its entries
-and before any content is cloned, so an over-bound frontier is refused rather
-than materialized. The refusal closes the turn through the tool-round-limit
-terminal cause before capability preparation or send.
+provider messages. The bound counts cloned content and per-message and per-part
+representation overhead; tool evidence is also checked before its payloads are
+loaded. It is enforced once the projection names its entries and before any
+content is cloned, so an over-bound frontier is refused rather than
+materialized. The refusal closes the turn through the tool-round-limit terminal
+cause before capability preparation or send.
 
 The result projection a stop consumes is bound to the interrupted turn: reusing
 the turn's current frontier identity is not sufficient, and a projection

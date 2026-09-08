@@ -14,21 +14,8 @@ use std::{
     time::Duration,
 };
 
-// The configured automatic tool-round ceiling alone does not bound memory: it
-// multiplies against the 32-request batch bound and the 1 MiB argument and
-// result bounds, so a 256-round deployment would admit 16 GiB of retained
-// argument and result text where 32 rounds admitted 2 GiB. Retained content is
-// therefore bounded on its own terms, independently of the round ceiling — and
-// of whether a deployment configured one at all. One maximal round retains 32
-// requests times 1 MiB of arguments plus 1 MiB of results, so this admits four
-// maximal rounds while leaving the round ceiling operative for the
-// kilobyte-scale results real executors return. It bounds every kind of content
-// a render clones, not tool evidence alone: assistant text carries no length
-// bound of its own beyond the transport cap on a single response, so a ceiling
-// blind to it would be multiplied by the same round count it is meant to
-// contain. It also sits far above any provider context window, so it cannot
-// refuse a turn a provider would accept.
-const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize = 256 * 1024 * 1024;
+/// Maximum projected frontier content and representation overhead retained for one call.
+pub const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize = 256 * 1024 * 1024;
 
 // Worst-case compact JSON for maximum checked metadata, u64 length, and digest.
 const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize = 2_304;

@@ -21,6 +21,13 @@ pub enum PrepareModelCallOutcome {
     PoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
     /// A new exact `Prepared` call committed; this invocation stops here.
     Checkpointed(ModelCallId),
+    /// A prepared call's retained tool evidence exceeds the rendering ceiling.
+    RetainedContentLimitExceeded {
+        /// Turn that must close through the tool-round-limit terminal cause.
+        turn: TurnId,
+        /// Prepared call whose capability must not be created.
+        call: ModelCallId,
+    },
     /// A previously committed `Prepared` request may prepare its capability.
     Ready {
         /// Checked durable request facts.

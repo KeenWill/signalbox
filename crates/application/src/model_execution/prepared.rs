@@ -91,6 +91,28 @@ impl PreparedModelOperation {
             |accepted_input| request.origin_content(accepted_input),
             projected_tool_entries.clone(),
         );
+        let container_bytes = projected_entries
+            .iter()
+            .fold(0_usize, |bytes, (_, payload)| {
+                let parts = match payload {
+                    signalbox_domain::SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                        accepted_input,
+                    }
+                    | signalbox_domain::SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                        accepted_input,
+                        ..
+                    } => request
+                        .origin_content(*accepted_input)
+                        .map_or(0, |content| content.parts().len()),
+                    _ => 0,
+                };
+                bytes
+                    .saturating_add(std::mem::size_of::<ModelConversationMessage>())
+                    .saturating_add(
+                        parts.saturating_mul(std::mem::size_of::<ModelUserContentPart>()),
+                    )
+            });
+        let observed_bytes = observed_bytes.saturating_add(container_bytes);
         if observed_bytes > retained_frontier_content_limit {
             return Err(
                 ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {

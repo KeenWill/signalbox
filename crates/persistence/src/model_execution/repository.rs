@@ -734,7 +734,10 @@ impl PostgresModelCallRepository {
         )
         .await?;
         resolve_runner_placement_entries(transaction.as_mut(), &mut request).await?;
-        let tool_entries = load_tool_conversation_entries(&mut transaction, &request).await?;
+        let Some(tool_entries) = load_tool_conversation_entries(&mut transaction, &request).await?
+        else {
+            return Ok(None);
+        };
         let reasoning_provenance =
             load_provider_reasoning_provenance(&mut transaction, &request).await?;
         let fast_mode = request.model_settings().effective().fast_mode();

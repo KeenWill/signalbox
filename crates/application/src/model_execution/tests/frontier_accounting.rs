@@ -290,7 +290,10 @@ fn projected_frontier_content_bytes_counts_every_payload_kind_the_render_clones(
 fn assistant_text_over_bound_frontiers_are_refused_before_any_clone() {
     let assistant_text = "assistant prose that no tool-evidence accounting would ever see";
     let (plain_request, plain_entries, _) = tool_round_saturated_fixture(2);
-    let plain_bytes = counted_frontier_bytes(&plain_request, &plain_entries);
+    let plain_bytes = counted_frontier_bytes(&plain_request, &plain_entries)
+        + plain_request.frontier_entries().count()
+            * std::mem::size_of::<super::ModelConversationMessage>()
+        + std::mem::size_of::<super::ModelUserContentPart>();
     // Control: at this exact ceiling the same frontier without the text
     // renders, so the refusal below is caused by the text and not by a
     // ceiling too small for the fixture's tool evidence.
@@ -320,7 +323,9 @@ fn assistant_text_over_bound_frontiers_are_refused_before_any_clone() {
     assert_eq!(
         error,
         ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {
-            observed_bytes: plain_bytes + assistant_text.len(),
+            observed_bytes: plain_bytes
+                + assistant_text.len()
+                + std::mem::size_of::<super::ModelConversationMessage>(),
             limit_bytes: plain_bytes,
         },
         "the refusal must report the assistant text it counted"
@@ -471,7 +476,7 @@ async fn retained_frontier_content_limit_fires_before_provider_entry() {
     );
     assert!(
         telemetry.contains("terminal_outcome=\"tool_round_limit_reached\""),
-        "the service terminalization must expose the tool_round_limit_reached label"
+        "the service terminalization must expose the tool_round_limit_reached label: {telemetry}"
     );
     let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
     assert_eq!(prepare.calls, 1);
@@ -495,4 +500,81 @@ async fn retained_frontier_content_limit_fires_before_provider_entry() {
         "an over-bound turn must not reach provider interaction"
     );
     assert!(retained.is_none());
+}
+
+#[test]
+fn message_cardinality_spends_the_retained_representation_budget() {
+    let (many_request, tool_entries, _) = tool_round_saturated_fixture(64);
+    let content_bytes = counted_frontier_bytes(&many_request, &tool_entries);
+    let single_request = super::support::prepared_execution_with_content_fixture(
+        UserContent::try_text("x".repeat(content_bytes)).expect("fixture text"),
+    )
+    .resume_prepared_call()
+    .expect("fixture call resumes");
+    let limit = content_bytes
+        + single_request.frontier_entries().count()
+            * std::mem::size_of::<super::ModelConversationMessage>()
+        + std::mem::size_of::<super::ModelUserContentPart>();
+    PreparedModelOperation::render_within(
+        single_request,
+        credential_reference(),
+        None,
+        Box::new([]),
+        &[],
+        &[],
+        limit,
+    )
+    .expect("one message fits with the same total payload bytes");
+    let result = PreparedModelOperation::render_within(
+        many_request,
+        credential_reference(),
+        None,
+        Box::new([]),
+        &tool_entries,
+        &[],
+        limit,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded { .. })
+        ),
+        "many short messages spend more retained representation bytes: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn evidence_loading_limit_closes_before_provider_preparation() {
+    let (request, _, failed) = tool_round_saturated_fixture(2);
+    let session = request.session();
+    let mut service = ModelCallExecutionService::new(
+        FixedIds::baseline(),
+        FakePrepare {
+            outcomes: [Ok(
+                super::PrepareModelCallOutcome::RetainedContentLimitExceeded {
+                    turn: request.turn(),
+                    call: request.call().id(),
+                },
+            )]
+            .into(),
+            calls: 0,
+        },
+        ScriptedFailure {
+            results: [Ok(failed.clone())].into(),
+            calls: 0,
+            recorded: Vec::new(),
+        },
+        UnusedAuthorization,
+        UnusedObservation,
+        ScriptedModelCallProvider::new([]),
+        InProcessAttemptDispatchGate::default(),
+        None,
+    );
+    assert_eq!(
+        service
+            .execute(session)
+            .await
+            .expect("the oversized prepared call closes"),
+        ModelCallExecutionOutcome::ToolRoundLimitReached(Box::new(failed))
+    );
 }
