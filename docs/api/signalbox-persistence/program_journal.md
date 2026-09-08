@@ -63,6 +63,7 @@ pub struct ProgramJournalRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl program_journal::ProgramJournalRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub fn registrations(&self) -> program_registration::ProgramRegistrationRepository;
     pub async fn create_stream(
         &self,
         run: signalbox_domain::ProgramRunId,

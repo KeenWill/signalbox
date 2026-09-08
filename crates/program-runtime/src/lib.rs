@@ -1,8 +1,9 @@
 //! JavaScript isolate host for journaled Signalbox programs.
 //!
-//! The host deliberately owns no effect implementation. A caller supplies a
-//! [`LiveDeliverySource`] that can answer already-durable live requests; replay
-//! deliveries bypass that source and come only from the checked journal.
+//! Registered runs resolve their artifact and grants from durable registration.
+//! Host-side executors answer granted effects; replay uses the checked journal.
+
+pub mod effects;
 
 use std::{
     cell::{Cell, RefCell},
@@ -23,9 +24,9 @@ use deno_core::{
 use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
 use signalbox_domain::{
-    DeliveryFrame, DeliveryKind, InlineFramePayload, NondeterminismError, ProgramFault,
-    ProgramJournal, ProgramRunId, RejectReason, ReplayCursor, ReplayInstruction, ReplayedRequest,
-    RequestFrame, RequestKind, RequestOrdinal,
+    DeliveryFrame, DeliveryKind, EffectRequest, InlineFramePayload, NondeterminismError,
+    ProgramFault, ProgramJournal, ProgramRunId, RejectReason, ReplayCursor, ReplayInstruction,
+    ReplayedRequest, RequestFrame, RequestKind, RequestOrdinal,
 };
 use signalbox_persistence::program_journal::{
     ProgramJournalRepository, ProgramJournalRepositoryError,
@@ -242,7 +243,8 @@ impl ProgramHost {
         clippy::result_large_err,
         reason = "The host retains its replay fault inline."
     )]
-    pub async fn execute(
+    #[cfg(feature = "postgres-integration")]
+    pub async fn execute_unregistered(
         &self,
         run: ProgramRunId,
         artifact: &ProgramArtifact,
@@ -253,8 +255,13 @@ impl ProgramHost {
             .load(run)
             .await?
             .ok_or(ProgramHostError::JournalMissing(run))?;
-        self.execute_loaded(run, journal, artifact, live_deliveries)
-            .await
+        self.execute_loaded(
+            run,
+            journal,
+            artifact,
+            &mut effects::NoEffects(live_deliveries),
+        )
+        .await
     }
 
     #[allow(
@@ -570,15 +577,37 @@ struct IsolateRequest {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum IsolateRequestKind {
-    Now { payload: Vec<u8> },
-    Random { payload: Vec<u8> },
-    Sleep { payload: Vec<u8> },
-    AwaitEvent { payload: Vec<u8> },
+    Now {
+        payload: Vec<u8>,
+    },
+    Random {
+        payload: Vec<u8>,
+    },
+    Sleep {
+        payload: Vec<u8>,
+    },
+    AwaitEvent {
+        payload: Vec<u8>,
+    },
+    Effect {
+        capability: effects::IsolateCapability,
+        method: String,
+        payload: Vec<u8>,
+    },
 }
 
 impl IsolateRequestKind {
     fn into_domain(self) -> RequestKind {
         match self {
+            Self::Effect {
+                capability,
+                method,
+                payload,
+            } => RequestKind::Effect(EffectRequest::new(
+                capability.into(),
+                method,
+                InlineFramePayload::new(payload),
+            )),
             Self::Now { payload } => RequestKind::Now(InlineFramePayload::new(payload)),
             Self::Random { payload } => RequestKind::Random(InlineFramePayload::new(payload)),
             Self::Sleep { payload } => RequestKind::Sleep(InlineFramePayload::new(payload)),
@@ -602,6 +631,8 @@ enum IsolateDelivery {
 #[serde(rename_all = "snake_case")]
 enum IsolateRejectReason {
     OutstandingRequests,
+    CapabilityDenied,
+    UnsupportedOperation,
 }
 
 #[op2]
@@ -735,6 +766,8 @@ impl ExecutionState {
             DeliveryKind::Reject { resolves, reason } => {
                 let reason = match reason {
                     RejectReason::OutstandingRequests => IsolateRejectReason::OutstandingRequests,
+                    RejectReason::CapabilityDenied => IsolateRejectReason::CapabilityDenied,
+                    RejectReason::UnsupportedOperation => IsolateRejectReason::UnsupportedOperation,
                 };
                 self.resolve(*resolves, IsolateDelivery::Reject { reason })?;
                 Ok(None)

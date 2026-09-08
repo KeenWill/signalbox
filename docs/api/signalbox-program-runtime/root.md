@@ -139,6 +139,14 @@ impl error::Error for ProgramHostProtocolError {}
 pub struct ProgramHost {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl ProgramHost {
+    pub async fn execute_registered(
+        &self,
+        run: signalbox_domain::ProgramRunId,
+        primitives: &mut impl LiveDeliverySource,
+        effects: &mut impl effects::EffectExecutor,
+    ) -> result::Result<ProgramExecutionOutcome, ProgramHostError>;
+}
+impl ProgramHost {
     pub const fn new(
         journal: signalbox_persistence::program_journal::ProgramJournalRepository,
     ) -> Self;
@@ -149,7 +157,8 @@ impl ProgramHost {
         option::Option<signalbox_domain::program_session::ProgramSessionCapability>,
         signalbox_persistence::program_journal::ProgramJournalRepositoryError,
     >;
-    pub async fn execute(
+    #[cfg(feature = "postgres-integration")]
+    pub async fn execute_unregistered(
         &self,
         run: signalbox_domain::ProgramRunId,
         artifact: &ProgramArtifact,

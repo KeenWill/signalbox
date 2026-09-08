@@ -203,6 +203,8 @@ impl RequestFrame {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RejectReason {
     OutstandingRequests,
+    CapabilityDenied,
+    UnsupportedOperation,
 }
 
 /// Closed terminal fault vocabulary for frame-contract version one.

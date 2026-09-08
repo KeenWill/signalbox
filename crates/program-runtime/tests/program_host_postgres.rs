@@ -207,7 +207,7 @@ async fn isolate_replays_then_transitions_to_live_at_the_durable_tail() -> Resul
         ScriptedDeliveries::new([expected_concurrent_kind.clone(), expected_live_kind.clone()]);
 
     let first_outcome = host
-        .execute(run, &artifact, &mut live)
+        .execute_unregistered(run, &artifact, &mut live)
         .await
         .expect("partial-journal execution must reach live and complete");
 
@@ -256,7 +256,7 @@ async fn isolate_replays_then_transitions_to_live_at_the_durable_tail() -> Resul
     let mut replay_must_not_go_live = ScriptedDeliveries::new([]);
 
     let replay_outcome = host
-        .execute(run, &artifact, &mut replay_must_not_go_live)
+        .execute_unregistered(run, &artifact, &mut replay_must_not_go_live)
         .await
         .expect("complete-journal replay must complete");
 
@@ -291,7 +291,7 @@ async fn isolate_divergence_persists_and_replays_the_nondeterminism_fault()
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let failure = host
-        .execute(run, &artifact, &mut live_must_not_run)
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
         .await
         .expect_err("different request bytes must stop the isolate host");
     let ProgramHostError::Nondeterminism {
@@ -317,7 +317,7 @@ async fn isolate_divergence_persists_and_replays_the_nondeterminism_fault()
     let mut restarted_live_must_not_run = ScriptedDeliveries::new([]);
 
     let restarted = host
-        .execute(run, &artifact, &mut restarted_live_must_not_run)
+        .execute_unregistered(run, &artifact, &mut restarted_live_must_not_run)
         .await?;
 
     assert_eq!(
@@ -350,7 +350,9 @@ globalThis.__signalboxProgramRequest === undefined || (() => { throw new Error("
     let host = ProgramHost::new(repository);
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(outcome, ProgramExecutionOutcome::Completed);
     assert!(live_must_not_run.observed_outstanding.is_empty());
@@ -373,7 +375,7 @@ async fn unresolved_top_level_await_returns_stalled_promptly() -> Result<(), Box
 
     let failure = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        host.execute(run, &artifact, &mut live_must_not_run),
+        host.execute_unregistered(run, &artifact, &mut live_must_not_run),
     )
     .await
     .expect("a stalled artifact must return promptly")
@@ -414,7 +416,7 @@ now(new Uint8Array([{FIRST_LIVE_REQUEST_BYTE}]));
     }]);
     let host = ProgramHost::new(repository.clone());
 
-    let outcome = host.execute(run, &artifact, &mut live).await?;
+    let outcome = host.execute_unregistered(run, &artifact, &mut live).await?;
 
     assert_eq!(outcome, ProgramExecutionOutcome::Completed);
     assert_eq!(live.observed_outstanding, vec![vec![expected_request]]);
@@ -442,7 +444,7 @@ async fn a_module_that_throws_is_an_isolate_failure_not_a_completion() -> Result
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let failure = host
-        .execute(run, &artifact, &mut live_must_not_run)
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
         .await
         .expect_err("a module that throws must not report completion");
 
@@ -488,7 +490,9 @@ typeof localeSensitiveMethods === "undefined" || (() => { throw new Error("a boo
     let host = ProgramHost::new(repository);
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(outcome, ProgramExecutionOutcome::Completed);
     assert!(live_must_not_run.observed_outstanding.is_empty());
@@ -513,7 +517,9 @@ async fn a_journal_opening_with_a_run_cancel_replays_before_the_artifact_request
     let host = ProgramHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(
         outcome,
@@ -553,7 +559,9 @@ async fn a_recorded_terminal_outcome_behind_a_request_outranks_an_unloadable_art
     let host = ProgramHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(
         outcome,
@@ -594,7 +602,9 @@ async fn a_leading_run_cancel_outranks_an_artifact_that_cannot_load() -> Result<
     let host = ProgramHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(
         outcome,
@@ -643,7 +653,9 @@ async fn a_run_cancel_behind_a_recorded_answer_replays_before_the_next_request()
     let host = ProgramHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
-    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+    let outcome = host
+        .execute_unregistered(run, &artifact, &mut live_must_not_run)
+        .await?;
 
     assert_eq!(
         outcome,
@@ -754,5 +766,380 @@ async fn session_capability_requires_a_retained_program_run() -> Result<(), Box<
     assert!(
         matches!(capability.actor(), signalbox_domain::Actor::Program { run: reference } if reference.run() == run)
     );
+    Ok(())
+}
+
+fn effect_artifact(expected_kind: &str) -> ProgramArtifact {
+    ProgramArtifact::new(format!(
+        r#"
+import {{ effect }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+const result = await effect("judge", "score", new Uint8Array());
+if (result.kind !== "{expected_kind}") throw new Error("unexpected effect outcome");
+"#
+    ))
+}
+
+async fn registered_run(
+    pool: &PgPool,
+    artifact: &ProgramArtifact,
+    grants: signalbox_domain::program_registration::ProgramGrants,
+) -> Result<ProgramRunId, Box<dyn Error>> {
+    use signalbox_domain::program_registration::ProgramRegistrationRequest;
+    use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+    let repository = ProgramRegistrationRepository::new(pool.clone());
+    let registration = repository
+        .register_user(ProgramRegistrationRequest {
+            name: "effect-fixture".into(),
+            revision: "fixture-revision".into(),
+            source: artifact.source().as_bytes().to_vec(),
+            artifact: artifact.source().into(),
+            grants,
+        })
+        .await?;
+    Ok(repository.start_run(registration.id).await?)
+}
+
+struct EffectProbe {
+    policy: signalbox_program_runtime::effects::EffectRecovery,
+    adopted: Option<InlineFramePayload>,
+    executions: usize,
+    adoptions: usize,
+}
+
+impl signalbox_program_runtime::effects::EffectExecutor for EffectProbe {
+    fn recovery(
+        &self,
+        _: &signalbox_domain::EffectRequest,
+    ) -> signalbox_program_runtime::effects::EffectRecovery {
+        self.policy
+    }
+    fn adopt<'a>(
+        &'a mut self,
+        _: signalbox_program_runtime::effects::EffectInvocation<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
+    {
+        self.adoptions += 1;
+        Box::pin(async { Ok(self.adopted.clone()) })
+    }
+    fn execute<'a>(
+        &'a mut self,
+        _: signalbox_program_runtime::effects::EffectInvocation<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
+        self.executions += 1;
+        Box::pin(async { Ok(payload(b"executed")) })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ungranted_effect_is_journaled_as_refused_without_calling_the_executor()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{RejectReason, program_registration::ProgramGrants};
+    use signalbox_program_runtime::effects::EffectRecovery;
+    let (_container, pool) = migrated_postgres().await?;
+    let artifact = effect_artifact("reject");
+    let run = registered_run(&pool, &artifact, ProgramGrants::new([])).await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let host = ProgramHost::new(journal.clone());
+    let mut effects = EffectProbe {
+        policy: EffectRecovery::Idempotent,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    let mut primitives = ScriptedDeliveries::new([]);
+    assert_eq!(
+        host.execute_registered(run, &mut primitives, &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed
+    );
+    assert_eq!(effects.executions, 0);
+    assert_eq!(effects.adoptions, 0);
+    assert!(primitives.observed_outstanding.is_empty());
+    let loaded = journal
+        .load(run)
+        .await?
+        .expect("registered run has a journal");
+    assert!(
+        matches!(loaded.entries().last().expect("refusal journaled").frame(), JournalFrame::Delivery(delivery) if matches!(delivery.kind(), DeliveryKind::Reject { reason: RejectReason::CapabilityDenied, .. }))
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// A persisted request without an answer models a crash after request admission.
+async fn recover_effect(
+    policy: signalbox_program_runtime::effects::EffectRecovery,
+    adopted: Option<InlineFramePayload>,
+) -> Result<(EffectProbe, InlineFramePayload), Box<dyn Error>> {
+    use signalbox_domain::{EffectRequest, ProgramCapability, program_registration::ProgramGrants};
+    let (_container, pool) = migrated_postgres().await?;
+    let artifact = effect_artifact("answer");
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Judge]),
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    journal
+        .append_request(
+            run,
+            None,
+            RequestKind::Effect(EffectRequest::new(
+                ProgramCapability::Judge,
+                "score".into(),
+                InlineFramePayload::default(),
+            )),
+        )
+        .await?;
+    let host = ProgramHost::new(journal.clone());
+    let mut effects = EffectProbe {
+        policy,
+        adopted,
+        executions: 0,
+        adoptions: 0,
+    };
+    let mut primitives = ScriptedDeliveries::new([]);
+    host.execute_registered(run, &mut primitives, &mut effects)
+        .await?;
+    let loaded = journal.load(run).await?.expect("registered journal exists");
+    let JournalFrame::Delivery(delivery) = loaded.entries().last().expect("answer exists").frame()
+    else {
+        panic!("expected delivery")
+    };
+    let DeliveryKind::Answer { payload, .. } = delivery.kind() else {
+        panic!("expected answer")
+    };
+    let answer = payload.clone();
+    // A second execution consumes the answer without executing or recovering again.
+    host.execute_registered(run, &mut primitives, &mut effects)
+        .await?;
+    pool.close().await;
+    Ok((effects, answer))
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn crash_recovery_adopts_a_proven_answer_without_reissuing() -> Result<(), Box<dyn Error>> {
+    use signalbox_program_runtime::effects::EffectRecovery;
+    let retained = payload(b"durable outcome");
+    let (effects, answer) =
+        recover_effect(EffectRecovery::Ambiguous, Some(retained.clone())).await?;
+    assert_eq!(effects.adoptions, 1);
+    assert_eq!(effects.executions, 0);
+    assert_eq!(answer, retained);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn crash_recovery_reissues_only_a_declared_idempotent_operation() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_program_runtime::effects::EffectRecovery;
+    let (effects, answer) = recover_effect(EffectRecovery::Idempotent, None).await?;
+    assert_eq!(effects.adoptions, 1);
+    assert_eq!(effects.executions, 1);
+    assert_eq!(answer.as_bytes(), b"executed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn crash_recovery_journals_ambiguity_without_a_silent_reissue() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_program_runtime::effects::EffectRecovery;
+    let (effects, answer) = recover_effect(EffectRecovery::Ambiguous, None).await?;
+    assert_eq!(effects.adoptions, 1);
+    assert_eq!(effects.executions, 0);
+    assert_eq!(answer.as_bytes(), b"{\"outcome\":\"ambiguous\"}");
+    Ok(())
+}
+
+fn register_artifact(input: &[u8], expected_kind: &str) -> ProgramArtifact {
+    ProgramArtifact::new(format!(
+        r#"
+import {{ effect }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+const result = await effect("register", "register", new Uint8Array({input:?}));
+if (result.kind !== "{expected_kind}") throw new Error("unexpected registration outcome");
+"#
+    ))
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn program_registration_widening_is_refused_in_the_journal() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ProgramCapability, RejectReason, program_registration::ProgramGrants};
+    let (_container, pool) = migrated_postgres().await?;
+    let input =
+        br#"{"name":"child","revision":"one","source":[],"artifact":"","grants":["judge"]}"#;
+    let artifact = register_artifact(input, "reject");
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Register]),
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let mut effects = EffectProbe {
+        policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    ProgramHost::new(journal.clone())
+        .execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+        .await?;
+    let registrations: i64 = sqlx::query_scalar("SELECT count(*) FROM program_registration")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(registrations, 1);
+    let loaded = journal.load(run).await?.expect("registered journal exists");
+    assert!(
+        matches!(loaded.entries().last().expect("refusal exists").frame(), JournalFrame::Delivery(delivery) if matches!(delivery.kind(), DeliveryKind::Reject { reason: RejectReason::CapabilityDenied, .. }))
+    );
+    assert_eq!(effects.executions, 0);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn registration_recovery_adopts_the_matching_immutable_row() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        EffectRequest, ProgramCapability,
+        program_registration::{ProgramGrants, ProgramRegistrationRequest},
+    };
+    use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+    let (_container, pool) = migrated_postgres().await?;
+    let input = br#"{"name":"child","revision":"one","source":[],"artifact":"","grants":[]}"#;
+    let artifact = register_artifact(input, "answer");
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Register]),
+    )
+    .await?;
+    let registrations = ProgramRegistrationRepository::new(pool.clone());
+    let child = registrations
+        .register_child(
+            run,
+            ProgramRegistrationRequest {
+                name: "child".into(),
+                revision: "one".into(),
+                source: Vec::new(),
+                artifact: String::new(),
+                grants: ProgramGrants::new([]),
+            },
+        )
+        .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    journal
+        .append_request(
+            run,
+            None,
+            RequestKind::Effect(EffectRequest::new(
+                ProgramCapability::Register,
+                "register".into(),
+                InlineFramePayload::new(input.as_slice()),
+            )),
+        )
+        .await?;
+    let mut effects = EffectProbe {
+        policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    ProgramHost::new(journal.clone())
+        .execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+        .await?;
+    let loaded = journal.load(run).await?.expect("registered journal exists");
+    let JournalFrame::Delivery(delivery) = loaded.entries().last().expect("answer exists").frame()
+    else {
+        panic!("expected delivery")
+    };
+    let DeliveryKind::Answer { payload, .. } = delivery.kind() else {
+        panic!("expected answer")
+    };
+    let answer: deno_core::serde_json::Value =
+        deno_core::serde_json::from_slice(payload.as_bytes())?;
+    assert_eq!(answer["registration"], child.id.into_uuid().to_string());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM program_registration")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 2);
+    assert_eq!(effects.executions, 0);
+    pool.close().await;
+    Ok(())
+}
+
+struct CancellingEffects(ProgramJournalRepository);
+
+impl signalbox_program_runtime::effects::EffectExecutor for CancellingEffects {
+    fn recovery(
+        &self,
+        _: &signalbox_domain::EffectRequest,
+    ) -> signalbox_program_runtime::effects::EffectRecovery {
+        signalbox_program_runtime::effects::EffectRecovery::Ambiguous
+    }
+    fn adopt<'a>(
+        &'a mut self,
+        _: signalbox_program_runtime::effects::EffectInvocation<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+    fn execute<'a>(
+        &'a mut self,
+        invocation: signalbox_program_runtime::effects::EffectInvocation<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
+        Box::pin(async move {
+            self.0
+                .append_delivery(
+                    invocation.run,
+                    DeliveryKind::RunCancel(payload(b"cancelled")),
+                )
+                .await
+                .map_err(|error| LiveDeliveryFailure::new(error.to_string()))?;
+            Ok(InlineFramePayload::default())
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_cancellation_committed_during_an_effect_remains_the_run_outcome()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ProgramCapability, program_registration::ProgramGrants};
+    let (_container, pool) = migrated_postgres().await?;
+    let run = registered_run(
+        &pool,
+        &effect_artifact("answer"),
+        ProgramGrants::new([ProgramCapability::Judge]),
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let outcome = ProgramHost::new(journal.clone())
+        .execute_registered(
+            run,
+            &mut ScriptedDeliveries::new([]),
+            &mut CancellingEffects(journal.clone()),
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::RunCancelled(payload(b"cancelled"))
+    );
+    assert_eq!(
+        journal
+            .load(run)
+            .await?
+            .expect("registered journal exists")
+            .entries()
+            .len(),
+        2
+    );
+    pool.close().await;
     Ok(())
 }

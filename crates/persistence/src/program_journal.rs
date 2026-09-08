@@ -127,6 +127,11 @@ impl ProgramJournalRepository {
         Self { pool }
     }
 
+    /// Registration storage sharing this journal's database.
+    pub fn registrations(&self) -> crate::program_registration::ProgramRegistrationRepository {
+        crate::program_registration::ProgramRegistrationRepository::new(self.pool.clone())
+    }
+
     /// Creates the journal anchor for one new run under frame contract v1.
     pub async fn create_stream(
         &self,

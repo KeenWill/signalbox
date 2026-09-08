@@ -55,6 +55,13 @@ impl program_registration::ProgramRegistrationRepository {
         signalbox_domain::ProgramRunId,
         program_registration::ProgramRegistrationError,
     >;
+    pub async fn find(
+        &self,
+        content: &signalbox_domain::program_registration::ProgramRegistrationContent,
+    ) -> result::Result<
+        option::Option<signalbox_domain::program_registration::ProgramRegistration>,
+        program_registration::ProgramRegistrationError,
+    >;
     pub async fn for_run(
         &self,
         run: signalbox_domain::ProgramRunId,

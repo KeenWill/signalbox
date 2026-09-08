@@ -157,6 +157,8 @@ impl RequestFrame {
 ```rust
 pub enum RejectReason {
     OutstandingRequests,
+    CapabilityDenied,
+    UnsupportedOperation,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

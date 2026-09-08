@@ -4,4 +4,5 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| effects | 2 | 1 | 0 | [effects](effects.md) |
 | root | 7 | 1 | 0 | [root](root.md) |

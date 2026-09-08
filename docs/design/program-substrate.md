@@ -13,18 +13,6 @@ stays thin coordination state.
 
 ## Design
 
-A capability outside the run's grant list does not exist for that run: the host
-journals a refusal of the request and exercises no authority.
-
-A capability declares, per operation, how recovery treats an `effect` request
-that has no answer after a crash. Recovery adopts the outcome when the
-operation's own durable record proves it completed. It re-issues the operation
-only when the capability declares the operation idempotent. Otherwise it answers
-the request with a journaled ambiguous outcome the program must branch on. This
-follows the external-effect ambiguity contract in
-[tool loop](../spec/tool-loop.md), which forbids treating an unresolved external
-loss as if it had not happened.
-
 A frame payload below a fixed inline threshold stays inline in the journal row.
 A larger payload, up to the configured blob maximum, becomes an immutable
 SHA-256-addressed blob, and the row references it by digest only. The blob is
@@ -73,11 +61,6 @@ isolate receives only journaled answers.
 
 ## Acceptance criteria
 
-- An effect request for an ungranted capability is refused and journaled before
-  the executor performs any host action.
-- After a crash between an external effect's request and its answer, recovery
-  yields exactly one of an adopted outcome, a re-issue of a declared-idempotent
-  operation, or a journaled ambiguous answer, and never a silent re-issue.
 - A payload above the inline threshold and within the configured blob maximum is
   stored once as a blob under the `program_journal` class and journaled by
   digest, and the loaded frame carries the exact bytes.

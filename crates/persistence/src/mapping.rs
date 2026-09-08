@@ -499,12 +499,16 @@ pub(crate) fn program_scope_operation_from_str(value: &str) -> Option<ScopeOpera
 pub(crate) const fn program_reject_reason_to_str(value: RejectReason) -> &'static str {
     match value {
         RejectReason::OutstandingRequests => "outstanding_requests",
+        RejectReason::CapabilityDenied => "capability_denied",
+        RejectReason::UnsupportedOperation => "unsupported_operation",
     }
 }
 
 pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason> {
     match value {
         "outstanding_requests" => Some(RejectReason::OutstandingRequests),
+        "capability_denied" => Some(RejectReason::CapabilityDenied),
+        "unsupported_operation" => Some(RejectReason::UnsupportedOperation),
         _ => None,
     }
 }
