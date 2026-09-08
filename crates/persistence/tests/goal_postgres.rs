@@ -5193,7 +5193,6 @@ async fn a_declared_achievement_settles_achieved_declared() -> Result<(), Box<dy
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn descendant_cascade_terminates_recovery_parked_children() -> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
     for (seed, disposition, expected) in [
         (0xfd00, "stop", DispatchedDelegationOutcome::ChildStopped),
         (
@@ -5202,6 +5201,7 @@ async fn descendant_cascade_terminates_recovery_parked_children() -> Result<(), 
             DispatchedDelegationOutcome::ChildCancelled,
         ),
     ] {
+        let (container, pool) = migrated_postgres().await?;
         let parent = seed + 1;
         let child = seed + 2;
         CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -5279,7 +5279,12 @@ async fn descendant_cascade_terminates_recovery_parked_children() -> Result<(), 
             )
             .await?;
         let reconciliation = PostgresAutomaticReconciliationRepository::new(pool.clone());
-        let _claimed = reconciliation.claim_due().await?;
+        let batch = reconciliation.claim_due().await?;
+        let claimed = *batch
+            .claimed()
+            .iter()
+            .find(|claimed| claimed.turn() == child_turn)
+            .expect("the recovery is claimed before descendant termination");
         let before: serde_json::Value = sqlx::query_scalar(
             "SELECT to_jsonb(turn) - 'delegation_runtime_terminal' FROM turn_lifecycle AS turn WHERE turn_id = $1")
             .bind(child_turn.into_uuid()).fetch_one(&pool).await?;
@@ -5317,9 +5322,10 @@ async fn descendant_cascade_terminates_recovery_parked_children() -> Result<(), 
             "SELECT to_jsonb(turn) - 'delegation_runtime_terminal', delegation_runtime_terminal FROM turn_lifecycle AS turn WHERE turn_id = $1")
             .bind(child_turn.into_uuid()).fetch_one(&pool).await?;
         assert_eq!(after, (before, true));
-        // A full one-row supersession page wraps before revisiting this child.
-        let _wrap = reconciliation.claim_due().await?;
-        let _next = reconciliation.claim_due().await?;
+        assert_eq!(
+            reconciliation.reconcile(claimed).await?,
+            signalbox_application::AutomaticReconciliationOutcome::Superseded,
+        );
         let recovery: String = sqlx::query_scalar(
             "SELECT state_kind FROM automatic_reconciliation WHERE turn_id = $1",
         )
@@ -5340,8 +5346,8 @@ async fn descendant_cascade_terminates_recovery_parked_children() -> Result<(), 
         assert!(
             matches!(reopened, Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23514"))
         );
+        pool.close().await;
+        drop(container);
     }
-    pool.close().await;
-    drop(container);
     Ok(())
 }
