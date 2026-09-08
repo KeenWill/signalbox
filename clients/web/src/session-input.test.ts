@@ -733,6 +733,9 @@ it('stops a bookkeeping scan at the workspace record budget regardless of histor
   expect(fetch).toHaveBeenCalledTimes(10)
   expect(result.page.items).toEqual([])
   expect(result.page.continuation).toEqual({ type: 'more_at', address: { event_sequence: '81' } })
+  expect(result.rawPage.items).toHaveLength(8)
+  expect(result.rawPage.items[0]?.address.event_sequence).toBe('73')
+  expect(result.rawPage.projected_body_bytes).toBe(8 * 128)
 })
 
 it.each(['unchanged', 'body facts', 'byte total'] as const)(
@@ -790,6 +793,68 @@ it.each(['unchanged', 'body facts', 'byte total'] as const)(
           continuation: next.continuation,
         },
       })
+    else await expect(result).rejects.toThrow('Continued detail changed')
+    expect(fetch).toHaveBeenCalledTimes(2)
+  },
+)
+
+it.each(['unchanged', 'body facts', 'byte total'] as const)(
+  'validates a hidden body across a manual continuation: %s',
+  async (change) => {
+    const cursor = {
+      address: { event_sequence: '1' },
+      field: 'goal_text' as const,
+      member_index: 0,
+      offset_bytes: '1',
+    }
+    const item = {
+      address: cursor.address,
+      kind: 'goal_changed' as const,
+      projected_body_bytes: 129,
+      body: {
+        type: 'goal_event' as const,
+        session_id: sessionId,
+        event: {
+          type: 'blocked' as const,
+          generation: '1',
+          reason: 'user_input_required' as const,
+          text: { text: 'a', offset_bytes: '0', total_bytes: '2', continuation: cursor },
+        },
+      },
+    }
+    const next = {
+      ...item,
+      projected_body_bytes: change === 'byte total' ? 130 : 129,
+      body: {
+        ...item.body,
+        event: {
+          ...item.body.event,
+          generation: change === 'body facts' ? '2' : '1',
+          text: {
+            text: change === 'byte total' ? 'bc' : 'b',
+            offset_bytes: '1',
+            total_bytes: change === 'byte total' ? '3' : '2',
+            continuation: null,
+          },
+        },
+      },
+    }
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          ...detailPage([item], { type: 'more_body', body: cursor }),
+          session_id: sessionId,
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ ...detailPage([next]), session_id: sessionId }))
+    vi.stubGlobal('fetch', fetch)
+    const window = { sessionId, first: '1', through: '1' }
+    const held = await readExtendedSessionTranscript(window, null, limits, null)
+    expect(held.page.items).toEqual([])
+    const result = readExtendedSessionTranscript(window, held.page.continuation, limits, held)
+    if (change === 'unchanged')
+      await expect(result).resolves.toMatchObject({ page: { items: [], continuation: null } })
     else await expect(result).rejects.toThrow('Continued detail changed')
     expect(fetch).toHaveBeenCalledTimes(2)
   },

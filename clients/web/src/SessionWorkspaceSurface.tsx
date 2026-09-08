@@ -292,7 +292,7 @@ export function SessionWorkspaceSurface({
       (item) => item.address.event_sequence === app.selectedTimeline,
     )
     onSelectionEvidence(
-      sessionId !== null && selectedItem !== undefined
+      showEvents && sessionId !== null && selectedItem !== undefined
         ? {
             sessionId,
             eventSequence: selectedItem.address.event_sequence,
@@ -301,7 +301,13 @@ export function SessionWorkspaceSurface({
           }
         : null,
     )
-  }, [app.selectedTimeline, displayedSession?.window.items, onSelectionEvidence, sessionId])
+  }, [
+    app.selectedTimeline,
+    displayedSession?.window.items,
+    onSelectionEvidence,
+    sessionId,
+    showEvents,
+  ])
   useEffect(() => () => onSelectionEvidence(null), [onSelectionEvidence])
   useEffect(() => {
     setExpanded((current) =>

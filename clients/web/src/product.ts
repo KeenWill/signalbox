@@ -1255,6 +1255,7 @@ export interface HeldSessionTranscript {
   first: string
   through: string
   page: SessionTranscriptPage
+  rawPage: WebSessionTimelineDetailPage
   continuation: WebTimelineDetailContinuation | null
   omittedThrough: string | null
 }
@@ -1268,7 +1269,7 @@ async function readSessionTextPage(
   signal?: AbortSignal,
   previous?: Pick<WebSessionTimelineDetailPage, 'items'>,
   retained: WebSessionTimelineDetailPage['items'] = [],
-): Promise<SessionTranscriptPage> {
+): Promise<Pick<HeldSessionTranscript, 'page' | 'rawPage'>> {
   const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
   const maxScannedItems = Math.min(SESSION_WINDOW_ITEMS, limits.max_timeline_detail_items)
   const maxBytes = Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
@@ -1277,6 +1278,7 @@ async function readSessionTextPage(
   let scannedItems = 0
   let scannedBytes = 0
   let cursor = continuation
+  let rawPage: WebSessionTimelineDetailPage
   do {
     const page = await readSessionTranscript(
       sessionId,
@@ -1297,6 +1299,7 @@ async function readSessionTextPage(
     scannedItems += page.items.length
     scannedBytes += page.projected_body_bytes
     previous = page
+    rawPage = page
     for (const item of page.items) {
       if (hasConversationContent(item, [...retained, ...items])) {
         items.push(item)
@@ -1318,7 +1321,7 @@ async function readSessionTextPage(
     items.length < maxItems &&
     maxBytes - scannedBytes >= limits.min_timeline_detail_bytes
   )
-  return { items, projected_body_bytes: bytes, continuation: cursor }
+  return { page: { items, projected_body_bytes: bytes, continuation: cursor }, rawPage }
 }
 
 export async function readExtendedSessionTranscript(
@@ -1355,9 +1358,9 @@ export async function readExtendedSessionTranscript(
   const retained = append
     ? held.page.items.filter((item) => BigInt(item.address.event_sequence) >= BigInt(window.first))
     : []
-  const page =
+  const { page, rawPage } =
     append && held.through === window.through
-      ? { ...held.page, items: [], projected_body_bytes: 0 }
+      ? { page: { ...held.page, items: [], projected_body_bytes: 0 }, rawPage: held.rawPage }
       : await readSessionTextPage(
           window.sessionId,
           append ? String(BigInt(held.through) + 1n) : window.first,
@@ -1369,11 +1372,11 @@ export async function readExtendedSessionTranscript(
             held?.sessionId === window.sessionId &&
             held.first === window.first &&
             held.through === window.through
-            ? held.page
+            ? held.rawPage
             : undefined,
           retained,
         )
-  if (!append) return { ...window, page, continuation, omittedThrough: null }
+  if (!append) return { ...window, page, rawPage, continuation, omittedThrough: null }
   const items = [...retained, ...page.items]
   let bytes = items.reduce((sum, item) => sum + item.projected_body_bytes, 0)
   let omittedThrough = held.omittedThrough
@@ -1393,6 +1396,7 @@ export async function readExtendedSessionTranscript(
     ...window,
     continuation,
     omittedThrough,
+    rawPage,
     page: { ...page, items, projected_body_bytes: bytes },
   }
 }

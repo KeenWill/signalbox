@@ -488,6 +488,29 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('hides selection evidence until Events is selected and clears it when hidden again', async ({
+  page,
+}) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  const events = page.getByRole('checkbox', { name: 'Events', exact: true })
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  await expect(events).not.toBeChecked()
+  const evidence = inspector.getByText(/^(Event|Kind|Projected bytes)$/)
+  await expect(evidence).toHaveCount(0)
+  await events.check()
+  await page.getByRole('row', { name: /42 turn activated/ }).click()
+  await expect(evidence).toHaveCount(3)
+  await expect(inspector.getByText('turn activated', { exact: true })).toBeVisible()
+  await events.uncheck()
+  await expect(evidence).toHaveCount(0)
+  await expect(inspector.getByText('turn activated', { exact: true })).toHaveCount(0)
+  await events.check()
+  await expect(inspector.getByText('turn activated', { exact: true })).toBeVisible()
+})
+
 test('clears the session inspector description when navigating to Imports', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
