@@ -814,25 +814,7 @@ async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<d
         .await?;
     migrate(&pool).await?;
     let keywords = postgres_keywords(&pool).await?;
-    quoted_function_identifier_is_a_call_edge(&keywords);
-    block_comment_between_function_name_and_parenthesis_preserves_the_call_edge(&keywords);
-    line_comment_between_function_name_and_parenthesis_preserves_the_call_edge(&keywords);
-    same_spelled_bare_alias_is_not_a_call_edge(&keywords);
-    call_shaped_name_inside_a_comment_is_not_a_call_edge(&keywords);
-    call_shaped_name_inside_a_string_is_not_a_call_edge(&keywords);
-    call_shaped_name_inside_a_dollar_quoted_string_is_not_a_call_edge(&keywords);
-    standard_string_backslash_does_not_hide_following_calls(&keywords);
-    escape_strings_skip_escaped_quotes_without_inventing_calls(&keywords);
-    doubled_standard_quotes_keep_call_shaped_string_content_hidden(&keywords);
-    column_alias_lists_do_not_add_call_edges(&keywords);
-    table_alias_column_lists_do_not_add_call_edges(&keywords);
-    function_sources_remain_call_edges(&keywords);
-    cte_column_lists_preserve_calls_inside_each_body(&keywords);
-    recursive_cte_clauses_preserve_following_cte_headers(&keywords);
-    parenthesized_body_ends_after_nested_groups(&keywords);
-    unterminated_parenthesized_body_has_no_end(&keywords);
-    expression_keywords_do_not_turn_calls_into_relation_aliases(&keywords);
-    keyword_categories_preserve_permitted_names_and_quoted_identifiers(&keywords);
+    let classifier_failures = collect_classifier_failures(&keywords);
     let chain = synthetic_transitive_chain();
     sqlx::query(sqlx::AssertSqlSafe(chain.create_tail.as_str()))
         .execute(&pool)
@@ -848,13 +830,104 @@ async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<d
         .await?;
 
     let covered = restore_reachable_functions(&pool).await?;
-    assert_eq!(
-        unpinned_names(&covered),
-        [RESTORE_PROBE_HEAD, RESTORE_PROBE_MIDDLE, RESTORE_PROBE_TAIL],
-        "the probe chain must surface: head directly, middle one body hop deep, \
-         and tail two hops deep, which only a transitive closure reaches"
+    let unpinned = unpinned_names(&covered);
+    assert!(
+        classifier_failures.is_empty()
+            && unpinned == [RESTORE_PROBE_HEAD, RESTORE_PROBE_MIDDLE, RESTORE_PROBE_TAIL],
+        "classifier failures: {classifier_failures:?}; fixed-point reachability: {unpinned:?}; \
+         expected head, middle and tail"
     );
     Ok(())
+}
+
+fn collect_classifier_failures(keywords: &BTreeMap<String, KeywordUse>) -> Vec<&'static str> {
+    type ClassifierCheck = fn(&BTreeMap<String, KeywordUse>);
+    let checks: &[(&str, ClassifierCheck)] = &[
+        (
+            "quoted_function_identifier_is_a_call_edge",
+            quoted_function_identifier_is_a_call_edge,
+        ),
+        (
+            "block_comment_between_function_name_and_parenthesis_preserves_the_call_edge",
+            block_comment_between_function_name_and_parenthesis_preserves_the_call_edge,
+        ),
+        (
+            "line_comment_between_function_name_and_parenthesis_preserves_the_call_edge",
+            line_comment_between_function_name_and_parenthesis_preserves_the_call_edge,
+        ),
+        (
+            "same_spelled_bare_alias_is_not_a_call_edge",
+            same_spelled_bare_alias_is_not_a_call_edge,
+        ),
+        (
+            "call_shaped_name_inside_a_comment_is_not_a_call_edge",
+            call_shaped_name_inside_a_comment_is_not_a_call_edge,
+        ),
+        (
+            "call_shaped_name_inside_a_string_is_not_a_call_edge",
+            call_shaped_name_inside_a_string_is_not_a_call_edge,
+        ),
+        (
+            "call_shaped_name_inside_a_dollar_quoted_string_is_not_a_call_edge",
+            call_shaped_name_inside_a_dollar_quoted_string_is_not_a_call_edge,
+        ),
+        (
+            "standard_string_backslash_does_not_hide_following_calls",
+            standard_string_backslash_does_not_hide_following_calls,
+        ),
+        (
+            "escape_strings_skip_escaped_quotes_without_inventing_calls",
+            escape_strings_skip_escaped_quotes_without_inventing_calls,
+        ),
+        (
+            "doubled_standard_quotes_keep_call_shaped_string_content_hidden",
+            doubled_standard_quotes_keep_call_shaped_string_content_hidden,
+        ),
+        (
+            "column_alias_lists_do_not_add_call_edges",
+            column_alias_lists_do_not_add_call_edges,
+        ),
+        (
+            "table_alias_column_lists_do_not_add_call_edges",
+            table_alias_column_lists_do_not_add_call_edges,
+        ),
+        (
+            "function_sources_remain_call_edges",
+            function_sources_remain_call_edges,
+        ),
+        (
+            "cte_column_lists_preserve_calls_inside_each_body",
+            cte_column_lists_preserve_calls_inside_each_body,
+        ),
+        (
+            "recursive_cte_clauses_preserve_following_cte_headers",
+            recursive_cte_clauses_preserve_following_cte_headers,
+        ),
+        (
+            "parenthesized_body_ends_after_nested_groups",
+            parenthesized_body_ends_after_nested_groups,
+        ),
+        (
+            "unterminated_parenthesized_body_has_no_end",
+            unterminated_parenthesized_body_has_no_end,
+        ),
+        (
+            "expression_keywords_do_not_turn_calls_into_relation_aliases",
+            expression_keywords_do_not_turn_calls_into_relation_aliases,
+        ),
+        (
+            "keyword_categories_preserve_permitted_names_and_quoted_identifiers",
+            keyword_categories_preserve_permitted_names_and_quoted_identifiers,
+        ),
+    ];
+    checks
+        .iter()
+        .filter_map(|(name, check)| {
+            std::panic::catch_unwind(|| check(keywords))
+                .err()
+                .map(|_| *name)
+        })
+        .collect()
 }
 
 fn quoted_function_identifier_is_a_call_edge(keywords: &BTreeMap<String, KeywordUse>) {
