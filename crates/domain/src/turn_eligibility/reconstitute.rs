@@ -997,7 +997,7 @@ fn reconstitute_inner(
                                     _,
                                 ) => false,
                                 (
-                                    StoredActiveTurnPhase::AwaitingRunnerRecovery { .. },
+                                    StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } | StoredActiveTurnPhase::AwaitingCredentialAvailability { .. },
                                     _,
                                 ) => false,
                                 (
@@ -1541,6 +1541,20 @@ fn reconstitute_inner(
                             );
                         }
                         ActiveTurnPhase::AwaitingChild { wait: *wait }
+                    }
+                    StoredActiveTurnPhase::AwaitingCredentialAvailability { wait } => {
+                        let snapshot = snapshots.get(&wait.frontier()).ok_or(
+                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                turn, accepted_input: record.accepted_input.id(),
+                            },
+                        )?;
+                        if phase.current_attempt.is_some() || !snapshots[starting_frontier].is_semantic_prefix_of(snapshot) {
+                            return Err(AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                turn, accepted_input: record.accepted_input.id(),
+                            });
+                        }
+                        referenced_snapshots.insert(wait.frontier());
+                        ActiveTurnPhase::AwaitingCredentialAvailability { wait: *wait }
                     }
                     StoredActiveTurnPhase::AwaitingRunnerRecovery {
                         source_frontier,

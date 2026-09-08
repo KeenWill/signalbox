@@ -1863,7 +1863,10 @@ where
                 {
                     continue;
                 }
-                Ok(PrepareToolContinuationOutcome::NoWork) => {
+                Ok(
+                    PrepareToolContinuationOutcome::NoWork
+                    | PrepareToolContinuationOutcome::CredentialWait(_),
+                ) => {
                     return Ok(ToolExecutionServiceOutcome::NoWork);
                 }
                 Ok(PrepareToolContinuationOutcome::Checkpointed(call)) => {

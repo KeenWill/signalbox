@@ -77,7 +77,8 @@ pub(super) fn reconstitute_active_acceptance_tail(
             | StoredActiveTurnPhase::Running
             | StoredActiveTurnPhase::AwaitingApproval { .. }
             | StoredActiveTurnPhase::AwaitingChild { .. }
-            | StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => None,
+            | StoredActiveTurnPhase::AwaitingRunnerRecovery { .. }
+            | StoredActiveTurnPhase::AwaitingCredentialAvailability { .. } => None,
         },
         AcceptedInputTurnSchedulingRecordState::Queued
         | AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }

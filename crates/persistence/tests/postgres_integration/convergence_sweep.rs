@@ -696,9 +696,8 @@ async fn locked_admission_rejects_a_recent_terminal_dispatch_during_cool_off()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn target_cool_off_uses_the_database_clock() -> Result<(), Box<dyn Error>> {
-    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let (_container, pool, database_url) = migrated_postgres().await?;
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
-    let sweep = PostgresConvergenceSweepStore::new(pool.clone());
     let _ = dispatched(
         commissioned
             .commission(
@@ -709,19 +708,46 @@ async fn target_cool_off_uses_the_database_clock() -> Result<(), Box<dyn Error>>
             .await?,
     );
 
+    // Only this pool resolves the fixture clock before pg_catalog's wall clock.
+    sqlx::query(
+        "CREATE FUNCTION public.clock_timestamp() RETURNS timestamptz
+         LANGUAGE SQL AS 'SELECT recorded_at FROM commissioned_dispatch'",
+    )
+    .execute(&pool)
+    .await?;
+    let clock_pool = sqlx::postgres::PgPoolOptions::new()
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                sqlx::query("SET search_path = public, pg_catalog")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(signalbox_persistence::local_test_connection_options(
+            &database_url,
+        )?)
+        .await?;
+    let sweep = PostgresConvergenceSweepStore::new(clock_pool.clone());
     let recent = sweep
         .load_target_with_cool_off(&repository()?, pull_request(), Duration::from_secs(1))
         .await?
         .expect("loading enrolls the target");
     assert!(!recent.cool_off_elapsed());
 
-    sqlx::query("SELECT pg_sleep(1.1)").execute(&pool).await?;
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION public.clock_timestamp() RETURNS timestamptz
+         LANGUAGE SQL AS 'SELECT recorded_at + interval ''1 second'' FROM commissioned_dispatch'",
+    )
+    .execute(&pool)
+    .await?;
     let elapsed = sweep
         .load_target_with_cool_off(&repository()?, pull_request(), Duration::from_secs(1))
         .await?
         .expect("the target remains enrolled");
 
     assert!(elapsed.cool_off_elapsed());
+    clock_pool.close().await;
     Ok(())
 }
 

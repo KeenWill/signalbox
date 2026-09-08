@@ -9,8 +9,19 @@ pub enum Actor {
     User,
     Core,
     Model { turn: TurnId },
+    Program { run: ProgramActor },
     Recovery,
     Tool { request: ToolRequestId },
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+```
+
+## ProgramActor
+
+```rust
+pub struct ProgramActor {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
+impl ProgramActor {
+    pub const fn run(self) -> ProgramRunId;
+}
 ```
