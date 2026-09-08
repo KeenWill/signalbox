@@ -800,6 +800,12 @@ async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposit
     .await;
     assert!(matches!(rejected, ToolExecutorEvidence::KnownFailed { .. }));
     let remote = git2::Repository::open_bare(&fixture.runner.bare)?;
+    remote.reference(
+        "refs/heads/nested/refs/heads/review",
+        git2::Oid::from_str(fixture.head.as_str())?,
+        false,
+        "Matching suffix is a different remote branch",
+    )?;
     assert_eq!(
         remote
             .find_reference("refs/heads/review")?

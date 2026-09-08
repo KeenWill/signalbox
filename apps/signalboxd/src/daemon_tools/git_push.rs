@@ -87,12 +87,16 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
                 ],
             )
             .await;
+        let expected_ref = format!("{}\t{remote_ref}", request.commit());
         if !matches!(
             confirmation.outcome,
             ProcessOutcome::Exited { code: Some(0) }
         ) || confirmation.stdout.completeness != CaptureCompleteness::Complete
-            || confirmation.stdout.bytes
-                != format!("{}\t{remote_ref}\n", request.commit()).as_bytes()
+            || !confirmation
+                .stdout
+                .bytes
+                .split(|byte| *byte == b'\n')
+                .any(|line| line == expected_ref.as_bytes())
         {
             return Err(GitPushTransportFailure::DispatchUnknown);
         }
