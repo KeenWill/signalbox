@@ -700,13 +700,17 @@ export function SessionWorkspaceSurface({
                   </div>
                   {isExpanded && sessionId !== null && (
                     <div id={`session-timeline-detail-${id}`} className="session-item-detail">
-                      <SessionItemDetail
-                        key={`${sessionId}:${id}`}
-                        sessionId={sessionId}
-                        item={item}
-                        limits={transcriptLimits}
-                        onComplete={() => timelineRef.current?.focus()}
-                      />
+                      {transcriptAvailable ? (
+                        <SessionItemDetail
+                          key={`${sessionId}:${id}`}
+                          sessionId={sessionId}
+                          item={item}
+                          limits={transcriptLimits}
+                          onComplete={() => timelineRef.current?.focus()}
+                        />
+                      ) : (
+                        <p>Timeline detail is unavailable.</p>
+                      )}
                     </div>
                   )}
                 </div>

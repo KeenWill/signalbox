@@ -381,6 +381,8 @@ test('keeps header-only history when transcript detail is not advertised', async
   await expect(page.getByRole('textbox', { name: 'Message to session' })).toBeVisible()
   api.grow()
   await expect(page.getByRole('option')).toHaveCount(3)
+  await page.getByRole('option').first().press('Enter')
+  await expect(page.getByText('Timeline detail is unavailable.', { exact: true })).toBeVisible()
   expect(detailRequests).toEqual([])
 })
 
