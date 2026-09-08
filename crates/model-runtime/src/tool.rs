@@ -174,6 +174,15 @@ pub fn decode_tool_arguments<T: DeserializeOwned>(
     })
 }
 
+/// Whether tool arguments are admitted by the credential boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolArgumentRedaction {
+    /// The admitted JSON text.
+    Admitted(String),
+    /// The argument object had to be suppressed as a whole.
+    Suppressed,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

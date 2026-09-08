@@ -14,10 +14,9 @@ use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
     CredentialReference, DeliveryMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
     Observation, ObservationFact, ObservationSink, PreparationFailure, PreparationOutcome,
-    ProviderErrorKind, REDACTED, RateLimitSnapshot, RequestedTarget, ResolvedTarget,
-    StreamInterruption, StructuredDecodeFailure, StructuredOutputContract, TerminalEvidence,
-    TokenUsage, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolChoice, ToolDefinition,
-    ToolName, decode_structured,
+    ProviderErrorKind, RateLimitSnapshot, RequestedTarget, ResolvedTarget, StreamInterruption,
+    StructuredDecodeFailure, StructuredOutputContract, TerminalEvidence, TokenUsage, ToolCallId,
+    ToolCallProposal, ToolCallsAtLoss, ToolChoice, ToolDefinition, ToolName, decode_structured,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
@@ -437,21 +436,7 @@ enum EmittedStream {
     ToolArguments,
 }
 
-/// Reassembles each delta stream the adapter emitted, in emission order,
-/// grouped by the stream a fragment extends — correlation, kind, and index.
-///
-/// [`boundary_material`] joins the facts it visits with newlines, which is what
-/// a *field*-level claim needs but not what a stream-level one does: the
-/// redactor may emit a safe prefix and its continuation as two fragments of one
-/// delta stream, and a credential spanning that split is recoverable by any
-/// consumer that concatenates the stream while appearing in no single fragment
-/// and in no newline-joined dump. A claim about what the caller can read is
-/// therefore checked against the reconstruction the caller assembles.
-///
-/// Exhaustive over `ObservationFact` so a new text-bearing fact cannot be added
-/// without deciding whether it joins a stream. Facts that carry one complete
-/// value rather than a fragment (a decoded tool proposal, the thread id) are
-/// not fragments of anything and stay covered by [`boundary_material`].
+/// Reassembles emitted deltas by correlation, kind, and content-part index.
 fn emitted_streams(observations: &[Observation<String>]) -> Vec<String> {
     let mut streams: BTreeMap<(&str, EmittedStream, u32), String> = BTreeMap::new();
     for observation in observations {
@@ -477,32 +462,6 @@ fn emitted_streams(observations: &[Observation<String>]) -> Vec<String> {
             .push_str(fragment);
     }
     streams.into_values().collect()
-}
-
-/// Asserts `secret` is unrecoverable from everything that crossed the adapter
-/// boundary: every field [`boundary_material`] visits, and every delta stream
-/// reassembled as the caller would read it. `label` names the fixture, so a
-/// leak in one case of a multi-scenario test is reported as itself.
-///
-/// Both checks, because they fail differently. Every fixture this helper guards
-/// is suppressed whole today and emits one fragment, so the field-level dump
-/// alone would catch each of them; the reassembly is what keeps that from being
-/// the assertion's ceiling. A regression that released the safe prefix and held
-/// only the tail would put the credential in no single fragment and in no
-/// newline-joined dump, and the case guarding the leak would go on passing.
-#[track_caller]
-fn assert_no_emitted_stream_carries(label: &str, result: &ExecutionResult, secret: &str) {
-    let material = boundary_material(result);
-    assert!(
-        !material.contains(secret),
-        "{label}: the credential must not cross the boundary, found it in: {material}"
-    );
-    for stream in emitted_streams(&result.observations) {
-        assert!(
-            !stream.contains(secret),
-            "{label}: the credential must not be recoverable from a reassembled stream: {stream}"
-        );
-    }
 }
 
 #[test]
@@ -935,25 +894,6 @@ async fn completed_turn_recovers_its_summarized_agent_message() {
     assert_eq!(result.spawns, 1);
 }
 
-/// a final message recovered from the CLI-owned file still follows
-/// the preceding JSONL redaction state; the second channel cannot bypass a
-/// credential marker retained from an earlier event.
-#[tokio::test]
-async fn output_last_message_consults_the_jsonl_redaction_state() {
-    let result = execute_scenario(
-        "terminal_summary_split_credential",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
 /// Exact ordered argv fragment generated from the audited production fixture,
 /// so the process regression proves every classified capability reaches the
 /// spawned CLI as a hard disable without re-encoding the list in the test.
@@ -966,7 +906,7 @@ fn disabled_capability_argv() -> String {
 }
 
 #[tokio::test]
-async fn streamed_completion_emits_redacted_progress_in_order() {
+async fn streamed_completion_emits_progress_in_order() {
     let result = execute_scenario(
         "streamed_completed",
         DeliveryMode::Streamed,
@@ -996,310 +936,6 @@ async fn streamed_completion_emits_redacted_progress_in_order() {
     assert_eq!(result.spawns, 1);
 }
 
-/// a credential token split across reasoning items cannot be
-/// reconstructed by concatenating streamed provider text.
-#[tokio::test]
-async fn split_credential_across_reasoning_items_is_redacted() {
-    let result = execute_scenario(
-        "split_stream_credential_between_reasoning_items",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let streamed = streamed_provider_text(&result.observations);
-
-    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
-    assert!(streamed.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// changing from reasoning to final text cannot flush a held
-/// credential prefix as provider-controlled bytes.
-#[tokio::test]
-async fn split_credential_before_final_text_is_redacted() {
-    let result = execute_scenario(
-        "split_stream_credential_before_final_text",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let streamed = streamed_provider_text(&result.observations);
-
-    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
-    assert!(streamed.contains("[redacted]"));
-    assert!(result.observations.iter().any(|observation| {
-        observation.fact
-            == ObservationFact::TextDelta {
-                index: 0,
-                text: "[redacted]".to_string(),
-            }
-    }));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a credential header split between reasoning and final text keeps
-/// redacting through the value, not just through the marker.
-#[tokio::test]
-async fn split_authorization_value_before_final_text_is_redacted() {
-    let result = execute_scenario(
-        "split_stream_authorization_before_final_text",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let streamed = streamed_provider_text(&result.observations);
-
-    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(streamed.contains("[redacted]"));
-    assert_eq!(
-        completed(&result.evidence).content,
-        vec![AssistantPart::Text("[redacted]".to_string())],
-        "terminal completion content must carry the stateful stream redaction"
-    );
-    assert_eq!(result.spawns, 1);
-}
-
-/// buffered delivery drops reasoning from the output, but a
-/// credential marker inside the dropped bytes still marks the final text's
-/// value as a secret — the same bytes the streamed path suppresses must not
-/// surface verbatim in buffered completion evidence.
-#[tokio::test]
-async fn buffered_reasoning_marker_suppresses_the_final_text_value() {
-    let result = execute_scenario(
-        "split_stream_authorization_before_final_text",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// the dropped-reasoning marker also governs buffered tool
-/// arguments, which reach terminal evidence without passing through streamed
-/// deltas.
-#[tokio::test]
-async fn buffered_reasoning_marker_suppresses_tool_arguments() {
-    let result = execute_scenario(
-        "split_stream_authorization_before_tool_arguments",
-        DeliveryMode::Buffered,
-        OperationShape::Tool,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(
-        completed(&result.evidence).content,
-        vec![
-            AssistantPart::Text(REDACTED.to_string()),
-            AssistantPart::SuppressedToolCall(signalbox_model_runtime::ToolName::new(
-                fixtures::TOOL_NAME,
-            )),
-        ]
-    );
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn split_authorization_value_before_tool_arguments_is_redacted() {
-    let result = execute_scenario(
-        "split_stream_authorization_before_tool_arguments",
-        DeliveryMode::Streamed,
-        OperationShape::Tool,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn split_authorization_value_before_tool_id_is_redacted() {
-    let result = execute_scenario(
-        "split_stream_authorization_before_tool_id",
-        DeliveryMode::Streamed,
-        OperationShape::Tool,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a tool argument continuing a credential marker at the end of the
-/// same-envelope final text is redacted in both the streamed delta and the
-/// terminal proposal, not only when the marker came from earlier reasoning.
-#[tokio::test]
-async fn final_text_marker_before_tool_arguments_is_redacted() {
-    let result = execute_scenario(
-        "final_text_marker_before_tool_arguments",
-        DeliveryMode::Streamed,
-        OperationShape::Tool,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a credential marker ending the final envelope text also governs
-/// the agent-message item id — the same same-envelope context the tool-call id
-/// path consults — so an id carrying the marker's continuation never surfaces
-/// as `ProviderMessageId` beside the independently redacted text.
-#[tokio::test]
-async fn final_text_marker_before_message_id_is_redacted() {
-    let result = execute_scenario(
-        "final_text_marker_before_message_id",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a thread id ending in a credential-marker prefix (`api_`) seeds
-/// the lookbehind when it is emitted in `ExchangeEstablished`, so streamed
-/// text carrying the marker's continuation (`key=value`) is suppressed
-/// instead of emitted beside the id, where the two records would reconstruct
-/// the credential.
-#[tokio::test]
-async fn thread_id_marker_prefix_suppresses_streamed_continuation() {
-    let result = execute_scenario(
-        "credential_prefix_thread_id_before_text",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_THREAD_CONTINUATION));
-    assert!(!diagnostic.contains("opaque-thread-continuation"));
-    // The id itself is harmless alone and keeps its diagnostic fidelity; the
-    // suppression lands on the continuation text, not the exchange facts.
-    assert!(diagnostic.contains(fixtures::CREDENTIAL_PREFIX_THREAD_ID));
-    assert_eq!(result.spawns, 1);
-}
-
-/// the same reconstruction is caught in buffered delivery, where the
-/// final text reaches terminal evidence without passing through streamed
-/// deltas — the buffered text consults the emitted thread-id context too.
-#[tokio::test]
-async fn thread_id_marker_prefix_suppresses_buffered_continuation() {
-    let result = execute_scenario(
-        "credential_prefix_thread_id_before_text",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_THREAD_CONTINUATION));
-    assert!(!diagnostic.contains("opaque-thread-continuation"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a credential marker inside a dropped error item governs the
-/// streamed final text that follows — the marker appears in no record, but
-/// the value completing it is a secret the stream must suppress.
-#[tokio::test]
-async fn error_item_marker_suppresses_streamed_continuation() {
-    let result = execute_scenario(
-        "credential_split_across_error_item",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// two independent object fields each ending in a distinct credential
-/// marker fail closed — a following value could complete either, and the
-/// single dropped chain cannot track both.
-#[tokio::test]
-async fn two_independent_sibling_markers_fail_closed() {
-    let result = execute_scenario(
-        "two_independent_sibling_markers",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn thread_started_additive_field_marker_suppresses_the_value() {
-    let result = execute_scenario(
-        "credential_split_across_thread_started_field",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// A streamed completion whose final text is empty and whose only provisional
-/// content was a held-credential `[redacted]` placeholder — replaced by an
-/// empty capture — fails closed as ResponseUnintelligible, not a contentless
-/// Completed.
-#[tokio::test]
-async fn streamed_empty_completion_with_held_credential_is_unintelligible() {
-    let result = execute_scenario(
-        "streamed_empty_final_text_with_held_credential",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-
-    let cause = response_unintelligible(&boundary_loss(&result.evidence).cause);
-    assert!(cause.contains("no completion material"));
-    assert_eq!(
-        boundary_loss(&result.evidence).finish_reported,
-        Some(signalbox_model_runtime::FinishReason::EndTurn)
-    );
-}
-
 /// Repeated members are ambiguous stream input, never additive evolution: the
 /// adapter fails closed before a last-value-wins JSON projection can choose
 /// which occurrence becomes evidence.
@@ -1314,7 +950,7 @@ async fn duplicate_event_members_are_stream_protocol_violations() {
     .await;
 
     let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
-    assert!(detail.contains("duplicate") || detail.contains(REDACTED));
+    assert!(detail.contains("duplicate"));
 }
 
 /// Repeated members stay ambiguous at nested object depth; the validation walk
@@ -1330,7 +966,7 @@ async fn nested_duplicate_event_members_are_stream_protocol_violations() {
     .await;
 
     let detail = stream_protocol_violation(&boundary_loss(&result.evidence).cause);
-    assert!(detail.contains("duplicate") || detail.contains(REDACTED));
+    assert!(detail.contains("duplicate"));
 }
 
 /// The response envelope is provider input even though the CLI transports it as
@@ -1357,276 +993,7 @@ async fn duplicate_response_envelope_members_are_stream_protocol_violations() {
     ));
 }
 
-/// a marker-bearing object field that sorts before a benign sibling
-/// (so a key-sorted concatenation would drop the marker) still governs the
-/// following final text — sibling fields are seeded as independent units.
-#[tokio::test]
-async fn sibling_object_field_marker_is_not_erased() {
-    let result = execute_scenario(
-        "credential_split_across_sibling_object_fields",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// an additive credential marker on an otherwise-accepted
-/// `turn.started` event governs the following final text.
-#[tokio::test]
-async fn turn_started_additive_field_marker_suppresses_the_value() {
-    let result = execute_scenario(
-        "credential_split_across_turn_started_field",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn retained_agent_message_folds_before_failure() {
-    let result = execute_scenario(
-        "credential_split_across_agent_message_then_failure",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a credential marker ending an agent message superseded by a later
-/// one, with the value in the final message, is folded into the lookbehind and
-/// suppressed rather than reconstructed across the discard.
-#[tokio::test]
-async fn superseded_agent_message_marker_suppresses_the_value() {
-    let result = execute_scenario(
-        "credential_split_across_superseded_agent_message",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a credential marker carried by an ignored lifecycle event's
-/// additive field governs the following final text.
-#[tokio::test]
-async fn lifecycle_event_marker_suppresses_the_value() {
-    let result = execute_scenario(
-        "credential_split_across_lifecycle_event",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a credential marker in an additively-tolerated unknown top-level
-/// event governs the following final text.
-#[tokio::test]
-async fn unknown_event_marker_suppresses_the_value() {
-    let result = execute_scenario(
-        "credential_split_across_unknown_event",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// an unmodeled item's ordered-array leaves that jointly form a
-/// marker (`["api", "_key="]`) seed the lookbehind in document order, so the
-/// following value is suppressed even though no single leaf is a marker.
-#[tokio::test]
-async fn ordered_unsupported_leaves_form_a_marker() {
-    let result = execute_scenario(
-        "credential_split_across_ordered_unsupported_leaves",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// an agent-message id ending in a credential-marker prefix whose
-/// continuation opens the final text is redacted, breaking the credential
-/// reconstruction across the id and content fields of terminal evidence.
-#[tokio::test]
-async fn message_id_prefixing_final_text_is_redacted() {
-    let result = execute_scenario(
-        "message_id_prefixes_final_text",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    // The unsafe id prefix is redacted, so neither the `api_` marker prefix
-    // nor the reconstructed `api_key=` marker survives across the id and
-    // content fields — the credential shape cannot reassemble even though the
-    // value continues to appear only in its marker-less `key=…` form.
-    assert!(!diagnostic.contains("api_"));
-    assert!(!diagnostic.contains("api_key="));
-    assert_eq!(result.spawns, 1);
-}
-
-/// Runs one dropped-identity fixture and asserts the credential is
-/// unrecoverable from everything the adapter emitted for it.
-///
-/// Absorbs only the spawn plumbing every case repeats; the two
-/// behaviour-relevant values — which fixture, which delivery mode — stay at the
-/// call site. `#[track_caller]` cannot name a call site through an async fn, so
-/// the case identity travels in the failure label instead.
-async fn assert_identity_marker_suppresses_the_continuation(
-    scenario: &str,
-    delivery: DeliveryMode,
-) {
-    let result = execute_scenario(
-        scenario,
-        delivery,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-
-    assert_no_emitted_stream_carries(
-        &format!("{scenario} {delivery:?}"),
-        &result,
-        fixtures::SENSITIVE_SPLIT_AUTHORIZATION,
-    );
-    assert_eq!(result.spawns, 1);
-}
-
-/// a bare lifecycle event is dropped whole after its identity is only
-/// validated as nonempty, so an `id` ending in a credential-marker prefix
-/// (`api_`) is dropped provider text that seeds the lookbehind — the value
-/// opening the text that follows (`key=<secret>`) is suppressed instead of
-/// crossing the boundary in retained evidence.
-#[tokio::test]
-async fn lifecycle_item_id_marker_suppresses_the_continuation() {
-    assert_identity_marker_suppresses_the_continuation(
-        "lifecycle_item_id_marker",
-        DeliveryMode::Streamed,
-    )
-    .await;
-    assert_identity_marker_suppresses_the_continuation(
-        "lifecycle_item_id_marker",
-        DeliveryMode::Buffered,
-    )
-    .await;
-}
-
-/// the same boundary one field over. A lifecycle event's item `type`
-/// is matched against nothing the adapter chose, so a `type` ending in the
-/// marker prefix seeds the lookbehind exactly as the id does.
-#[tokio::test]
-async fn lifecycle_item_type_marker_suppresses_the_continuation() {
-    assert_identity_marker_suppresses_the_continuation(
-        "lifecycle_item_type_marker",
-        DeliveryMode::Streamed,
-    )
-    .await;
-    assert_identity_marker_suppresses_the_continuation(
-        "lifecycle_item_type_marker",
-        DeliveryMode::Buffered,
-    )
-    .await;
-}
-
-/// an unsupported item's `type` selected the catch-all arm rather than
-/// one of the adapter's literals, so it is provider-chosen text the adapter
-/// drops, and a marker prefix ending it governs the text that follows.
-#[tokio::test]
-async fn unsupported_item_type_marker_suppresses_the_continuation() {
-    assert_identity_marker_suppresses_the_continuation(
-        "unsupported_item_type_marker",
-        DeliveryMode::Streamed,
-    )
-    .await;
-    assert_identity_marker_suppresses_the_continuation(
-        "unsupported_item_type_marker",
-        DeliveryMode::Buffered,
-    )
-    .await;
-}
-
-/// a modeled reasoning item interprets its `type` (the adapter's own
-/// literal) and its text, but never retains the id. The dropped id carries the
-/// marker prefix that the item's own `key=` and the final-text value complete.
-#[tokio::test]
-async fn reasoning_item_id_marker_suppresses_the_continuation() {
-    assert_identity_marker_suppresses_the_continuation(
-        "reasoning_item_id_marker",
-        DeliveryMode::Streamed,
-    )
-    .await;
-    assert_identity_marker_suppresses_the_continuation(
-        "reasoning_item_id_marker",
-        DeliveryMode::Buffered,
-    )
-    .await;
-}
-
-/// the same shape on the dropped error item, whose message is
-/// interpreted while its id is not.
-#[tokio::test]
-async fn error_item_id_marker_suppresses_the_continuation() {
-    assert_identity_marker_suppresses_the_continuation(
-        "error_item_id_marker",
-        DeliveryMode::Streamed,
-    )
-    .await;
-    assert_identity_marker_suppresses_the_continuation(
-        "error_item_id_marker",
-        DeliveryMode::Buffered,
-    )
-    .await;
-}
-
-/// The control on the cases above, in buffered delivery: routine item identity
-/// is not a credential. An ordinary id and a real Codex item type (`todo_list`,
-/// whose trailing bytes the lookbehind does hold conservatively — they could
-/// still grow into a credential name) fold like every other dropped field, and
-/// the answer still reaches the caller byte-verbatim. Folding the identity
-/// widens what can arm the scrubber; it does not make routine metadata suppress
-/// the response.
+/// Buffered output retains ordinary text beside lifecycle metadata.
 #[tokio::test]
 async fn buffered_benign_item_identity_leaves_the_answer_verbatim() {
     let result = execute_scenario(
@@ -1646,10 +1013,7 @@ async fn buffered_benign_item_identity_leaves_the_answer_verbatim() {
     assert_eq!(result.spawns, 1);
 }
 
-/// The same control in streamed delivery, which carries the further claim
-/// buffered delivery has no stream to make: the answer is verbatim in the
-/// delta stream too, read as the caller reads it — reassembled, since a
-/// conservatively held trailing byte may arrive as its own fragment.
+/// Streamed output retains ordinary text beside lifecycle metadata.
 #[tokio::test]
 async fn streamed_benign_item_identity_leaves_the_answer_verbatim() {
     let result = execute_scenario(
@@ -1669,285 +1033,6 @@ async fn streamed_benign_item_identity_leaves_the_answer_verbatim() {
     assert_eq!(
         emitted_streams(&result.observations),
         vec![fixtures::BUFFERED_ANSWER.to_string()]
-    );
-    assert_eq!(result.spawns, 1);
-}
-
-/// an unsupported (unmodeled) streamed item whose text ends in a
-/// credential marker prefix (`api_`) seeds the dropped lookbehind, so a final
-/// text beginning with the continuation (`key=<secret>`) is suppressed rather
-/// than releasing the credential the adapter never surfaced the item for.
-#[tokio::test]
-async fn streamed_unsupported_item_marker_suppresses_the_continuation() {
-    let result = execute_scenario(
-        "credential_split_across_unsupported_item",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// the same unsupported-item marker governs the buffered final text,
-/// which reaches terminal evidence without streamed deltas.
-#[tokio::test]
-async fn buffered_unsupported_item_marker_suppresses_the_continuation() {
-    let result = execute_scenario(
-        "credential_split_across_unsupported_item",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a credential split as dropped `api_`, a held streamed `key` (safe
-/// alone but unsafe as a continuation of `api_`), a dropped `=`, then the
-/// value — the held bytes are treated as unsafe in the dropped context, so the
-/// value is suppressed rather than emitted verbatim.
-#[tokio::test]
-async fn context_dependent_held_bytes_stay_in_the_dropped_chain() {
-    let result = execute_scenario(
-        "credential_split_across_dropped_pending_and_error_separator",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a credential marker in a non-standard field of an unsupported
-/// item (not `text`/`message`) still seeds the lookbehind, so a final text
-/// completing it is suppressed.
-#[tokio::test]
-async fn unsupported_item_nonstandard_field_seeds_the_lookbehind() {
-    let result = execute_scenario(
-        "unsupported_item_marker_in_nonstandard_field",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// an unsupported item's benign field must not erase the credential
-/// marker another field establishes, so a final text completing that marker is
-/// still suppressed.
-#[tokio::test]
-async fn unsupported_item_benign_field_does_not_erase_a_marker() {
-    let result = execute_scenario(
-        "unsupported_item_marker_beside_benign_field",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a held credential-prefix (`api_` from a reasoning delta) followed
-/// by an unrelated dropped error item stays adjacent to a later emitted
-/// `key=<secret>` in the output, so the value is suppressed — the redacted
-/// prefix still marks the future value even though the dropped bytes broke
-/// the internal candidate.
-#[tokio::test]
-async fn held_prefix_suppresses_value_across_unrelated_error_item() {
-    let result = execute_scenario(
-        "held_credential_prefix_then_unrelated_error_item",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// held reasoning bytes unrelated to the credential (`Auth`), a
-/// dropped error marker (`api_`), then a final-text value (`key=<secret>`)
-/// reassemble chronologically as `api_key=<secret>` — the held bytes are
-/// resolved out of the way rather than scanned between the dropped marker and
-/// the value, so the credential is suppressed.
-#[tokio::test]
-async fn credential_reassembles_across_held_reasoning_and_error_item() {
-    let result = execute_scenario(
-        "credential_reassembled_across_held_reasoning_and_error_item",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a marker held in the stream lookbehind (`Authorization` from a
-/// reasoning delta), its separator supplied by an intervening dropped error
-/// item (`:`), and the value in the final text must rejoin chronologically —
-/// the dropped bytes fold through the pending held text rather than being
-/// scanned in isolation, so the value is suppressed.
-#[tokio::test]
-async fn error_item_separator_folds_through_held_reasoning() {
-    let result = execute_scenario(
-        "credential_split_across_error_item_after_held_reasoning",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// the dropped error-item marker also governs the buffered final
-/// text, which reaches terminal evidence without streamed deltas.
-#[tokio::test]
-async fn error_item_marker_suppresses_buffered_continuation() {
-    let result = execute_scenario(
-        "credential_split_across_error_item",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn split_authorization_value_before_message_id_is_redacted() {
-    let result = execute_scenario(
-        "split_stream_authorization_before_message_id",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// an undeclared tool name that extends a held credential marker is
-/// redacted in the resulting boundary-loss detail, not left verbatim.
-#[tokio::test]
-async fn split_authorization_value_before_tool_name_is_redacted() {
-    let result = execute_scenario(
-        "split_stream_authorization_before_tool_name",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// the same rule where no joined-form scan could ever see the pair
-/// rejoin — a marker prefix (`api_`) held in the dropped chain and its
-/// continuation (`key=<value>`) quoted inside serde's own prose. The detail is
-/// content-silent while any context is held, so the continuation cannot cross
-/// in the provider error.
-#[tokio::test]
-async fn decode_failure_detail_is_silent_while_a_dropped_marker_is_held() {
-    let result = execute_scenario(
-        "dropped_marker_then_malformed_usage",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let LossCause::StreamProtocolViolation { detail } = &boundary_loss(&result.evidence).cause
-    else {
-        panic!("expected protocol loss")
-    };
-
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(detail.as_str(), "undecodable Codex event: [redacted]");
-}
-
-#[tokio::test]
-async fn decode_failure_detail_consults_held_redaction_state() {
-    let result = execute_scenario(
-        "reasoning_then_malformed_usage",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let LossCause::StreamProtocolViolation { detail } = &boundary_loss(&result.evidence).cause
-    else {
-        panic!("expected protocol loss")
-    };
-
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(detail.as_str(), "undecodable Codex event: [redacted]");
-}
-
-#[tokio::test]
-async fn split_authorization_value_before_failure_is_redacted() {
-    let result = execute_scenario(
-        "split_stream_authorization_before_failure",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let streamed = streamed_provider_text(&result.observations);
-    let error = provider_error(&result.evidence);
-
-    assert!(!streamed.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert_eq!(
-        error.native.message.as_deref(),
-        Some("[redacted]"),
-        "terminal failure evidence must carry the stateful stream redaction"
     );
     assert_eq!(result.spawns, 1);
 }
@@ -2358,100 +1443,6 @@ async fn named_tool_choice_rejects_an_extra_declared_tool_proposal() {
     );
 }
 
-/// an additively tolerated sibling field on a *known* completed item
-/// is discarded by serde, so its credential marker seeds nothing unless the
-/// decoder folds it; the envelope text the same item carries then completes the
-/// marker and would reach observations and terminal evidence verbatim.
-#[tokio::test]
-async fn agent_message_additive_field_marker_suppresses_the_continuation() {
-    let result = execute_scenario(
-        "agent_message_additive_field_marker",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-#[tokio::test]
-async fn turn_failed_additive_field_marker_suppresses_the_message() {
-    let result = execute_scenario(
-        "turn_failed_additive_field_marker",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// a superseded agent message ending in a live marker (`api_`) beside
-/// a clean id is folded id-first, in wire order, so the id cannot resolve the
-/// marker away and release the value the replacing envelope text completes.
-#[tokio::test]
-async fn superseded_message_marker_survives_a_clean_id() {
-    let result = execute_scenario(
-        "superseded_message_marker_before_clean_id",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// an object nested inside an array keeps its fields as independent
-/// dropped units; flattening them into the array's wire-adjacent run lets a
-/// benign sibling erase the marker the other field holds.
-#[tokio::test]
-async fn object_inside_an_array_keeps_its_fields_independent() {
-    let result = execute_scenario(
-        "unsupported_item_object_inside_an_array",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
-/// an unknown event's own metadata is dropped provider content — the
-/// adapter matched its `type` against no known event and never reads its `id` —
-/// so a credential marker either field holds still governs the final text that
-/// completes it.
-#[tokio::test]
-async fn unknown_event_metadata_marker_suppresses_the_continuation() {
-    let result = execute_scenario(
-        "unknown_event_metadata_marker",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
 /// A textless explicit refusal is refusal evidence in streamed delivery, as it
 /// already is in buffered delivery: the outcome is definitive on its own, so
 /// the empty-material rule that guards ordinary completions does not
@@ -2536,7 +1527,6 @@ async fn stderr_alone_cannot_classify_credential_rejection() {
         }
     );
     assert!(!boundary_material(&result).contains(fixtures::SENSITIVE_STDERR_TOKEN));
-    assert!(!boundary_material(&result).contains(fixtures::SENSITIVE_STDERR_CONTINUATION));
     assert_eq!(result.spawns, 1);
 }
 
@@ -3564,26 +2554,6 @@ async fn cancellation_after_terminal_with_closed_pipes_preserves_completion_evid
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-pipes-close-group"));
 }
 
-#[tokio::test]
-async fn stderr_exit_detail_consults_held_redaction_state() {
-    let result = execute_scenario(
-        "stderr_credential_continuation",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    assert_eq!(
-        boundary_loss(&result.evidence).cause,
-        LossCause::StreamEndedWithoutTerminalMarker {
-            interruption: StreamInterruption::EndOfStream
-        }
-    );
-    assert!(!boundary_material(&result).contains(fixtures::SENSITIVE_STDERR_TOKEN));
-    assert!(!boundary_material(&result).contains(fixtures::SENSITIVE_STDERR_CONTINUATION));
-    assert_eq!(result.spawns, 1);
-}
-
 /// Cancellation that lands after the provider terminal marker, while an open
 /// stdout handle still blocks end-of-stream, drives immediate group cleanup
 /// and returns the definitive completion instead of discarding it.
@@ -3730,28 +2700,6 @@ async fn signal_exit_with_held_stderr_remains_boundary_loss() {
         }
     );
     assert_recorded_process_group_exited(temporary.path().join("fake-codex-stderr-kill-group"));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn drifted_thread_id_is_redacted_against_held_state() {
-    let temporary = tempfile::tempdir().expect("test working directory is created");
-    let executable = reasoning_before_thread_started_cli(temporary.path());
-    let runtime = runtime(temporary.path(), executable);
-    let prepared = prepare(
-        &runtime,
-        operation("drift", DeliveryMode::Streamed, OperationShape::Text),
-    )
-    .await;
-    let mut observations = Vec::new();
-
-    let report = runtime
-        .execute(prepared, &mut observations, CancellationSignal::never())
-        .await;
-    let diagnostic = boundary_material_from(&report.evidence, &observations);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
-    assert!(diagnostic.contains("[redacted]"));
 }
 
 #[cfg(unix)]
@@ -4069,76 +3017,6 @@ async fn selected_member_home_reaches_each_spawn_and_changes_with_the_reference(
     assert_eq!(delivered_second, second_home.to_string_lossy());
 }
 
-/// credential-shaped CLI text and tool JSON are redacted before
-/// observations or terminal evidence leave the adapter.
-#[tokio::test]
-async fn cli_output_is_credential_shape_redacted() {
-    let result = execute_scenario(
-        "redaction",
-        DeliveryMode::Streamed,
-        OperationShape::Tool,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_OUTPUT_TOKEN));
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_REFRESH_TOKEN));
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_COMPOSITE_SECRET));
-    assert!(diagnostic.contains("[redacted]"));
-}
-
-/// a bare JSON credential member at the start of CLI-controlled text
-/// is still recognized without an enclosing object delimiter.
-#[tokio::test]
-async fn bare_credential_member_is_redacted() {
-    let result = execute_scenario(
-        "bare_credential_text",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_COMPOSITE_SECRET));
-    assert!(diagnostic.contains("[redacted]"));
-}
-
-/// a credential member whose value is a JSON object is consumed
-/// through its balanced structural close before terminal evidence leaves the
-/// adapter, never released piecewise past its first structural character.
-#[tokio::test]
-async fn structured_credential_value_is_redacted_whole() {
-    let result = execute_scenario(
-        "structured_credential_value",
-        DeliveryMode::Buffered,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let diagnostic = boundary_material(&result);
-
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_STRUCTURED_SECRET));
-    assert!(diagnostic.contains("[redacted]"));
-}
-
-#[tokio::test]
-async fn split_structured_credential_value_is_redacted() {
-    let result = execute_scenario(
-        "split_stream_structured_credential",
-        DeliveryMode::Streamed,
-        OperationShape::Text,
-        CancellationSignal::never(),
-    )
-    .await;
-    let streamed = streamed_provider_text(&result.observations);
-
-    assert!(!streamed.contains(fixtures::SENSITIVE_STRUCTURED_SECRET));
-    assert!(streamed.contains("[redacted]"));
-    assert_eq!(result.spawns, 1);
-}
-
 #[tokio::test]
 async fn synchronous_preparation_wins_over_ready_cancellation() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
@@ -4174,31 +3052,6 @@ async fn prepare_with_cancellation(
             panic!("offline preparation found a defect: {defect:?}")
         }
     }
-}
-
-/// distinct credential-shaped provider ids remain distinct without
-/// exposing their raw values.
-#[tokio::test]
-async fn redacted_tool_ids_receive_distinct_safe_surrogates() {
-    let result = execute_scenario(
-        "sensitive_tool_ids",
-        DeliveryMode::Buffered,
-        OperationShape::Tool,
-        CancellationSignal::never(),
-    )
-    .await;
-    let content = &completed(&result.evidence).content;
-    let diagnostic = boundary_material(&result);
-
-    assert_eq!(
-        tool_ids(content),
-        vec![
-            fixtures::REDACTED_TOOL_ID_ONE,
-            fixtures::REDACTED_TOOL_ID_TWO
-        ]
-    );
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_TOOL_ID_ONE));
-    assert!(!diagnostic.contains(fixtures::SENSITIVE_TOOL_ID_TWO));
 }
 
 #[tokio::test]
@@ -4754,36 +3607,6 @@ fn completed_exchange_script_lines() -> String {
     let usage = serde_json::json!({"method":"thread/tokenUsage/updated","params":{"threadId":fixtures::THREAD_ID,"turnId":"turn-offline-1","tokenUsage":{"total":{"inputTokens":fixtures::INPUT_TOKENS,"cachedInputTokens":fixtures::CACHE_READ_INPUT_TOKENS,"cacheWriteInputTokens":fixtures::CACHE_CREATION_INPUT_TOKENS,"outputTokens":fixtures::OUTPUT_TOKENS,"reasoningOutputTokens":3,"totalTokens":18}}}});
     let terminal = serde_json::json!({"method":"turn/completed","params":{"threadId":fixtures::THREAD_ID,"turn":{"id":"turn-offline-1","status":"completed","items":[],"error":null}}});
     format!("printf '%s\\n' '{item}' '{usage}' '{terminal}'\n")
-}
-
-#[cfg(unix)]
-fn reasoning_before_thread_started_cli(directory: &Path) -> std::path::PathBuf {
-    let script = format!(
-        r#"#!/bin/sh
-read -r initialize
-printf '%s\n' '{{"method":"future","params":{{"text":"Authorization:"}}}}'
-printf '%s\n' '{{"id":1,"result":{{}}}}'
-read -r initialized
-read -r limits
-printf '%s\n' '{{"id":4,"result":{{"rateLimits":{{}}}}}}'
-read -r thread
-printf '%s\n' '{{"id":2,"result":{{"thread":{{"id":" {authorization}"}}}}}}'
-read -r turn
-printf '%s\n' '{{"id":3,"result":{{"turn":{{"id":"turn-offline-1","status":"inProgress","items":[],"error":null}}}}}}'
-{lines}
-"#,
-        authorization = fixtures::SENSITIVE_SPLIT_AUTHORIZATION,
-        lines = completed_exchange_script_lines().replace(
-            fixtures::THREAD_ID,
-            &format!(" {}", fixtures::SENSITIVE_SPLIT_AUTHORIZATION)
-        )
-    );
-    use std::os::unix::fs::PermissionsExt;
-    let executable = directory.join("reasoning-drift-codex");
-    std::fs::write(&executable, script).expect("the executable fixture is written and executable");
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
-        .expect("the executable fixture is written and executable");
-    executable
 }
 
 #[cfg(unix)]
@@ -5370,21 +4193,6 @@ fn observed_tool_arguments(observations: &[Observation<String>]) -> Option<&str>
         })
 }
 
-fn tool_ids(content: &[AssistantPart]) -> Vec<&str> {
-    content
-        .iter()
-        .filter_map(|part| match part {
-            AssistantPart::ToolCall(proposal) => Some(proposal.id.as_str()),
-            AssistantPart::Text(_)
-            | AssistantPart::Thinking { .. }
-            | AssistantPart::RedactedThinking { .. }
-            | AssistantPart::ProviderCompaction { .. }
-            | AssistantPart::ProviderReasoning { .. }
-            | AssistantPart::SuppressedToolCall(_) => None,
-        })
-        .collect()
-}
-
 fn failed_preparation(
     outcome: PreparationOutcome<
         String,
@@ -5497,4 +4305,37 @@ async fn consumed_snapshot_past_reset_is_recorded_as_zero_delay() {
         assert!(error.non_acceptance_proven);
         assert_eq!(result.spawns, 1);
     }
+}
+
+#[tokio::test]
+async fn ambient_cli_preserves_credential_shaped_text_and_tool_json() {
+    let result = execute_scenario(
+        "redaction",
+        DeliveryMode::Streamed,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+    let expected_text = format!(
+        r#"Bearer {} and {{"client_secret":"{}"}}"#,
+        fixtures::SENSITIVE_OUTPUT_TOKEN,
+        fixtures::SENSITIVE_COMPOSITE_SECRET
+    );
+    let expected_arguments = format!(
+        r#"{{"access_token":"{}","city":"Oslo"}}"#,
+        fixtures::SENSITIVE_REFRESH_TOKEN
+    );
+    assert_eq!(streamed_provider_text(&result.observations), expected_text);
+    assert_eq!(
+        completed(&result.evidence).content[0],
+        AssistantPart::Text(expected_text)
+    );
+    assert_eq!(
+        tool_proposal(&completed(&result.evidence).content[1..]).arguments_json,
+        expected_arguments
+    );
+    assert_eq!(
+        observed_tool_arguments(&result.observations),
+        Some(expected_arguments.as_str())
+    );
 }

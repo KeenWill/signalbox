@@ -251,17 +251,14 @@ The daemon refers to a credential by its non-secret name everywhere except at
 the point of use. OAuth authorization tables hold the refresh and identity
 tokens the delivery needs; no credential value appears in a log, an error, or
 any other durable record. No credential file path or database URL appears in a
-log, an error, or a durable record. For a profile whose credential value the
-daemon resolves, the daemon redacts that exact value from provider text before
-it truncates the text; a delivery that gives the daemon no value receives
-credential-shape redaction instead. A credential for one repository never
-authorizes a request to another.
+log, an error, or a durable record. Provider output follows the adapter
+credential boundary. A credential for one repository never authorizes a request
+to another.
 
 OAuth access and identity tokens seed exact-value redaction before scratch-home
 writes. Raw and JSON-escaped token forms are scrubbed across child-output chunks
-before adapter decoding, truncation, observations, or terminal evidence;
-credential-shape redaction also applies. Failure to install this delivery fails
-preparation before spawn.
+before adapter decoding, truncation, observations, or terminal evidence. A
+failure to install this delivery fails preparation before spawn.
 
 `crates/domain`, `crates/application` and `crates/persistence` declare no
 dependency on any runtime crate, and no runtime type appears in a domain or
@@ -552,23 +549,12 @@ interpreter using only builtins, never an executable resolved through the search
 path. A file credential value that is empty, not UTF-8, or carries a NUL is
 unusable and fails preparation before spawn.
 
-Provider-controlled text is credential-sanitized before it leaves the adapter.
-An adapter that reads the credential value redacts that exact value from the
-text it emits: evidence text before any truncation, tool-argument JSON
-JSON-aware, and streamed deltas with a held-back trailing prefix. When ordering
-forces a held prefix out it is replaced with a redaction marker, so a possible
-secret prefix is destroyed rather than delivered. Under an ambient CLI login no
-credential value crosses the adapter's boundary, so CLI-controlled text and JSON
-receive only recursive scrubbing by credential-bearing member names and token
-shapes before they leave the crate. Discarded lifecycle and model fields feed
-the same redaction lookbehind, so a credential split between a discarded field
-and later text is still scrubbed. For any delta fragmentation of one text
-stream, the concatenated streamed output is never less redacted than a stateless
-scan of the concatenated provider text. Held pending bytes and the rescanning
-work one candidate can cost are bounded, and the sink fails closed past either
-bound. Fail-closed suppression is absorbing for a sink's lifetime: usage
-reports, other fact boundaries and terminal flushes never re-enable
-provider-controlled bytes.
+An adapter that reads a credential value redacts that exact value from evidence
+text before truncation, tool-argument JSON JSON-aware, and streamed deltas with
+a held-back trailing prefix. When ordering forces a held prefix out, it is
+replaced with a redaction marker. Under an ambient CLI login no credential value
+crosses the adapter boundary, so CLI-controlled text and JSON pass through
+unmodified.
 
 Each CLI adapter's build derives its supported-version constant from the exact
 version in its pin manifest, so the manifest is the sole source. The daemon

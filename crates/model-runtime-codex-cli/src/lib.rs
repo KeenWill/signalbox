@@ -15,8 +15,6 @@ mod config;
 mod event;
 mod executable_pin;
 mod oauth;
-#[cfg(test)]
-mod redaction;
 mod runtime;
 mod translate;
 mod wire;

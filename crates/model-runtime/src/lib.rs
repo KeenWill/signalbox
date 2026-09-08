@@ -38,7 +38,6 @@
 mod capability;
 #[cfg(feature = "cli-process")]
 mod cli_process;
-mod cli_redaction;
 mod credential;
 mod evidence;
 mod input_count;
@@ -66,11 +65,7 @@ pub use capability::{
 pub use cli_process::{
     CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CliDecodeFailure, CliDecodeFailureClass,
     CliEnvironmentOverride, CliEnvironmentVariable, CliProcessLabels, CliProcessRequest,
-    CliSession, CliTerminalTextCapture, execute_cli_process, execute_cli_process_with_credentials,
-};
-pub use cli_redaction::{
-    DiscardedField, REDACTED, RedactingSink, TerminalTextCapture, ToolArgumentRedaction,
-    redact_json, redact_text, trailing_credential_context,
+    CliSession, execute_cli_process, execute_cli_process_with_credentials,
 };
 pub use credential::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -117,7 +112,7 @@ pub use settings::{
 pub use sse::{SseFraming, SseFramingError, SsePushOutcome, SseRecord, SseTermination};
 pub use target::{ProviderReportedModel, RequestedTarget, ResolvedTarget};
 pub use tool::{
-    ToolCallId, ToolCallProposal, ToolDecodeFailure, ToolDefinition, ToolName,
-    decode_tool_arguments,
+    ToolArgumentRedaction, ToolCallId, ToolCallProposal, ToolDecodeFailure, ToolDefinition,
+    ToolName, decode_tool_arguments,
 };
 pub use usage::TokenUsage;

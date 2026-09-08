@@ -86,3 +86,13 @@ pub fn decode_tool_arguments<T: de::DeserializeOwned>(
     proposal: &ToolCallProposal,
 ) -> result::Result<T, ToolDecodeFailure>;
 ```
+
+## ToolArgumentRedaction
+
+```rust
+pub enum ToolArgumentRedaction {
+    Admitted(string::String),
+    Suppressed,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
