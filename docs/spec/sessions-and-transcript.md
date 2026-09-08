@@ -503,7 +503,9 @@ pages of at most eight items and 65,536 projected bytes, clamped to the
 advertised limits, with exact byte accounting and continuation matching.
 Pagination resets when the session, window bounds, or observation cursor
 changes; the response bound includes their attachment references. Text pages
-advance past metadata-only detail records automatically.
+advance past metadata-only detail records automatically within the item and
+projected-byte page budgets; discarded records consume both budgets. The
+continuation remains available when either budget is exhausted.
 
 The session timeline descriptor reports the first and latest addresses, the item
 and projected-size facts, the active and queued turn counts, and the observation

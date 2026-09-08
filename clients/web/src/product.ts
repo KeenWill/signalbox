@@ -1238,6 +1238,8 @@ async function readSessionTextPage(
   const maxBytes = Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
   const items: Array<Awaited<ReturnType<typeof readSessionTranscript>>['items'][number]> = []
   let bytes = 0
+  let scannedItems = 0
+  let scannedBytes = 0
   let cursor = continuation
   do {
     const page = await readSessionTranscript(
@@ -1246,11 +1248,13 @@ async function readSessionTextPage(
       through,
       cursor,
       {
-        max_timeline_detail_items: maxItems - items.length,
-        max_timeline_detail_bytes: maxBytes - bytes,
+        max_timeline_detail_items: maxItems - scannedItems,
+        max_timeline_detail_bytes: maxBytes - scannedBytes,
       },
       signal,
     )
+    scannedItems += page.items.length
+    scannedBytes += page.projected_body_bytes
     for (const item of page.items) {
       if (
         item.body.type === 'user_input' ||
@@ -1270,8 +1274,8 @@ async function readSessionTextPage(
     }
   } while (
     cursor?.type === 'more_at' &&
-    items.length < maxItems &&
-    maxBytes - bytes >= MIN_SESSION_TRANSCRIPT_PAGE_BYTES
+    scannedItems < maxItems &&
+    maxBytes - scannedBytes >= MIN_SESSION_TRANSCRIPT_PAGE_BYTES
   )
   return { session_id: sessionId, items, projected_body_bytes: bytes, continuation: cursor }
 }
