@@ -32,16 +32,14 @@ standing cause forward. The missing part is the driver: the turn liveness pass,
 the goal disposition pass, and model-call failure classification call the park
 path with the classified cause inside the transaction that records the failure.
 
-Every deadline expiry is a published transition with the expired deadline named
-in its cause. Admission expiry reaches the terminal event the satellite's
-trigger appends; the state-change event for a waiting or active-stall expiry is
-to be built, because the deadline pass parks the row and appends no event. The
-daemon reads the active-stall bound from configuration, and the pass parks an
-active or recovering session whose stall exceeds it, with the cause selected
-from the state: active-stall deadline expired from active, recovering deadline
-expired from recovering. Modules and the program substrate subscribe to those
-events and run no timer over a session of their own. A module that needs a
-deadline core does not arm asks for a new deadline kind in core.
+Every active-stall deadline expiry is a published transition with the expired
+deadline named in its cause. The daemon reads the active-stall bound from
+configuration, and the pass parks an active or recovering session whose stall
+exceeds it, with the cause selected from the state: active-stall deadline
+expired from active, recovering deadline expired from recovering. Modules and
+the program substrate subscribe to those events and run no timer over a session
+of their own. A module that needs a deadline core does not arm asks for a new
+deadline kind in core.
 
 The lifecycle actor vocabulary gains a run-scoped program-run actor, a reference
 to the program run rather than a module name, for commands issued by a
@@ -100,8 +98,8 @@ creation, and an interactive session's row carries them from its first accepted
 input.
 
 An active or recovering session whose stall exceeds the configured bound is
-parked by the deadline pass, and a waiting or active-stall expiry appends a
-state-change event naming the deadline.
+parked by the deadline pass, and an active-stall expiry appends a state-change
+event naming the deadline.
 
 A closure that releases resources leaves no worktree or container for the
 session.

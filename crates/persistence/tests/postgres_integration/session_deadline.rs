@@ -311,6 +311,19 @@ async fn waiting_expiry_parks_without_terminalizing_the_turn() -> Result<(), Box
     .expire_next()
     .await?;
     assert_eq!(outcome, SessionDeadlinePassOutcome::Parked { session });
+    let events = read_state_changes(&pool).await?;
+    assert_eq!(
+        events.last(),
+        Some(&(
+            signalbox_persistence::outbox::DispatchedSessionStateKind::Waiting,
+            SessionLifecycleState::Parked {
+                cause: SessionParkCause::WaitingDeadlineExpired,
+                responder: SessionParkResponder::Operator,
+                standing: None,
+            },
+            LifecycleActor::Watchdog,
+        ))
+    );
     let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(session)
         .await?
@@ -542,6 +555,131 @@ async fn retired_never_started_turn_restores_dispatched_admission() -> Result<()
             .await?;
     assert_eq!(deadline_kind, "admission");
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn read_state_changes(
+    pool: &PgPool,
+) -> Result<
+    Vec<(
+        signalbox_persistence::outbox::DispatchedSessionStateKind,
+        SessionLifecycleState,
+        LifecycleActor,
+    )>,
+    Box<dyn Error>,
+> {
+    let reader = OutboxConsumerReader::new(pool.clone(), OutboxConsumer::RepoWatch);
+    let mut transitions = Vec::new();
+    while let Some(event) = reader.read_next().await? {
+        if let DispatchedOutboxEventKind::SessionStateChanged(change) = event.kind() {
+            transitions.push((change.prior, change.state, change.actor));
+        }
+        reader.acknowledge(event.sequence()).await?;
+    }
+    Ok(transitions)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn module_park_resume_and_start_release_publish_each_transition() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // Arbitrary identity seed for this isolated session fixture.
+    const FIXTURE_IDENTITY: u128 = 20;
+    let creation = owned_creation(FIXTURE_IDENTITY, StartGate::Held);
+    let session = creation.applied_result().session();
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    queue_turn(&pool, session, FIXTURE_IDENTITY).await?;
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle
+        .park(
+            session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::CommissionedDispatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::CommissionedDispatch,
+            },
+        )
+        .await?;
+    lifecycle.resume(session).await?;
+    let release = SessionLifecycleCommand::new(
+        DurableCommandId::from_uuid(next_test_submit_uuid()),
+        session,
+        SessionLifecycleOperation::ReleaseStart,
+    );
+    let commands = SessionLifecycleCommandRepository::new(pool.clone());
+    commands
+        .handle(release.clone(), CommandPrincipal::Operator)
+        .await?;
+    commands.handle(release, CommandPrincipal::Operator).await?;
+    use signalbox_persistence::outbox::DispatchedSessionStateKind;
+    assert_eq!(
+        read_state_changes(&pool).await?,
+        vec![
+            (
+                DispatchedSessionStateKind::Created,
+                SessionLifecycleState::Parked {
+                    cause: SessionParkCause::ModulePark,
+                    responder: SessionParkResponder::Module {
+                        module: DispatchingModule::CommissionedDispatch
+                    },
+                    standing: None
+                },
+                LifecycleActor::Module {
+                    module: DispatchingModule::CommissionedDispatch
+                }
+            ),
+            (
+                DispatchedSessionStateKind::Parked,
+                SessionLifecycleState::Created,
+                LifecycleActor::Operator
+            ),
+            (
+                DispatchedSessionStateKind::Created,
+                SessionLifecycleState::Dispatched,
+                LifecycleActor::Operator
+            ),
+        ]
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn rolled_back_state_changes_publish_no_event() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // Arbitrary identity seed for this isolated session fixture.
+    const FIXTURE_IDENTITY: u128 = 21;
+    let creation = owned_creation(FIXTURE_IDENTITY, StartGate::Open);
+    let session = creation.applied_result().session();
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("UPDATE session_lifecycle SET state_kind = 'dispatched' WHERE session_id = $1")
+        .bind(session.into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_state_changed_outbox_event WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&mut *transaction)
+    .await?;
+    assert_eq!(pending, 1);
+    transaction.rollback().await?;
+    let committed: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_event WHERE session_id = $1 AND event_kind = 'session_state_changed'")
+        .bind(session.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(committed, 0);
     pool.close().await;
     drop(container);
     Ok(())
