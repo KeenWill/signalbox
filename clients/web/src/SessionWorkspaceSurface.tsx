@@ -720,6 +720,7 @@ export function SessionWorkspaceSurface({
           activeState={live ? (live.active?.state.kind ?? null) : undefined}
           stateUnavailable={followFailed && live === null}
           onAccepted={refetchSession}
+          onEscape={() => entryInput.current?.focus()}
         />
       )}
     </div>

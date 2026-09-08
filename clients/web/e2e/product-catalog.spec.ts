@@ -236,6 +236,24 @@ test('filters and opens a session with Enter, then returns to the catalog', asyn
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('leaves the composer before returning to the catalog on Escape', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
+  await session.click()
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  const composer = page.getByRole('textbox', { name: 'Message to session', exact: true })
+  const draft = 'Keep the draft while leaving the field.'
+  await composer.fill(draft)
+  await composer.press('Escape')
+  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toBeFocused()
+  await expect(composer).toHaveValue(draft)
+  await page.keyboard.press('Escape')
+  await expect(session).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('returns browser Back focus to the row that opened a workspace', async ({
   page,
 }, testInfo) => {
