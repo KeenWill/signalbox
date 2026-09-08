@@ -458,7 +458,11 @@ impl GoalRepository {
                     crate::session_lifecycle::confer_ownership_in_transaction(
                         &mut transaction,
                         command.session(),
-                        principal.classify(None),
+                        principal
+                            .classify(None)
+                            .ok_or(GoalCorruption::Inconsistent(
+                                "command principal lifecycle classification",
+                            ))?,
                     )
                     .await
                     .map_err(|error| match error {

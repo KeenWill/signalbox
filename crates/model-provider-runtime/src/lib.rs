@@ -833,6 +833,7 @@ impl PreparedBinding {
 
 /// Opaque runtime capability plus the application facts it was prepared from.
 pub struct RuntimeModelCallCapability<Prepared> {
+    invocation_capacity_reserved: bool,
     prepared: Prepared,
     binding: PreparedBinding,
     resolved_target: ResolvedTarget,
@@ -1371,6 +1372,7 @@ where
         {
             PreparationOutcome::Prepared(prepared) => Ok(ModelCallCapabilityPreparation::Ready(
                 RuntimeModelCallCapability {
+                    invocation_capacity_reserved: operation.invocation_capacity_reserved(),
                     prepared,
                     binding,
                     resolved_target,
@@ -1431,7 +1433,10 @@ where
         }
         let mut observations = AcceptanceObservations {
             invocation_process_group: None,
-            invocation_processes: self.invocation_processes.clone(),
+            invocation_processes: self
+                .invocation_processes
+                .clone()
+                .filter(|_| capability.invocation_capacity_reserved),
             expected_correlation: correlation,
             correlation_mismatch: false,
             acceptance_possible: Some(acceptance_possible),
@@ -1453,7 +1458,7 @@ where
                 CancellationSignal::when(cancellation),
             )
             .await;
-        if let Some(observer) = &self.invocation_processes {
+        if let Some(observer) = &observations.invocation_processes {
             observer
                 .finished(
                     correlation,
@@ -1628,6 +1633,45 @@ fn report_classified_outcome(telemetry: ModelCallTelemetry, classified: &Termina
             );
         }
     }
+}
+
+/// Measures each projected entry through the runtime renderer and an adapter serializer.
+///
+/// Each entry is rendered independently so its allowance includes a complete
+/// message envelope even where the final request combines adjacent entries.
+pub fn rendered_entry_bytes(
+    messages: &[ModelConversationMessage],
+    provenance: &[signalbox_application::ProviderReasoningProvenance],
+    models: &RuntimeModelCatalog,
+    mut measure: impl FnMut(&ConversationMessage) -> Option<usize>,
+) -> Option<std::collections::BTreeMap<signalbox_domain::SemanticTranscriptEntryRef, u64>> {
+    messages
+        .iter()
+        .map(|message| {
+            let source = match message {
+                ModelConversationMessage::RunnerPlacementChanged { source, .. }
+                | ModelConversationMessage::ModelIdentityChanged { source, .. }
+                | ModelConversationMessage::ContextSummary { source, .. }
+                | ModelConversationMessage::User { source, .. }
+                | ModelConversationMessage::DelegatedTask { source, .. }
+                | ModelConversationMessage::DelegationMessage { source, .. }
+                | ModelConversationMessage::BackgroundDelegationResult { source, .. }
+                | ModelConversationMessage::Assistant { source, .. }
+                | ModelConversationMessage::ProviderReasoning { source, .. }
+                | ModelConversationMessage::ProviderCompaction { source, .. }
+                | ModelConversationMessage::AssistantToolUse { source, .. }
+                | ModelConversationMessage::ToolResult { source, .. }
+                | ModelConversationMessage::ImportedUser { source, .. }
+                | ModelConversationMessage::ImportedAssistant { source, .. } => *source,
+            };
+            let rendered =
+                render_runtime_messages(std::slice::from_ref(message), provenance, models)?;
+            let bytes = rendered.iter().try_fold(0_u64, |total, message| {
+                Some(total.saturating_add(u64::try_from(measure(message)?).ok()?))
+            })?;
+            Some((source, bytes))
+        })
+        .collect()
 }
 
 fn render_runtime_messages(

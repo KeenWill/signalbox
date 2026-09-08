@@ -402,6 +402,7 @@ where
                     request,
                     credential_reference,
                     retained_mapped_target,
+                    invocation_capacity_reserved,
                     dangerous_tool_auto_approval,
                     recorded_user_overrides,
                     system_prompt,
@@ -412,6 +413,7 @@ where
                         request,
                         credential_reference,
                         retained_mapped_target,
+                        invocation_capacity_reserved,
                         dangerous_tool_auto_approval,
                         recorded_user_overrides,
                         system_prompt,
@@ -441,6 +443,7 @@ where
             prepared,
             credential_reference,
             retained_mapped_target,
+            invocation_capacity_reserved,
             dangerous_tool_auto_approval,
             recorded_user_overrides,
             system_prompt,
@@ -463,6 +466,7 @@ where
         ) {
             Ok(mut operation) => {
                 operation.retained_mapped_target = retained_mapped_target;
+                operation.invocation_capacity_reserved = invocation_capacity_reserved;
                 operation
             }
             // The retained-content ceiling is a safety bound on the same

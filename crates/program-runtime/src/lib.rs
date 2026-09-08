@@ -225,6 +225,19 @@ impl ProgramHost {
         Self { journal }
     }
 
+    /// Verifies the retained run before fixing host-side session input attribution.
+    pub async fn session_capability(
+        &self,
+        run: ProgramRunId,
+    ) -> Result<
+        Option<signalbox_persistence::program_journal::ProgramSessionCapability>,
+        ProgramJournalRepositoryError,
+    > {
+        signalbox_persistence::program_journal::ProgramSessionHost::new(self.journal.clone())
+            .session_capability(run)
+            .await
+    }
+
     #[allow(
         clippy::result_large_err,
         reason = "The host retains its replay fault inline."

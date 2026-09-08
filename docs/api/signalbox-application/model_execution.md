@@ -293,6 +293,7 @@ pub enum PrepareModelCallOutcome {
         request: boxed::Box<signalbox_domain::PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,
         retained_mapped_target: option::Option<signalbox_domain::ResolvedProviderTarget>,
+        invocation_capacity_reserved: bool,
         dangerous_tool_auto_approval: signalbox_domain::DangerousToolAutoApproval,
         recorded_user_overrides: boxed::Box<[signalbox_domain::RecordedUserOverride]>,
         system_prompt: option::Option<signalbox_domain::SessionSystemPrompt>,
@@ -626,6 +627,7 @@ impl PreparedModelOperation {
     pub const fn retained_mapped_target(
         &self,
     ) -> option::Option<signalbox_domain::ResolvedProviderTarget>;
+    pub const fn invocation_capacity_reserved(&self) -> bool;
     pub const fn request(&self) -> &signalbox_domain::PreparedModelCallRequest;
     pub fn reasoning_provenance(&self) -> &[ProviderReasoningProvenance];
     pub const fn credential_reference(&self) -> &ModelCallCredentialReference;

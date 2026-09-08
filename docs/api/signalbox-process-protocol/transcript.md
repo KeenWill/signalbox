@@ -312,6 +312,7 @@ pub enum TranscriptEntry {
     ToolDenied {
         tool_request_id: CanonicalUuid,
         content: string::String,
+        override_recorded: bool,
     },
     ToolInadmissible {
         tool_request_id: CanonicalUuid,
@@ -320,6 +321,7 @@ pub enum TranscriptEntry {
     ToolClosed {
         tool_request_id: CanonicalUuid,
         content: string::String,
+        approved_before_close: bool,
     },
     TurnCompleted {
         turn_id: CanonicalUuid,

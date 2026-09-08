@@ -5,7 +5,9 @@
 //! vocabulary and leave the table and column names here, so a schema change is
 //! contained in — and exercised by — the crate that owns the schema.
 
-use signalbox_domain::{DispatchingModule, ModelCallId, SessionId, TurnId};
+use signalbox_domain::{
+    CommitSha, DispatchingModule, DurableCommandId, ModelCallId, SessionId, TurnId,
+};
 use sqlx::{FromRow, PgPool, types::Uuid};
 
 #[derive(signalbox_derive::Accessors)]
@@ -263,6 +265,49 @@ fn decode_goal_resumption_input(
             GoalCorruption::Inconsistent("resumption input content")
         }
     })
+}
+
+/// Seeds an applied checkout in the repository-watch schema through migration
+/// `202609071400`, using a pool connected as the repository-watch module role.
+pub async fn seed_historical_repository_checkout(
+    pool: &PgPool,
+    command: DurableCommandId,
+    head: &CommitSha,
+) -> Result<(), sqlx::Error> {
+    // The rule, event and command identities only need to satisfy the parent schema.
+    sqlx::query(
+        "WITH event AS (
+             INSERT INTO gh_event
+                 (event_id, content_identity, repository, event_kind, target_kind,
+                  pull_request_number, normalized_payload, recorded_at,
+                  frontier_generation, event_ordinal, producer, repository_event_ordinal)
+             VALUES (gen_random_uuid(), decode(repeat('00', 32), 'hex'),
+                     'checkout/project', 'pull_request_opened', 'pull_request',
+                     1, ''::bytea, now(), 1, 1, 'poll', 1)
+             RETURNING event_id
+         ), rule AS (
+             INSERT INTO rule_revision
+                 (repository, rule_id, revision, content_digest, activated_at,
+                  activated_after_event_ordinal)
+             VALUES ('checkout/project', 'checkout', 1,
+                     decode(repeat('00', 32), 'hex'), now(), 0)
+             RETURNING repository, rule_id, revision
+         )
+         INSERT INTO dispatch_ledger
+             (dispatch_ref, action_ordinal, command_id, repository, rule_id,
+              rule_revision, event_id, command_kind, command_payload,
+              created_session_id, status, issued_at, settled_at,
+              checkout_path, checkout_head_sha)
+         SELECT $1, 1, $1, rule.repository, rule.rule_id, rule.revision,
+                event.event_id, 'create_session', ''::bytea, gen_random_uuid(),
+                'applied', now(), now(), '.', $2
+         FROM event CROSS JOIN rule",
+    )
+    .bind(command.into_uuid())
+    .bind(head.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

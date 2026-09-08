@@ -207,6 +207,9 @@ bounded member and its reservation identities alongside excluded members. A
 same-credential retry blocked only by its invocation bound enters this wait and
 retains its retry binding.
 
+Process registration and completion observation apply only to calls with a
+retained invocation-capacity reservation.
+
 Preparation reserves only its selected `codex_home` member; invocation
 completion releases that reservation and grants eligibility to contended waits
 naming that bounded member in one transaction. Competing releases admit only the

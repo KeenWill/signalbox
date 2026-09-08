@@ -94,6 +94,7 @@ pub(super) fn rendered_text(content: UserContent) -> ModelUserContent {
 pub(super) fn ready(request: PreparedModelCallRequest) -> PrepareModelCallOutcome {
     PrepareModelCallOutcome::Ready {
         retained_mapped_target: None,
+        invocation_capacity_reserved: false,
         reasoning_provenance: Box::new([]),
         request: Box::new(request),
         credential_reference: credential_reference(),
@@ -112,6 +113,7 @@ pub(super) fn ready_with_tool_evidence(
 ) -> PrepareModelCallOutcome {
     PrepareModelCallOutcome::Ready {
         retained_mapped_target: None,
+        invocation_capacity_reserved: false,
         reasoning_provenance: Box::new([]),
         request: Box::new(request),
         credential_reference: credential_reference(),

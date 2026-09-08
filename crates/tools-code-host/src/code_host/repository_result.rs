@@ -240,6 +240,7 @@ impl RepositoryReadFileResult {
             && returned_range_valid
             && returned_within_request
             && !fields.content.contains('\0')
+            && bounds.permits_result_text(fields.content.len())
             && bounds
                 .repository_file_content_bytes()
                 .is_none_or(|limit| fields.content.len() <= limit)
@@ -1192,24 +1193,6 @@ mod tests {
         );
 
         assert!(result.is_none());
-    }
-
-    /// The generated oversized fixture passes every constructor invariant that
-    /// precedes the encoded-result budget.
-    #[test]
-    fn oversized_encoded_directory_fixture_passes_pre_encoding_invariants() {
-        let entries = oversized_encoded_directory_entries();
-        let observed_entries = entries.len();
-        let arguments = directory_arguments(".");
-        let result = RepositoryListDirectoryResult::try_entries_candidate(
-            crate::code_host::test_numeric_bounds(),
-            &arguments,
-            entries,
-            observed_entries,
-            CodeHostResultCompleteness::Complete,
-        );
-
-        assert!(result.is_some());
     }
 
     /// A typed directory result cannot exceed the encoded tool-result bound.
