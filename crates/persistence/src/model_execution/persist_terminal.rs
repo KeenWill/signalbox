@@ -654,6 +654,12 @@ pub(crate) async fn persist_tool_reconciliation_required(
         reconciliation.reclassified_pending_steering(),
     )
     .await?;
+    super::retire_terminal_batch_replacement(
+        connection,
+        reconciliation.session(),
+        reconciliation.turn(),
+    )
+    .await?;
     let rows = sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal',

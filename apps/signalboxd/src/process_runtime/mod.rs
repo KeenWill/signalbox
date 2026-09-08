@@ -363,7 +363,7 @@ pub use runtime::{
     ProcessProviderTextDeltaSink, ProcessRuntime,
 };
 #[cfg(test)]
-use runtime::{nudge_delegation_wake, observe_outbox_metrics_once};
+use runtime::{nudge_eligible_outbox_wake, observe_outbox_metrics_once};
 mod connection;
 pub use connection::shared_snapshot_reader_budget;
 use connection::*;

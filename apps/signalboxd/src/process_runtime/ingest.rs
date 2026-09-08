@@ -530,11 +530,6 @@ where
     drop(snapshot_permit);
     match outcome {
         Ok(metadata) => {
-            if configured_u64(&services.model_configuration, "max_blob_replica_count")
-                .is_some_and(|maximum| metadata.replica_count > maximum)
-            {
-                return Err(ProcessConnectionError::EncodeInvariant);
-            }
             write_message(
                 writer,
                 version,

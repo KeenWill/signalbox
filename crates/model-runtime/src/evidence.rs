@@ -486,6 +486,13 @@ pub enum LossCause {
         /// The parser's rendered description.
         detail: String,
     },
+    /// A completed response envelope failed a checked decoding stage.
+    ResponseEnvelopeRejected {
+        /// The exact rejection stage.
+        stage: ResponseEnvelopeRejectionStage,
+        /// The redacted parser or content detail.
+        detail: String,
+    },
     /// The response carried an HTTP status that is neither the provider's
     /// success nor error contract — a redirect, for example. Redirects are
     /// never followed (a follow could silently resend the request), so the
@@ -503,6 +510,47 @@ pub enum LossCause {
         /// What was violated.
         detail: String,
     },
+}
+
+/// The checked stage that rejected a completed response envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseEnvelopeRejectionStage {
+    Missing,
+    NestingBound,
+    DuplicateMembers,
+    Shape,
+    RefusalWithTools,
+    ToolCallId,
+    UndeclaredTool,
+    ToolArgumentsNesting,
+    StructuredOutputTool,
+    RequiredToolMissing,
+    NamedToolMismatch,
+    CompletionEmpty,
+    ObservationProjection,
+    StreamedCompletionEmpty,
+}
+
+impl ResponseEnvelopeRejectionStage {
+    /// Closed diagnostic token containing no provider-controlled text.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::NestingBound => "nesting_bound",
+            Self::DuplicateMembers => "duplicate_members",
+            Self::Shape => "shape",
+            Self::RefusalWithTools => "refusal_with_tools",
+            Self::ToolCallId => "tool_call_id",
+            Self::UndeclaredTool => "undeclared_tool",
+            Self::ToolArgumentsNesting => "tool_arguments_nesting",
+            Self::StructuredOutputTool => "structured_output_tool",
+            Self::RequiredToolMissing => "required_tool_missing",
+            Self::NamedToolMismatch => "named_tool_mismatch",
+            Self::CompletionEmpty => "completion_empty",
+            Self::ObservationProjection => "observation_projection",
+            Self::StreamedCompletionEmpty => "streamed_completion_empty",
+        }
+    }
 }
 
 /// How an event stream stopped without its terminal marker.

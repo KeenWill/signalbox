@@ -374,7 +374,8 @@ evidence commits as soon as execution ends, independently of semantic
 projection.
 
 Once every request in a running batch is resolved, one continuation transaction
-appends exactly one result entry per request in proposal order, consumes every
+appends exactly one result entry per request in proposal order, installs any
+staged runner replacement and appends its relocation boundary, consumes every
 pending steering input in ascending acceptance position and appends its entry
 after the results, derives the exact prefix-preserving frontier extension, and
 creates the next round's `Prepared` model call against that frontier. These
@@ -488,7 +489,10 @@ infrastructure failure, while a mutation transport loss, server failure, or
 malformed acknowledgement is commit-ambiguous. `change_request_thread_reply` and
 `change_request_thread_resolve` query thread ownership before they mutate, and a
 failure of that query classifies the mutation as not dispatched rather than
-ambiguous. The adapter never returns code-host response bodies as error detail.
+ambiguous. HTTP failures retain content-free authentication, permission,
+rate-limit, not-found, conflict, validation, and server classes. Authentication
+refusals use the credential-unavailable detail. The adapter never returns
+code-host response bodies as error detail.
 
 Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round

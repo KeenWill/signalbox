@@ -93,7 +93,10 @@ names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 `[numeric_bounds]` table holds the central numeric-bound inventory and the
 loader supplies no default for any member, while other tables carry their own
 configured limits. Numeric-bound duration policies use Jiff's friendly
-unsigned-duration syntax. `repository_watch_webhook_retention` must be positive
+unsigned-duration syntax. `max_review_findings_per_run` must be finite and no
+greater than its domain bound. A finite `max_blob_replica_count` must admit the
+durable catalog's full store bound. Disabling reconciliation requires an
+unbounded nudge buffer. `repository_watch_webhook_retention` must be positive
 and finite and governs authenticated webhook `expires_at` and
 merged-pull-request baseline retention as described in
 [repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
@@ -454,10 +457,8 @@ The daemon refers to a credential by its non-secret name everywhere except at
 the point of use. OAuth authorization tables hold the refresh and identity
 tokens the delivery needs; no credential value appears in a log, an error, or
 any other durable record. No credential file path or database URL appears in a
-log, an error, or a durable record. For a profile whose credential value the
-daemon resolves, the daemon redacts that exact value from provider text before
-it truncates the text; a delivery that gives the daemon no value receives
-credential-shape redaction instead. A credential for one repository never
+log, an error, or a durable record. Provider output follows the
+[runtime substrate](runtime-substrate.md). A credential for one repository never
 authorizes a request to another. That isolation comes from how a credential is
 provisioned or from the repository entry a runner selects; the daemon's
 code-host tools use one fixed credential reference.
@@ -718,8 +719,8 @@ resolves its fixed reference and builds its scrubber inside execution. Every
 provider-controlled text leaving such an adapter, and every checked string in a
 successful code-host result, is scrubbed of that value and its JSON-escaped form
 before it crosses into evidence. An `ambient` or `codex_home` profile gives the
-daemon no value, so a CLI child's output receives only the credential-shape
-redaction owned by [runtime substrate](runtime-substrate.md).
+daemon no value; its output follows the
+[runtime substrate](runtime-substrate.md).
 
 The GitHub and code-host adapters share `github-primary`, which needs API access
 to read pull requests, publish reviews and comments, reply to and resolve review

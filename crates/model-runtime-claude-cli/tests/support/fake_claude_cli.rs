@@ -26,56 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         emit(b"{\"type\":\"system\",\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n")?;
         return Ok(());
     }
-    if scenario == "redacted_native_identity" {
-        system_init_with_identity(
-            &arguments,
-            fixtures::CREDENTIAL_SHAPED_SESSION_ID,
-            fixtures::CREDENTIAL_SHAPED_MODEL,
-        )?;
-        assistant_text_with_identity(
-            fixtures::MESSAGE_ID,
-            fixtures::CREDENTIAL_SHAPED_MODEL,
-            fixtures::ANSWER,
-        )?;
-        success_with_session(
-            fixtures::CREDENTIAL_SHAPED_SESSION_ID,
-            "end_turn",
-            Some(fixtures::ANSWER),
-        )?;
-        return Ok(());
-    }
-    if scenario == "suppressed_state_survives_the_usage_barrier" {
-        // Two live identifier chains (the model prefix seeded at init, then a
-        // message id ending in its own marker prefix) drive the sink into
-        // fail-closed suppression, then a terminal error carries a value that
-        // continues the suppressed marker.
-        system_init_with_identity(
-            &arguments,
-            fixtures::SESSION_ID,
-            fixtures::MODEL_CREDENTIAL_PREFIX,
-        )?;
-        assistant_text_with_identity(
-            fixtures::CREDENTIAL_PREFIX_MESSAGE_ID,
-            fixtures::MODEL_CREDENTIAL_PREFIX,
-            fixtures::ANSWER,
-        )?;
-        error_result_with_message(fixtures::OPAQUE_CREDENTIAL_CONTINUATION)?;
-        return Ok(());
-    }
-    if scenario == "model_prefix_redaction" {
-        system_init_with_identity(
-            &arguments,
-            fixtures::SESSION_ID,
-            fixtures::MODEL_CREDENTIAL_PREFIX,
-        )?;
-        assistant_text_with_identity(
-            fixtures::MESSAGE_ID,
-            fixtures::MODEL_CREDENTIAL_PREFIX,
-            fixtures::MODEL_CREDENTIAL_CONTINUATION,
-        )?;
-        success("end_turn", Some(fixtures::MODEL_RECONSTRUCTED_CREDENTIAL))?;
-        return Ok(());
-    }
+
     if scenario == "version_drift" {
         // The handshake is rejected on this first event, so nothing after it
         // would be read.
@@ -100,17 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         success("end_turn", Some(fixtures::ANSWER))?;
         return Ok(());
     }
-    if scenario == "system_lifecycle_event_redaction" {
-        system_init(&arguments)?;
-        system_status(Some(fixtures::FRAGMENTED_SECRET_PREFIX))?;
-        assistant_text(fixtures::FRAGMENTED_SECRET_CONTINUATION)?;
-        success("end_turn", Some(fixtures::FRAGMENTED_SECRET_CONTINUATION))?;
-        return Ok(());
-    }
+
     if scenario == "lifecycle_session_contradicts_init" {
-        // The contradicting identity carries the credential prefix, so a
-        // decoder that discarded it as a repeated identity would drop the
-        // lookbehind the continuation below needs.
         system_init(&arguments)?;
         system_status_with_session(
             Some("running"),
@@ -124,15 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         success("end_turn", Some(fixtures::FRAGMENTED_SECRET_CONTINUATION))?;
         return Ok(());
     }
-    if scenario == "lifecycle_session_precedes_init" {
-        // No init has correlated a session yet, so this identity is not a
-        // repeated one and stays provider content that seeds the lookbehind.
-        system_event_with_session("status", fixtures::FRAGMENTED_SECRET_PREFIX)?;
-        system_init(&arguments)?;
-        assistant_text(fixtures::FRAGMENTED_SECRET_CONTINUATION)?;
-        success("end_turn", Some(fixtures::FRAGMENTED_SECRET_CONTINUATION))?;
-        return Ok(());
-    }
+
     system_init(&arguments)?;
     match scenario.as_str() {
         "normal_completion" => {
@@ -147,41 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             success("end_turn", Some(fixtures::ANSWER))?;
         }
-        "resolved_model_prefix_redaction" => {
-            // The init model is the clean selected alias, so nothing seeds the
-            // lookbehind before the assistant event. The resolved model this
-            // event newly accepts — stored only for the contradiction check and
-            // otherwise discarded — ends in the credential marker its own first
-            // text block then continues.
-            assistant_text_with_identity(
-                fixtures::MESSAGE_ID,
-                fixtures::CREDENTIAL_PREFIX_RESOLVED_MODEL,
-                fixtures::MODEL_CREDENTIAL_CONTINUATION,
-            )?;
-            success("end_turn", Some(fixtures::MODEL_CREDENTIAL_CONTINUATION))?;
-        }
-        "repeated_model_prefix_redaction" => {
-            // Clean content in the first event spends the discarded model's
-            // lookbehind. The second event must repeat that same model, and its
-            // own text block continues the marker the model ends in.
-            assistant_text_with_identity(
-                fixtures::MESSAGE_ID,
-                fixtures::CREDENTIAL_PREFIX_RESOLVED_MODEL,
-                fixtures::ANSWER,
-            )?;
-            assistant_text_with_identity(
-                fixtures::MESSAGE_ID,
-                fixtures::CREDENTIAL_PREFIX_RESOLVED_MODEL,
-                fixtures::MODEL_CREDENTIAL_CONTINUATION,
-            )?;
-            success("end_turn", Some(fixtures::MODEL_CREDENTIAL_CONTINUATION))?;
-        }
         "repeated_model_prefix_release" => {
-            // The first event's text continues the model's marker without
-            // completing a credential, so the lookbehind is still live when the
-            // second event repeats the same model. Reading that repeat as a
-            // second independent field would fail the exchange closed and
-            // destroy output the held marker eventually releases.
             assistant_text_with_identity(
                 fixtures::MESSAGE_ID,
                 fixtures::CREDENTIAL_PREFIX_RESOLVED_MODEL,
@@ -290,44 +190,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assistant_text(fixtures::REFUSAL)?;
             success("refusal", Some(fixtures::REFUSAL))?;
         }
-        "credential_redaction" => {
-            assistant_text(fixtures::SENSITIVE_TEXT)?;
-            success("end_turn", Some(fixtures::SENSITIVE_TEXT))?;
-        }
         "fragmented_credential_redaction" => {
             assistant_text(fixtures::FRAGMENTED_SECRET_PREFIX)?;
             assistant_text(fixtures::FRAGMENTED_SECRET_CONTINUATION)?;
             success("end_turn", Some(fixtures::FRAGMENTED_SECRET))?;
-        }
-        "control_sequence_credential_redaction" => {
-            assistant_text(fixtures::FRAGMENTED_SECRET_PREFIX)?;
-            assistant_text(fixtures::CONTROL_SEQUENCE)?;
-            assistant_text(fixtures::CONTROL_SEQUENCE_SECRET_CONTINUATION)?;
-            success("end_turn", Some(fixtures::CONTROL_OBFUSCATED_SECRET))?;
         }
         "named_choice_extra_tool" => {
             assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
             assistant_tool(fixtures::OTHER_TOOL_ID, fixtures::OTHER_TOOL_NAME)?;
             tool_result(fixtures::TOOL_ID)?;
             tool_result(fixtures::OTHER_TOOL_ID)?;
-            success("tool_use", None)?;
-        }
-        "named_choice_suppressed_extra_tool" => {
-            assistant_tool(fixtures::TOOL_ID, fixtures::TOOL_NAME)?;
-            assistant_tool_with_raw_arguments(
-                fixtures::OTHER_TOOL_ID,
-                fixtures::OTHER_TOOL_NAME,
-                fixtures::SUPPRESSED_TOOL_ARGUMENTS,
-            )?;
-            tool_result(fixtures::TOOL_ID)?;
-            tool_result(fixtures::OTHER_TOOL_ID)?;
-            success("tool_use", None)?;
-        }
-        "redacted_tool_ids" => {
-            assistant_tool(fixtures::CREDENTIAL_TOOL_ID_ONE, fixtures::TOOL_NAME)?;
-            assistant_tool(fixtures::CREDENTIAL_TOOL_ID_TWO, fixtures::TOOL_NAME)?;
-            tool_result(fixtures::CREDENTIAL_TOOL_ID_ONE)?;
-            tool_result(fixtures::CREDENTIAL_TOOL_ID_TWO)?;
             success("tool_use", None)?;
         }
         "tool_with_end_turn" => {
@@ -348,26 +220,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             contradictory_success(&[], Some(500))?;
         }
         "api_status_error" => api_status_error()?,
-        "credential_finish_token" => {
-            assistant_text(fixtures::ANSWER)?;
-            success(fixtures::FINISH_TOKEN_SECRET, Some(fixtures::ANSWER))?;
-        }
-        "credential_error_token" => credential_error_token()?,
-        "reasoning_metadata_credential" => reasoning_metadata_credential()?,
-        "redacted_reasoning_metadata_credential" => redacted_reasoning_metadata_credential()?,
-        "message_id_prefix_redaction" => {
-            assistant_text_with_id(
-                fixtures::CREDENTIAL_PREFIX_MESSAGE_ID,
-                fixtures::OPAQUE_CREDENTIAL_CONTINUATION,
-            )?;
-            success("end_turn", Some(fixtures::OPAQUE_CREDENTIAL_CONTINUATION))?;
-        }
-        "tool_id_prefix_redaction" => {
-            assistant_tool(fixtures::CREDENTIAL_PREFIX_TOOL_ID, fixtures::TOOL_NAME)?;
-            assistant_text(fixtures::OPAQUE_CREDENTIAL_CONTINUATION)?;
-            tool_result(fixtures::CREDENTIAL_PREFIX_TOOL_ID)?;
-            success("tool_use", Some(fixtures::OPAQUE_CREDENTIAL_CONTINUATION))?;
-        }
         // A complete, fully decodable event and then silence at a line
         // boundary: the deadline fires with the reader holding nothing.
         "complete_event_then_hang" => {
@@ -425,14 +277,6 @@ fn system_status_with_session(status: Option<&str>, session_id: &str) -> std::io
     emit_json(&serde_json::json!({
         "type": "system", "subtype": "status", "status": status,
         "session_id": session_id
-    }))
-}
-
-/// Emits a lifecycle event whose only retained member is its `session_id`, so
-/// that identity is the trailing dropped context a later field must complete.
-fn system_event_with_session(subtype: &str, session_id: &str) -> std::io::Result<()> {
-    emit_json(&serde_json::json!({
-        "type": "system", "subtype": subtype, "session_id": session_id
     }))
 }
 
@@ -535,28 +379,6 @@ fn assistant_tool_with_raw_arguments(
     )
 }
 
-fn reasoning_metadata_credential() -> std::io::Result<()> {
-    emit_json(&serde_json::json!({
-        "type": "assistant", "parent_tool_use_id": null,
-        "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID, "role": "assistant",
-            "content": [{"type": "thinking", "thinking": fixtures::REASONING_SECRET_PREFIX,
-                "signature": fixtures::REASONING_SECRET_CONTINUATION}]}
-    }))?;
-    success("end_turn", Some(fixtures::REASONING_SECRET))
-}
-
-fn redacted_reasoning_metadata_credential() -> std::io::Result<()> {
-    emit_json(&serde_json::json!({
-        "type": "assistant", "parent_tool_use_id": null,
-        "message": {"model": fixtures::MODEL, "id": fixtures::MESSAGE_ID, "role": "assistant",
-            "content": [
-                {"type": "thinking", "thinking": fixtures::REASONING_SECRET_PREFIX},
-                {"type": "redacted_thinking", "data": fixtures::REASONING_SECRET_CONTINUATION}
-            ]}
-    }))?;
-    success("end_turn", Some(fixtures::REASONING_SECRET))
-}
-
 fn tool_result(id: &str) -> std::io::Result<()> {
     emit_json(&serde_json::json!({
         "type": "user", "message": {"role": "user", "content": [{
@@ -586,28 +408,6 @@ fn generic_error_result() -> std::io::Result<()> {
         "session_id": fixtures::SESSION_ID, "stop_reason": null,
         "terminal_reason": null, "result": "synthetic provider error",
         "errors": [], "api_error_status": null,
-        "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
-    }))
-}
-
-/// A terminal error whose provider-controlled message is caller supplied, so a
-/// test can drive a specific continuation into `NativeErrorFacts`.
-fn error_result_with_message(message: &str) -> std::io::Result<()> {
-    emit_json(&serde_json::json!({
-        "type": "result", "subtype": "error_during_execution", "is_error": true,
-        "session_id": fixtures::SESSION_ID, "stop_reason": null,
-        "terminal_reason": null, "result": message,
-        "errors": [], "api_error_status": null,
-        "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
-    }))
-}
-
-fn credential_error_token() -> std::io::Result<()> {
-    emit_json(&serde_json::json!({
-        "type": "result", "subtype": fixtures::ERROR_TOKEN_SECRET, "is_error": true,
-        "session_id": fixtures::SESSION_ID, "stop_reason": null,
-        "terminal_reason": null, "result": "synthetic provider error",
-        "errors": [], "api_error_status": 500,
         "usage": {"input_tokens": fixtures::INPUT_TOKENS, "output_tokens": fixtures::OUTPUT_TOKENS}
     }))
 }

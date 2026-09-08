@@ -1598,7 +1598,7 @@ async fn nudge_after_admission(
 /// `None` means the read itself did not settle, which is a different answer from
 /// any observation it could have returned.
 async fn reobserve_refused_expired_pass_recovery(
-    repository: &PostgresTurnLivenessRepository,
+    repository: &impl ExpiredPassObservationSource,
     session: SessionId,
     expected_turn: TurnId,
     refused: StaleTurnCandidate,
@@ -1619,25 +1619,30 @@ async fn recover_expired_scheduler_pass(
     session: SessionId,
     expected_turn: TurnId,
 ) {
-    let policy = recovery.policy;
     let repository =
         PostgresTurnLivenessRepository::new(recovery.pool.clone(), recovery.persistence_bounds);
+    recover_expired_scheduler_pass_with_repository(recovery, &repository, session, expected_turn)
+        .await;
+}
+
+async fn recover_expired_scheduler_pass_with_repository(
+    recovery: SchedulerPassOccupancyRecovery,
+    repository: &impl ExpiredPassRecoverySource,
+    session: SessionId,
+    expected_turn: TurnId,
+) {
+    let policy = recovery.policy;
     let resumption = PostgresToolLoopRepository::new(recovery.pool.clone());
     let Some((mut candidate, mut attempt)) =
-        correlate_expired_scheduler_pass(&recovery, &repository, session, expected_turn).await
+        correlate_expired_scheduler_pass(&recovery, repository, session, expected_turn).await
     else {
         return;
     };
     attempt = attempt.saturating_add(1);
     while policy.attempts.is_none_or(|limit| attempt <= limit) {
-        let mut ids = UuidV7StartupScanIdGenerator;
-        let identities = signalbox_domain::AcceptedInputTurnFailureIdentities::new(
-            SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
-            ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
-        );
         match optional_timeout(
             policy.attempt_bound,
-            repository.recover_observed_slot_held_turn(candidate, identities, &mut ids),
+            repository.recover_observed_turn(candidate),
         )
         .await
         {
@@ -1655,7 +1660,7 @@ async fn recover_expired_scheduler_pass(
             }
             Ok(Ok(None)) => {
                 match reobserve_refused_expired_pass_recovery(
-                    &repository,
+                    repository,
                     session,
                     expected_turn,
                     candidate,
@@ -1751,27 +1756,6 @@ async fn recover_expired_scheduler_pass(
                 }
             }
             Ok(Err(error)) => {
-                if matches!(
-                    &error,
-                    TurnLivenessRepositoryError::TerminalizationLockUnavailable(_)
-                ) && expired_pass_exact_operation_is_live(
-                    &repository,
-                    session,
-                    expected_turn,
-                    policy.attempt_bound,
-                )
-                .await
-                {
-                    recovery.nudge(session);
-                    tracing::info!(
-                        cause_code = "scheduler_pass_occupancy_recovery_superseded",
-                        session_id = %session.as_uuid(),
-                        turn_id = %expected_turn.as_uuid(),
-                        attempt,
-                        "expired scheduler pass found exact live operation evidence under lock contention and left it alone"
-                    );
-                    return;
-                }
                 report_scheduler_pass_recovery_failure(session, expected_turn, attempt, &error);
                 if policy.attempts.is_none_or(|limit| attempt < limit) {
                     sleep_for_policy(expired_pass_recovery_retry_delay(policy, &error)).await;
@@ -1930,6 +1914,34 @@ impl ExpiredPassObservationSource for PostgresTurnLivenessRepository {
     }
 }
 
+trait ExpiredPassRecoverySource: ExpiredPassObservationSource {
+    fn recover_observed_turn(
+        &self,
+        candidate: StaleTurnCandidate,
+    ) -> impl Future<
+        Output = Result<
+            Option<signalbox_application::StartupScanSessionOutcome>,
+            TurnLivenessRepositoryError,
+        >,
+    > + Send;
+}
+
+impl ExpiredPassRecoverySource for PostgresTurnLivenessRepository {
+    async fn recover_observed_turn(
+        &self,
+        candidate: StaleTurnCandidate,
+    ) -> Result<Option<signalbox_application::StartupScanSessionOutcome>, TurnLivenessRepositoryError>
+    {
+        let mut ids = UuidV7StartupScanIdGenerator;
+        let identities = signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+            SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+            ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+        );
+        self.recover_observed_slot_held_turn(candidate, identities, &mut ids)
+            .await
+    }
+}
+
 /// Correlates the expired pass with the exact active turn it proposed,
 /// spending the same bounded attempts recovery does.
 ///
@@ -2012,27 +2024,6 @@ where
     );
     recovery.nudge(session);
     None
-}
-
-async fn expired_pass_exact_operation_is_live(
-    repository: &PostgresTurnLivenessRepository,
-    session: SessionId,
-    expected_turn: TurnId,
-    attempt_bound: Option<std::time::Duration>,
-) -> bool {
-    let observation =
-        optional_timeout(attempt_bound, repository.observed_slot_held_turn(session)).await;
-    match observation {
-        Ok(Ok(candidate)) => matches_exact_slot_held_turn(candidate, expected_turn),
-        Ok(Err(_)) | Err(_) => false,
-    }
-}
-
-fn matches_exact_slot_held_turn(
-    candidate: Option<signalbox_application::StaleTurnCandidate>,
-    expected_turn: TurnId,
-) -> bool {
-    matches!(candidate, Some(candidate) if candidate.turn() == expected_turn)
 }
 
 fn expired_pass_recovery_retry_delay(
@@ -3413,18 +3404,19 @@ mod tests {
     use super::{
         APPROVAL_JUDGE_SYSTEM_PROMPT, ActivatedTurnExecution, ActivatedTurnPass,
         ActivatedTurnPassError, ApprovalJudgeModelError, ExpiredPassObservation,
-        ExpiredPassObservationSource, ExpiredPassRecoveryPolicy, ExpiredPassSubject,
-        FailedApprovalJudgeDisposition, FatalExecutionGuardState, FatalExecutionOccupancyExpiry,
-        FatalExecutionSignal, FatalExecutionSupervisor, FreshPassAdmission, JudgeRequestFields,
-        MAX_QUOTED_CONTEXT_BYTES, ReportedUsageCompactionError, SchedulerPassOccupancyRecovery,
-        SessionAuthorityContext, TokenUsage, TurnLivenessRepositoryError, TurnPassExecutionStage,
+        ExpiredPassObservationSource, ExpiredPassRecoveryPolicy, ExpiredPassRecoverySource,
+        ExpiredPassSubject, FailedApprovalJudgeDisposition, FatalExecutionGuardState,
+        FatalExecutionOccupancyExpiry, FatalExecutionSignal, FatalExecutionSupervisor,
+        FreshPassAdmission, JudgeRequestFields, MAX_QUOTED_CONTEXT_BYTES,
+        ReportedUsageCompactionError, SchedulerPassOccupancyRecovery, SessionAuthorityContext,
+        TokenUsage, TurnLivenessRepositoryError, TurnPassExecutionStage,
         WorkspaceInstructionPreparedExecution, WorkspaceInstructionRuntime,
         activation_session_matches, classify_expired_pass_observation,
-        correlate_expired_scheduler_pass, expired_pass_recovery_retry_delay,
-        matches_exact_slot_held_turn, nudge_after_admission, progressing_turn_is_handed_off,
-        reconcile_retained_once, render_dispatch_authority, render_judge_request_payload,
-        render_session_authority_context, reported_usage_compaction_failure, supervise_execution,
-        supervise_execution_for_session,
+        correlate_expired_scheduler_pass, expired_pass_recovery_retry_delay, nudge_after_admission,
+        progressing_turn_is_handed_off, reconcile_retained_once,
+        recover_expired_scheduler_pass_with_repository, render_dispatch_authority,
+        render_judge_request_payload, render_session_authority_context,
+        reported_usage_compaction_failure, supervise_execution, supervise_execution_for_session,
     };
 
     fn example_expired_pass_policy() -> ExpiredPassRecoveryPolicy {
@@ -3496,20 +3488,6 @@ mod tests {
             expired_pass_recovery_retry_delay(example_expired_pass_policy(), &error),
             example_expired_pass_policy().conservative_retry_delay
         );
-    }
-
-    #[test]
-    fn expired_pass_live_operation_matches_only_the_exact_reported_turn() {
-        let expected = TurnId::from_uuid(Uuid::from_u128(0x51));
-        let other = TurnId::from_uuid(Uuid::from_u128(0x52));
-        let candidate = StaleTurnCandidate::new(
-            SessionId::from_uuid(Uuid::from_u128(0x50)),
-            expected,
-            TurnLivenessEvidence::new(TurnAttemptId::from_uuid(Uuid::from_u128(0x53)), Some(11)),
-        );
-
-        assert!(matches_exact_slot_held_turn(Some(candidate), expected));
-        assert!(!matches_exact_slot_held_turn(Some(candidate), other));
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4054,6 +4032,86 @@ mod tests {
             },
             work_source,
         )
+    }
+
+    struct ContendedExpiryRecovery {
+        candidate: StaleTurnCandidate,
+        attempts: Mutex<
+            std::collections::VecDeque<
+                Result<
+                    Option<signalbox_application::StartupScanSessionOutcome>,
+                    TurnLivenessRepositoryError,
+                >,
+            >,
+        >,
+    }
+
+    impl ExpiredPassObservationSource for ContendedExpiryRecovery {
+        async fn observed_slot_held_turn(
+            &self,
+            _session: SessionId,
+        ) -> Result<Option<StaleTurnCandidate>, TurnLivenessRepositoryError> {
+            Ok(Some(self.candidate))
+        }
+    }
+
+    impl ExpiredPassRecoverySource for ContendedExpiryRecovery {
+        async fn recover_observed_turn(
+            &self,
+            candidate: StaleTurnCandidate,
+        ) -> Result<
+            Option<signalbox_application::StartupScanSessionOutcome>,
+            TurnLivenessRepositoryError,
+        > {
+            assert_eq!(candidate, self.candidate);
+            self.attempts
+                .lock()
+                .expect("scripted recoveries are available")
+                .pop_front()
+                .expect("every recovery is scripted")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_pass_lock_contention_retries_despite_its_retained_live_operation() {
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let turn = TurnId::from_uuid(Uuid::now_v7());
+        let source = ContendedExpiryRecovery {
+            candidate: StaleTurnCandidate::new(
+                session,
+                turn,
+                TurnLivenessEvidence::new(TurnAttemptId::from_uuid(Uuid::now_v7()), None),
+            ),
+            attempts: Mutex::new([
+                Err(TurnLivenessRepositoryError::TerminalizationLockUnavailable(sqlx::Error::PoolTimedOut)),
+                Ok(Some(signalbox_application::StartupScanSessionOutcome::ResumablePreparedModelCall { turn })),
+            ].into_iter().collect()),
+        };
+        let (recovery, mut work_source) = expiry_recovery_fixture();
+        let lock_delay = recovery
+            .policy
+            .lock_retry_delay
+            .expect("fixture has a lock retry delay");
+        let started = tokio::time::Instant::now();
+
+        recover_expired_scheduler_pass_with_repository(recovery, &source, session, turn).await;
+
+        assert!(
+            source
+                .attempts
+                .lock()
+                .expect("remaining attempts are readable")
+                .is_empty(),
+            "retained operation evidence must not abandon the configured lock retry"
+        );
+        assert!(started.elapsed() >= lock_delay);
+        assert_eq!(
+            work_source
+                .next()
+                .await
+                .expect("the fixture sweep succeeds"),
+            session
+        );
     }
 
     /// A transient inventory failure in the expiry window spends one of the
