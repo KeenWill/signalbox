@@ -257,11 +257,14 @@ impl ToolExecutor for BlobToolExecutor {
                 let Ok(_permit) = Arc::clone(&self.read_budget).try_acquire_owned() else {
                     return Ok(invocation.bind(failed(BlobReadError::Unavailable)?));
                 };
-                let traversal = tokio::time::timeout(BLOB_READ_TIMEOUT, async {
-                    let registry = self.registry.as_deref().ok_or(BlobReadError::Unavailable)?;
-                    let entry = read_blob_entry(&self.repository, digest).await?;
-                    read_blob_chunk(registry, &entry, offset, length).await
-                })
+                let traversal = signalbox_application::with_released_scheduler_admission(
+                    tokio::time::timeout(BLOB_READ_TIMEOUT, async {
+                        let registry =
+                            self.registry.as_deref().ok_or(BlobReadError::Unavailable)?;
+                        let entry = read_blob_entry(&self.repository, digest).await?;
+                        read_blob_chunk(registry, &entry, offset, length).await
+                    }),
+                )
                 .await
                 .unwrap_or(Err(BlobReadError::Unavailable));
                 match traversal {

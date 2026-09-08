@@ -5,6 +5,9 @@
 //! keeps both hint sources behind one application port and drives the
 //! existing authoritative eligibility pass.
 
+mod admission;
+pub use admission::with_released_scheduler_admission;
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
@@ -1028,6 +1031,8 @@ where
             return SchedulerLoopExit::Shutdown;
         }
         let mut passes = JoinSet::new();
+        let mut admission = admission::Admission::default();
+        let (admission_sender, mut admission_changes) = mpsc::unbounded_channel();
         let mut task_sessions = HashMap::new();
         let mut in_flight_sessions = HashSet::new();
         let mut pending_sessions = VecDeque::new();
@@ -1040,7 +1045,7 @@ where
             if let Some(session) = take_admissible_hint(
                 &mut pending_sessions,
                 &mut pending_hints,
-                task_sessions.len(),
+                admission.occupied(&task_sessions),
                 self.max_in_flight_passes,
             ) {
                 select! {
@@ -1048,6 +1053,9 @@ where
 
                     () = &mut shutdown => break,
                     () = ready(()) => {
+                        if admission.resume(session) {
+                            continue;
+                        }
                         if in_flight_sessions.insert(session) {
                             // The bound stays on every pass: its expiry is
                             // turn-liveness recovery, which ownership does not
@@ -1062,6 +1070,7 @@ where
                                 counts_toward_occupancy,
                                 self.occupancy_bound,
                                 shutdown_drain_receiver.clone(),
+                                admission_sender.clone(),
                                 &mut task_sessions,
                                 &self.occupancy_observer,
                             );
@@ -1086,6 +1095,12 @@ where
                         biased;
 
                         () = &mut shutdown => break 'scheduler,
+                        Some(change) = admission_changes.recv() => {
+                            admission.apply(change, &task_sessions, &mut pending_sessions, &mut pending_hints);
+                            if has_admissible_hint(&pending_hints, admission.occupied(&task_sessions), self.max_in_flight_passes) {
+                                break None;
+                            }
+                        }
                         completed = passes.join_next_with_id(),
                             if !task_sessions.is_empty() =>
                         {
@@ -1093,6 +1108,7 @@ where
                                 && apply_pass_completion::<Pass>(
                                     completed,
                                     PassCompletionState {
+                                        admission: &mut admission,
                                         task_sessions: &mut task_sessions,
                                         in_flight_sessions: &mut in_flight_sessions,
                                         pending_hints: &mut pending_hints,
@@ -1103,7 +1119,7 @@ where
                                 )
                                 && has_admissible_hint(
                                     &pending_hints,
-                                    task_sessions.len(),
+                                    admission.occupied(&task_sessions),
                                     self.max_in_flight_passes,
                                 )
                             {
@@ -1119,6 +1135,12 @@ where
                         biased;
 
                         () = &mut shutdown => break 'scheduler,
+                        Some(change) = admission_changes.recv() => {
+                            admission.apply(change, &task_sessions, &mut pending_sessions, &mut pending_hints);
+                            if has_admissible_hint(&pending_hints, admission.occupied(&task_sessions), self.max_in_flight_passes) {
+                                break None;
+                            }
+                        }
                         completed = passes.join_next_with_id(),
                             if !task_sessions.is_empty() =>
                         {
@@ -1126,6 +1148,7 @@ where
                                 && apply_pass_completion::<Pass>(
                                     completed,
                                     PassCompletionState {
+                                        admission: &mut admission,
                                         task_sessions: &mut task_sessions,
                                         in_flight_sessions: &mut in_flight_sessions,
                                         pending_hints: &mut pending_hints,
@@ -1160,13 +1183,24 @@ where
         }
 
         shutdown_drain.send_replace(true);
-        while let Some(completed) = passes.join_next_with_id().await {
-            observe_pass_completion::<Pass>(
-                completed,
-                &mut task_sessions,
-                &mut in_flight_sessions,
-                &self.occupancy_observer,
-            );
+        while !task_sessions.is_empty() {
+            while admission.occupied(&task_sessions) < self.max_in_flight_passes {
+                let Some(session) = pop_pending_hint(&mut pending_sessions, &mut pending_hints)
+                else {
+                    break;
+                };
+                admission.resume(session);
+            }
+            select! {
+                Some(change) = admission_changes.recv() => {
+                    admission.apply(change, &task_sessions, &mut pending_sessions, &mut pending_hints);
+                }
+                Some(completed) = passes.join_next_with_id() => {
+                    let task = match &completed { Ok((task, _)) => *task, Err(error) => error.id() };
+                    admission.retire(task, &task_sessions, &mut pending_hints, &mut pending_sessions);
+                    observe_pass_completion::<Pass>(completed, &mut task_sessions, &mut in_flight_sessions, &self.occupancy_observer);
+                }
+            }
         }
         SchedulerLoopExit::Shutdown
     }
@@ -1247,6 +1281,7 @@ where
 
 /// Scheduler-visible queues retired by one completed pass.
 struct PassCompletionState<'a> {
+    admission: &'a mut admission::Admission,
     task_sessions: &'a mut HashMap<Id, InFlightPass>,
     in_flight_sessions: &'a mut HashSet<SessionId>,
     pending_hints: &'a mut HashSet<SessionId>,
@@ -1267,6 +1302,16 @@ where
     Pass: EligibilityPass,
     Pass::Error: ClassifyOperatorFailure,
 {
+    let task = match &completed {
+        Ok((task, _)) => *task,
+        Err(error) => error.id(),
+    };
+    state.admission.retire(
+        task,
+        state.task_sessions,
+        state.pending_hints,
+        state.pending_sessions,
+    );
     let Some(CompletedPass {
         session,
         rerun_allowed,
@@ -1302,6 +1347,7 @@ fn spawn_pass<Pass>(
     counts_toward_occupancy: bool,
     bound: SchedulerPassOccupancyBound,
     shutdown_drain: watch::Receiver<bool>,
+    admission_sender: mpsc::UnboundedSender<admission::Change>,
     task_sessions: &mut HashMap<Id, InFlightPass>,
     observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
 ) where
@@ -1315,7 +1361,11 @@ fn spawn_pass<Pass>(
     // stack at the spawn boundary.
     let execution = erased_pass_execution(pass, session);
     let task = passes.spawn(
-        bounded_pass(execution, session, bound, shutdown_drain, expiry_handler).instrument(span),
+        admission::scope(
+            admission_sender,
+            bounded_pass(execution, session, bound, shutdown_drain, expiry_handler),
+        )
+        .instrument(span),
     );
     task_sessions.insert(
         task.id(),
@@ -2711,6 +2761,91 @@ mod tests {
             .expect("recorded identities are not poisoned");
         assert_eq!(identities.len(), 2);
         assert_ne!(identities[0], identities[1]);
+    }
+
+    #[derive(Clone)]
+    struct ReleasingPass {
+        first: SessionId,
+        first_starts: Arc<AtomicUsize>,
+        resumed: Arc<AtomicUsize>,
+        release_io: Arc<Notify>,
+        io_finished: Arc<Notify>,
+        second_started: Arc<Notify>,
+        second_verified: Arc<Notify>,
+        finish_second: Arc<Notify>,
+    }
+
+    impl EligibilityPass for ReleasingPass {
+        type Error = FakeSweepError;
+
+        fn run(
+            &mut self,
+            session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let state = self.clone();
+            async move {
+                if session == state.first {
+                    state.first_starts.fetch_add(1, Ordering::SeqCst);
+                    super::with_released_scheduler_admission(async {
+                        state.release_io.notified().await;
+                        state.io_finished.notify_one();
+                    })
+                    .await;
+                    state.resumed.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    state.second_started.notify_one();
+                    state.io_finished.notified().await;
+                    assert_eq!(state.resumed.load(Ordering::SeqCst), 0);
+                    state.second_verified.notify_one();
+                    state.finish_second.notified().await;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn released_pass_reacquires_without_duplicate_session_during_shutdown() {
+        let state = ReleasingPass {
+            first: session(0x1285),
+            first_starts: Arc::new(AtomicUsize::new(0)),
+            resumed: Arc::new(AtomicUsize::new(0)),
+            release_io: Arc::new(Notify::new()),
+            io_finished: Arc::new(Notify::new()),
+            second_started: Arc::new(Notify::new()),
+            second_verified: Arc::new(Notify::new()),
+            finish_second: Arc::new(Notify::new()),
+        };
+        let (shutdown, stopping) = oneshot::channel();
+        let mut scheduler = SchedulerLoop::with_max_in_flight(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(state.first), Ok(state.first), Ok(session(0x1286))]),
+            },
+            state.clone(),
+            NonZeroUsize::new(1).expect("one admission slot"),
+        );
+        let runtime = tokio::spawn(async move {
+            scheduler
+                .run_until(async {
+                    let _ = stopping.await;
+                })
+                .await
+        });
+        timeout(Duration::from_secs(1), async {
+            state.second_started.notified().await;
+            shutdown.send(()).expect("scheduler awaits shutdown");
+            state.release_io.notify_one();
+            state.second_verified.notified().await;
+            state.finish_second.notify_one();
+            assert_eq!(
+                runtime.await.expect("scheduler completes"),
+                SchedulerLoopExit::Shutdown
+            );
+        })
+        .await
+        .expect("released passes drain through reacquisition");
+        assert_eq!(state.first_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(state.resumed.load(Ordering::SeqCst), 1);
     }
 
     #[derive(Clone, Debug)]
