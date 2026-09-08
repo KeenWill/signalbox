@@ -734,6 +734,8 @@ The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
 true; false disables module polling, webhook listening, and command dispatch,
 including convergence-sweep target enrollment and session commissioning.
+Repository-watch duration fields accept integer seconds or Jiff's friendly
+unsigned-duration strings; rule cooldowns retain whole-second precision.
 
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its

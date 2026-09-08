@@ -190,20 +190,11 @@ async fn oauth_quarantine_committing_during_selection_prevents_a_call_checkpoint
         },
     );
     tokio::pin!(checkpoint);
-    let waiting_for_profile = async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%oauth_credential_profile%')",
-            ).fetch_one(&pool).await?;
-            if waiting {
-                return Ok::<_, sqlx::Error>(());
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    };
     tokio::select! {
-        result = &mut checkpoint => panic!("checkpoint escaped the profile lock: {result:?}"),
-        waiting = tokio::time::timeout(Duration::from_secs(5), waiting_for_profile) => waiting??,
+        result = &mut checkpoint => panic!("checkpoint escaped the credential lock: {result:?}"),
+        waiting = blocked_backends_reached(&pool, 1) => {
+            assert!(waiting?, "checkpoint waits for the held credential lease");
+        }
     }
     lease
         .quarantine(OauthQuarantineCause::RefreshRejected)

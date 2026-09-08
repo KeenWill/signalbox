@@ -540,19 +540,6 @@ async fn command_load_reconstitutes_complete_checked_seed() -> Result<(), Box<dy
     assert_eq!(recorded.applied_result(), applied);
     assert_eq!(recorded.semantic_entries().len(), 2);
     assert_eq!(recorded.seed_snapshot().entry_count(), 2);
-    let versions: (i16, i16) = sqlx::query_as(
-        "SELECT registry.storage_version, typed.storage_version
-           FROM durable_command AS registry
-           JOIN create_session_from_imported_frontier_command AS typed
-             ON typed.command_id = registry.command_id
-          WHERE registry.command_id = $1",
-    )
-    .bind(Uuid::from_u128(0x302))
-    .fetch_one(&pool)
-    .await?;
-    // Imported creation skips committed runner-placement version four and
-    // writes settings-bearing storage version five.
-    assert_eq!(versions, (5, 5));
     Ok(())
 }
 

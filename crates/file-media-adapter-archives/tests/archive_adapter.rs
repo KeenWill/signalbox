@@ -51,8 +51,9 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
         Box::pin(async move {
+            let source = fixtures::EnvelopeSource::new(source, &request);
             self.provider
-                .inspect(reader, request, source, cancellation)
+                .inspect(reader, request, &source, cancellation)
                 .await
                 .map_err(map_provider_failure)
         })
@@ -78,6 +79,63 @@ fn map_provider_failure(
     _: signalbox_file_media_runtime::FileMediaProviderFailure,
 ) -> ProcessorBoundaryFailure {
     ProcessorFailure::Failed.into()
+}
+
+#[tokio::test]
+async fn declared_zip_beyond_probe_prefix_fits_one_validation_range() -> Result<(), Box<dyn Error>>
+{
+    let source = ArchiveFixture::zip_after_long_preamble()?.into_source()?;
+    let ceilings = FileMediaCeilings {
+        validation_ranges: 1,
+        ..FileMediaCeilings::version_one()
+    };
+    let registry = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    )?;
+    let inspection = registry
+        .inspect(
+            &DirectProcessor::new(),
+            InspectionRequest {
+                source: source.file_use()?,
+                visible_part: None,
+            },
+            &source,
+            &NeverCancelled,
+        )
+        .await?;
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lowered_validation_byte_ceiling_returns_a_typed_size_limit() -> Result<(), Box<dyn Error>>
+{
+    let source = ArchiveFixture::zip()?.into_source()?;
+    let ceilings = FileMediaCeilings {
+        validation_source_bytes: source.byte_length().get() - 1,
+        validation_ranges: 1,
+        ..FileMediaCeilings::version_one()
+    };
+    let registry = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    )?;
+    let inspection = registry
+        .inspect(
+            &DirectProcessor::new(),
+            InspectionRequest {
+                source: source.file_use()?,
+                visible_part: None,
+            },
+            &source,
+            &NeverCancelled,
+        )
+        .await?;
+    assert_eq!(malformed_reason(&inspection)?, "source_size_limit");
+    Ok(())
 }
 
 #[test]

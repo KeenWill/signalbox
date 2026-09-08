@@ -145,35 +145,40 @@ impl FileMediaProvider for ArchiveProvider {
             if request.media_type.as_str() != kind.media_type() {
                 return Err(FileMediaProviderFailure::Failed);
             }
-            let mut complete = None;
-            if request.evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
-                let length = source.byte_length().get().min(PROBE_BYTES);
-                let prefix =
-                    ProbePrefix(read_range(source, SourceRange { offset: 0, length }).await?);
-                require_active(cancellation)?;
-                if !kind.matches_probe(prefix.as_bytes()) {
-                    if kind != ArchiveKind::Zip || source.byte_length().get() > SOURCE_BYTES {
-                        return Ok(ProcessorValidationOutput::NoMatch);
-                    }
-                    let bytes = read_complete_after_prefix(source, prefix).await?;
-                    require_active(cancellation)?;
-                    match structurally_valid_zip(bytes.as_bytes()) {
-                        Ok(true) => {}
-                        Ok(false) => return Ok(ProcessorValidationOutput::NoMatch),
-                        Err(issue) => return Ok(malformed_validation(kind, issue.reason())),
-                    }
-                    complete = Some(bytes.0);
-                } else if source.byte_length().get() <= SOURCE_BYTES {
-                    complete = Some(read_complete_after_prefix(source, prefix).await?.0);
-                }
-            }
-            if source.byte_length().get() > SOURCE_BYTES {
+            let maximum = SOURCE_BYTES.min(request.maximum_source_bytes);
+            if request.maximum_ranges == 0 || maximum == 0 {
                 return Ok(malformed_validation(kind, SOURCE_SIZE_REASON));
             }
-            let bytes = match complete {
-                Some(bytes) => bytes,
-                None => read_all(source).await?,
-            };
+            if source.byte_length().get() > maximum {
+                if request.evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
+                    let prefix = read_range(
+                        source,
+                        SourceRange {
+                            offset: 0,
+                            length: PROBE_BYTES.min(maximum),
+                        },
+                    )
+                    .await?;
+                    require_active(cancellation)?;
+                    if !kind.matches_probe(&prefix) {
+                        return Ok(ProcessorValidationOutput::NoMatch);
+                    }
+                }
+                return Ok(malformed_validation(kind, SOURCE_SIZE_REASON));
+            }
+            let bytes = read_all(source).await?;
+            if request.evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
+                && !kind.matches_probe(&bytes[..bytes.len().min(PROBE_BYTES as usize)])
+            {
+                if kind != ArchiveKind::Zip {
+                    return Ok(ProcessorValidationOutput::NoMatch);
+                }
+                match structurally_valid_zip(&bytes) {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(ProcessorValidationOutput::NoMatch),
+                    Err(issue) => return Ok(malformed_validation(kind, issue.reason())),
+                }
+            }
             require_active(cancellation)?;
             match enumerate(kind, &bytes) {
                 Ok(summary) => validated_output(kind, request.evidence, &summary),
@@ -210,9 +215,10 @@ impl FileMediaProvider for ArchiveProvider {
             if request.view.as_str() != ENTRIES_VIEW {
                 return Ok(ProcessorReadOutput::UnsupportedView);
             }
-            if source.byte_length().get() > SOURCE_BYTES {
+            let maximum = SOURCE_BYTES.min(request.maximum_source_bytes);
+            if source.byte_length().get() > maximum {
                 return Ok(ProcessorReadOutput::SourceTooLarge {
-                    maximum_bytes: SOURCE_BYTES,
+                    maximum_bytes: maximum,
                 });
             }
             let bytes = read_all(source).await?;
@@ -290,10 +296,8 @@ fn reader_declaration(
             range_count: 1,
             cumulative_bytes: SOURCE_BYTES,
         }),
-        // Validation reads at most two ranges: the bounded signature prefix and
-        // the single remainder read that completes the bounded whole source.
-        // Their cumulative bytes never exceed the whole-source ceiling.
-        validation: ValidationDeclaration::new(SOURCE_BYTES, 2),
+        // Validation reads either the bounded whole source or its signature prefix.
+        validation: ValidationDeclaration::new(SOURCE_BYTES, 1),
         views: vec![entries_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
@@ -552,7 +556,8 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
             let mut file = archive
                 .by_index(index)
                 .map_err(|_| ArchiveIssue::Malformed)?;
-            let (expanded, recursive) = count_reader(&mut file, MAX_ENTRY_BYTES, &scan_budget)?;
+            let (expanded, recursive) =
+                count_reader(&mut file, remaining_entry_bytes(total)?, &scan_budget)?;
             if kind == "directory" && expanded != 0 {
                 return Err(ArchiveIssue::Special);
             }
@@ -652,7 +657,7 @@ fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         let (expanded, recursive) = if entry_type.is_dir() {
             (0, false)
         } else {
-            count_reader(&mut entry, MAX_ENTRY_BYTES, &scan_budget)?
+            count_reader(&mut entry, remaining_entry_bytes(total)?, &scan_budget)?
         };
         if recursive {
             return Err(ArchiveIssue::Recursive);
@@ -745,6 +750,13 @@ fn single_stream_summary(name: String, expanded: u64) -> ArchiveSummary {
     }
 }
 
+fn remaining_entry_bytes(total: u64) -> Result<u64, ArchiveIssue> {
+    MAX_EXPANDED_BYTES
+        .checked_sub(total)
+        .map(|remaining| remaining.min(MAX_ENTRY_BYTES))
+        .ok_or(ArchiveIssue::Expansion)
+}
+
 fn count_reader(
     reader: &mut dyn Read,
     maximum: u64,
@@ -763,8 +775,11 @@ fn count_reader_with_detector(
     let mut total = 0_u64;
     let mut buffer = [0_u8; DECODE_BUFFER_BYTES];
     loop {
+        let read_length = usize::try_from(maximum.saturating_sub(total).saturating_add(1))
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
         let count = reader
-            .read(&mut buffer)
+            .read(&mut buffer[..read_length])
             .map_err(|_| ArchiveIssue::Malformed)?;
         if count == 0 {
             break;
@@ -1170,7 +1185,7 @@ mod tests {
 
     use super::{
         ArchiveIssue, DECODE_BUFFER_BYTES, DecodeStatus, MAX_EXPANDED_BYTES, RecursiveDetector,
-        ZipScanReader, enumerate_zip, reader_decode_status,
+        ZipScanReader, count_reader, enumerate_zip, reader_decode_status, remaining_entry_bytes,
     };
 
     /// A well-formed decoder over a high-expansion source: it never fails and never ends,
@@ -1301,5 +1316,24 @@ mod tests {
 
         assert_eq!(status, DecodeStatus::LimitExceeded);
         assert!(decoder.produced <= MAX_EXPANDED_BYTES + buffer_bytes);
+    }
+    #[test]
+    fn entry_decode_stops_at_the_remaining_aggregate_allowance() {
+        let mut decoder = EndlessDecoder { produced: 0 };
+        let remaining = 17;
+        let allowance = remaining_entry_bytes(MAX_EXPANDED_BYTES - remaining).unwrap();
+        assert!(matches!(
+            count_reader(
+                &mut decoder,
+                allowance,
+                &super::zip_scan_budget().expect("compiled allowance")
+            ),
+            Err(ArchiveIssue::Expansion)
+        ));
+        assert_eq!(
+            decoder.produced,
+            remaining + 1,
+            "only one EOF-detection byte may exceed the allowance"
+        );
     }
 }
