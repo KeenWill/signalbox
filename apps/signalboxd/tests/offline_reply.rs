@@ -36,14 +36,13 @@ use signalbox_model_runtime::{
     AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, ProviderReportedModel,
     RefusalEvidence, Script, ScriptedModel, TerminalEvidence, TokenUsage,
 };
+#[cfg(feature = "test-support")]
+use signalbox_persistence::goal::GoalRecoveryProgress;
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
-    goal::{
-        GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRecoveryProgress,
-        GoalRepository,
-    },
+    goal::{GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
@@ -75,10 +74,13 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const SCHEDULED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal.";
 // numeric-bound: test - identifies the first durable recovery event
+#[cfg(feature = "test-support")]
 const FIRST_RECOVERY_EVENT_COUNT: i64 = 1;
 // numeric-bound: test - identifies the second durable execution-failure block
+#[cfg(feature = "test-support")]
 const SECOND_FAILURE_EVENT_COUNT: i64 = 2;
 // numeric-bound: test - counts the commissioned turn and its two successors
+#[cfg(feature = "test-support")]
 const RECOVERY_CYCLE_TURN_COUNT: i64 = 3;
 const GOAL_MODEL_CONFIGURATION: &str = r#"
 version = 1
@@ -223,6 +225,7 @@ async fn wait_for_execution_failure_block(pool: &PgPool, session: SessionId) {
     }
 }
 
+#[cfg(feature = "test-support")]
 async fn wait_for_goal_recovery_count(
     repository: &GoalRepository,
     session: SessionId,
@@ -543,6 +546,13 @@ async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dy
     Ok(())
 }
 
+#[cfg_attr(
+    not(feature = "test-support"),
+    allow(
+        dead_code,
+        reason = "recovery probes are read by the test-support scenario"
+    )
+)]
 struct GoalFailureFixture<Pass, Probe> {
     container: ContainerAsync<Postgres>,
     pool: PgPool,
@@ -750,9 +760,13 @@ async fn s_goal_success_continues_and_unsuccessful_turn_blocks_without_retry()
 
 /// Repeated reconciliation inventories re-arm one pending block; the resumed turn
 /// blocks durably after another refusal. This exercises the reconciliation method.
+#[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn repeated_reconciliation_resumes_a_blocked_goal_once() -> Result<(), Box<dyn Error>> {
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
     let GoalFailureFixture {
         container,
         pool,
@@ -764,19 +778,29 @@ async fn repeated_reconciliation_resumes_a_blocked_goal_once() -> Result<(), Box
     } = goal_failure_block_after_success(signalbox_domain::SessionOwnership::Owned).await?;
     let session = goal.session();
     assert_execution_failure_blocked(&goal);
+    // The two spawned resumptions and this test release recovery together.
+    let resume_barrier = Arc::new(Barrier::new(3));
     let reconciliation = PostgresGoalPassDisposition::new(
         pool.clone(),
         support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?,
         nudge,
         GoalModeNumericBounds::new(None, None, None, None, None),
-    );
-    let (first, repeated) = tokio::join!(
-        reconciliation.reconcile_automatic_resumptions_after_restart(),
-        reconciliation.reconcile_automatic_resumptions_after_restart(),
-    );
-    assert_eq!(first?, usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?);
-    assert_eq!(repeated?, usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?);
+    )
+    .with_startup_resume_barrier(resume_barrier.clone());
+    let first = reconciliation
+        .reconcile_automatic_resumptions_after_restart()
+        .await?;
+    let repeated = reconciliation
+        .reconcile_automatic_resumptions_after_restart()
+        .await?;
+    assert_eq!(first, usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?);
+    assert_eq!(repeated, usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?);
     let repository = GoalRepository::new(pool.clone());
+    assert_eq!(
+        repository.recovery_progress(session).await?.resumptions(),
+        0
+    );
+    timeout(Duration::from_secs(10), resume_barrier.wait()).await?;
     timeout(
         Duration::from_secs(10),
         wait_for_goal_recovery_count(

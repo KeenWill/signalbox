@@ -25,6 +25,8 @@ use signalbox_persistence::{
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
 };
 use sqlx::PgPool;
+#[cfg(feature = "test-support")]
+use tokio::sync::Barrier;
 use uuid::Uuid;
 
 use crate::HubModelConfiguration;
@@ -524,6 +526,8 @@ pub struct PostgresGoalPassDisposition {
     configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     eligibility_nudge: InProcessEligibilityNudge,
     numeric_bounds: GoalModeNumericBounds,
+    #[cfg(feature = "test-support")]
+    startup_resume_barrier: Option<Arc<Barrier>>,
 }
 
 impl PostgresGoalPassDisposition {
@@ -540,7 +544,16 @@ impl PostgresGoalPassDisposition {
             configuration_reload: None,
             eligibility_nudge,
             numeric_bounds,
+            #[cfg(feature = "test-support")]
+            startup_resume_barrier: None,
         }
+    }
+
+    /// Holds spawned startup resumptions until a test releases the barrier.
+    #[cfg(feature = "test-support")]
+    pub fn with_startup_resume_barrier(mut self, barrier: Arc<Barrier>) -> Self {
+        self.startup_resume_barrier = Some(barrier);
+        self
     }
 
     pub fn with_configuration_reload(
@@ -604,6 +617,10 @@ impl PostgresGoalPassDisposition {
         for candidate in pending {
             let adapter = self.clone();
             drop(tokio::spawn(async move {
+                #[cfg(feature = "test-support")]
+                if let Some(barrier) = &adapter.startup_resume_barrier {
+                    barrier.wait().await;
+                }
                 adapter
                     .resume_after_execution_failure(candidate.session(), candidate.blocked())
                     .await;
