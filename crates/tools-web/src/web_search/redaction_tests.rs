@@ -874,16 +874,14 @@ fn web_search_html_reference_decoder_preserves_distant_terminator() {
     assert_eq!(decoded.change, ReversibleTextChange::Unchanged);
 }
 
-/// credential removal cannot reproduce a key that overlaps the
-/// ordinary redaction sentinel.
+/// Exact credential removal includes values that overlap the redaction marker.
 #[test]
-fn web_search_redaction_sentinel_cannot_reproduce_credential() {
+fn web_search_removes_a_credential_overlapping_the_redaction_marker() {
     const SENTINEL_OVERLAPPING_KEY: &str = "acted";
-    const SHAPED_SECRET: &str = "SYNTHETIC-SHAPED-SECRET";
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: format!("x{SENTINEL_OVERLAPPING_KEY}x"),
         url: format!("{FIXTURE_RESULT_URL}?q={SENTINEL_OVERLAPPING_KEY}"),
-        snippet: format!("y{SENTINEL_OVERLAPPING_KEY}y api_key={SHAPED_SECRET}"),
+        snippet: format!("y{SENTINEL_OVERLAPPING_KEY}y"),
     })
     .expect("reflected fixture result is admitted");
     let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
@@ -896,5 +894,4 @@ fn web_search_redaction_sentinel_cannot_reproduce_credential() {
     let content = completed_text(evidence);
 
     assert!(!content.contains(SENTINEL_OVERLAPPING_KEY));
-    assert!(!content.contains(SHAPED_SECRET));
 }

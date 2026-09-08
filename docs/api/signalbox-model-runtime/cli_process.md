@@ -53,18 +53,6 @@ impl CliEnvironmentOverride {
 }
 ```
 
-## CliTerminalTextCapture
-
-```rust
-#[cfg(feature = "cli-process")]
-pub enum CliTerminalTextCapture {
-    Disabled,
-    TerminalOnly,
-    StreamAndTerminal,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::PartialEq, cmp::Eq
-```
-
 ## CliProcessRequest
 
 ```rust
@@ -122,7 +110,6 @@ impl error::Error for CliDecodeFailure {}
 pub trait CliSession<C>: marker::Sized {
     const LABELS: CliProcessLabels;
     fn correlation(&self) -> &C;
-    fn terminal_text_capture(&self) -> CliTerminalTextCapture;
     fn terminal_observed(&self) -> bool;
     fn keeps_stdin_open(&self) -> bool {
         /* provided */
@@ -133,14 +120,14 @@ pub trait CliSession<C>: marker::Sized {
     fn push(
         &mut self,
         line: &[u8],
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + marker::Send),
     ) -> result::Result<(), CliDecodeFailure>;
     fn decode_failure(
         self,
         class: CliDecodeFailureClass,
         detail: string::String,
     ) -> TerminalEvidence;
-    fn finish(self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence;
+    fn finish(self, sink: &mut (dyn ObservationSink<C> + marker::Send)) -> TerminalEvidence;
     fn boundary_loss(self, cause: LossCause) -> TerminalEvidence;
     fn note_undelivered_line(&mut self) {
         /* provided */
@@ -154,13 +141,13 @@ pub trait CliSession<C>: marker::Sized {
     fn boundary_loss_unless_provider_failure(
         self,
         cause: LossCause,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + marker::Send),
     ) -> TerminalEvidence;
     fn provider_error_after_exit(
         self,
         message: &str,
         classification: &str,
-        sink: &mut RedactingSink<'_, C>,
+        sink: &mut (dyn ObservationSink<C> + marker::Send),
     ) -> TerminalEvidence;
 }
 ```
