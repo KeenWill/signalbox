@@ -6,37 +6,24 @@ This design is not built; it extends
 ## Goal
 
 Complete the durable storage that built subsystems already reserve space for:
-runner replacement, abandonment, and operation-failure evidence; retirement of
-an unacknowledged workspace release; runner placement in imported-create command
-records; the instruction admitted set; credential-pool state and availability
-waits; a producer for the session-state-changed event; and daemon-owned OAuth
-material.
+general runner operation-failure evidence; retirement of an unacknowledged
+workspace release; runner placement in imported-create command records; the
+instruction admitted set; credential-pool state and availability waits; a
+producer for the session-state-changed event; and daemon-owned OAuth material.
 
 ## Design
-
-Runner replacement and abandonment each end in one terminal orchestration
-transaction that holds authority outside the placement aggregate, moves the
-placement, and appends one runner-state-transition event per affected session in
-the same transaction. Replacement of a pinned placement also appends the
-placement transcript entry: one positive placement revision with a foreign key
-to the same session's placement record at that revision, which reconstitution
-resolves, rejecting a missing, cross-session, non-successor, or duplicated
-reference. Replacing a `RunnerLostBeforePin` placement updates only the exact
-selector and returns to `Unpinned`, appending no such entry. The record kind
-already carries the replacement and abandonment states; the transactions that
-produce them do not exist.
 
 A daemon transaction retires a workspace release the lost runner never
 acknowledged, so a lost runner leaves no release outstanding.
 
-Runner operation-failure evidence is stored in the transaction that resolves the
-correlated operation as refused, and the daemon acknowledges the failure to the
-runner only after that commit. The record is append-only and keyed by the
-refused operation's correlation identity, so success and refusal are exclusive
-after the operation head retires. The record keeps the bounded code, message,
-and exact payload of the admitted detail, so runner status inspection reproduces
-the failure. Equal retransmission rereads the equal record; unequal reuse is a
-correlation error.
+For operations other than replacement provisioning, runner operation-failure
+evidence is stored in the transaction that resolves the correlated operation as
+refused, and the daemon acknowledges the failure to the runner only after that
+commit. The record is append-only and keyed by the refused operation's
+correlation identity, so success and refusal are exclusive after the operation
+head retires. The record keeps the bounded code, message, and exact payload of
+the admitted detail, so runner status inspection reproduces the failure. Equal
+retransmission rereads the equal record; unequal reuse is a correlation error.
 
 Imported-create command records at storage version 4 carry the complete
 placement request, and replay compares it with the created session's
@@ -89,9 +76,6 @@ publishes nothing. Delivery of OAuth material to a model call is owned by
 
 ## Compatibility constraints
 
-The placement snapshot writer keeps refusing loss, replacement, and abandonment;
-the new transactions gain that authority elsewhere.
-
 No writer produces imported-create storage version 4, and the version gate keeps
 rejecting it until a record at that version carries placement.
 
@@ -109,10 +93,6 @@ appended in the committing transaction, and the row locks the inventory names
 issued from that file.
 
 ## Acceptance criteria
-
-Replacement and abandonment each apply the placement move and one
-runner-state-transition event per affected session in one terminal transaction,
-and the placement snapshot writer is unchanged.
 
 After a runner is lost, no workspace release that runner held stays
 unacknowledged; a daemon transaction has retired it. Releases held by reachable

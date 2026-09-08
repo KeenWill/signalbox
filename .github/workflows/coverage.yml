@@ -1,21 +1,8 @@
 name: Coverage
 
-# Coverage is a measurement here, never a gate. No step in this file compares a
-# percentage against a threshold, no job is meant to become a required check,
-# and every job carries `continue-on-error` so a coverage failure can never
-# block a merge — the same report-only shape rust.yml's instruction counts and
-# tool-smokes.yml's live smokes already use. What this produces is a job
-# summary, a downloadable HTML and LCOV report, and an upload of that LCOV
-# to Codecov under the `rust` flag. Codecov updates a pull-request comment only
-# when coverage changes. The upload changes nothing about the posture:
-# codecov.yml marks every status there
-# `informational: true`, so what Codecov reports is another readout and not a
-# second opinion with a veto.
-#
-# The report is deliberately honest about what it does not measure; the
-# "Report the numbers" step below states every exclusion alongside the number,
-# because a coverage percentage whose denominator is unstated is not a
-# measurement.
+# Coverage is report-only: no threshold, required check, or blocking Codecov
+# status. Each measured suite records its outcome even when it fails. Artifacts
+# contain the merged LCOV measurement and Markdown/HTML summaries.
 
 on:
   pull_request:
@@ -25,6 +12,12 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "rust-toolchain.toml"
+      - "BUILD.bazel"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".bazelrc"
+      - ".bazelversion"
+      - "tooling/bazel/**"
       - "tooling/summarize_coverage.py"
       - "tooling/test_summarize_coverage.py"
       - ".github/workflows/coverage.yml"
@@ -36,6 +29,12 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "rust-toolchain.toml"
+      - "BUILD.bazel"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".bazelrc"
+      - ".bazelversion"
+      - "tooling/bazel/**"
       - "tooling/summarize_coverage.py"
       - "tooling/test_summarize_coverage.py"
       - ".github/workflows/coverage.yml"
@@ -63,100 +62,103 @@ jobs:
     name: Rust coverage (report only)
     continue-on-error: true
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-docker' }}
-    # The instrumented build compiles the workspace once more and then runs
-    # both the workspace suite and the three dockerized PostgreSQL suites in
-    # one job. They cannot be split across runners: a report needs the
-    # profiling data and the instrumented binaries that produced it in the same
-    # workspace, and shipping the instrumented binaries between jobs would cost
-    # more than the serial minutes do. This is the slowest job in the
-    # repository by design, and it gates nothing.
     timeout-minutes: 90
+    env:
+      BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Cheap and first: the summarizer's own regression tests run before the
-      # hour-long instrumented build, so a broken report renderer fails in
-      # seconds rather than at the end.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.29.0
       - name: Test the coverage summarizer
-        run: python3 tooling/test_summarize_coverage.py
-      # Mirrors workspace-tests in rust.yml: without Bubblewrap the sandboxed
-      # execution suite skips, and the measured surface would silently differ
-      # from the surface CI actually tests.
+        run: |
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          bazel test --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:test_summarize_coverage
+      - name: Fetch Cargo inputs for offline diagnostic fixtures
+        run: cargo fetch --locked
       - name: Install Bubblewrap
         if: ${{ runner.environment == 'github-hosted' }}
         run: sudo apt-get install --yes bubblewrap
       - name: Enable unprivileged user namespaces for Bubblewrap
         if: ${{ runner.environment == 'github-hosted' }}
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-on-failure: true
-          shared-key: coverage
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Exact version pin, as cargo-deny is pinned in deny.yml: an instrumented
-      # build and its report must come from one known tool build.
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
-        with:
-          tool: cargo-llvm-cov@0.8.7
-      # Each measured suite runs under `--no-report`, which accumulates
-      # profiling data across invocations; the report is generated once from
-      # all of them below. Each suite continues on error and its outcome is
-      # reported, so one failing suite yields a smaller number that says so
-      # rather than no number at all.
-      # One test is skipped, and only here. The production exec runner launches
-      # its target through the workspace's own `signalbox-exec-supervisor`,
-      # which this job instruments; LLVM's profiling runtime sets
-      # `__LLVM_PROFILE_RT_INIT_ONCE` in that supervisor's environment, and the
-      # variable survives the exec into the target. A test asserting that a
-      # cleared environment holds exactly the one variable it was given
-      # therefore observes two. Both the assertion and the code under test are
-      # right; only the instrumented supervisor differs from the binary
-      # rust.yml runs. Skipping the one test it perturbs is honest — the
-      # exclusion is stated in the report — where leaving a permanently failed
-      # suite row would teach a reader to ignore that column.
       - name: Measure the workspace suite
         id: workspace
         continue-on-error: true
-        run: >-
-          cargo llvm-cov --no-report --no-fail-fast
-          --workspace --all-targets --all-features
-          -- --skip production_runner_clears_ambient_environment_when_requested
+        run: |
+          report_dir="$RUNNER_TEMP/coverage"
+          mkdir -p "$report_dir"
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          rm -f bazel-out/_coverage/_coverage_report.dat
+          status=0
+          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" --test_arg=--skip --test_arg=production_runner_clears_ambient_environment_when_requested //:coverage_workspace || status=$?
+          if [[ -f bazel-out/_coverage/_coverage_report.dat ]]; then
+            cp bazel-out/_coverage/_coverage_report.dat "$report_dir/workspace.lcov"
+          fi
+          exit "$status"
       - name: Measure the persistence PostgreSQL suite
         id: persistence
         continue-on-error: true
-        run: >-
-          cargo llvm-cov --no-report --no-fail-fast
-          -p signalbox-persistence --features postgres-integration --tests
-          -- --ignored --test-threads=4
-      # `--skip` keeps the whole-daemon live smoke and subprocess-only bridge
-      # fixtures out of this run. The live smoke is already inert without
-      # GITHUB_TOKEN, which this job never sets, but a measurement job spends
-      # no real HTTP requests by construction rather than by an absent
-      # credential. The bridge fixtures are launched only by owning tests;
-      # selecting them directly adds sleeps, builds, and orphaned descendants
-      # that measure no production behavior.
+        run: |
+          report_dir="$RUNNER_TEMP/coverage"
+          mkdir -p "$report_dir"
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          rm -f bazel-out/_coverage/_coverage_report.dat
+          status=0
+          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" //:coverage_persistence || status=$?
+          if [[ -f bazel-out/_coverage/_coverage_report.dat ]]; then
+            cp bazel-out/_coverage/_coverage_report.dat "$report_dir/persistence.lcov"
+          fi
+          exit "$status"
       - name: Measure the signalboxd PostgreSQL suite
         id: signalboxd
         continue-on-error: true
-        run: >-
-          cargo llvm-cov --no-report --no-fail-fast
-          -p signalboxd --tests
-          -- --ignored --test-threads=4
-          --skip live_daemon_executes_every_tool_family_and_denies_every_gate
-          --skip bridge_build_direct_invocation_fixture
-          --skip bridge_wait_
+        run: |
+          report_dir="$RUNNER_TEMP/coverage"
+          mkdir -p "$report_dir"
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          rm -f bazel-out/_coverage/_coverage_report.dat
+          status=0
+          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" //:coverage_signalboxd || status=$?
+          if [[ -f bazel-out/_coverage/_coverage_report.dat ]]; then
+            cp bazel-out/_coverage/_coverage_report.dat "$report_dir/signalboxd.lcov"
+          fi
+          exit "$status"
       - name: Measure the terminal-client PostgreSQL suite
         id: terminal_client
         continue-on-error: true
-        run: >-
-          cargo llvm-cov --no-report --no-fail-fast
-          -p signalbox-client --tests
-          -- --ignored --test-threads=4
-          --skip terminal_client_completes_the_real_anthropic_path
+        run: |
+          report_dir="$RUNNER_TEMP/coverage"
+          mkdir -p "$report_dir"
+          cache_args=()
+          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
+            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
+          fi
+          rm -f bazel-out/_coverage/_coverage_report.dat
+          status=0
+          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" //:coverage_terminal_client || status=$?
+          if [[ -f bazel-out/_coverage/_coverage_report.dat ]]; then
+            cp bazel-out/_coverage/_coverage_report.dat "$report_dir/terminal_client.lcov"
+          fi
+          exit "$status"
       - name: Report the numbers
         if: ${{ always() }}
         env:
@@ -167,58 +169,30 @@ jobs:
         run: |
           report_dir="$RUNNER_TEMP/coverage"
           mkdir -p "$report_dir"
-          cargo llvm-cov report --lcov --output-path "$report_dir/lcov.info"
-          cargo llvm-cov report --html --output-dir "$report_dir"
-          # `--summary-only` drops the per-region detail the summarizer never
-          # reads, which is the difference between a 140 KiB document and a
-          # 70 MiB one.
-          cargo llvm-cov report --json --summary-only \
-            --output-path "$report_dir/summary.json"
-
           {
             echo '| Measured suite | Outcome |'
             echo '| --- | --- |'
-            echo "| workspace (\`--all-targets --all-features\`) | $WORKSPACE_OUTCOME |"
-            echo "| persistence PostgreSQL (\`--ignored\`) | $PERSISTENCE_OUTCOME |"
-            echo "| signalboxd PostgreSQL (\`--ignored\`) | $SIGNALBOXD_OUTCOME |"
-            echo "| terminal-client PostgreSQL (\`--ignored\`) | $TERMINAL_CLIENT_OUTCOME |"
+            echo "| workspace | $WORKSPACE_OUTCOME |"
+            echo "| persistence PostgreSQL | $PERSISTENCE_OUTCOME |"
+            echo "| signalboxd PostgreSQL | $SIGNALBOXD_OUTCOME |"
+            echo "| terminal-client PostgreSQL | $TERMINAL_CLIENT_OUTCOME |"
             echo
-            echo '<details><summary>What this number does not measure</summary>'
+            echo 'Doctests, live credential smokes, subprocess-only bridge fixtures,'
+            echo 'and the Swift client are outside this measurement. The workspace'
+            echo 'excludes production_runner_clears_ambient_environment_when_requested:'
+            echo 'instrumenting its supervisor adds an LLVM runtime environment variable.'
+            echo 'The ordinary test gate runs that assertion without instrumentation.'
             echo
-            echo '- Doctests. `cargo llvm-cov --doctests` needs a nightly'
-            echo '  toolchain; this workspace pins stable, so the compile-fail'
-            echo '  sealing proofs and every other doctest are outside the'
-            echo '  denominator.'
-            echo '- Live smokes, which spend real network requests or'
-            echo '  credentials and are never run here: the tools-github and'
-            echo '  tools-web smokes stay `--ignored`, and the whole-daemon and'
-            echo '  real-provider terminal smokes are skipped by name above.'
-            echo '- The Swift native client, which Xcode measures separately.'
-            echo '- One environment-clearing test in `signalbox-tools-exec`,'
-            echo '  which instrumenting its supervisor process perturbs. The'
-            echo '  workflow comment on the workspace step states why; rust.yml'
-            echo '  runs that test uninstrumented and gates on it.'
-            echo '- Dedicated test files. cargo-llvm-cov excludes `tests/`'
-            echo '  and `benches/` targets and `*tests.rs` modules from the'
-            echo '  report by default, so that test code is counted neither'
-            echo '  covered nor uncovered here. Inline `#[cfg(test)]` modules'
-            echo '  inside a source file are the exception: they are'
-            echo '  instrumented, and they land on both sides. A test body'
-            echo '  that ran counts as covered, which makes every percentage'
-            echo '  below optimistic; the body of an `#[ignore]`d test no'
-            echo '  measured suite runs counts as uncovered, which puts test'
-            echo '  lines into the file ranking. Read both tables as close,'
-            echo '  not exact.'
-            echo
-            echo '</details>'
+            echo 'Dedicated tests/, benches/, and *tests.rs sources are excluded from'
+            echo 'the report. Inline test modules remain counted, so the figures include'
+            echo 'some test code. LCOV contains no region metric; regions are unavailable.'
           } > "$report_dir/preamble.md"
-
-          python3 tooling/summarize_coverage.py "$report_dir/summary.json" \
+          python3 tooling/summarize_coverage.py --lcov "$report_dir"/*.lcov \
+            --lcov-output "$report_dir/lcov.info" \
             --preamble "$report_dir/preamble.md" \
             --top-uncovered 25 > "$report_dir/report.md"
-
+          python3 -c 'import html, os, pathlib; p = pathlib.Path(os.environ["RUNNER_TEMP"]) / "coverage"; (p / "index.html").write_text("<!doctype html><meta charset=utf-8><title>Rust coverage</title><pre>" + html.escape((p / "report.md").read_text()) + "</pre>")'
           cat "$report_dir/report.md" >> "$GITHUB_STEP_SUMMARY"
-
       - name: Upload the coverage report
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -227,22 +201,6 @@ jobs:
           path: ${{ runner.temp }}/coverage
           if-no-files-found: error
           retention-days: 14
-      # The LCOV the report step already wrote, sent on to Codecov — a second
-      # reader of one measurement, not a second measurement. Nothing above
-      # changes to produce it.
-      #
-      # Report-only like the rest of this workflow, and by two independent
-      # mechanisms: this step continues on error, and codecov.yml marks every
-      # status `informational: true`, so neither the upload nor anything
-      # Codecov concludes from it can fail a job or gate a merge.
-      #
-      # `flags: rust` is what keeps this separate from the native client's
-      # measurement, which swift.yml uploads under `swift`. The two are
-      # measured by different toolchains over disjoint trees, and a single
-      # merged percentage over both would be a number describing nothing.
-      #
-      # Pinned to a commit like every other third-party action here. The tag it
-      # resolves to is codecov-action v5.5.5.
       - name: Upload coverage reports to Codecov
         if: ${{ always() }}
         continue-on-error: true
@@ -251,13 +209,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ runner.temp }}/coverage/lcov.info
           flags: rust
-          # The one file above is the whole upload. Without these two the
-          # action also walks the checkout for anything matching its coverage
-          # globs and runs its gcov and Python plugins, either of which can
-          # add a second, differently-derived report under the same flag.
           disable_search: true
           plugins: noop
-          # A report-only job does not fail on a failed upload to a third
-          # party. `continue-on-error` above would contain it anyway; this
-          # keeps the step's own outcome honest rather than relying on that.
           fail_ci_if_error: false

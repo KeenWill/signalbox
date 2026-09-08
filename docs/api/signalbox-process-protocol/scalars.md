@@ -582,6 +582,7 @@ impl BlobChunk {
 ```rust
 pub enum FrameValidationError {
     OauthCredentialShape,
+    CredentialExclusionShape,
     UnsupportedVersion,
     UncorrelatedClientRequest,
     UncorrelatedSuccess,
@@ -611,6 +612,7 @@ pub enum FrameValidationError {
     ModelSettingsShape,
     PlacementShape,
     DispatchFenceShape,
+    ConfigurationReloadShape,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for FrameValidationError {

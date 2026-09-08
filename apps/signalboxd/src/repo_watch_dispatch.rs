@@ -65,6 +65,7 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
     (),
     signalbox_module_repo_watch_v2::dispatch::SubmissionError<RepositoryWatchCommandError>,
 > {
+    let source = signalbox_ownership_seam::LifecycleEventSource::new(sink.pool.clone());
     store
         .submit_pending(
             &mut RepositoryWatchCommandCodec,
@@ -74,6 +75,7 @@ async fn submit_with_checkout<Runner: signalbox_tools_exec::ProcessRunner>(
                 core: sink,
                 runner,
             },
+            &source,
         )
         .await
 }

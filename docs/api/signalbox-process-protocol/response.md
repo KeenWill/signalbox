@@ -2,6 +2,16 @@
 
 # response
 
+## TerminationReceipt
+
+```rust
+pub struct TerminationReceipt {
+    pub descendant_scope: DescendantTerminationScope,
+    pub descendant_count: CanonicalU64,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## OauthCredentialOutcome
 
 ```rust
@@ -50,6 +60,15 @@ pub fn validate_oauth_authorization(
 
 ```rust
 pub enum ServerMessage {
+    ConfigurationReloaded {
+        command_id: CommandId,
+        reloaded_sections: vec::Vec<ReloadedSection>,
+    },
+    ConfigurationReloadFailed {
+        command_id: CommandId,
+        phase: ConfigurationReloadPhase,
+        reason: string::String,
+    },
     RunnerReplacementReceipt {
         command_id: CommandId,
         session_id: CanonicalUuid,
@@ -75,6 +94,18 @@ pub enum ServerMessage {
         command_id: CommandId,
         profile: string::String,
         outcome: OauthCredentialOutcome,
+    },
+    CredentialExclusionStart {},
+    CredentialExclusion {
+        target: CredentialExclusionTarget,
+    },
+    CredentialExclusionEnd {
+        exclusion_count: CanonicalU64,
+        next_after: option::Option<CredentialExclusionTarget>,
+    },
+    CredentialExclusionCleared {
+        target: CredentialExclusionTarget,
+        outcome: CredentialExclusionClearOutcome,
     },
     SessionCreated {
         session_id: CanonicalUuid,
@@ -120,6 +151,7 @@ pub enum ServerMessage {
         placement: SessionPlacement,
     },
     InputSubmitted {
+        termination: option::Option<TerminationReceipt>,
         session_id: CanonicalUuid,
         accepted_input_id: CanonicalUuid,
         acceptance_position: CanonicalU64,
@@ -133,6 +165,7 @@ pub enum ServerMessage {
         source_turn_id: CanonicalUuid,
     },
     GoalTransitionApplied {
+        termination: option::Option<TerminationReceipt>,
         session_id: CanonicalUuid,
         event_ordinal: CanonicalU64,
         generation: CanonicalU64,
@@ -449,4 +482,37 @@ pub enum ServerMessage {
     },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## MAX_CONFIGURATION_RELOAD_REASON_BYTES
+
+```rust
+pub const MAX_CONFIGURATION_RELOAD_REASON_BYTES: usize;
+```
+
+## ReloadedSection
+
+```rust
+pub enum ReloadedSection {
+    ModelCatalog,
+    SessionTemplates,
+    RepoWatch,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+impl ReloadedSection {
+    pub const ALL: [Self; 3];
+}
+```
+
+## ConfigurationReloadPhase
+
+```rust
+pub enum ConfigurationReloadPhase {
+    Read,
+    Validate,
+    Activate,
+    Reconcile,
+    Install,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

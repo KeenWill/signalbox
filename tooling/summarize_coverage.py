@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
-"""Render one llvm-cov JSON export as a per-crate Markdown coverage report.
+"""Render LLVM JSON or merged Bazel LCOV as report-only per-crate coverage.
 
-`cargo llvm-cov` reports either a whole-workspace total or a per-file table.
-Neither answers the question this report exists to answer — which crate still
-has untested code — so this tool aggregates the per-file export into per-crate
-rows and orders them least-covered first.
-
-The report measures; it decides nothing. There is no threshold here, no exit
-code that depends on a percentage, and no caller that gates on one: every
-invocation that produces a well-formed report exits zero.
-
-Input is the `llvm.coverage.json.export` document `cargo llvm-cov report
---json` writes. Only the file summaries are read, so the much larger per-region
-detail in the same document is ignored.
+The report has no threshold and never derives an exit status from coverage.
+LCOV inputs exclude dedicated tests and benches from the reported denominator.
 """
 
 from __future__ import annotations
@@ -39,10 +29,12 @@ class Counter:
 
     count: int = 0
     covered: int = 0
+    available: bool = True
 
     def add(self, other: "Counter") -> None:
         self.count += other.count
         self.covered += other.covered
+        self.available = self.available and other.available
 
     @property
     def percent(self) -> float:
@@ -85,7 +77,8 @@ def read_counter(summary: dict, name: str) -> Counter:
     block = summary.get(name)
     if not isinstance(block, dict):
         return Counter()
-    return Counter(count=int(block.get("count", 0)), covered=int(block.get("covered", 0)))
+    return Counter(count=int(block.get("count", 0)), covered=int(block.get("covered", 0)),
+                   available=block.get("available", True))
 
 
 def read_file_summaries(document: dict) -> list[tuple[str, Summary]]:
@@ -159,7 +152,7 @@ def total_of(summaries: list[Summary]) -> Summary:
 
 
 def percent(counter: Counter) -> str:
-    return f"{counter.percent:.2f}%"
+    return f"{counter.percent:.2f}%" if counter.available else "n/a"
 
 
 def crate_rows(crates: dict[str, Summary]) -> list[str]:
@@ -239,7 +232,8 @@ def render(document: dict, repo_root: Path, limit: int, title: str, preamble: st
             "| --- | ---: | ---: | ---: |",
             f"| Lines | {total.lines.covered} | {total.lines.count} | {percent(total.lines)} |",
             f"| Functions | {total.functions.covered} | {total.functions.count} | {percent(total.functions)} |",
-            f"| Regions | {total.regions.covered} | {total.regions.count} | {percent(total.regions)} |",
+            (f"| Regions | {total.regions.covered} | {total.regions.count} | {percent(total.regions)} |"
+             if total.regions.available else "| Regions | n/a | n/a | n/a |"),
             "",
             "### Per crate, least-covered first",
             "",
@@ -265,9 +259,85 @@ def render(document: dict, repo_root: Path, limit: int, title: str, preamble: st
     return "\n".join(lines) + "\n"
 
 
+def read_lcov(paths: list[Path], repo_root: Path) -> dict[str, dict]:
+    """Merge source lines and functions across suite exports, excluding test files."""
+    files: dict[str, dict] = {}
+    record = None
+    for path in paths:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            kind, _, value = line.partition(":")
+            if kind == "SF":
+                source = Path(value)
+                if not source.is_absolute():
+                    source = repo_root / source
+                try:
+                    relative = source.relative_to(repo_root)
+                except ValueError:
+                    record = None
+                    continue
+                if relative.parts[0] not in {"apps", "crates"} or (
+                    {"tests", "benches"} & set(relative.parts)
+                    or relative.name.endswith("tests.rs")
+                ):
+                    record = None
+                    continue
+                record = files.setdefault(str(relative), {"lines": {}, "functions": {}, "starts": {}})
+            elif kind == "end_of_record":
+                record = None
+            elif record is not None and kind == "DA":
+                number, hits, *_ = value.split(",")
+                number = int(number)
+                record["lines"][number] = record["lines"].get(number, 0) + int(hits)
+            elif record is not None and kind == "FNDA":
+                hits, name = value.split(",", 1)
+                record["functions"][name] = record["functions"].get(name, 0) + int(hits)
+            elif record is not None and kind == "FN":
+                # LLVM may include an end line before the function name.
+                number, name = value.split(",", 1)
+                end, comma, remainder = name.partition(",")
+                if comma and end.isdecimal():
+                    name = remainder
+                record["starts"][name] = int(number)
+    return files
+
+
+def lcov_document(files: dict[str, dict], repo_root: Path) -> dict:
+    """Project LCOV's measured counters into the report's file summaries."""
+    def counter(values):
+        return {"count": len(values), "covered": sum(value > 0 for value in values)}
+
+    return {"type": EXPORT_TYPE, "data": [{"files": [
+        {"filename": str(repo_root / source), "summary": {
+            "lines": counter(record["lines"].values()),
+            "functions": counter(record["functions"].values()),
+            "regions": {"available": False},
+        }} for source, record in sorted(files.items())
+    ]}]}
+
+
+def write_lcov(files: dict[str, dict], path: Path) -> None:
+    """Write the same merged measurement used by the summary for Codecov."""
+    with path.open("w", encoding="utf-8") as output:
+        for source, record in sorted(files.items()):
+            output.write(f"SF:{source}\n")
+            for name, number in sorted(record["starts"].items()):
+                output.write(f"FN:{number},{name}\n")
+            for name, hits in sorted(record["functions"].items()):
+                output.write(f"FNDA:{hits},{name}\n")
+            output.write(f'FNF:{len(record["functions"])}\n')
+            output.write(f'FNH:{sum(hits > 0 for hits in record["functions"].values())}\n')
+            for number, hits in sorted(record["lines"].items()):
+                output.write(f"DA:{number},{hits}\n")
+            output.write(f'LF:{len(record["lines"])}\n')
+            output.write(f'LH:{sum(hits > 0 for hits in record["lines"].values())}\n')
+            output.write("end_of_record\n")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("json", type=Path, help="llvm-cov JSON export to summarize")
+    parser.add_argument("inputs", type=Path, nargs="+", help="LLVM JSON export or Bazel LCOV files")
+    parser.add_argument("--lcov", action="store_true", help="Read and merge LCOV inputs")
+    parser.add_argument("--lcov-output", type=Path, help="Write the merged, filtered LCOV measurement")
     parser.add_argument(
         "--repo-root",
         type=Path,
@@ -293,7 +363,15 @@ def main(argv: list[str]) -> int:
     )
     arguments = parser.parse_args(argv)
 
-    document = json.loads(arguments.json.read_text(encoding="utf-8"))
+    if arguments.lcov:
+        files = read_lcov(arguments.inputs, arguments.repo_root.resolve())
+        document = lcov_document(files, arguments.repo_root.resolve())
+        if arguments.lcov_output:
+            write_lcov(files, arguments.lcov_output)
+    else:
+        if len(arguments.inputs) != 1 or arguments.lcov_output:
+            parser.error('multiple inputs and --lcov-output require --lcov')
+        document = json.loads(arguments.inputs[0].read_text(encoding="utf-8"))
     preamble = "" if arguments.preamble is None else arguments.preamble.read_text(encoding="utf-8")
     sys.stdout.write(
         render(

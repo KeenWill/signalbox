@@ -815,7 +815,7 @@ export type WebTimelineToolBatchState = {
 
 export type WebTimelineToolEffectPosture = "effect_free" | "external_effect";
 
-export type WebTimelineToolFailureCause = "unknown_tool" | "invalid_arguments" | "execution_failed" | "result_too_large" | "crash_lost";
+export type WebTimelineToolFailureCause = "preauthorization_rejected" | "unknown_tool" | "invalid_arguments" | "execution_failed" | "result_too_large" | "crash_lost";
 
 export type WebTimelineToolSandboxPosture = "unsandboxed" | "sandboxed";
 

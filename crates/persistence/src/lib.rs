@@ -17,6 +17,7 @@ pub mod blob;
 pub mod blob_derivation;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
+pub mod context_compaction_continuation;
 pub mod convergence_sweep;
 pub mod conversation_import;
 pub mod conversation_import_discovery;
@@ -24,6 +25,7 @@ pub mod conversation_listing;
 pub mod create_session;
 pub mod create_session_from_imported_frontier;
 pub mod credential_capacity;
+pub mod credential_exclusions;
 pub mod goal;
 pub mod goal_turn;
 pub mod hub_fence;
@@ -57,6 +59,7 @@ pub mod session_timeline;
 pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;
+pub mod termination_receipt;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 pub mod tool_loop;
@@ -715,3 +718,6 @@ mod tests {
         assert!(unbounded.tmpfs_options().is_none());
     }
 }
+
+/// Durable configuration reload intent and receipts.
+pub mod reload_configuration;

@@ -143,6 +143,8 @@ use uuid::Uuid;
 
 mod blob_objects;
 mod compaction;
+mod continuation_compaction;
+mod credential_exclusions;
 mod fixtures;
 mod fleet_soak;
 mod imported_conversations;
@@ -153,6 +155,7 @@ mod review_orchestration;
 mod runner_recovery;
 mod session_configuration;
 mod session_metadata;
+mod spawn_session;
 mod stop_turn;
 mod streaming;
 mod tool_decisions;

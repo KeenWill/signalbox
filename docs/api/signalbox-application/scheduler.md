@@ -272,6 +272,12 @@ where
 ```rust
 pub struct InProcessEligibilityNudge {/* private */}
 // derives: clone::Clone, fmt::Debug
+impl InProcessEligibilityNudge {
+    pub async fn nudge_waiting_for_capacity(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> EligibilityNudgeOutcome;
+}
 impl EligibilityNudge for InProcessEligibilityNudge {
     fn nudge(&self, session: signalbox_domain::SessionId) -> EligibilityNudgeOutcome;
 }

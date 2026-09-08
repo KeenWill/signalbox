@@ -70,6 +70,7 @@ pub use oauth::OauthCredentialService;
 mod process_runtime;
 mod repo_watch_checkout;
 mod repo_watch_credentials;
+pub use repo_watch_credentials::credential_files_conflict;
 pub mod repo_watch_dispatch;
 pub mod repo_watch_runtime;
 mod repo_watch_webhook;
@@ -102,6 +103,8 @@ pub use configuration::{
     OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
     WorkspaceInstructionConfiguration,
 };
+#[cfg(feature = "test-support")]
+pub use context_guard::repository_watch_continuation_test_request;
 pub use context_guard::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,
     ReportedUsageCompactionError,
@@ -128,6 +131,8 @@ pub use fenced_database::{
     FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation,
     reconcile_fenced_pool_floor,
 };
+#[cfg(feature = "test-support")]
+pub use goal_mode::goal_declaration_test_tools;
 pub use goal_mode::{
     CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED, GoalModeNumericBounds, PostgresGoalPassDisposition,
     PostgresGoalPassDispositionError,
@@ -205,7 +210,7 @@ pub use signalbox_tools_workspace::{
     WORKSPACE_READ_TOOL_NAMES, WRITE_FILE_NAME, WorkspaceFileSystem, WorkspaceMutationExecutor,
     WorkspaceMutationFileSystem, WorkspaceMutationTools, WorkspaceReadExecutor, WorkspaceReadTools,
 };
-pub use single_hub::{SingleHubGuard, SingleHubGuardError};
+pub use single_hub::{GUARD_CHECK_INTERVAL, SingleHubGuard, SingleHubGuardError};
 pub use telemetry::{
     OTLP_ENDPOINT_ENVIRONMENT, OTLP_HEADERS_FILE_ENVIRONMENT, OTLP_MAX_EXPORT_BATCH,
     OTLP_MAX_QUEUED_SPANS, OTLP_PROTOCOL_ENVIRONMENT, OTLP_SAMPLING_RATIO_ENVIRONMENT,
@@ -531,6 +536,15 @@ impl<Execution> FatalExecutionSupervisor<Execution> {
     pub fn recovery_reporter(&self) -> FatalRecoveryReporter {
         FatalRecoveryReporter {
             fatal_signal: self.fatal_signal.clone(),
+        }
+    }
+
+    /// Shares recovery and occupancy authority with a freshly composed execution snapshot.
+    pub fn with_execution<E>(&self, execution: E) -> FatalExecutionSupervisor<E> {
+        FatalExecutionSupervisor {
+            execution,
+            fatal_signal: self.fatal_signal.clone(),
+            bounded_expirations: self.bounded_expirations.clone(),
         }
     }
 
@@ -5293,3 +5307,7 @@ mod tests {
         ));
     }
 }
+
+/// Durable configuration reload composition.
+pub mod configuration_reload;
+pub mod model_catalog_runtime;

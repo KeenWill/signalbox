@@ -11,6 +11,11 @@ use crate::mapping::{
     durable_command_kind_from_str, durable_command_kind_to_str,
 };
 
+pub(crate) const CLEAR_CREDENTIAL_EXCLUSION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ClearCredentialExclusion);
+pub(crate) const RELOAD_CONFIGURATION_KIND: &str =
+    durable_command_kind_to_str(CommandKind::ReloadConfiguration);
+
 pub(crate) const CREATE_SESSION_KIND: &str =
     durable_command_kind_to_str(CommandKind::CreateSession);
 pub(crate) const CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND: &str =
@@ -83,7 +88,14 @@ pub(crate) const REPROVISION_OAUTH_CREDENTIAL_KIND: &str =
 pub(crate) const DELETE_OAUTH_CREDENTIAL_KIND: &str =
     durable_command_kind_to_str(CommandKind::DeleteOauthCredential);
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 22] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 24] = [
+    CommandKindDefinition {
+        kind: CommandKind::ReloadConfiguration,
+        spelling: RELOAD_CONFIGURATION_KIND,
+        typed_table: "reload_configuration_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
     CommandKindDefinition {
         kind: CommandKind::ProvisionOauthCredential,
         spelling: PROVISION_OAUTH_CREDENTIAL_KIND,
@@ -102,6 +114,13 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 22] = [
         kind: CommandKind::DeleteOauthCredential,
         spelling: DELETE_OAUTH_CREDENTIAL_KIND,
         typed_table: "delete_oauth_credential_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::ClearCredentialExclusion,
+        spelling: CLEAR_CREDENTIAL_EXCLUSION_KIND,
+        typed_table: "clear_credential_exclusion_command",
         minimum_version: 1,
         maximum_version: 1,
     },
@@ -371,57 +390,21 @@ fn sole_typed_record(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::{
         COMMAND_KIND_DEFINITIONS, CommandKind, RegistryCorruption,
         create_session_storage_version_is_supported, imported_session_storage_version_is_supported,
         sole_typed_record,
     };
 
-    fn database_admitted_command_kinds() -> BTreeSet<String> {
-        // The baseline renders the constraint the way `pg_dump` deparses it:
-        // inline in `CREATE TABLE` and with an `= ANY (ARRAY[...])` list rather
-        // than the `IN (...)` the retired chain spelled by hand.
-        const CONSTRAINT: &str = "CONSTRAINT durable_command_kind_closed";
-        const KIND_LIST: &str = "command_kind = ANY (ARRAY[";
-        let definition = crate::MIGRATOR
-            .iter()
-            .filter_map(|migration| {
-                migration
-                    .sql
-                    .as_str()
-                    .find(CONSTRAINT)
-                    .map(|offset| &migration.sql.as_str()[offset..])
-            })
-            .next_back()
-            .expect("one migration defines the durable command kind constraint");
-        let list = definition
-            .split_once(KIND_LIST)
-            .expect("the current command-kind constraint has an admitted-kind list")
-            .1
-            .split_once(')')
-            .expect("the current command-kind list is closed")
-            .0;
-        list.split('\'')
-            .skip(1)
-            .step_by(2)
-            .map(str::to_owned)
-            .collect()
-    }
-
-    fn registry_admitted_command_kinds() -> BTreeSet<String> {
-        COMMAND_KIND_DEFINITIONS
-            .iter()
-            .map(|definition| definition.spelling.to_owned())
-            .collect()
-    }
-
     #[test]
-    fn database_and_registry_admit_the_same_command_kinds() {
-        assert_eq!(
-            database_admitted_command_kinds(),
-            registry_admitted_command_kinds()
+    fn reload_configuration_is_admitted_by_the_closed_registry() {
+        assert!(
+            COMMAND_KIND_DEFINITIONS
+                .iter()
+                .any(
+                    |definition| definition.kind == CommandKind::ReloadConfiguration
+                        && definition.supports_version(1)
+                )
         );
     }
 

@@ -272,6 +272,16 @@ pub(super) async fn handle_request<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
+    let mut services = services.clone();
+    if let Some(reload) = &services.configuration_reload {
+        let catalogs = reload.catalogs();
+        if let Some(model) = reload.compaction_model(catalogs.models.clone()) {
+            services.context_compaction_model = model;
+        }
+        services.model_configuration = catalogs.models;
+        services.template_configuration = catalogs.templates;
+    }
+    let services = &services;
     let review_request = is_review_mutation(&request);
     let ConnectionRequestResources {
         import_permit,
@@ -301,11 +311,14 @@ where
         return write_bulk_ingest_rejection(writer, version, request_id, active_kind).await;
     }
     match request {
+        ClientRequest::ReloadConfiguration { command_id } => {
+            super::reload::handle_reload(writer, version, request_id, command_id, services).await
+        }
         request @ (ClientRequest::ReplaceLostRunner { .. }
         | ClientRequest::AbandonLostRunner { .. }
         | ClientRequest::PromotePendingRunner { .. }) => {
             runner_recovery::handle_runner_recovery(
-                writer, version, request_id, request, services, shutdown,
+                reader, writer, version, request_id, request, services, shutdown,
             )
             .await
         }
@@ -351,6 +364,18 @@ where
                 profile,
                 signalbox_persistence::oauth_credential::OauthCredentialOperation::Delete,
                 services,
+            )
+            .await
+        }
+        ClientRequest::ListCredentialExclusions { page_size, after } => {
+            handle_list_credential_exclusions(
+                writer, version, request_id, page_size, after, services,
+            )
+            .await
+        }
+        ClientRequest::ClearCredentialExclusion { command_id, target } => {
+            handle_clear_credential_exclusion(
+                writer, version, request_id, command_id, target, services,
             )
             .await
         }
@@ -1523,8 +1548,25 @@ where
             )
             .await
         }
-        ClientRequest::SpawnSession { .. } => {
-            reject_uncomposed_spawn(writer, version, request_id).await
+        ClientRequest::SpawnSession {
+            session_id,
+            turn_id,
+            tool_request_id,
+            task,
+            relationship,
+        } => {
+            handle_spawn_session(
+                writer,
+                version,
+                request_id,
+                session_id,
+                turn_id,
+                tool_request_id,
+                task,
+                relationship,
+                services,
+            )
+            .await
         }
         ClientRequest::AwaitSession {
             session_id,

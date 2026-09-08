@@ -883,6 +883,7 @@ pub enum WebTimelineToolSandboxPosture {
 
 ```rust
 pub enum WebTimelineToolFailureCause {
+    PreauthorizationRejected,
     UnknownTool,
     InvalidArguments,
     ExecutionFailed,
@@ -926,17 +927,6 @@ pub struct WebTimelineToolAttempt {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
-## WebTimelineApprovalSource
-
-```rust
-pub enum WebTimelineApprovalSource {
-    Policy,
-    Delegate,
-    User,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
 ## WebTimelineApprovalDecision
 
 ```rust
@@ -945,21 +935,6 @@ pub enum WebTimelineApprovalDecision {
     Deny,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebTimelineApprovalDecider
-
-```rust
-pub enum WebTimelineApprovalDecider {
-    User {
-        command_id: WebSessionId,
-    },
-    Delegate {
-        model_selection_id: WebSessionId,
-        model_call_id: WebSessionId,
-    },
-}
-// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
 ## WebTimelineApprovalActor
@@ -1000,20 +975,6 @@ pub enum WebTimelineRunnerState {
     Replaced,
     WorkingDirectoryChanged,
     Abandoned,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
-```
-
-## WebTimelineGoalEventKind
-
-```rust
-pub enum WebTimelineGoalEventKind {
-    Commissioned,
-    Blocked,
-    Resumed,
-    Achieved,
-    UserStopped,
-    Superseded,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```

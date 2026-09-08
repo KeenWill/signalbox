@@ -80,19 +80,20 @@ An approval wait is a stored active-turn phase that names the earliest undecided
 request and survives restart.
 
 A runner-locus request whose placement is lost before a lease offer or executor
-dispatch records `closed_inadmissible` with reason `placement_lost`. The loss
-transaction closes every such unresolved request in the batch, including earlier
-approved requests in a parked batch, retires existing approvals, and resumes
-batch evaluation without creating an attempt or result entry. An existing
-`Prepared` attempt first terminalizes `KnownFailed` with `execution_failed` and
-detail `placement_lost`; a `Prepared` approval judge retires without
-authorization. An in-flight judge reaches its observation boundary before its
-resulting approval retires and the request closes in that same transaction.
-Continuation projects one reference-only `ToolInadmissible { request }` in
-proposal order, rendered as `execution_failed` with detail `placement_lost`; it
-counts toward batch completion and survives interrupt, crash-loss, and
-reconciliation materialization. Placement loss never rewrites or cancels
-dispatched work.
+dispatch records `closed_inadmissible` with reason `placement_lost`. Pre-pin
+closure uses the registration retained by the connection loss, or the current
+registration when that loss epoch has no retained revision. The loss transaction
+closes every such unresolved request in the batch, including earlier approved
+requests in a parked batch, retires existing approvals, and resumes batch
+evaluation without creating an attempt or result entry. An existing `Prepared`
+attempt first terminalizes `KnownFailed` with `execution_failed` and detail
+`placement_lost`; a `Prepared` approval judge retires without authorization. An
+in-flight judge reaches its observation boundary before its resulting approval
+retires and the request closes in that same transaction. Continuation projects
+one reference-only `ToolInadmissible { request }` in proposal order, rendered as
+`execution_failed` with detail `placement_lost`; it counts toward batch
+completion and survives interrupt, crash-loss, and reconciliation
+materialization. Placement loss never rewrites or cancels dispatched work.
 
 ## Design decisions
 
@@ -265,7 +266,8 @@ admissible stores the completed call but no decision and leaves the same request
 parked. A commissioned dispatch also keeps the request parked while its
 authority stands or when the turn has pending steering. Once that authority is
 withdrawn, an escalation with no pending steering terminalizes the unattended
-turn under the commissioned-dispatch audit. A `KnownFailed`, `Refused`,
+turn under the commissioned-dispatch audit, preserving `ToolInadmissible` for
+requests already closed by placement loss. A `KnownFailed`, `Refused`,
 `Cancelled`, or `Ambiguous` terminal judge call for an admissible request
 retains the attended park while immediately admitting a user decision.
 
@@ -488,6 +490,23 @@ Preparing a model operation collects all frontier-referenced requests, attempts,
 and decisions in one batched query per record family, with no per-entry round
 trips under the scheduler lock.
 
+`spawn_session` declares a task plus a relationship, either background or bound
+with separately labeled actions for the parent stopping and the parent being
+cancelled. The creation transaction atomically creates one delegated no-ancestry
+child and its initial task work, closes the spawning physical attempt with its
+matching receipt, derives the child's placement default from its parent's
+directory, and returns the child session identity as a durable completion. The
+child's initial task is not accepted user input: the spawn transition records a
+`DelegatedTask` origin bound to the spawning request and its parent session and
+turn, and the child's first turn starts from that entry with no accepted-input
+row or user actor invented. Equal physical replay returns that child and reuses
+the same semantic entry and turn origin; a second child cannot attach to the
+request. There is no fixed active-child-count limit; admission checks the
+complete locked relationship inventory for request and child uniqueness.
+
+The daemon nudges the child for eligibility after its spawn commits, retaining
+the hint until a full nudge buffer has capacity.
+
 ## Planned
 
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
@@ -498,9 +517,7 @@ trips under the scheduler lock.
   an `InstructionAdmission` and a successor instruction manifest for a
   successful `instructions_read`; see
   [tool-loop design](../design/tool-loop.md).
-- Child creation by `spawn_session`, the child's `DelegatedTask` origin, and
-  delivery of its terminal result to the parent: no present surface creates the
-  child, and the daemon rejects execution until the placement-owned creation
-  transaction exists; see [tool-loop design](../design/tool-loop.md).
+- Delivery of a delegated child's terminal result to the parent: see
+  [tool-loop design](../design/tool-loop.md).
 - Runner-locus execution rules: the lost-lease retry exception and the runner
   approval ladder; see [runner protocol design](../design/runner-protocol.md).

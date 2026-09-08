@@ -190,6 +190,8 @@ pub(crate) fn delegation_rejection_matches(
         | RejectionDetail::BlobUploadLengthMismatch { .. }
         | RejectionDetail::BlobUploadDigestMismatch { .. }
         | RejectionDetail::BlobReadLengthOutOfRange { .. }
+        | RejectionDetail::StaleGeneration {}
+        | RejectionDetail::UnknownCredentialExclusion {}
         | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     }
 }
@@ -333,12 +335,18 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
         | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::ConfigurationReloaded { .. }
+        | ServerMessage::ConfigurationReloadFailed { .. }
         | ServerMessage::DeploymentLimits { .. }
         | ServerMessage::RunnerReplacementReceipt { .. }
         | ServerMessage::RunnerAbandonmentReceipt { .. }
         | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
-        | ServerMessage::OauthCredentialReceipt { .. } => DelegationResponse::Unexpected,
+        | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::CredentialExclusionStart {}
+        | ServerMessage::CredentialExclusion { .. }
+        | ServerMessage::CredentialExclusionEnd { .. }
+        | ServerMessage::CredentialExclusionCleared { .. } => DelegationResponse::Unexpected,
     }
 }
 

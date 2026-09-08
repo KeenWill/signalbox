@@ -943,6 +943,13 @@ pub struct LifecycleEventSource {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl LifecycleEventSource {
     pub const fn new(core_pool: sqlx_postgres::PgPool) -> Self;
+    pub async fn session_terminal_at(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<
+        option::Option<offset_date_time::OffsetDateTime>,
+        signalbox_persistence::outbox::OutboxDispatchError,
+    >;
     pub async fn next(
         &self,
     ) -> result::Result<
@@ -1013,4 +1020,31 @@ impl fmt::Display for CommandOutsideSeam {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for CommandOutsideSeam {}
+```
+
+## RepositoryRuleSet
+
+```rust
+pub struct RepositoryRuleSet<'a> {
+    pub repository: &'a signalbox_domain::RepositorySlug,
+    pub rules: &'a [signalbox_domain::RepoWatchRule],
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug
+impl<'a> RepositoryRuleSet<'a> {
+    pub const fn new(
+        repository: &'a signalbox_domain::RepositorySlug,
+        rules: &'a [signalbox_domain::RepoWatchRule],
+    ) -> Self;
+}
+```
+
+## ReloadIntentInput
+
+```rust
+pub struct ReloadIntentInput<'a> {
+    pub command_id: signalbox_domain::DurableCommandId,
+    pub repositories: &'a [RepositoryRuleSet<'a>],
+    pub rule_set_digest: [u8; 32],
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug
 ```
