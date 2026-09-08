@@ -315,6 +315,11 @@ export function ImportsWorkspace({
     continuation.reset()
   }, [continuation, pendingCommand, queryScope])
   const canRecoverRetainedCommand = pendingCommand !== null && !continuation.isPending
+  const refetchImports = importsQuery.refetch
+  const retryImportDiscovery = useCallback(() => {
+    catalogRef.current?.focus()
+    void refetchImports()
+  }, [refetchImports])
   const commandContext = useMemo<CommandContext>(
     () => ({
       dispatch: store.dispatch,
@@ -334,6 +339,7 @@ export function ImportsWorkspace({
       continueImport: continueAt,
       canRetryImport: canRecoverRetainedCommand,
       retryImport: retryExactCommand,
+      retryImportDiscovery: importsQuery.isError ? retryImportDiscovery : undefined,
       canAbandonImport: canRecoverRetainedCommand,
       abandonImport: abandonExactCommand,
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
@@ -345,8 +351,10 @@ export function ImportsWorkspace({
       continueAt,
       hasRetainedCommand,
       importEntryIds,
+      importsQuery.isError,
       navigate,
       retryExactCommand,
+      retryImportDiscovery,
       selectImportEntry,
       selectedFrontier?.imported_entry_id,
     ],
@@ -602,10 +610,7 @@ export function ImportsWorkspace({
                 <p>Imports unavailable</p>
                 <button
                   type="button"
-                  onClick={() => {
-                    catalogRef.current?.focus()
-                    void importsQuery.refetch()
-                  }}
+                  onClick={() => invokeCommand('imports.discovery.retry', commandContext)}
                 >
                   Retry imports
                 </button>

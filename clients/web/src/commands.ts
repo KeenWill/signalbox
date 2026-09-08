@@ -27,6 +27,7 @@ export interface CommandContext {
   continueImport?: (relationship: 'resume' | 'fork') => void
   canRetryImport?: boolean
   retryImport?: () => void
+  retryImportDiscovery?: () => void
   canAbandonImport?: boolean
   abandonImport?: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
@@ -480,6 +481,15 @@ export const commandRegistry = [
     available: (context) =>
       context.canContinueImport === true && context.continueImport !== undefined,
     run: (context) => context.continueImport?.('fork'),
+  },
+  {
+    id: 'imports.discovery.retry',
+    title: 'Retry imports',
+    description: 'Import discovery',
+    category: 'Imports',
+    bindings: [],
+    available: (context) => context.retryImportDiscovery !== undefined,
+    run: (context) => context.retryImportDiscovery?.(),
   },
   {
     id: 'imports.continue.retry',

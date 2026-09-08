@@ -1729,33 +1729,52 @@ test('starts the settled exact import filter without the previous page cursor', 
   await expect.poll(() => requests.at(-1)).toEqual({ source: 'source-session-1', after: null })
 })
 
-test('hides empty import controls and retries failed discovery', async ({ page }) => {
-  await useDeterministicBootstrap(page)
-  await useDeterministicImportApi(page)
-  let mode: 'empty' | 'failed' | 'ready' = 'empty'
-  await page.route('**/api/imports/**', async (route) => {
-    if (
-      new URL(route.request().url()).pathname.replace(/\/$/, '') !== '/api/imports' ||
-      mode === 'ready'
-    )
-      return route.fallback()
-    return mode === 'empty'
-      ? route.fulfill({ json: { items: [] } })
-      : route.fulfill({ status: 503, body: 'unavailable' })
+for (const entry of ['button', 'palette'] as const) {
+  test(`hides empty import controls and retries failed discovery from the ${entry}`, async ({
+    page,
+  }) => {
+    await useDeterministicBootstrap(page)
+    await useDeterministicImportApi(page)
+    let mode: 'empty' | 'failed' | 'ready' = 'empty'
+    await page.route('**/api/imports/**', async (route) => {
+      if (
+        new URL(route.request().url()).pathname.replace(/\/$/, '') !== '/api/imports' ||
+        mode === 'ready'
+      )
+        return route.fallback()
+      return mode === 'empty'
+        ? route.fulfill({ json: { items: [] } })
+        : route.fulfill({ status: 503, body: 'unavailable' })
+    })
+    await page.goto('/imports')
+    await expect(page.getByRole('table', { name: 'Imported conversations' })).toBeVisible()
+    await expect(page.locator('.import-inspector')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0)
+    mode = 'failed'
+    await page.reload()
+    await expect(page.getByRole('alert')).toContainText('Imports unavailable')
+    await expect(page.locator('.import-inspector')).toHaveCount(0)
+    mode = 'ready'
+    const opener = page.getByRole('button', { name: 'Open command palette', exact: true })
+    if (entry === 'palette') await opener.click()
+    const retry =
+      entry === 'button'
+        ? page.getByRole('button', { name: 'Retry imports', exact: true })
+        : page
+            .getByRole('dialog', { name: 'Command palette' })
+            .getByRole('button', { name: /Retry imports/ })
+    await retry.focus()
+    await retry.press('Enter')
+    await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+    await expect(page.locator('.import-inspector')).toBeVisible()
+    await expect(
+      entry === 'button' ? page.getByRole('region', { name: 'Imports', exact: true }) : opener,
+    ).toBeFocused()
+    await opener.click()
+    await expect(
+      page
+        .getByRole('dialog', { name: 'Command palette' })
+        .getByRole('button', { name: /Retry imports/ }),
+    ).toHaveCount(0)
   })
-  await page.goto('/imports')
-  await expect(page.getByRole('table', { name: 'Imported conversations' })).toBeVisible()
-  await expect(page.locator('.import-inspector')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0)
-  mode = 'failed'
-  await page.reload()
-  await expect(page.getByRole('alert')).toContainText('Imports unavailable')
-  await expect(page.locator('.import-inspector')).toHaveCount(0)
-  mode = 'ready'
-  const retry = page.getByRole('button', { name: 'Retry imports', exact: true })
-  await retry.focus()
-  await retry.press('Enter')
-  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
-  await expect(page.locator('.import-inspector')).toBeVisible()
-  await expect(page.getByRole('region', { name: 'Imports', exact: true })).toBeFocused()
-})
+}
