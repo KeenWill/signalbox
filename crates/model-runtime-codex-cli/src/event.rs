@@ -7,10 +7,10 @@ use signalbox_model_runtime::{
     CliSession, CliTerminalTextCapture, CompletionEvidence, CompletionFinish, DeliveryMode,
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
     ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
-    ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence, TerminalEvidence, TokenUsage,
-    ToolArgumentRedaction, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName,
-    provider_json_has_duplicate_members, redact_text, trailing_credential_context,
-    validate_provider_json_nesting,
+    ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence, ResponseEnvelopeRejectionStage,
+    TerminalEvidence, TokenUsage, ToolArgumentRedaction, ToolCallId, ToolCallProposal,
+    ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, redact_text,
+    trailing_credential_context, validate_provider_json_nesting,
 };
 
 use crate::app_server::{
@@ -362,22 +362,22 @@ impl<C: Clone> EventDecoder<C> {
         let agent_message = match self.agent_message.take() {
             Some(agent_message) => agent_message,
             None => {
-                report_response_envelope_rejection("missing");
                 return boundary_loss_before_envelope(
                     self.exchange,
                     self.usage,
-                    LossCause::ResponseUnintelligible {
+                    LossCause::ResponseEnvelopeRejected {
+                        stage: ResponseEnvelopeRejectionStage::Missing,
                         detail: "turn/completed carried no response envelope".into(),
                     },
                 );
             }
         };
         if let Err(error) = validate_provider_json_nesting(agent_message.as_bytes()) {
-            report_response_envelope_rejection("nesting_bound");
             return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
-                LossCause::ResponseUnintelligible {
+                LossCause::ResponseEnvelopeRejected {
+                    stage: ResponseEnvelopeRejectionStage::NestingBound,
                     detail: format!("last agent message exceeds JSON nesting bounds: {error}"),
                 },
             );
@@ -386,7 +386,8 @@ impl<C: Clone> EventDecoder<C> {
             return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
-                LossCause::StreamProtocolViolation {
+                LossCause::ResponseEnvelopeRejected {
+                    stage: ResponseEnvelopeRejectionStage::DuplicateMembers,
                     detail: format!(
                         "undecodable Codex response envelope: {}",
                         error.into_detail()
@@ -397,11 +398,11 @@ impl<C: Clone> EventDecoder<C> {
         let envelope: ModelEnvelope = match serde_json::from_str(&agent_message) {
             Ok(envelope) => envelope,
             Err(_) => {
-                report_response_envelope_rejection("shape");
                 return boundary_loss_before_envelope(
                     self.exchange,
                     self.usage,
-                    LossCause::ResponseUnintelligible {
+                    LossCause::ResponseEnvelopeRejected {
+                        stage: ResponseEnvelopeRejectionStage::Shape,
                         detail: "last agent message does not match the response envelope"
                             .to_string(),
                     },
@@ -420,13 +421,13 @@ impl<C: Clone> EventDecoder<C> {
         let mut content = match self.decode_content(&envelope, &mut *sink) {
             Ok(content) => content,
             Err(failure) => {
-                report_response_envelope_rejection(failure.stage);
                 return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
                     Some(reported_finish.clone()),
                     &envelope,
-                    LossCause::ResponseUnintelligible {
+                    LossCause::ResponseEnvelopeRejected {
+                        stage: failure.stage,
                         detail: failure.detail,
                     },
                 );
@@ -463,13 +464,15 @@ impl<C: Clone> EventDecoder<C> {
             &envelope.text,
             reported_finish.clone(),
         ) {
-            report_response_envelope_rejection("observation_projection");
             return boundary_loss_after_envelope(
                 self.exchange,
                 self.usage,
                 Some(reported_finish.clone()),
                 &envelope,
-                LossCause::ResponseUnintelligible { detail },
+                LossCause::ResponseEnvelopeRejected {
+                    stage: ResponseEnvelopeRejectionStage::ObservationProjection,
+                    detail,
+                },
             );
         }
         if self.delivery == DeliveryMode::Streamed {
@@ -507,13 +510,13 @@ impl<C: Clone> EventDecoder<C> {
                 && self.output_contract_name.is_none()
                 && envelope.outcome != EnvelopeOutcome::Refused
             {
-                report_response_envelope_rejection("streamed_completion_empty");
                 return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
                     Some(reported_finish),
                     &envelope,
-                    LossCause::ResponseUnintelligible {
+                    LossCause::ResponseEnvelopeRejected {
+                        stage: ResponseEnvelopeRejectionStage::StreamedCompletionEmpty,
                         detail: "streamed response envelope carries no completion material"
                             .to_string(),
                     },
@@ -557,7 +560,7 @@ impl<C: Clone> EventDecoder<C> {
     ) -> Result<Vec<AssistantPart>, ResponseEnvelopeFailure> {
         if envelope.outcome == EnvelopeOutcome::Refused && !envelope.tool_calls.is_empty() {
             return Err(ResponseEnvelopeFailure::new(
-                "refusal_with_tools",
+                ResponseEnvelopeRejectionStage::RefusalWithTools,
                 "a refusal envelope also proposed tools",
             ));
         }
@@ -594,7 +597,7 @@ impl<C: Clone> EventDecoder<C> {
         for call in &envelope.tool_calls {
             if call.id.is_empty() || !raw_ids.insert(call.id.as_str()) {
                 return Err(ResponseEnvelopeFailure::new(
-                    "tool_call_id",
+                    ResponseEnvelopeRejectionStage::ToolCallId,
                     "tool call ids must be nonempty and distinct",
                 ));
             }
@@ -613,7 +616,7 @@ impl<C: Clone> EventDecoder<C> {
                 || self.output_contract_name.as_deref() == Some(call.name.as_str());
             if !allowed {
                 return Err(ResponseEnvelopeFailure::new(
-                    "undeclared_tool",
+                    ResponseEnvelopeRejectionStage::UndeclaredTool,
                     format!(
                         "response proposed undeclared tool `{}`",
                         sink.redact_provider_id(final_text_context, &call.name)
@@ -668,7 +671,7 @@ impl<C: Clone> EventDecoder<C> {
                 .all(|call| &call.name == contract_name)
             {
                 return Err(ResponseEnvelopeFailure::new(
-                    "structured_output_tool",
+                    ResponseEnvelopeRejectionStage::StructuredOutputTool,
                     format!("structured output permits only `{contract_name}` proposals"),
                 ));
             }
@@ -677,7 +680,7 @@ impl<C: Clone> EventDecoder<C> {
                 ToolRequirement::Optional => {}
                 ToolRequirement::Any if envelope.tool_calls.is_empty() => {
                     return Err(ResponseEnvelopeFailure::new(
-                        "required_tool_missing",
+                        ResponseEnvelopeRejectionStage::RequiredToolMissing,
                         "tool choice requires a proposal",
                     ));
                 }
@@ -686,7 +689,7 @@ impl<C: Clone> EventDecoder<C> {
                         || !envelope.tool_calls.iter().all(|call| &call.name == name) =>
                 {
                     return Err(ResponseEnvelopeFailure::new(
-                        "named_tool_mismatch",
+                        ResponseEnvelopeRejectionStage::NamedToolMismatch,
                         format!("tool choice permits only `{name}`"),
                     ));
                 }
@@ -697,7 +700,7 @@ impl<C: Clone> EventDecoder<C> {
             && self.output_contract_name.is_none()
         {
             return Err(ResponseEnvelopeFailure::new(
-                "completion_empty",
+                ResponseEnvelopeRejectionStage::CompletionEmpty,
                 "response envelope carries no completion material",
             ));
         }
@@ -766,25 +769,17 @@ impl<C: Clone> EventDecoder<C> {
 }
 
 struct ResponseEnvelopeFailure {
-    stage: &'static str,
+    stage: ResponseEnvelopeRejectionStage,
     detail: String,
 }
 
 impl ResponseEnvelopeFailure {
-    fn new(stage: &'static str, detail: impl Into<String>) -> Self {
+    fn new(stage: ResponseEnvelopeRejectionStage, detail: impl Into<String>) -> Self {
         Self {
             stage,
             detail: detail.into(),
         }
     }
-}
-
-fn report_response_envelope_rejection(stage: &'static str) {
-    tracing::warn!(
-        cause_code = "codex_response_envelope_rejected",
-        stage,
-        "Codex completed-turn response envelope was rejected"
-    );
 }
 
 /// Requires a string-carried tool-argument payload to stay within the
@@ -799,7 +794,7 @@ fn report_response_envelope_rejection(stage: &'static str) {
 fn validate_tool_argument_nesting(call: &EnvelopeToolCall) -> Result<(), ResponseEnvelopeFailure> {
     validate_provider_json_nesting(call.arguments.as_bytes()).map_err(|error| {
         ResponseEnvelopeFailure::new(
-            "tool_arguments_nesting",
+            ResponseEnvelopeRejectionStage::ToolArgumentsNesting,
             format!("tool `{}` arguments: {error}", redact_text(&call.name)),
         )
     })
