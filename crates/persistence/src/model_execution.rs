@@ -994,8 +994,8 @@ where
 #[cfg(test)]
 mod tests;
 
-/// Serializes colliding initial/continuation frontier candidates before their
-/// writers take the global credential/outbox guard.
+/// Serializes colliding frontier candidates before their writers take the
+/// global credential/outbox guard.
 pub(crate) async fn reserve_frontier_write_identities(
     connection: &mut PgConnection,
     identities: impl IntoIterator<Item = Uuid>,

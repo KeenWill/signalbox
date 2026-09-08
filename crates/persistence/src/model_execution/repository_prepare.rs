@@ -531,6 +531,27 @@ impl PostgresModelCallRepository {
                     &mut next_reclassified_turn,
                 )?;
                 let usage = observation.usage();
+                let (entries, frontier) = match &identities {
+                    ModelCallTerminalIdentityCandidates::Exact(identities) => {
+                        identities.frontier_identity_candidates()
+                    }
+                    ModelCallTerminalIdentityCandidates::Availability { failed, .. } => {
+                        (vec![failed.failure_entry()], failed.terminal_frontier())
+                    }
+                    ModelCallTerminalIdentityCandidates::ToolRound { .. } => {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "terminal candidate selection retained a nonterminal alternative",
+                        ));
+                    }
+                };
+                super::reserve_frontier_write_identities(
+                    &mut transaction,
+                    entries
+                        .into_iter()
+                        .map(|entry| entry.into_uuid())
+                        .chain([frontier.into_uuid()]),
+                )
+                .await?;
                 if let Some(snapshot) = observation.rate_limits() {
                     retain_call_capacity_policy_observation(
                         &mut transaction,

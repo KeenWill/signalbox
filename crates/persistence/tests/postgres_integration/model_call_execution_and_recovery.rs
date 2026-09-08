@@ -10,7 +10,7 @@ fn nonzero_priority(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("fixture membership priority is non-zero")
 }
 
-async fn active_credential_pool_fixture(
+pub(super) async fn active_credential_pool_fixture(
     pool: &sqlx::PgPool,
     seed: u128,
     pool_name: &str,
@@ -335,7 +335,7 @@ async fn counted_attachment_failure_handles_pool_exhaustion_at_commit() -> Resul
     Ok(())
 }
 
-async fn prepare_and_authorize_pool_call(
+pub(super) async fn prepare_and_authorize_pool_call(
     repository: &PostgresModelCallRepository,
     session: SessionId,
     seed: u128,

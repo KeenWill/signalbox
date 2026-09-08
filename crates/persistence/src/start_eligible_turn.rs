@@ -340,6 +340,12 @@ impl StartEligibleTurnRepository {
                 .map_err(CommitActivationPreviewError::Activation)?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
+        reserve_preview_frontier_identities(
+            &mut transaction,
+            preview.identities,
+            &failure_identities,
+        )
+        .await?;
         let outbox_order_guard =
             crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
                 .await
@@ -451,6 +457,8 @@ impl StartEligibleTurnRepository {
                 .map_err(CommitActivationPreviewError::Activation)?;
             return Ok(CommitCountedAttachmentFailurePreviewOutcome::Stale);
         }
+        reserve_preview_frontier_identities(&mut transaction, preview.identities, &identities)
+            .await?;
         let outbox_order_guard =
             crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
                 .await
@@ -550,6 +558,8 @@ impl StartEligibleTurnRepository {
                 .map_err(CommitActivationPreviewError::Activation)?;
             return Ok(CommitCompactionFailurePreviewOutcome::Stale);
         }
+        reserve_preview_frontier_identities(&mut transaction, preview.identities, &identities)
+            .await?;
         let _outbox_order_guard =
             crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
                 .await
@@ -1767,6 +1777,25 @@ fn semantic_entry_insert_error(
         }
         _ => error.into(),
     }
+}
+
+async fn reserve_preview_frontier_identities(
+    connection: &mut sqlx::PgConnection,
+    activation: AcceptedInputTurnActivationIdentities,
+    failure: &signalbox_domain::FailedModelCallTurnIdentities,
+) -> Result<(), CommitActivationPreviewError> {
+    crate::model_execution::reserve_frontier_write_identities(
+        connection,
+        [
+            activation.model_identity_entry().into_uuid(),
+            activation.origin_entry().into_uuid(),
+            activation.starting_frontier().into_uuid(),
+            failure.failure_entry().into_uuid(),
+            failure.terminal_frontier().into_uuid(),
+        ],
+    )
+    .await
+    .map_err(CommitActivationPreviewError::ModelCall)
 }
 
 #[cfg(test)]

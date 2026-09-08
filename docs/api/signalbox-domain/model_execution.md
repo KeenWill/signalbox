@@ -773,6 +773,11 @@ pub enum ModelCallTerminalIdentities {
     Ambiguous(AmbiguousModelCallTurnIdentities),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl ModelCallTerminalIdentities {
+    pub fn frontier_identity_candidates(
+        &self,
+    ) -> (vec::Vec<SemanticTranscriptEntryId>, ContextFrontierId);
+}
 ```
 
 ## ModelCallTerminalOutcome

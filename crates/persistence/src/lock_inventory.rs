@@ -51,7 +51,7 @@
 //!   `retire_hub_fence_generation` takes exclusive `pg_advisory_lock` on it.
 //! - The following use exclusive `pg_advisory_xact_lock` with `hashtextextended(key, 0)`:
 //!   - `model_execution::reserve_frontier_write_identities`: candidate identity keys
-//!     in sorted lock-key order, before the initial/continuation writer guard.
+//!     in sorted lock-key order, before the frontier writer's ordering guard.
 //!   - `model_execution::acquire_model_call_outbox_order_guard`: the
 //!     `MODEL_CALL_OUTBOX_ORDER_GUARD` key before credential or outbox locks;
 //!     `lock_credential_pool_action_head`: `credential_pool_action_head:` plus profile reference,
