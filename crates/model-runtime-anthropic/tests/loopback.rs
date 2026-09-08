@@ -19,13 +19,13 @@ use std::time::Duration;
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, ConversationMessage,
-    ConversationRole, DeliveryMode, FastMode, FastModeTarget, InputTokenCountOutcome, LossCause,
-    MessagePart, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
-    ModelInputTokenCounter, ModelOperation, ModelRuntime, ModelSettings, Observation,
-    ObservationFact, PROVIDER_JSON_NESTING_LIMIT, PreparationFailure, PreparationOutcome,
-    ProviderCompactionMode, ProviderErrorKind, ProviderRequestId, ReasoningLevel, RequestedTarget,
-    ResolvedTarget, StreamInterruption, StructuredOutputContract, TerminalEvidence, TerminalReport,
-    ToolCallId, ToolCallProposal, ToolName, UnsentCause,
+    ConversationRole, DeliveryMode, FastMode, FastModeTarget, InputTokenCountFailure,
+    InputTokenCountOutcome, LossCause, MessagePart, ModelCapabilities, ModelCapabilityCatalog,
+    ModelCapabilityDefinition, ModelInputTokenCounter, ModelOperation, ModelRuntime, ModelSettings,
+    Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT, PreparationFailure,
+    PreparationOutcome, ProviderCompactionMode, ProviderErrorKind, ProviderRequestId,
+    ReasoningLevel, RequestedTarget, ResolvedTarget, StreamInterruption, StructuredOutputContract,
+    TerminalEvidence, TerminalReport, ToolCallId, ToolCallProposal, ToolName, UnsentCause,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -855,9 +855,119 @@ async fn input_count_rejects_unsupported_settings_before_credential_resolution()
         outcome,
         InputTokenCountOutcome::Failed {
             correlation: "count-unsupported".to_string(),
+            failure: InputTokenCountFailure::Capability,
         }
     );
     assert_eq!(resolutions.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn input_count_preserves_translation_failure_before_credentials() {
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let runtime = AnthropicRuntime::new(
+        AnthropicConfig::new(None),
+        CountingKey {
+            resolutions: Arc::clone(&resolutions),
+            value: b"unused_count_key",
+        },
+    )
+    .expect("configuration constructs");
+    let mut invalid = operation("count-translation");
+    invalid.messages.clear();
+
+    let outcome = runtime
+        .count_input_tokens(invalid, CancellationSignal::never())
+        .await;
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Failed {
+            correlation: "count-translation".to_string(),
+            failure: InputTokenCountFailure::Translation,
+        }
+    );
+    assert_eq!(resolutions.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn input_count_preserves_credential_failure_without_credential_material() {
+    let runtime = AnthropicRuntime::new(AnthropicConfig::new(None), UnavailableKey)
+        .expect("configuration constructs");
+
+    let outcome = runtime
+        .count_input_tokens(operation("count-credential"), CancellationSignal::never())
+        .await;
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Failed {
+            correlation: "count-credential".to_string(),
+            failure: InputTokenCountFailure::CredentialAccess {
+                failure: CredentialAccessFailure::Unavailable,
+            },
+        }
+    );
+}
+
+#[tokio::test]
+async fn input_count_preserves_http_status_and_response_decode_failures() {
+    let cases = [
+        (
+            http_response("429 Too Many Requests", &[], b"private provider detail"),
+            InputTokenCountFailure::HttpStatus { status: 429 },
+        ),
+        (
+            http_response("401 Unauthorized", &[], b"private provider detail"),
+            InputTokenCountFailure::HttpStatus { status: 401 },
+        ),
+        (
+            http_response(
+                "200 OK",
+                &[],
+                br#"{"input_tokens":"private invalid count"}"#,
+            ),
+            InputTokenCountFailure::ResponseDecode,
+        ),
+    ];
+    for (response, failure) in cases {
+        let server = CannedServer::serving(vec![response]).await;
+        let runtime = runtime_for(&server.base_url);
+
+        let outcome = runtime
+            .count_input_tokens(operation("count-response"), CancellationSignal::never())
+            .await;
+
+        assert_eq!(
+            outcome,
+            InputTokenCountOutcome::Failed {
+                correlation: "count-response".to_string(),
+                failure,
+            },
+            "response failure: {failure}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn input_count_classifies_connection_failure_as_transport() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback socket binds");
+    let address = listener.local_addr().expect("bound socket has an address");
+    drop(listener);
+    let runtime = runtime_for(&format!("http://{address}"));
+
+    let outcome = runtime
+        .count_input_tokens(operation("count-transport"), CancellationSignal::never())
+        .await;
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Failed {
+            correlation: "count-transport".to_string(),
+            failure: InputTokenCountFailure::Transport,
+        }
+    );
 }
 
 #[tokio::test]

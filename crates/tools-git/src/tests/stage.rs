@@ -147,7 +147,7 @@ fn stage_revalidates_the_injected_root_immediately_before_index_publication() {
     let mut replacement_index = Vec::new();
 
     let failure = executor
-        .stage_with_pre_publish_hook(
+        .stage_with_publish_hooks(
             &repository,
             GitStageArguments {
                 paths: vec![TRACKED_PATH.to_owned()],
@@ -163,6 +163,7 @@ fn stage_revalidates_the_injected_root_immediately_before_index_publication() {
                 replacement_index =
                     fs::read(root.join(".git/index")).expect("replacement fixture index reads");
             },
+            || {},
         )
         .expect_err("root replacement rejects before index publication");
 
@@ -175,6 +176,45 @@ fn stage_revalidates_the_injected_root_immediately_before_index_publication() {
         fs::read(root.join(".git/index")).expect("replacement index reads"),
         replacement_index
     );
+}
+
+#[test]
+fn stage_reports_ambiguity_when_repository_validation_fails_after_publication() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    let executor = fixture.executor();
+    let repository = executor
+        .repository_authority
+        .repository()
+        .expect("pinned repository opens");
+
+    let failure = executor
+        .stage_with_publish_hooks(
+            &repository,
+            GitStageArguments {
+                paths: vec![TRACKED_PATH.to_owned()],
+            },
+            || {},
+            || {
+                fs::rename(
+                    fixture.root().join(".git/config"),
+                    fixture.root().join(".git/retired-config"),
+                )
+                .expect("configuration identity changes after index publication");
+            },
+        )
+        .expect_err("published stage has ambiguous repository evidence");
+
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
+    let live_repository = Repository::open(fixture.root()).expect("live repository opens");
+    let index = live_repository.index().expect("published index opens");
+    let entry = index
+        .get_path(Path::new(TRACKED_PATH), 0)
+        .expect("staged entry exists");
+    let blob = live_repository
+        .find_blob(entry.id)
+        .expect("staged blob exists");
+    assert_eq!(blob.content(), CHANGED_CONTENT.as_bytes());
 }
 
 #[test]

@@ -36,11 +36,6 @@ impl<Writer> signalbox_tool_contract::ToolContract for SessionStatusTool<Writer>
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
 }
-impl SessionStatusTool<PostgresSessionStatusWriter> {
-    pub fn try_new_postgres(
-        pool: sqlx_postgres::PgPool,
-    ) -> result::Result<Self, SessionStatusToolConstructionError>;
-}
 impl<Writer> SessionStatusTool<Writer> {
     pub fn try_new(writer: Writer) -> result::Result<Self, SessionStatusToolConstructionError>;
     pub fn into_parts(
@@ -87,44 +82,6 @@ pub trait SessionStatusWriter: marker::Send {
     ) -> impl future::Future<
         Output = result::Result<SessionStatusWriteOutcome, <Self as SessionStatusWriter>::Error>,
     > + marker::Send;
-}
-```
-
-## PostgresSessionStatusWriter
-
-```rust
-pub struct PostgresSessionStatusWriter {/* private */}
-// derives: clone::Clone, fmt::Debug
-impl PostgresSessionStatusWriter {
-    pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
-}
-impl SessionStatusWriter for PostgresSessionStatusWriter {
-    type Error = PostgresSessionStatusWriterError;
-    async fn write(
-        &mut self,
-        update: SessionStatusWrite,
-    ) -> result::Result<SessionStatusWriteOutcome, <Self as SessionStatusWriter>::Error>;
-}
-```
-
-## PostgresSessionStatusWriterError
-
-```rust
-pub enum PostgresSessionStatusWriterError {
-    InvalidCommandIdentity,
-    Database,
-    IdentityCollision,
-    Corruption,
-}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for PostgresSessionStatusWriterError {
-    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-impl error::Error for PostgresSessionStatusWriterError {
-    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
-}
-impl signalbox_application::ClassifyOperatorFailure for PostgresSessionStatusWriterError {
-    fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;
 }
 ```
 

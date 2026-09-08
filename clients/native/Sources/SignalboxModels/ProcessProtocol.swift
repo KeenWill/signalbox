@@ -587,6 +587,13 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     relationship: SignalboxImportedSessionRelationship,
     initialModelSelection: SignalboxModelSelection
   )
+  case reconcileTurn(
+    commandID: SignalboxCommandID,
+    sessionID: SignalboxCanonicalUUID,
+    expectedActiveTurnID: SignalboxCanonicalUUID,
+    content: String,
+    expectedDefaultsVersion: SignalboxCanonicalUInt64
+  )
   case stopTurn(
     commandID: SignalboxCommandID,
     sessionID: SignalboxCanonicalUUID,
@@ -673,6 +680,20 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(throughPosition, forKey: "through_position")
       try container.encode(relationship, forKey: "relationship")
       try container.encode(selection, forKey: "initial_model_selection")
+      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
+    case .reconcileTurn(
+      let commandID,
+      let sessionID,
+      let activeTurnID,
+      let content,
+      let expectedDefaultsVersion
+    ):
+      try container.encode("reconcile_turn", forKey: "type")
+      try container.encode(commandID, forKey: "command_id")
+      try container.encode(sessionID, forKey: "session_id")
+      try container.encode(activeTurnID, forKey: "expected_active_turn_id")
+      try container.encode(SignalboxUserInputContent.text(content), forKey: "content")
+      try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
       try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
     case .stopTurn(
       let commandID,
