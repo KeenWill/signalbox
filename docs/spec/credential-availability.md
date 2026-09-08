@@ -197,5 +197,5 @@ call preparation and send authorization.
 
 ## Planned
 
-- Contention and capacity reservations, their startup re-evaluation,
+- Contention and capacity reservations and their startup re-evaluation
   ([design](../design/credential-availability.md)).
