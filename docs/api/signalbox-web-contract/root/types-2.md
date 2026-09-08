@@ -383,3 +383,42 @@ impl fmt::Display for GenerateWebContractError {
 }
 impl error::Error for GenerateWebContractError {}
 ```
+
+## WebRepositoryWatchProvenance
+
+```rust
+pub struct WebRepositoryWatchProvenance {
+    pub dispatch_id: WebLiveResourceId,
+    pub action_ordinal: WebPositiveU64,
+    pub repository: string::String,
+    pub rule_id: string::String,
+    pub rule_revision: WebPositiveU64,
+    pub event_id: WebLiveResourceId,
+    pub event_kind: WebRepositoryWatchEventKind,
+    pub pull_request: option::Option<WebPositiveU64>,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
+## WebRepositoryWatchEventKind
+
+```rust
+pub enum WebRepositoryWatchEventKind {
+    PullRequestOpened,
+    PullRequestClosed,
+    PullRequestMerged,
+    HeadChanged,
+    MergeableStateChanged,
+    ChecksCompleted,
+    CheckRunCompleted,
+    BranchWorkflowRunCompleted,
+    ReviewSubmitted,
+    ThreadOpened,
+    ThreadResolved,
+    Labeled,
+    Unlabeled,
+    BaseAdvanced,
+    ReactionChanged,
+}
+// derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```

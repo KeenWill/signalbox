@@ -401,6 +401,8 @@ where
                 Ok(PrepareModelCallOutcome::Ready {
                     request,
                     credential_reference,
+                    retained_mapped_target,
+                    invocation_capacity_reserved,
                     dangerous_tool_auto_approval,
                     recorded_user_overrides,
                     system_prompt,
@@ -410,6 +412,8 @@ where
                     break (
                         request,
                         credential_reference,
+                        retained_mapped_target,
+                        invocation_capacity_reserved,
                         dangerous_tool_auto_approval,
                         recorded_user_overrides,
                         system_prompt,
@@ -438,6 +442,8 @@ where
         let (
             prepared,
             credential_reference,
+            retained_mapped_target,
+            invocation_capacity_reserved,
             dangerous_tool_auto_approval,
             recorded_user_overrides,
             system_prompt,
@@ -458,7 +464,11 @@ where
             &reasoning_provenance,
             self.retained_frontier_content_limit,
         ) {
-            Ok(operation) => operation,
+            Ok(mut operation) => {
+                operation.retained_mapped_target = retained_mapped_target;
+                operation.invocation_capacity_reserved = invocation_capacity_reserved;
+                operation
+            }
             // The retained-content ceiling is a safety bound on the same
             // automatic tool loop the round ceiling bounds, so it closes the
             // checkpoint through the same terminal contract rather than

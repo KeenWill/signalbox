@@ -305,6 +305,81 @@ fn continuation_compaction(
     continuation_compaction_with_configuration(runtime, summary, configuration)
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn exec_decisions_commit_in_a_compaction_created_turn() -> Result<(), Box<dyn Error>> {
+    for decision in [
+        ToolDecision::Approve {},
+        ToolDecision::Deny {
+            reason: "stop the retry".to_owned(),
+        },
+    ] {
+        let mut runtime = RunningRuntime::start().await?;
+        let (session, original) =
+            exhausted_continuation(&runtime, ContinuationSession::RepositoryWatch).await?;
+        let summary = ScriptedModel::single(completed_script(
+            "fixture-model",
+            "Continue the repository task.",
+            TokenUsage::default(),
+        ));
+        continuation_compaction(&runtime, summary)?
+            .compact_if_needed(session, None)
+            .await?;
+        let wire_session = CanonicalUuid::from_uuid(session.into_uuid());
+        let request = super::tool_decisions::park_after_failed_exec(
+            &mut runtime,
+            wire_session,
+            InitialToolApproval::Human,
+        )
+        .await?;
+        let turn: Uuid =
+            sqlx::query_scalar("SELECT turn_id FROM tool_request WHERE request_id = $1")
+                .bind(request.into_uuid())
+                .fetch_one(&runtime.pool)
+                .await?;
+        assert_ne!(turn, original.into_uuid());
+        let mut connection = Connection::connect(runtime.socket()).await?;
+        connection
+            .request(
+                3,
+                ClientRequest::DecideToolRequest {
+                    command_id: command()?,
+                    session_id: wire_session,
+                    tool_request_id: request,
+                    decision: decision.clone(),
+                },
+            )
+            .await?;
+        assert_eq!(
+            decided_receipt(response_within(&mut connection).await?.message()),
+            (request, decision)
+        );
+        connection
+            .request(
+                4,
+                ClientRequest::StopTurn {
+                    command_id: command()?,
+                    session_id: wire_session,
+                    expected_active_turn_id: CanonicalUuid::from_uuid(turn),
+                    content: UserInputContent::text("continue after stop".to_owned()),
+                    expected_defaults_version: CanonicalU64::new(1),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    model_settings: ModelSettingsOverlay::inherit_all(),
+                },
+            )
+            .await?;
+        accepted_successor_turn(&mut connection, wire_session, 3).await?;
+        let messages = read_transcript_messages(&mut connection, 5, wire_session).await?;
+        assert!(matches!(
+            turn_state_of(&messages, CanonicalUuid::from_uuid(turn)),
+            TurnState::Cancelled { .. }
+        ));
+        drop(connection);
+        runtime.stop().await?;
+    }
+    Ok(())
+}
+
 fn continuation_compaction_with_configuration(
     runtime: &RunningRuntime,
     summary: ScriptedModel<ModelCallId>,

@@ -1474,6 +1474,9 @@ impl ProtocolError {
 
 #[derive(Clone, Debug)]
 pub(super) enum ProcessUpdate {
+    ResyncRequired {
+        session: Option<SessionId>,
+    },
     Durable {
         cursor: u64,
         session: SessionId,
@@ -2249,7 +2252,7 @@ pub enum ProcessRuntimeError {
     /// The durable outbox dispatcher failed.
     Dispatch(OutboxDispatchError),
     /// The shared runner-recovery notification listener failed.
-    RunnerRecoveryNotifications(sqlx::Error),
+    DatabaseNotifications(sqlx::Error),
     /// A retained runner-recovery command could not be resumed.
     RunnerRecoveryCommands(signalbox_persistence::runner_protocol::RunnerRecoveryError),
     /// The single dispatcher produced an impossible retry result.
@@ -2285,9 +2288,7 @@ impl fmt::Display for ProcessRuntimeError {
             }
             Self::ConnectionTask(_) => "a local process connection task failed",
             Self::Dispatch(_) => "the durable process-update dispatcher failed",
-            Self::RunnerRecoveryNotifications(_) => {
-                "the runner recovery notification listener failed"
-            }
+            Self::DatabaseNotifications(_) => "the database notification listener failed",
             Self::RunnerRecoveryCommands(_) => "a retained runner recovery command failed",
             Self::UnexpectedDispatcherRetry => {
                 "the process-update dispatcher unexpectedly requested retry"
@@ -2305,7 +2306,7 @@ impl Error for ProcessRuntimeError {
             Self::Encode(error) => Some(error),
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
-            Self::RunnerRecoveryNotifications(error) => Some(error),
+            Self::DatabaseNotifications(error) => Some(error),
             Self::RunnerRecoveryCommands(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
             Self::OauthRecovery(_)

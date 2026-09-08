@@ -207,6 +207,8 @@ export type WebPositiveU64 = string;
 
 export type WebProviderModelCallFailureCause = "credential_rejected" | "permission_denied" | "invalid_request" | "target_not_found" | "request_too_large" | "rate_limited" | "quota_exhausted" | "overloaded" | "provider_internal" | "unrecognized";
 
+export type WebRepositoryWatchEventKind = "pull_request_opened" | "pull_request_closed" | "pull_request_merged" | "head_changed" | "mergeable_state_changed" | "checks_completed" | "check_run_completed" | "branch_workflow_run_completed" | "review_submitted" | "thread_opened" | "thread_resolved" | "labeled" | "unlabeled" | "base_advanced" | "reaction_changed";
+
 export type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
 
 export type WebSearchHighlight = {
@@ -548,6 +550,16 @@ export type WebSessionTimelineDescriptor = {
   readonly first_address: WebTimelineAddress;
   readonly latest_address: WebTimelineAddress;
   readonly observed_through: WebU64;
+  readonly repository_watch: {
+  readonly action_ordinal: WebPositiveU64;
+  readonly dispatch_id: WebLiveResourceId;
+  readonly event_id: WebLiveResourceId;
+  readonly event_kind: WebRepositoryWatchEventKind;
+  readonly pull_request: string | null;
+  readonly repository: string;
+  readonly rule_id: string;
+  readonly rule_revision: WebPositiveU64;
+} | null;
   readonly session_id: WebSessionId;
   readonly sizes: WebSessionTimelineSizeFacts;
   readonly work: WebSessionWorkFacts;

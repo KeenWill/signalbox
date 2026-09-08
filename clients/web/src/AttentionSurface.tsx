@@ -198,11 +198,11 @@ export function AttentionSurface({
           onClick={monitorCanRestart ? restartMonitor : () => void attention.refetch()}
         >
           <RefreshCw aria-hidden="true" />
-          {monitorCanRestart ? 'Restart monitor' : 'Refresh snapshot'}
+          {monitorCanRestart ? 'Restart monitor' : 'Refresh'}
         </button>
       </div>
 
-      {attention.isLoading && <p className="attention-notice">Reading one bounded fleet page…</p>}
+      {attention.isLoading && <p className="attention-notice">Loading sessions…</p>}
       {attention.isError && (
         <section className="surface-empty" role="alert">
           <div>
@@ -217,7 +217,7 @@ export function AttentionSurface({
             </button>
             {after && (
               <button type="button" onClick={returnToLivePage}>
-                Return to live page
+                Live page
               </button>
             )}
           </div>
@@ -229,15 +229,14 @@ export function AttentionSurface({
           <section className="attention-list" aria-labelledby="attention-heading">
             <header>
               <div>
-                <span className="eyebrow">Bounded intervention fleet</span>
                 <h2 id="attention-heading" ref={pageHeading} tabIndex={-1}>
-                  {attention.data.summaries.length} sessions
+                  {attention.data.summaries.length}{' '}
+                  {attention.data.summaries.length === 1 ? 'session' : 'sessions'}
                 </h2>
               </div>
-              <code>cursor {attention.data.cursor}</code>
             </header>
             {attention.data.summaries.length === 0 ? (
-              <p className="attention-notice">No sessions occupy this fleet page.</p>
+              <p className="attention-notice">No sessions</p>
             ) : (
               <ol>
                 {attention.data.summaries.map((summary) => (
@@ -253,9 +252,8 @@ export function AttentionSurface({
                         <code>{summary.session_id}</code>
                       </span>
                       <span className="attention-obligation">
-                        {summary.action ? label(summary.action) : 'Observe only'}
+                        {summary.action ? label(summary.action) : '—'}
                       </span>
-                      <span>{summary.current_turn_id ?? 'No current turn'}</span>
                       <time>{activityTime(summary.last_activity.unix_milliseconds)}</time>
                       <ArrowRight aria-hidden="true" />
                     </button>
@@ -266,12 +264,12 @@ export function AttentionSurface({
             <div className="attention-page-controls">
               {after && (
                 <button type="button" onClick={returnToLivePage}>
-                  Return to live page
+                  Live page
                 </button>
               )}
               {attention.data.continuation_after_session_id && (
                 <button type="button" onClick={nextPage}>
-                  Next page <ArrowRight aria-hidden="true" />
+                  Next <ArrowRight aria-hidden="true" />
                 </button>
               )}
             </div>
@@ -281,7 +279,6 @@ export function AttentionSurface({
             <aside className="attention-inspector" aria-labelledby="attention-inspector-heading">
               <header>
                 <div>
-                  <span className="eyebrow">Current obligation</span>
                   <h2 id="attention-inspector-heading">{label(selected.state)}</h2>
                 </div>
                 <button
@@ -340,10 +337,6 @@ export function AttentionSurface({
                   <strong>{selected.judge.failed}</strong>
                 </div>
               </section>
-              <p className="attention-readonly-note">
-                This projection names the owed action. Its mutation remains on the owning session or
-                review surface.
-              </p>
             </aside>
           )}
         </div>

@@ -1243,6 +1243,302 @@ async fn a_cancellation_committed_during_an_effect_remains_the_run_outcome()
     Ok(())
 }
 
+fn session_creation_artifact(command: Uuid, model: Uuid) -> (ProgramArtifact, InlineFramePayload) {
+    let request = deno_core::serde_json::to_vec(
+        &deno_core::serde_json::json!({"command":command.to_string(),"model":model.to_string()}),
+    )
+    .expect("fixture JSON encodes");
+    let bytes = request
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    (
+        ProgramArtifact::new(format!(
+            r#"
+import {{ effect }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+const answer = await effect("session", "create", new Uint8Array([{bytes}]));
+if (answer.kind !== "answer") throw new Error("creation refused");
+"#
+        )),
+        InlineFramePayload::new(request),
+    )
+}
+
+fn session_repository(
+    pool: &PgPool,
+) -> signalbox_persistence::program_session::ProgramSessionRepository {
+    let credentials = signalbox_persistence::SessionCredentialPin::try_new(vec![
+        signalbox_persistence::SessionModelCredential::new("fixture-family", "fixture-credential"),
+    ])
+    .expect("host fixture credential pin is valid");
+    signalbox_persistence::program_session::ProgramSessionRepository::new(
+        pool.clone(),
+        signalbox_persistence::submit_input::SubmitInputRepository::new(pool.clone()),
+        signalbox_persistence::create_session::CreateSessionRepository::new(
+            pool.clone(),
+            credentials,
+        ),
+    )
+}
+
+enum SessionEffectAttempt {
+    Live,
+    Recovered,
+}
+
+async fn execute_session_creation(attempt: SessionEffectAttempt) -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        DirectModelSelection, DurableCommandId, EffectRequest, ModelSelectionRequest,
+        ProgramCapability, SessionConfigurationDefaults, SessionId,
+        program_registration::ProgramGrants, program_session::ProgramSessionCreate,
+    };
+    use signalbox_program_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
+    let (_container, pool) = migrated_postgres().await?;
+    let command = Uuid::now_v7();
+    let model = Uuid::now_v7();
+    let (artifact, request) = session_creation_artifact(command, model);
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Session]),
+    )
+    .await?;
+    let sessions = session_repository(&pool);
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let created = if matches!(attempt, SessionEffectAttempt::Recovered) {
+        let session = sessions
+            .create(
+                run,
+                ProgramSessionCreate {
+                    command: DurableCommandId::from_uuid(command),
+                    defaults: SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                        DirectModelSelection::from_uuid(model),
+                    )),
+                },
+            )
+            .await?;
+        journal
+            .append_request(
+                run,
+                None,
+                RequestKind::Effect(EffectRequest::new(
+                    ProgramCapability::Session,
+                    "create".into(),
+                    request,
+                )),
+            )
+            .await?;
+        Some(session)
+    } else {
+        None
+    };
+    let other = EffectProbe {
+        policy: EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    let mut effects = SessionEffects::new(sessions, other, |_| {}, |_| None);
+    let host = ProgramHost::new(journal.clone());
+    assert_eq!(
+        host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed
+    );
+    let loaded = journal.load(run).await?.expect("run journal exists");
+    let JournalFrame::Delivery(delivery) =
+        loaded.entries().last().expect("creation answer").frame()
+    else {
+        panic!("creation answer")
+    };
+    let DeliveryKind::Answer { payload, .. } = delivery.kind() else {
+        panic!("creation answer")
+    };
+    let answer: deno_core::serde_json::Value =
+        deno_core::serde_json::from_slice(payload.as_bytes())?;
+    let session = SessionId::from_uuid(
+        answer["session"]
+            .as_str()
+            .expect("session identity")
+            .parse()?,
+    );
+    if let Some(created) = created {
+        assert_eq!(session, created);
+    }
+    let loaded = signalbox_persistence::session::SessionRepository::new(pool.clone())
+        .load_session(session)
+        .await?
+        .expect("created session");
+    assert!(
+        matches!(loaded.creation_provenance().cause(), signalbox_domain::SessionCreationCause::Workflow { run: actor } if actor.run() == run)
+    );
+    assert_eq!(answer.as_object().expect("answer object").len(), 1);
+    assert_eq!(
+        host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM session")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 1);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_session_effect_creates_a_workflow_session_host_side() -> Result<(), Box<dyn Error>> {
+    execute_session_creation(SessionEffectAttempt::Live).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_creation_recovery_adopts_the_durable_command_receipt() -> Result<(), Box<dyn Error>>
+{
+    execute_session_creation(SessionEffectAttempt::Recovered).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_turn_answers_retain_only_the_exact_terminal_identities_and_digest()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        CommandPrincipal, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+        ModelSelectionRequest, ProgramCapability, SessionConfigurationDefaults,
+        SessionLifecycleCommand, SessionLifecycleOperation, StopStickiness,
+        SubmitInputAppliedResult, SubmitInputResult, program_registration::ProgramGrants,
+        program_session::ProgramSessionCreate,
+    };
+    use signalbox_persistence::{
+        session_lifecycle_command::SessionLifecycleCommandRepository,
+        submit_input::SubmitInputRepository,
+    };
+    use signalbox_program_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
+    let (_container, pool) = migrated_postgres().await?;
+    let sessions = session_repository(&pool);
+    let creator = registered_run(
+        &pool,
+        &ProgramArtifact::new("export {};"),
+        ProgramGrants::new([ProgramCapability::Session]),
+    )
+    .await?;
+    let session = sessions
+        .create(
+            creator,
+            ProgramSessionCreate {
+                command: DurableCommandId::from_uuid(Uuid::now_v7()),
+                defaults: SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                    DirectModelSelection::from_uuid(Uuid::now_v7()),
+                )),
+            },
+        )
+        .await?;
+    let command = DurableCommandId::from_uuid(Uuid::now_v7());
+    let request = deno_core::serde_json::to_vec(&deno_core::serde_json::json!({
+        "command": command.into_uuid().to_string(), "session": session.into_uuid().to_string(),
+        "text": "private transcript input", "defaults_version": 1,
+    }))?;
+    let bytes = request
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let artifact = ProgramArtifact::new(format!(
+        r#"
+import {{ effect }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+const answer = await effect("session", "turn", new Uint8Array([{bytes}]));
+if (answer.kind !== "answer") throw new Error("turn refused");
+"#
+    ));
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Session]),
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let host = ProgramHost::new(journal.clone());
+    let (nudge, mut ready) = tokio::sync::mpsc::unbounded_channel();
+    let other = EffectProbe {
+        policy: EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    let mut effects = SessionEffects::new(
+        sessions,
+        other,
+        |session| {
+            nudge.send(session).expect("fixture receiver exists");
+        },
+        |_| None,
+    );
+    let execute = async {
+        host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+            .await
+            .map_err(Box::<dyn Error>::from)
+    };
+    let stop = async {
+        assert_eq!(ready.recv().await, Some(session));
+        SessionLifecycleCommandRepository::new(pool.clone())
+            .handle(
+                SessionLifecycleCommand::new(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    session,
+                    SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Sticky,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+                CommandPrincipal::Operator,
+            )
+            .await
+            .map_err(Box::<dyn Error>::from)
+    };
+    let (execution, _) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::try_join!(execute, stop)
+    })
+    .await??;
+    assert_eq!(execution, ProgramExecutionOutcome::Completed);
+    let receipt = SubmitInputRepository::new(pool.clone())
+        .load(command)
+        .await?
+        .expect("program input receipt");
+    let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) = receipt.result()
+    else {
+        panic!("turn origin")
+    };
+    let loaded = journal.load(run).await?.expect("run journal");
+    let JournalFrame::Delivery(delivery) = loaded.entries().last().expect("turn answer").frame()
+    else {
+        panic!("turn answer")
+    };
+    let DeliveryKind::Answer { payload, .. } = delivery.kind() else {
+        panic!("turn answer")
+    };
+    let answer: deno_core::serde_json::Value =
+        deno_core::serde_json::from_slice(payload.as_bytes())?;
+    assert_eq!(answer["session"], session.into_uuid().to_string());
+    assert_eq!(answer["turn"], origin.turn().into_uuid().to_string());
+    assert_eq!(
+        answer["accepted_input"],
+        origin.accepted_input().into_uuid().to_string()
+    );
+    assert_eq!(answer["outcome"], "retired");
+    assert_eq!(answer["digest"].as_array().expect("digest bytes").len(), 32);
+    assert_eq!(answer.as_object().expect("thin answer").len(), 5);
+    assert_eq!(
+        host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed
+    );
+    assert_eq!(journal.load(run).await?.expect("replayed journal"), loaded);
+    pool.close().await;
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_unregistered_run_is_rejected_by_registered_execution()
@@ -1273,6 +1569,183 @@ async fn terminal_unregistered_run_is_rejected_by_registered_execution()
             signalbox_persistence::program_registration::ProgramRegistrationError::RunMissing
         )
     ));
+    pool.close().await;
+    Ok(())
+}
+
+async fn refused_session_effect(
+    pool: &PgPool,
+    attempt: SessionEffectAttempt,
+    method: &str,
+    input: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{EffectRequest, ProgramCapability, program_registration::ProgramGrants};
+    use signalbox_program_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
+    let artifact = ProgramArtifact::new(format!(
+        r#"
+import {{ effect }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+const answer = await effect("session", "{method}", new Uint8Array({input:?}));
+if (answer.kind !== "answer") throw new Error("expected a session refusal answer");
+"#
+    ));
+    let run = registered_run(
+        pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Session]),
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    if matches!(attempt, SessionEffectAttempt::Recovered) {
+        journal
+            .append_request(
+                run,
+                None,
+                RequestKind::Effect(EffectRequest::new(
+                    ProgramCapability::Session,
+                    method.into(),
+                    InlineFramePayload::new(input),
+                )),
+            )
+            .await?;
+    }
+    let other = EffectProbe {
+        policy: EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    let mut effects = SessionEffects::new(session_repository(pool), other, |_| {}, |_| None);
+    let host = ProgramHost::new(journal.clone());
+    assert_eq!(
+        host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed
+    );
+    let loaded = journal.load(run).await?.expect("registered journal");
+    let JournalFrame::Delivery(delivery) = loaded.entries().last().expect("refusal answer").frame()
+    else {
+        panic!("refusal answer")
+    };
+    let DeliveryKind::Answer { payload, .. } = delivery.kind() else {
+        panic!("refusal answer")
+    };
+    assert_eq!(payload.as_bytes(), br#"{"outcome":"refused"}"#);
+    assert_eq!(
+        host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed
+    );
+    assert_eq!(journal.load(run).await?.expect("replayed journal"), loaded);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unsupported_session_operation_is_journaled_as_a_replayable_refusal()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    refused_session_effect(&pool, SessionEffectAttempt::Live, "unknown", &[]).await?;
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unanswered_unsupported_session_operation_recovers_to_a_refusal()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    refused_session_effect(&pool, SessionEffectAttempt::Recovered, "unknown", &[]).await?;
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn malformed_registration_requests_are_durably_rejected() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        EffectRequest, ProgramCapability, RejectReason, program_registration::ProgramGrants,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let malformed: &[&[u8]] = &[
+        b"{",
+        br#"{"id":"invalid","name":"child","revision":"one","source":[],"artifact":"","grants":[]}"#,
+    ];
+    for input in malformed {
+        for recovered in [false, true] {
+            let artifact = register_artifact(input, "reject");
+            let run = registered_run(
+                &pool,
+                &artifact,
+                ProgramGrants::new([ProgramCapability::Register]),
+            )
+            .await?;
+            let journal = ProgramJournalRepository::new(pool.clone());
+            if recovered {
+                journal
+                    .append_request(
+                        run,
+                        None,
+                        RequestKind::Effect(EffectRequest::new(
+                            ProgramCapability::Register,
+                            "register".into(),
+                            InlineFramePayload::new(*input),
+                        )),
+                    )
+                    .await?;
+            }
+            let mut effects = EffectProbe {
+                policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+                adopted: None,
+                executions: 0,
+                adoptions: 0,
+            };
+            let host = ProgramHost::new(journal.clone());
+            host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+                .await?;
+            let loaded = journal.load(run).await?.expect("registered journal exists");
+            assert!(
+                matches!(loaded.entries().last().expect("rejection exists").frame(),
+                JournalFrame::Delivery(delivery) if matches!(delivery.kind(),
+                    DeliveryKind::Reject { reason: RejectReason::UnsupportedOperation, .. }))
+            );
+            host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
+                .await?;
+            let replayed = journal.load(run).await?.expect("replayed journal exists");
+            assert_eq!(replayed.entries(), loaded.entries());
+            assert_eq!(effects.executions, 0);
+        }
+    }
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn invalid_session_requests_are_refused_live_and_after_recovery() -> Result<(), Box<dyn Error>>
+{
+    use deno_core::serde_json::json;
+    let (_container, pool) = migrated_postgres().await?;
+    let identity = Uuid::now_v7().to_string();
+    let create = json!({"command": identity, "model": identity});
+    let turn =
+        json!({"command": identity, "session": identity, "text": "input", "defaults_version": 1});
+    let mut invalid = vec![("create", b"{".to_vec()), ("turn", b"{".to_vec())];
+    for (method, valid, field, value) in [
+        ("create", &create, "command", json!("invalid")),
+        ("create", &create, "model", json!("invalid")),
+        ("turn", &turn, "command", json!("invalid")),
+        ("turn", &turn, "session", json!("invalid")),
+        ("turn", &turn, "defaults_version", json!(0)),
+        ("turn", &turn, "text", json!("")),
+    ] {
+        let mut input = valid.clone();
+        input[field] = value;
+        invalid.push((method, deno_core::serde_json::to_vec(&input)?));
+    }
+    for (method, input) in invalid {
+        refused_session_effect(&pool, SessionEffectAttempt::Live, method, &input).await?;
+        refused_session_effect(&pool, SessionEffectAttempt::Recovered, method, &input).await?;
+    }
     pool.close().await;
     Ok(())
 }

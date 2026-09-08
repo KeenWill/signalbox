@@ -131,6 +131,8 @@ impl<'a> Output<'a> {
                 self.stdout,
                 "turn={turn_id} position={position} state=active_awaiting_credential_availability attempt={wait_attempt_id} cause={}",
                 match cause {
+                    signalbox_process_protocol::CredentialAvailabilityWaitCause::Contended =>
+                        "contended",
                     signalbox_process_protocol::CredentialAvailabilityWaitCause::Exhausted =>
                         "exhausted",
                 },
@@ -153,6 +155,18 @@ impl<'a> Output<'a> {
                     placement_revision.value()
                 ),
             },
+            TurnState::FailedAfterCredentialWait {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                predecessor_model_call,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=failed_after_credential_wait frontier={terminal_frontier_id} attempt={terminal_attempt_id} predecessor_call={} predecessor_cause={}",
+                predecessor_model_call.model_call_id(),
+                predecessor_model_call
+                    .cause()
+                    .map_or("none", failed_model_call_cause)
+            ),
             TurnState::FailedCredentialPoolExhausted {
                 terminal_frontier_id,
                 terminal_attempt_id,

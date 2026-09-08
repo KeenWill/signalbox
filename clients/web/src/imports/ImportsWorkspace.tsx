@@ -2,7 +2,7 @@ import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Menu } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type CommandContext,
   importHotkeyBindings,
@@ -86,6 +86,7 @@ export function ImportsWorkspace({
   onNavigationDisabledChange?: (disabled: boolean) => void
 }) {
   const queryClient = useQueryClient()
+  const catalogRef = useRef<HTMLElement>(null)
   const navigate = useNavigate()
   const app = useAppSelector(selectApp)
   const queryScope = scenario ? 'scenario' : 'production'
@@ -322,6 +323,11 @@ export function ImportsWorkspace({
     continuation.reset()
   }, [continuation, pendingCommand, queryScope])
   const canRecoverRetainedCommand = pendingCommand !== null && !continuation.isPending
+  const refetchImports = importsQuery.refetch
+  const retryImportDiscovery = useCallback(() => {
+    catalogRef.current?.focus()
+    void refetchImports()
+  }, [refetchImports])
   const commandContext = useMemo<CommandContext>(
     () => ({
       dispatch: store.dispatch,
@@ -341,6 +347,7 @@ export function ImportsWorkspace({
       continueImport: continueAt,
       canRetryImport: canRecoverRetainedCommand,
       retryImport: retryExactCommand,
+      retryImportDiscovery: importsQuery.isError ? retryImportDiscovery : undefined,
       canAbandonImport: canRecoverRetainedCommand,
       abandonImport: abandonExactCommand,
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
@@ -352,8 +359,10 @@ export function ImportsWorkspace({
       continueAt,
       hasRetainedCommand,
       importEntryIds,
+      importsQuery.isError,
       navigate,
       retryExactCommand,
+      retryImportDiscovery,
       selectImportEntry,
       selectedFrontier?.imported_entry_id,
     ],
@@ -495,10 +504,14 @@ export function ImportsWorkspace({
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
   const retainedCommandNeedsAction = pendingCommand !== null && !continuation.isPending
+  const inspectorVisible =
+    selectedImport !== null || hasRetainedCommand || continuation.isSuccess || continuation.isError
 
   return (
     <>
-      <div className={`imports-shell imports-shell-${presentation}`}>
+      <div
+        className={`imports-shell imports-shell-${presentation} ${inspectorVisible ? 'inspector-open' : ''}`}
+      >
         {presentation === 'standalone' && (
           <aside className="navigation-pane imports-navigation">
             <ScenarioNavigation
@@ -508,7 +521,7 @@ export function ImportsWorkspace({
           </aside>
         )}
         <div
-          className={`imports-workspace imports-workspace-${presentation}`}
+          className={`imports-workspace imports-workspace-${presentation} ${inspectorVisible ? 'inspector-open' : ''}`}
           role={presentation === 'standalone' ? 'main' : undefined}
         >
           {presentation === 'standalone' && (
@@ -522,18 +535,20 @@ export function ImportsWorkspace({
                 <Menu />
               </IconCommand>
               <div>
-                <span className="eyebrow">Immutable imported evidence</span>
                 <h1>Imports</h1>
               </div>
-              <span className="window-count">100-row keyset pages · 101-entry windows</span>
             </header>
           )}
-          <section className="imports-catalog" aria-labelledby="imports-catalog-heading">
+          <section
+            ref={catalogRef}
+            tabIndex={-1}
+            className="imports-catalog"
+            aria-labelledby="imports-catalog-heading"
+          >
             <header className="section-header imports-catalog-header">
-              <div>
-                <span className="eyebrow">Bounded discovery</span>
-                <h2 id="imports-catalog-heading">Imported conversations</h2>
-              </div>
+              <h2 id="imports-catalog-heading" className="sr-only">
+                Imports
+              </h2>
               <div className="imports-filters">
                 <label>
                   <span>Format</span>
@@ -557,9 +572,9 @@ export function ImportsWorkspace({
                 <label>
                   <span>Source session</span>
                   <input
-                    aria-label="Filter imports by exact source session evidence"
+                    aria-label="Source session"
                     value={sourceSession}
-                    placeholder="Exact attested identifier"
+                    placeholder="Source session ID"
                     disabled={hasRetainedCommand}
                     onChange={(event) => {
                       if (hasRetainedCommand) return
@@ -569,9 +584,9 @@ export function ImportsWorkspace({
                   />
                 </label>
                 <label className="source-session-filter-toggle">
-                  <span>Exact filter</span>
+                  <span>Filter by source</span>
                   <input
-                    aria-label="Use exact source session filter"
+                    aria-label="Filter by source"
                     type="checkbox"
                     checked={sourceSessionFilterEnabled}
                     disabled={hasRetainedCommand}
@@ -587,22 +602,28 @@ export function ImportsWorkspace({
                   disabled={!after || hasRetainedCommand}
                   onClick={() => showCatalogPage(undefined)}
                 >
-                  First page
+                  First
                 </button>
                 <button
                   type="button"
                   disabled={!imports?.next_cursor || hasRetainedCommand}
                   onClick={() => showCatalogPage(imports?.next_cursor ?? undefined)}
                 >
-                  Next page
+                  Next
                 </button>
               </div>
             </header>
-            {importsQuery.isPending && <p className="imports-state">Loading bounded imports…</p>}
+            {importsQuery.isPending && <p className="imports-state">Loading imports…</p>}
             {importsQuery.isError && (
-              <p className="imports-state" role="alert">
-                Imported-conversation discovery is unavailable.
-              </p>
+              <div className="imports-state imports-error" role="alert">
+                <p>Imports unavailable</p>
+                <button
+                  type="button"
+                  onClick={() => invokeCommand('imports.discovery.retry', commandContext)}
+                >
+                  Retry imports
+                </button>
+              </div>
             )}
             {imports && (
               <ImportsTable
@@ -613,239 +634,230 @@ export function ImportsWorkspace({
               />
             )}
           </section>
-          <section className="import-inspector" aria-labelledby="import-inspector-heading">
-            <header className="section-header import-inspector-header">
-              <div>
-                <span className="eyebrow">Descriptor and selected source frontier</span>
-                <h2 id="import-inspector-heading">
-                  {descriptor?.display_title ?? 'Import inspector'}
-                </h2>
-              </div>
-              <div className="window-controls">
-                <button
-                  type="button"
-                  disabled={hasRetainedCommand}
-                  onClick={() =>
-                    showWindow({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
-                  }
-                >
-                  First
-                </button>
-                <button
-                  type="button"
-                  disabled={hasRetainedCommand}
-                  onClick={() =>
-                    showWindow({ anchor: 'latest', before: IMPORT_WINDOW_RADIUS, after: 0 })
-                  }
-                >
-                  Latest
-                </button>
-                <label>
-                  <span>Position</span>
-                  <input
-                    aria-label="Imported entry position"
-                    inputMode="numeric"
-                    value={positionInput}
+          {inspectorVisible && (
+            <section className="import-inspector" aria-labelledby="import-inspector-heading">
+              <header className="section-header import-inspector-header">
+                <div>
+                  <h2 id="import-inspector-heading">
+                    {descriptor?.display_title ?? 'Import inspector'}
+                  </h2>
+                </div>
+                <div className="window-controls">
+                  <button
+                    type="button"
                     disabled={hasRetainedCommand}
-                    onChange={(event) => {
-                      if (hasRetainedCommand) return
-                      setPositionInput(event.target.value)
-                    }}
-                  />
-                </label>
-                <button
-                  type="button"
-                  disabled={hasRetainedCommand || !requestedPositionInRange}
-                  onClick={showPosition}
-                >
-                  Go
-                </button>
-              </div>
-            </header>
-            <div className="import-inspector-body">
-              <div className="import-evidence">
-                {descriptor && (
-                  <dl>
-                    <div>
-                      <dt>Import identity</dt>
-                      <dd>{descriptor.imported_conversation_id}</dd>
-                    </div>
-                    <div>
-                      <dt>Format</dt>
-                      <dd>{descriptor.source.format}</dd>
-                    </div>
-                    <div>
-                      <dt>Source session</dt>
-                      <dd>
-                        {descriptor.source.source_session_id
-                          ? `${descriptor.source.source_session_id.leading_text}${
-                              descriptor.source.source_session_id.completeness === 'truncated'
-                                ? '…'
-                                : ''
-                            }`
-                          : 'Not attested'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Source digest</dt>
-                      <dd>{descriptor.source.source_digest_sha256}</dd>
-                    </div>
-                    <div>
-                      <dt>Raw records</dt>
-                      <dd>{descriptor.raw_record_count.toLocaleString()}</dd>
-                    </div>
-                    <div>
-                      <dt>Entries</dt>
-                      <dd>{descriptor.entry_count.toLocaleString()}</dd>
-                    </div>
-                    <div>
-                      <dt>Raw source size</dt>
-                      <dd>{byteLabel(descriptor.sizes.raw_source_bytes)}</dd>
-                    </div>
-                    <div>
-                      <dt>Normalized records</dt>
-                      <dd>{byteLabel(descriptor.sizes.normalized_source_record_bytes)}</dd>
-                    </div>
-                    <div>
-                      <dt>Normalized entries</dt>
-                      <dd>{byteLabel(descriptor.sizes.normalized_entry_bytes)}</dd>
-                    </div>
-                    <div>
-                      <dt>Timeline</dt>
-                      <dd>1–{descriptor.timeline.latest.position.toLocaleString()}</dd>
-                    </div>
-                  </dl>
-                )}
-                {descriptorQuery.isError && (
-                  <p className="imports-state" role="alert">
-                    The selected import descriptor could not be loaded.
-                  </p>
-                )}
-                <div className="continuation-form">
-                  <span className="eyebrow">Create native session from selected frontier</span>
-                  <div className="model-selection">
-                    <select
-                      aria-label="Initial model selection kind"
-                      value={modelKind}
-                      disabled={hasRetainedCommand}
-                      onChange={(event) => {
-                        if (!hasRetainedCommand) setModelKind(event.target.value as ModelKind)
-                      }}
-                    >
-                      <option value="direct">Direct model</option>
-                      <option value="alias">Model alias</option>
-                    </select>
+                    onClick={() =>
+                      showWindow({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
+                    }
+                  >
+                    First
+                  </button>
+                  <button
+                    type="button"
+                    disabled={hasRetainedCommand}
+                    onClick={() =>
+                      showWindow({ anchor: 'latest', before: IMPORT_WINDOW_RADIUS, after: 0 })
+                    }
+                  >
+                    Latest
+                  </button>
+                  <label>
+                    <span>Position</span>
                     <input
-                      aria-label="Initial model selection UUID"
-                      placeholder="Model selection UUID"
-                      value={modelSelectionId}
+                      aria-label="Imported entry position"
+                      inputMode="numeric"
+                      value={positionInput}
                       disabled={hasRetainedCommand}
                       onChange={(event) => {
-                        if (!hasRetainedCommand) setModelSelectionId(event.target.value)
+                        if (hasRetainedCommand) return
+                        setPositionInput(event.target.value)
                       }}
                     />
-                  </div>
-                  <p>
-                    Frontier {selectedFrontier?.position.toLocaleString() ?? '—'} · provider
-                    defaults
-                  </p>
-                  <div className="continuation-actions">
-                    <button
-                      type="button"
-                      onClick={() => invokeCommand('imports.continue.resume', commandContext)}
-                      disabled={!canContinueImport}
-                    >
-                      Resume
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => invokeCommand('imports.continue.fork', commandContext)}
-                      disabled={!canContinueImport}
-                    >
-                      Fork
-                    </button>
+                  </label>
+                  <button
+                    type="button"
+                    disabled={hasRetainedCommand || !requestedPositionInRange}
+                    onClick={showPosition}
+                  >
+                    Go
+                  </button>
+                </div>
+              </header>
+              <div className="import-inspector-body">
+                <div className="import-evidence">
+                  {descriptor && (
+                    <dl>
+                      <div>
+                        <dt>Import ID</dt>
+                        <dd>{descriptor.imported_conversation_id}</dd>
+                      </div>
+                      <div>
+                        <dt>Format</dt>
+                        <dd>{descriptor.source.format}</dd>
+                      </div>
+                      <div>
+                        <dt>Source session</dt>
+                        <dd>
+                          {descriptor.source.source_session_id
+                            ? `${descriptor.source.source_session_id.leading_text}${
+                                descriptor.source.source_session_id.completeness === 'truncated'
+                                  ? '…'
+                                  : ''
+                              }`
+                            : 'Not attested'}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Source digest</dt>
+                        <dd>{descriptor.source.source_digest_sha256}</dd>
+                      </div>
+                      <div>
+                        <dt>Raw records</dt>
+                        <dd>{descriptor.raw_record_count.toLocaleString()}</dd>
+                      </div>
+                      <div>
+                        <dt>Entries</dt>
+                        <dd>{descriptor.entry_count.toLocaleString()}</dd>
+                      </div>
+                      <div>
+                        <dt>Raw source size</dt>
+                        <dd>{byteLabel(descriptor.sizes.raw_source_bytes)}</dd>
+                      </div>
+                      <div>
+                        <dt>Normalized records</dt>
+                        <dd>{byteLabel(descriptor.sizes.normalized_source_record_bytes)}</dd>
+                      </div>
+                      <div>
+                        <dt>Normalized entries</dt>
+                        <dd>{byteLabel(descriptor.sizes.normalized_entry_bytes)}</dd>
+                      </div>
+                      <div>
+                        <dt>Timeline</dt>
+                        <dd>1–{descriptor.timeline.latest.position.toLocaleString()}</dd>
+                      </div>
+                    </dl>
+                  )}
+                  {descriptorQuery.isError && (
+                    <p className="imports-state" role="alert">
+                      Import details unavailable.
+                    </p>
+                  )}
+                  <div className="continuation-form">
+                    <span className="eyebrow">New session</span>
+                    <div className="model-selection">
+                      <select
+                        aria-label="Initial model selection kind"
+                        value={modelKind}
+                        disabled={hasRetainedCommand}
+                        onChange={(event) => {
+                          if (!hasRetainedCommand) setModelKind(event.target.value as ModelKind)
+                        }}
+                      >
+                        <option value="direct">Direct model</option>
+                        <option value="alias">Model alias</option>
+                      </select>
+                      <input
+                        aria-label="Initial model selection UUID"
+                        placeholder="Model ID"
+                        value={modelSelectionId}
+                        disabled={hasRetainedCommand}
+                        onChange={(event) => {
+                          if (!hasRetainedCommand) setModelSelectionId(event.target.value)
+                        }}
+                      />
+                    </div>
+                    <p>Position {selectedFrontier?.position.toLocaleString() ?? '—'}</p>
+                    <div className="continuation-actions">
+                      <button
+                        type="button"
+                        onClick={() => invokeCommand('imports.continue.resume', commandContext)}
+                        disabled={!canContinueImport}
+                      >
+                        Resume
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => invokeCommand('imports.continue.fork', commandContext)}
+                        disabled={!canContinueImport}
+                      >
+                        Fork
+                      </button>
+                      {retainedCommandNeedsAction && pendingCommand && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => invokeCommand('imports.continue.retry', commandContext)}
+                          >
+                            Retry
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              invokeCommand('imports.continue.abandon', commandContext)
+                            }
+                          >
+                            Abandon
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    {retainedStorageFailed && (
+                      <p role="alert">Command storage unavailable. Request not sent.</p>
+                    )}
                     {retainedCommandNeedsAction && pendingCommand && (
+                      <p role="alert">
+                        Outcome unknown. Import {pendingCommand.frontier.imported_conversation_id},
+                        position {pendingCommand.frontier.position.toLocaleString()}.
+                      </p>
+                    )}
+                    {continuation.isError && !retryableContinuationFailure && !pendingCommand && (
+                      <p role="alert">Request rejected.</p>
+                    )}
+                    {continuation.data && (
                       <>
-                        <button
-                          type="button"
-                          onClick={() => invokeCommand('imports.continue.retry', commandContext)}
-                        >
-                          Retry exact command
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => invokeCommand('imports.continue.abandon', commandContext)}
-                        >
-                          Abandon exact retry
-                        </button>
+                        <p className="continuation-result">
+                          Session created: {continuation.data.session_id}
+                        </p>
+                        <p className="continuation-result">
+                          Import {continuation.data.frontier.imported_conversation_id}, position{' '}
+                          {continuation.data.frontier.position.toLocaleString()}
+                        </p>
                       </>
                     )}
                   </div>
-                  {retainedStorageFailed && (
-                    <p role="alert">
-                      The exact continuation command could not be retained in session storage. No
-                      request was sent.
+                </div>
+                <div className="import-window">
+                  <div className="import-window-summary">
+                    <span>Entries</span>
+                    <small>
+                      {windowQuery.isError
+                        ? 'Entry window unavailable'
+                        : entryWindow
+                          ? `${entryWindow.first_position.toLocaleString()}–${entryWindow.last_position.toLocaleString()} · ${entryWindow.items.length} loaded`
+                          : selectedImport === null
+                            ? 'No import selected'
+                            : 'Loading window…'}
+                    </small>
+                  </div>
+                  {windowQuery.isError && (
+                    <p className="imports-state" role="alert">
+                      Entries unavailable.
                     </p>
                   )}
-                  {retainedCommandNeedsAction && pendingCommand && (
-                    <p role="alert">
-                      The continuation outcome is unresolved. The exact command for import{' '}
-                      {pendingCommand.frontier.imported_conversation_id}, position{' '}
-                      {pendingCommand.frontier.position.toLocaleString()}, is retained for retry.
-                      Abandon it before selecting another import or frontier.
-                    </p>
+                  {selectedImport === null && <p className="imports-state">No import selected.</p>}
+                  {entryWindow && (
+                    <ImportedEntries
+                      entries={entryWindow.items}
+                      logicalEntryCount={descriptor?.entry_count ?? entryWindow.last_position}
+                      selected={selectedFrontier}
+                      commandContext={commandContext}
+                    />
                   )}
-                  {continuation.isError && !retryableContinuationFailure && !pendingCommand && (
-                    <p role="alert">
-                      The continuation request was rejected and cannot be retried unchanged.
-                    </p>
-                  )}
-                  {continuation.data && (
-                    <>
-                      <p className="continuation-result">
-                        Session created: {continuation.data.session_id}
-                      </p>
-                      <p className="continuation-result">
-                        Receipt source: import {continuation.data.frontier.imported_conversation_id}
-                        , position {continuation.data.frontier.position.toLocaleString()}
-                      </p>
-                    </>
-                  )}
+                  <ImportedArtifactView entry={selectedEntry} commandContext={commandContext} />
                 </div>
               </div>
-              <div className="import-window">
-                <div className="import-window-summary">
-                  <span>Imported source evidence</span>
-                  <small>
-                    {windowQuery.isError
-                      ? 'Entry window unavailable'
-                      : entryWindow
-                        ? `${entryWindow.first_position.toLocaleString()}–${entryWindow.last_position.toLocaleString()} · ${entryWindow.items.length} loaded`
-                        : selectedImport === null
-                          ? 'No import selected'
-                          : 'Loading window…'}
-                  </small>
-                </div>
-                {windowQuery.isError && (
-                  <p className="imports-state" role="alert">
-                    The selected imported-entry window could not be loaded.
-                  </p>
-                )}
-                {selectedImport === null && (
-                  <p className="imports-state">Select an imported conversation to inspect.</p>
-                )}
-                {entryWindow && (
-                  <ImportedEntries
-                    entries={entryWindow.items}
-                    logicalEntryCount={descriptor?.entry_count ?? entryWindow.last_position}
-                    selected={selectedFrontier}
-                    commandContext={commandContext}
-                  />
-                )}
-                <ImportedArtifactView entry={selectedEntry} commandContext={commandContext} />
-              </div>
-            </div>
-          </section>
+            </section>
+          )}
         </div>
       </div>
       {presentation === 'standalone' && (

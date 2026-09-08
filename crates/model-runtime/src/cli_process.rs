@@ -459,6 +459,24 @@ pub async fn execute_cli_process_with_credentials<C: Clone + Send + Sync, D: Cli
             });
         }
     };
+    if let Some(process_group) = child.process_group_id {
+        let registration = tokio::select! {
+            biased;
+            registered = sink.register_process(correlation.clone(), process_group) => {
+                registered.then_some(()).ok_or_else(|| UnsentCause::ConnectFailed(
+                    TransportFacts::new("invocation process registration failed"),
+                ))
+            },
+            () = &mut *cancellation => Err(UnsentCause::CancelledBeforeSend),
+            () = wait_for_deadline(deadline) => Err(UnsentCause::ConnectFailed(
+                TransportFacts::new("exchange deadline elapsed before process registration"),
+            )),
+        };
+        if let Err(cause) = registration {
+            force_kill(&mut child).await;
+            return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence { cause });
+        }
+    }
     let Some(mut stdin) = child.stdin.take() else {
         force_kill(&mut child).await;
         return pre_exchange_transport_loss(format!(
@@ -2059,6 +2077,46 @@ mod tests {
             environment: &[],
             environment_overrides: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_process_registration_kills_the_child_before_request_delivery() {
+        struct RegistrationSink {
+            group: Option<u32>,
+        }
+        impl crate::ObservationSink<u8> for RegistrationSink {
+            fn observe(&mut self, _: crate::Observation<u8>) {}
+            fn register_process(
+                &mut self,
+                correlation: u8,
+                group: u32,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>
+            {
+                assert_eq!(correlation, 7);
+                self.group = Some(group);
+                Box::pin(async { false })
+            }
+        }
+        let mut request = direct_request(std::time::Duration::from_secs(30));
+        request.command = std::process::Command::new("/bin/sh");
+        request.command.args(["-c", "read request"]);
+        request.prompt = b"request\n".to_vec();
+        let mut sink = RegistrationSink { group: None };
+        let evidence =
+            execute_cli_process(request, &mut sink, &mut CancellationSignal::never()).await;
+        assert!(matches!(
+            evidence,
+            TerminalEvidence::ProvenUnsent(crate::ProvenUnsentEvidence {
+                cause: UnsentCause::ConnectFailed(_),
+            })
+        ));
+        let group = rustix::process::Pid::from_raw(sink.group.expect("spawn is registered") as i32)
+            .expect("positive group");
+        assert_eq!(
+            rustix::process::test_kill_process_group(group),
+            Err(rustix::io::Errno::SRCH)
+        );
     }
 
     #[tokio::test]
