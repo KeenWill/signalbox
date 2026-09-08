@@ -490,7 +490,7 @@ export function ProductApp({
   }, [])
   const updateSessionSearch = useCallback(
     (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
-      sessionEntryRequested.current = next.workspace === true
+      sessionEntryRequested.current = next.workspace === true && next.session === undefined
       if (mode === 'push' && next.workspace && next.session)
         catalogReturnSessionId.current = next.session
       if (mode === 'close') {

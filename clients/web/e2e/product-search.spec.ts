@@ -544,11 +544,11 @@ test('clears a draft error when history restores a valid search', async ({ page 
 test('withholds previous results after a failed refresh', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search?q=release')
-  await expect(page.getByRole('heading', { name: resultsHeading(firstPage.results) })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
   await page.route('**/api/search?**', (route) => route.abort())
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
   await expect(page.getByRole('heading', { name: 'Search could not be read' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: resultsHeading(firstPage.results) })).toBeHidden()
+  await expect(page.getByRole('heading', { name: '2 results' })).toBeHidden()
 })
 
 test('applies prepaint preferences while the application bundle is pending', async ({ page }) => {

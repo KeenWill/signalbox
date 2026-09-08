@@ -491,8 +491,8 @@ test('opens the selected catalog row in the landed timeline workspace', async ({
 
   await expect.poll(() => new URL(page.url()).searchParams.get('workspace')).toBe('true')
   await expect(page.getByRole('textbox', { name: 'Session ID' })).toHaveValue(firstSessionId)
-  await expect(page.getByRole('textbox', { name: 'Session ID' })).toBeFocused()
-  await expect(page.getByText(`Session workspace loaded for ${firstSessionId}.`)).toBeVisible()
+  await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Session ID' })).not.toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -698,14 +698,16 @@ test('keeps opened workspace identities in the URL and restores them on reload',
   await input.fill(firstSessionId)
   await input.press('Enter')
   await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
-  await expect(page.getByText(`Session workspace loaded for ${firstSessionId}.`)).toBeVisible()
+  await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+  await expect(input).not.toBeFocused()
   await input.fill(secondSessionId)
   await input.press('Enter')
   await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(secondSessionId)
-  await expect(page.getByText(`Session workspace loaded for ${secondSessionId}.`)).toBeVisible()
+  await expect(page.getByRole('heading', { name: secondSessionId, exact: true })).toBeVisible()
+  await expect(input).not.toBeFocused()
   await page.reload()
   await expect(input).toHaveValue(secondSessionId)
-  await expect(page.getByText(`Session workspace loaded for ${secondSessionId}.`)).toBeVisible()
+  await expect(page.getByRole('heading', { name: secondSessionId, exact: true })).toBeVisible()
 })
 
 test('classifies a catalog connection failure as transport unavailability', async ({ page }) => {
