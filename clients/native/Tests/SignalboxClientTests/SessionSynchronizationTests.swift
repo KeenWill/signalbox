@@ -4,6 +4,32 @@ import XCTest
 @testable import SignalboxNative
 
 final class SessionSynchronizationTests: XCTestCase {
+  func testRequestedRefreshStartsANewGenerationAndRejectsStaleRequests() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor)
+    let generation = SynchronizationFixture.initialGeneration
+    let effects = transport.send(.refreshRequested(generation: generation))
+
+    XCTAssertEqual(SynchronizationFixture.effectNames(effects),
+      ["close_follow", "open_follow", "arm_deadline"])
+    XCTAssertEqual(transport.machine.phase, .connect(generation: generation + 1, reconnectAttempt: 0))
+    XCTAssertTrue(transport.send(.refreshRequested(generation: generation)).isEmpty)
+    _ = transport.send(.stop)
+    XCTAssertTrue(transport.send(.refreshRequested(generation: generation + 1)).isEmpty)
+  }
+
+  func testRequestedRefreshWaitsForAnExistingSideSnapshot() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor)
+    let generation = SynchronizationFixture.initialGeneration
+    _ = transport.send(.frame(generation: generation,
+      message: try SynchronizationFixture.turnActivatedEvent(cursor: SynchronizationFixture.unknownCursor)))
+    let phase = transport.machine.phase
+
+    XCTAssertTrue(transport.send(.refreshRequested(generation: generation)).isEmpty)
+    XCTAssertEqual(transport.machine.phase, phase)
+  }
+
   func testScriptedTransportTraversesEverySynchronizationPhase() throws {
     let snapshotCursor = SynchronizationFixture.initialCursor
     var transport = try SynchronizationFixture.transport()
