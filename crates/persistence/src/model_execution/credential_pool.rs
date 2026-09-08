@@ -395,6 +395,21 @@ pub(super) async fn load_durable_pool_exclusions(
     excluded.extend(sqlx::query_scalar::<_, String>(
         "SELECT profile FROM credential_exclusion_state WHERE active AND kind = 'profile_quarantine' AND origin <> 'pool_trigger' AND profile = ANY($1)")
         .bind(&member_references).fetch_all(&mut *connection).await?);
+    let mut snapshots = Vec::new();
+    for member in policy.members().iter().filter(|member| {
+        policy.tie_break == CredentialPoolRuntimeTieBreak::LeastUsed
+            || member
+                .headroom_reserve_percent
+                .or(policy.headroom_reserve_percent)
+                .is_some()
+    }) {
+        let snapshot = crate::credential_capacity::load_credential_rate_limits(
+            connection,
+            member.credential_reference(),
+        )
+        .await?;
+        snapshots.push((member, snapshot));
+    }
     let (observed_at, transient_exclusions): (sqlx::types::time::OffsetDateTime, Vec<String>) =
         sqlx::query_as(
             "WITH observation AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
@@ -411,18 +426,7 @@ pub(super) async fn load_durable_pool_exclusions(
     let now = std::time::SystemTime::from(observed_at);
     excluded.extend(transient_exclusions);
     let mut headroom = HashMap::new();
-    for member in policy.members().iter().filter(|member| {
-        policy.tie_break == CredentialPoolRuntimeTieBreak::LeastUsed
-            || member
-                .headroom_reserve_percent
-                .or(policy.headroom_reserve_percent)
-                .is_some()
-    }) {
-        let snapshot = crate::credential_capacity::load_credential_rate_limits(
-            connection,
-            member.credential_reference(),
-        )
-        .await?;
+    for (member, snapshot) in snapshots {
         let remaining = snapshot
             .as_ref()
             .and_then(|snapshot| capacity_headroom(snapshot, now));
