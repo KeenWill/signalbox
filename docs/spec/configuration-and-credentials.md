@@ -717,13 +717,13 @@ daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
 
 The GitHub and code-host adapters share `github-primary`, which needs API access
-to read and create pull requests, publish reviews and comments, reply to and
-resolve review threads, read repository files and directories, read checks and
-CI job logs, and rerun failed jobs. Neither adapter pushes Git changes. The
-repository-watch credential needs read access for polling and checkout
-provisioning; it does not need push or workflow-write authority. Classic `repo`
-is broader than read-only access, so a fine-grained read credential limits that
-role to the watched repositories.
+to read pull requests, publish reviews and comments, reply to and resolve review
+threads, read repository files and directories, read checks and CI job logs, and
+rerun failed jobs. Neither adapter pushes Git changes. The repository-watch
+credential needs read access for polling and checkout provisioning; it does not
+need push or workflow-write authority. Classic `repo` is broader than read-only
+access, so a fine-grained read credential limits that role to the watched
+repositories.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
