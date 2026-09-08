@@ -176,3 +176,22 @@ pub async fn inject_deadline_diagnostic_failure(pool: &PgPool) -> Result<(), sql
     .await?;
     Ok(())
 }
+
+/// Reads the complete accepted input queued by one exact goal resumption event.
+pub async fn goal_resumption_input(
+    pool: &PgPool,
+    session: SessionId,
+    event: signalbox_domain::GoalEventOrdinal,
+) -> Result<signalbox_domain::UserContent, crate::goal::GoalRepositoryError> {
+    let stored = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT accepted_input_content_parts_json(turn.accepted_input_id)
+           FROM goal_turn AS turn
+          WHERE turn.session_id = $1 AND turn.source_event_ordinal = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(event.get()))
+    .fetch_one(pool)
+    .await?;
+    crate::user_content::decode(stored)
+        .map_err(|_| crate::goal::GoalCorruption::Inconsistent("resumption input content").into())
+}

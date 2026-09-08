@@ -1158,24 +1158,16 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
 }
 
 /// Reads the input durably queued by the last resumption event.
-async fn resumed_goal_input(pool: &PgPool, resumed: &Goal) -> Result<String, Box<dyn Error>> {
-    Ok(sqlx::query_scalar(
-        "SELECT part.text_value
-           FROM goal_turn AS turn
-           JOIN accepted_input_content_part AS part
-             ON part.accepted_input_id = turn.accepted_input_id
-          WHERE turn.session_id = $1 AND turn.source_event_ordinal = $2",
-    )
-    .bind(resumed.session().into_uuid())
-    .bind(rust_decimal::Decimal::from(
+async fn resumed_goal_input(pool: &PgPool, resumed: &Goal) -> Result<UserContent, Box<dyn Error>> {
+    Ok(signalbox_persistence::test_support::goal_resumption_input(
+        pool,
+        resumed.session(),
         resumed
             .events()
             .last()
             .expect("resumed event exists")
-            .ordinal()
-            .get(),
-    ))
-    .fetch_one(pool)
+            .ordinal(),
+    )
     .await?)
 }
 
@@ -1211,9 +1203,15 @@ async fn automatic_resume_persists_strategy_guidance_for_a_chargeable_failure()
 
     assert_eq!(
         input,
-        "Continue pursuing the commissioned goal. The preceding turn failed to execute. Inspect the durable session state and choose a different safe approach before repeating the failed operation."
+        UserContent::try_text(String::from(
+            "Continue pursuing the commissioned goal. The preceding turn failed to execute. Inspect the durable session state and choose a different safe approach before repeating the failed operation."
+        )).expect("guidance fixture is valid user content")
     );
-    assert_ne!(input, blocked.current().statement().as_str());
+    assert_ne!(
+        input,
+        UserContent::try_text(blocked.current().statement().as_str().to_owned())
+            .expect("goal statement is valid user content")
+    );
     pool.close().await;
     Ok(())
 }
@@ -1258,7 +1256,11 @@ async fn automatic_resume_preserves_the_statement_for_an_exempt_provider_failure
     let resumed = resumed_goal(&pool, session).await?;
     let input = resumed_goal_input(&pool, &resumed).await?;
 
-    assert_eq!(input, blocked.current().statement().as_str());
+    assert_eq!(
+        input,
+        UserContent::try_text(blocked.current().statement().as_str().to_owned())
+            .expect("goal statement is valid user content")
+    );
     pool.close().await;
     Ok(())
 }

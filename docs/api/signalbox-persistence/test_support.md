@@ -53,3 +53,14 @@ pub async fn inject_deadline_diagnostic_failure(
     pool: &sqlx_postgres::PgPool,
 ) -> result::Result<(), error::Error>;
 ```
+
+## goal_resumption_input
+
+```rust
+#[cfg(feature = "test-support")]
+pub async fn goal_resumption_input(
+    pool: &sqlx_postgres::PgPool,
+    session: signalbox_domain::SessionId,
+    event: signalbox_domain::GoalEventOrdinal,
+) -> result::Result<signalbox_domain::UserContent, goal::GoalRepositoryError>;
+```
