@@ -48,14 +48,14 @@ immediate-successor attempt carrying the applied-interrupt proof, ends that
 attempt cancelled, appends the cancellation entry after the wait's latest
 frontier, and terminalizes the turn cancelled.
 
-Runner-loss recovery has two user commands, replace and abandon, whose request
-shapes and placement transitions are owned by
-[runner-protocol](../spec/runner-protocol.md). This subsystem owns their effect
-on the turn; [runner design](runner-protocol.md) owns the installation
-transaction. Replacement is never refused because a model call is in flight; it
-stays staged and resumable while daemon-locus requests execute on the current
-placement. [Tool loop](tool-loop.md) owns lost-placement resolution. After every
-request resolves, replacement takes over in the
+Active-turn replacement extends the user command whose request shape and
+placement transitions are owned by
+[runner-protocol](../spec/runner-protocol.md). This subsystem owns its effect on
+the turn; [runner design](runner-protocol.md) owns the installation transaction.
+Replacement is never refused because a model call is in flight; it stays staged
+and resumable while daemon-locus requests execute on the current placement.
+[Tool loop](tool-loop.md) owns lost-placement resolution. After every request
+resolves, replacement takes over in the
 [continuation transaction](../spec/tool-loop.md), after all tool results are
 appended and before the next call is prepared against the changed placement. The
 one exception is an offered runner attempt, either pure or idempotent or backed
@@ -87,9 +87,9 @@ completed, refused, failed, cancelled, or ended ambiguous leaves the turn in the
 state that outcome produced. A call that ends known-failed, refused, cancelled,
 or ambiguous reaches an observation boundary too, so staging never waits
 indefinitely. A queued turn remains queued and cannot activate while its
-placement is lost. Both commands are administrative recovery: they neither widen
-the interrupt delivery nor create a standalone cancellation path, and no case
-turns ambiguous effect evidence into known failure.
+placement is lost. Staged replacement is administrative recovery: it neither
+widens the interrupt delivery nor creates a standalone cancellation path, and no
+case turns ambiguous effect evidence into known failure.
 
 Recovery-only startup binds the runner socket in recovery-only mode after
 migrations, reconciles retained runner inventory, evidence, and nonterminal
