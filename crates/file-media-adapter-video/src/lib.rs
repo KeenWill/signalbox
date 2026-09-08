@@ -1993,9 +1993,7 @@ fn parse_ebml_scope(
             .checked_add(size_bytes)
             .ok_or(VideoIssue::Structure)?;
         let declared_payload_end = if unknown {
-            if id != EBML_SEGMENT
-                && !(id == EBML_CLUSTER && (scope == EbmlScope::Segment || id == EBML_VOID))
-            {
+            if id != EBML_SEGMENT && !(id == EBML_CLUSTER && scope == EbmlScope::Segment) {
                 return Err(VideoIssue::Malformed);
             }
             if id == EBML_CLUSTER {
