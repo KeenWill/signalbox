@@ -293,8 +293,12 @@ fn branch_create_rejects_a_start_reference_changed_before_publication() {
     pinned_objects
         .add_to(&object_database)
         .expect("captured objects install");
+    let repository = executor
+        .repository_authority
+        .open_repository_shell()
+        .expect("repository shell opens");
     repository
-        .set_odb(&object_database)
+        .set_odb(&object_database, &pinned_objects)
         .expect("captured objects bind");
 
     let failure = branch_create(
@@ -1017,7 +1021,10 @@ fn real_git_sha256_pack_index_matches_the_bounded_parser() {
     let parsed = parse_pack_index(&index, checksum, ObjectFormat::Sha256)
         .expect("real Git SHA-256 pack index parses");
 
-    assert_eq!(parsed, expected);
+    assert_eq!(
+        parsed.into_iter().map(|(oid, _)| oid).collect::<Vec<_>>(),
+        expected
+    );
 }
 
 #[test]
@@ -1324,7 +1331,10 @@ fn stage_rejects_when_a_captured_live_object_disappears_before_publication() {
 
     let failure = executor
         .stage_with_publish_hooks(
-            &repository,
+            &executor
+                .repository_authority
+                .open_repository_shell()
+                .expect("repository shell opens"),
             GitStageArguments {
                 paths: vec![TRACKED_PATH.to_owned()],
             },
@@ -1362,7 +1372,10 @@ fn stage_rejects_when_its_new_object_pack_disappears_before_publication() {
 
     let failure = executor
         .stage_with_publish_hooks(
-            &repository,
+            &executor
+                .repository_authority
+                .open_repository_shell()
+                .expect("repository shell opens"),
             GitStageArguments {
                 paths: vec![TRACKED_PATH.to_owned()],
             },

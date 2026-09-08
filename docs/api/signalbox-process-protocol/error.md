@@ -123,6 +123,9 @@ pub enum RejectionDetail {
     ToolRequestAlreadyResolved {
         tool_request_id: CanonicalUuid,
     },
+    ToolRequestAwaitingApprovalJudge {
+        tool_request_id: CanonicalUuid,
+    },
     ToolRequestNotEarliestUndecided {
         tool_request_id: CanonicalUuid,
         earliest_tool_request_id: CanonicalUuid,

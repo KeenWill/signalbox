@@ -106,6 +106,17 @@ impl DecideToolRequest {
         }
     }
 
+    /// Prepares a rejection while the delegated approval judge is outstanding.
+    pub const fn prepare_awaiting_approval_judge(self) -> PreparedDecideToolRequest {
+        let request = self.request;
+        PreparedDecideToolRequest {
+            command: self,
+            result: DecideToolRequestResult::Rejected(
+                DecideToolRequestRejectedResult::AwaitingApprovalJudge { request },
+            ),
+        }
+    }
+
     /// Prepares an authoritative proposal-order rejection.
     pub const fn prepare_not_earliest(self, earliest: ToolRequestId) -> PreparedDecideToolRequest {
         let request = self.request;
@@ -171,6 +182,11 @@ impl DecideToolRequestAppliedResult {
 /// Closed authoritative rejection vocabulary for tool decisions.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DecideToolRequestRejectedResult {
+    /// The delegated request has no terminal approval-judge evidence yet.
+    AwaitingApprovalJudge {
+        /// The request awaiting its judge.
+        request: ToolRequestId,
+    },
     /// No logical request had this identity.
     RequestNotFound {
         /// The absent request.

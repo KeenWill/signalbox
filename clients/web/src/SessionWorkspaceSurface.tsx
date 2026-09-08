@@ -505,6 +505,28 @@ export function SessionWorkspaceSurface({
               </div>
             </dl>
           </header>
+          {displayedSession.descriptor.repository_watch && (
+            <section className="session-provenance" aria-label="Repository watch origin">
+              Repository watch · {displayedSession.descriptor.repository_watch.repository}
+              {displayedSession.descriptor.repository_watch.pull_request !== null &&
+                ` #${displayedSession.descriptor.repository_watch.pull_request}`}
+              {' · Rule '}
+              {displayedSession.descriptor.repository_watch.rule_id}
+              {' v'}
+              {displayedSession.descriptor.repository_watch.rule_revision}
+              {' · '}
+              {displayedSession.descriptor.repository_watch.event_kind.replaceAll('_', ' ')}
+              <details>
+                <summary>Dispatch provenance</summary>
+                <p>
+                  Dispatch {displayedSession.descriptor.repository_watch.dispatch_id}
+                  {' · Action '}
+                  {displayedSession.descriptor.repository_watch.action_ordinal}
+                </p>
+                <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
+              </details>
+            </section>
+          )}
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
             <button
               type="button"

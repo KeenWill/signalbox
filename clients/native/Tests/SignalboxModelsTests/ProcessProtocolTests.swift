@@ -3851,7 +3851,7 @@ extension ProcessProtocolTests {
     let state = try SignalboxJSONCoding.decoder().decode(
       SignalboxTranscriptTurnState.self,
       from: poolExhaustionStateJSON(
-        members: #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#
+        members: #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":"0"}}]"#
       )
     )
     guard case .failedCredentialPoolExhausted(let evidence) = state else {
@@ -3859,16 +3859,16 @@ extension ProcessProtocolTests {
     }
     XCTAssertEqual(evidence.policyMembers, ["only"])
     XCTAssertEqual(evidence.members.count, 1)
-    XCTAssertEqual(evidence.members[0].exclusion, .profileQuarantine(recordGeneration: nil))
+    XCTAssertEqual(evidence.members[0].exclusion, .profileQuarantine(recordGeneration: SignalboxCanonicalUInt64(rawValue: 0)))
     XCTAssertNil(evidence.members[0].resetAtUnixMS)
   }
 
   func testPoolExhaustionDecodesResetPresenceForEachExclusion() throws {
     // Arbitrary reset timestamp: only its presence is under test.
     let cases: [(String, Int64?)] = [
-      (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#, nil),
+      (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":"0"}}]"#, nil),
       (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"membership_exclusion","record_generation":"4"}}]"#, nil),
-      (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"session_displacement","record_generation":null}}]"#, nil),
+      (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"session_displacement","record_generation":"0"}}]"#, nil),
       (#"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"chain_exclusion","predecessor_model_call_id":"55555555-5555-4555-8555-555555555555"}}]"#, nil),
       (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"transient_exclusion","observation_model_call_id":"66666666-6666-4666-8666-666666666666"}}]"#, 1_000),
       (#"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}}]"#, 1_000),
@@ -3890,13 +3890,13 @@ extension ProcessProtocolTests {
   func testPoolExhaustionInvalidEvidenceProducesADiagnostic() throws {
     for members in [
       #"[]"#,
-      #"[{"profile":"foreign","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#,
+      #"[{"profile":"foreign","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":"0"}}]"#,
       #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine"}}]"#,
-      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":"0"}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#,
       #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"unknown"}}]"#,
-      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"profile_quarantine","record_generation":null}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"profile_quarantine","record_generation":"0"}}]"#,
       #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"membership_exclusion","record_generation":"4"}}]"#,
-      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"session_displacement","record_generation":null}}]"#,
+      #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"session_displacement","record_generation":"0"}}]"#,
       #"[{"profile":"only","reset_at_unix_ms":1000,"exclusion":{"kind":"chain_exclusion","predecessor_model_call_id":"55555555-5555-4555-8555-555555555555"}}]"#,
       #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"transient_exclusion","observation_model_call_id":"66666666-6666-4666-8666-666666666666"}}]"#,
       #"[{"profile":"only","reset_at_unix_ms":null,"exclusion":{"kind":"headroom_reserve","observed_headroom_percent":10,"reserve_percent":10}}]"#,

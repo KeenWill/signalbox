@@ -146,5 +146,5 @@ fn revision_diff_rejects_an_oversized_root_tree_before_parsing() {
         }))
         .expect_err("oversized root tree rejects before parsing");
 
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Operation);
 }

@@ -157,7 +157,7 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
             .add_to(&object_database)
             .map_err(|_| GitPushFailure::Repository)?;
         repository
-            .set_odb(&object_database)
+            .set_odb(&object_database, &pinned_objects)
             .map_err(|_| GitPushFailure::Repository)?;
 
         let reference = format!("refs/heads/{}", arguments.branch);

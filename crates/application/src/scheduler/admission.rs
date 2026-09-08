@@ -28,24 +28,27 @@ pub(super) enum Change {
 /// Cancellation that returns control to the pass must be handled inside `io`;
 /// dropping this future is allowed only when terminating the entire pass.
 pub async fn with_released_scheduler_admission<F: Future>(io: F) -> F::Output {
-    let sender = CURRENT
-        .try_with(|slot| slot.borrow_mut().take())
-        .ok()
-        .flatten();
-    let Some(sender) = sender else {
-        return io.await;
-    };
-    let task = tokio::task::id();
-    if sender.send(Change::Release(task)).is_err() {
-        return pending().await;
-    }
-    let output = io.await;
-    let (ready, admitted) = oneshot::channel();
-    if sender.send(Change::Resume(task, ready)).is_err() || admitted.await.is_err() {
-        return pending().await;
-    }
-    CURRENT.with(|slot| *slot.borrow_mut() = Some(sender));
-    output
+    crate::scheduler_slot::with_scheduler_slot_released(async {
+        let sender = CURRENT
+            .try_with(|slot| slot.borrow_mut().take())
+            .ok()
+            .flatten();
+        let Some(sender) = sender else {
+            return io.await;
+        };
+        let task = tokio::task::id();
+        if sender.send(Change::Release(task)).is_err() {
+            return pending().await;
+        }
+        let output = io.await;
+        let (ready, admitted) = oneshot::channel();
+        if sender.send(Change::Resume(task, ready)).is_err() || admitted.await.is_err() {
+            return pending().await;
+        }
+        CURRENT.with(|slot| *slot.borrow_mut() = Some(sender));
+        output
+    })
+    .await
 }
 
 pub(super) async fn scope<F: Future>(
@@ -67,7 +70,10 @@ impl Admission {
     }
 
     pub(super) fn occupied(&self, tasks: &HashMap<Id, InFlightPass>) -> usize {
-        tasks.len() - self.released.len()
+        tasks
+            .iter()
+            .filter(|(task, pass)| pass.slot.is_occupied() && !self.is_released(**task))
+            .count()
     }
 
     pub(super) fn apply(

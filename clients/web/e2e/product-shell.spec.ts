@@ -133,6 +133,7 @@ const useDeterministicSession = async (
     return route.fulfill({
       json: {
         session_id: requestedSessionId,
+        repository_watch: null,
         sizes: {
           item_count: sessionWorkspaceFixture.itemCount,
           projected_text_bytes: '0',
@@ -1196,9 +1197,7 @@ test('shares expired Imports admission failure with the shell retry state', asyn
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.clock.fastForward(30_001)
-  await page
-    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
-    .fill('expired-admission')
+  await page.getByRole('textbox', { name: 'Source session' }).fill('expired-admission')
   await expect(page.getByText('Contract rejected')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry connection' })).toBeVisible()
   await useDeterministicBootstrap(page)
@@ -1285,10 +1284,8 @@ test('serves exact source-session searches through the deterministic adapter', a
 
   const rows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
   await expect(rows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
-  await page
-    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
-    .fill('source-session-0')
-  await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
+  await page.getByRole('textbox', { name: 'Source session' }).fill('source-session-0')
+  await page.getByRole('checkbox', { name: 'Filter by source' }).check()
 
   await expect(rows).toHaveAttribute('data-total-loaded', '1')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -1458,7 +1455,7 @@ test('locks product navigation while an ambiguous continuation command is retain
     .getByRole('textbox', { name: 'Initial model selection UUID' })
     .fill('00000000-0000-7000-8000-000000000777')
   await page.getByRole('button', { name: 'Resume' }).click()
-  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
 
   const settingsLink = page.getByRole('link', { name: /Settings/ })
   await expect(settingsLink).toHaveAttribute('aria-disabled', 'true')
@@ -1467,7 +1464,7 @@ test('locks product navigation while an ambiguous continuation command is retain
   await page.keyboard.press('g')
   await page.keyboard.press(',')
   await expect(page).toHaveURL(/\/imports$/)
-  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
   const expectedResourceError =
     'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
   expect(problems.pageErrors).toEqual([])
@@ -1497,25 +1494,25 @@ test('retains exact retry after a lost acknowledgement and corrupt continuation 
     .getByRole('textbox', { name: 'Initial model selection UUID' })
     .fill('00000000-0000-7000-8000-000000000777')
   await page.getByRole('button', { name: 'Resume' }).click()
-  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  await expect(page.getByRole('alert')).toContainText('Outcome unknown.')
   const corruptReceipt = page.waitForResponse((response) => response.status() === 500)
-  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
   await corruptReceipt
-  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
-  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('alert')).toContainText('Outcome unknown.')
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: /Settings/ })).toHaveAttribute(
     'aria-disabled',
     'true',
   )
   await page.getByRole('link', { name: /Settings/ }).click({ force: true })
   await expect(page).toHaveURL(/\/imports$/)
-  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
   await expect(page.getByText('Session created:', { exact: false })).toBeVisible()
   expect(requests).toHaveLength(3)
   expect(requests[1]).toBe(requests[0])
   expect(requests[2]).toBe(requests[0])
   await expect(page.getByRole('alert')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Retry exact command' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
 })
 
@@ -1760,15 +1757,15 @@ test('starts the settled exact import filter without the previous page cursor', 
   await page.clock.install()
   await page.clock.pauseAt(new Date(Date.now() + 1_000))
   const input = page.getByRole('textbox', {
-    name: 'Filter imports by exact source session evidence',
+    name: 'Source session',
   })
   await input.fill('source-session-0')
   await page.clock.runFor(200)
-  await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
+  await page.getByRole('checkbox', { name: 'Filter by source' }).check()
   await expect.poll(() => requests.at(-1)?.source).toBe('source-session-0')
-  await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Next', exact: true })).toBeEnabled()
   await input.fill('source-session-1')
-  await page.getByRole('button', { name: 'Next page', exact: true }).click()
+  await page.getByRole('button', { name: 'Next', exact: true }).click()
   await expect
     .poll(() =>
       requests.some((request) => request.source === 'source-session-0' && request.after !== null),
@@ -1794,3 +1791,112 @@ test('keeps connection recovery controls inside a phone viewport', async ({ page
   expect(await page.locator('.product-shell').evaluate((element) => element.scrollWidth)).toBe(390)
   await page.screenshot({ path: testInfo.outputPath('phone-connection-error.png') })
 })
+
+for (const entry of ['button', 'palette'] as const) {
+  test(`hides empty import controls and retries failed discovery from the ${entry}`, async ({
+    page,
+  }) => {
+    await useDeterministicBootstrap(page)
+    await useDeterministicImportApi(page)
+    let mode: 'empty' | 'failed' | 'ready' = 'empty'
+    await page.route('**/api/imports/**', async (route) => {
+      if (
+        new URL(route.request().url()).pathname.replace(/\/$/, '') !== '/api/imports' ||
+        mode === 'ready'
+      )
+        return route.fallback()
+      return mode === 'empty'
+        ? route.fulfill({ json: { items: [] } })
+        : route.fulfill({ status: 503, body: 'unavailable' })
+    })
+    await page.goto('/imports')
+    await expect(page.getByRole('table', { name: 'Imported conversations' })).toBeVisible()
+    await expect(page.locator('.import-inspector')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0)
+    mode = 'failed'
+    await page.reload()
+    await expect(page.getByRole('alert')).toContainText('Imports unavailable')
+    await expect(page.locator('.import-inspector')).toHaveCount(0)
+    mode = 'ready'
+    const opener = page.getByRole('button', { name: 'Open command palette', exact: true })
+    if (entry === 'palette') await opener.click()
+    const retry =
+      entry === 'button'
+        ? page.getByRole('button', { name: 'Retry imports', exact: true })
+        : page
+            .getByRole('dialog', { name: 'Command palette' })
+            .getByRole('button', { name: /Retry imports/ })
+    await retry.focus()
+    await retry.press('Enter')
+    await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+    await expect(page.locator('.import-inspector')).toBeVisible()
+    await expect(
+      entry === 'button' ? page.getByRole('region', { name: 'Imports', exact: true }) : opener,
+    ).toBeFocused()
+    await opener.click()
+    await expect(
+      page
+        .getByRole('dialog', { name: 'Command palette' })
+        .getByRole('button', { name: /Retry imports/ }),
+    ).toHaveCount(0)
+  })
+}
+
+for (const outcome of ['success', 'rejection'] as const) {
+  test(`keeps a restored import continuation ${outcome} visible while discovery fails`, async ({
+    page,
+  }) => {
+    const problems = watchBrowser(page)
+    await useDeterministicBootstrap(page)
+    await useDeterministicImportApi(page)
+    const requests: string[] = []
+    await page.route('**/api/imports/*/continuations', (route) => {
+      requests.push(route.request().postData() ?? '')
+      if (requests.length === 1) return route.abort('failed')
+      return outcome === 'success'
+        ? route.fallback()
+        : route.fulfill({
+            status: 400,
+            json: {
+              error: {
+                kind: 'application',
+                code: 'invalid_import_request',
+                message: 'Request rejected.',
+              },
+            },
+          })
+    })
+    await page.goto(importsProductFixture.path)
+    await page
+      .getByRole('textbox', { name: 'Initial model selection UUID' })
+      .fill('00000000-0000-7000-8000-000000000777')
+    await page.getByRole('button', { name: 'Resume', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
+    await page.route('**/api/imports/**', (route) =>
+      new URL(route.request().url()).pathname.replace(/\/$/, '') === '/api/imports'
+        ? route.fulfill({ status: 503, body: 'unavailable' })
+        : route.fallback(),
+    )
+    await page.reload()
+    await expect(page.getByText('Imports unavailable', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(
+      page.getByText(outcome === 'success' ? 'Session created:' : 'Request rejected.', {
+        exact: false,
+      }),
+    ).toBeVisible()
+    await expect(page.getByText('Imports unavailable', { exact: true })).toBeVisible()
+    await expect(page.locator('.import-inspector')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: /Settings/ })).not.toHaveAttribute(
+      'aria-disabled',
+      'true',
+    )
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toBe(requests[0])
+    expect(
+      await page.evaluate(() => sessionStorage.getItem('signalbox.import-continuation.production')),
+    ).toBeNull()
+    expect(problems.pageErrors).toEqual([])
+  })
+}

@@ -1,5 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
-import { useState } from 'react'
+import { ArrowUp } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { invokeCommand } from './commands'
 import type { WebSubmitInputRequest } from './generated/web-contract.mjs'
 import {
@@ -34,11 +35,13 @@ export function SessionComposer({
   const pending = useAppSelector((state) => selectPendingSessionInput(state, sessionId))
   const retained = pending?.input ?? null
   const capacityReached = useAppSelector(selectSessionInputCapacityReached)
-  const capacityNotice =
-    'Pending-message limit reached. Retry a retained message before sending to another session.'
+  const capacityNotice = 'Pending-message limit reached'
   const newInputBlocked = retained === null && capacityReached
   const [text, setText] = useState('')
   const [notice, setNotice] = useState('')
+  useEffect(() => {
+    if (notice === 'Message sent' && activeState != null) setNotice('')
+  }, [activeState, notice])
   const mutation = useMutation({
     mutationFn: (input: WebSubmitInputRequest) => submitSessionInput(sessionId, input),
     onSuccess: (_, input) => {
@@ -46,7 +49,7 @@ export function SessionComposer({
         actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: true }),
       )
       setText('')
-      setNotice('Message accepted by the daemon.')
+      setNotice('Message sent')
       void onAccepted()
     },
     onError: (error, input) => {
@@ -81,7 +84,7 @@ export function SessionComposer({
     ) {
       return
     }
-    setNotice('Sending message…')
+    setNotice('Sending…')
     mutation.mutate(input)
   }
   const invokeSend = () =>
@@ -103,22 +106,11 @@ export function SessionComposer({
         invokeSend()
       }}
     >
-      <header>
-        <h3>Message</h3>
-        <span>
-          {stateUnavailable
-            ? 'Input state unavailable'
-            : activeState === undefined
-              ? 'Checking input state…'
-              : activeState === null
-                ? 'Starts a turn when idle'
-                : `Input unavailable: ${activeState.replaceAll('_', ' ')}`}
-        </span>
-      </header>
-      <label htmlFor="session-message">Message to session</label>
+      <label htmlFor="session-message">Message</label>
       <textarea
         id="session-message"
         rows={3}
+        placeholder="Write a message…"
         maxLength={MAX_SESSION_MESSAGE_LENGTH}
         value={retained?.message ?? text}
         readOnly={retained !== null}
@@ -134,6 +126,7 @@ export function SessionComposer({
       />
       <div className="session-composer-actions">
         <button type="submit" disabled={!canSend}>
+          <ArrowUp aria-hidden="true" />
           {retained === null
             ? 'Send message'
             : pending?.phase === 'sending'
@@ -144,10 +137,17 @@ export function SessionComposer({
           {newInputBlocked
             ? capacityNotice
             : pending?.phase === 'unconfirmed'
-              ? 'Acceptance is unconfirmed. Retry sends the same command and message.'
+              ? 'Delivery unconfirmed'
               : pending?.phase === 'sending'
-                ? 'Sending message…'
-                : notice}
+                ? 'Sending…'
+                : notice ||
+                  (stateUnavailable
+                    ? 'Session unavailable'
+                    : activeState === undefined
+                      ? 'Connecting…'
+                      : activeState === null
+                        ? ''
+                        : `Session ${activeState.replaceAll('_', ' ')}`)}
         </span>
       </div>
     </form>

@@ -1633,9 +1633,29 @@ async fn a_park_closure_settles_its_turn_and_preserves_failure_evidence()
         ))
     ));
     // A retained program run is provenance, not permission to settle this handoff.
-    let program_run = signalbox_domain::ProgramRunId::from_uuid(Uuid::from_u128(0x11fe_c230));
-    signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone())
-        .create_stream(program_run)
+    let registrations =
+        signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
+            pool.clone(),
+        );
+    let registration = registrations
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            signalbox_domain::program_registration::ProgramRegistrationRequest {
+                name: "program-lifecycle-fixture".into(),
+                revision: "fixture-revision".into(),
+                source: Vec::new(),
+                artifact: String::new(),
+                grants: signalbox_domain::program_registration::ProgramGrants::new([
+                    signalbox_domain::ProgramCapability::Session,
+                ]),
+            },
+        )
+        .await?;
+    let program_run = registrations
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            registration.id,
+        )
         .await?;
     let program_interrupt = SubmitInput::new_program(
         interrupt.command_id(),
@@ -1647,7 +1667,7 @@ async fn a_park_closure_settles_its_turn_and_preserves_failure_evidence()
         )
         .session_capability(program_run)
         .await?
-        .expect("run is retained")
+        .expect("registered run has the session grant")
         .reference(),
     );
     let program_error = SubmitInputRepository::new(pool.clone())

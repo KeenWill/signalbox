@@ -262,7 +262,8 @@ public actor SignalboxSessionSynchronizationDriver: SignalboxSessionSynchronizin
               }
               await exchange.close()
               return actual
-            case .failed(let terminalFrontierID, _, _):
+            case .failed(let terminalFrontierID, _, _),
+              .failedAfterCredentialWait(let terminalFrontierID, _, _):
               guard evidence == nil,
                 case .turnFailed(_, _, let eventFrontierID) = event.event,
                 terminalFrontierID == eventFrontierID
