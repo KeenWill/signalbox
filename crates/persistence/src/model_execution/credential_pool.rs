@@ -313,8 +313,6 @@ pub(super) async fn load_durable_pool_exclusions(
     let members = credential_pool_member_references(policy);
     lock_credential_pool_action_heads(connection, policy).await?;
     let policy_id = credential_pool_records::retain_policy(connection, policy).await?;
-    let now = std::time::SystemTime::now();
-    let observed_at = sqlx::types::time::OffsetDateTime::from(now);
     let mut excluded = sqlx::query_scalar::<_, String>(
         "SELECT credential_reference
            FROM credential_pool_chain_exclusion
@@ -332,18 +330,21 @@ pub(super) async fn load_durable_pool_exclusions(
         .iter()
         .map(|member| member.credential_reference().to_owned())
         .collect::<Vec<_>>();
-    excluded.extend(
-        sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT credential_reference
-              FROM credential_pool_transient_exclusion
-              WHERE credential_reference = ANY($1)
-                AND reset_at > $2",
+    let (observed_at, transient_exclusions): (sqlx::types::time::OffsetDateTime, Vec<String>) =
+        sqlx::query_as(
+            "WITH observation AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
+             SELECT observation.observed_at,
+                    ARRAY(SELECT DISTINCT credential_reference
+                          FROM credential_pool_transient_exclusion
+                          WHERE credential_reference = ANY($1)
+                            AND reset_at > observation.observed_at)
+               FROM observation",
         )
         .bind(&member_references)
-        .bind(observed_at)
-        .fetch_all(&mut *connection)
-        .await?,
-    );
+        .fetch_one(&mut *connection)
+        .await?;
+    let now = std::time::SystemTime::from(observed_at);
+    excluded.extend(transient_exclusions);
     let completed_references = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT call.credential_reference
            FROM model_call AS call
