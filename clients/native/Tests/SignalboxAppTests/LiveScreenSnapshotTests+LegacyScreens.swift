@@ -208,7 +208,8 @@ extension LiveScreenSnapshotTests {
     /// are empty until it answers, and an unrefreshed model would record a
     /// form with two empty menus.
     func testLegacySessionCreationSheetContent() async {
-        await assertLegacySnapshot(of: await legacyCreationSheet(), canvas: .sheet)
+        let sheet = await legacyCreationSheet()
+        await assertLegacySnapshot(of: sheet, canvas: .sheet)
     }
 
     // MARK: - Construction
