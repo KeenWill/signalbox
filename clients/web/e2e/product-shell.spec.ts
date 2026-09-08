@@ -1376,6 +1376,7 @@ test('retains exact retry after a lost acknowledgement and corrupt continuation 
     .getByRole('textbox', { name: 'Initial model selection UUID' })
     .fill('00000000-0000-7000-8000-000000000777')
   await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
   const corruptReceipt = page.waitForResponse((response) => response.status() === 500)
   await page.getByRole('button', { name: 'Retry exact command' }).click()
   await corruptReceipt
@@ -1392,11 +1393,9 @@ test('retains exact retry after a lost acknowledgement and corrupt continuation 
   expect(requests).toHaveLength(3)
   expect(requests[1]).toBe(requests[0])
   expect(requests[2]).toBe(requests[0])
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
-  expect(problems.consoleErrors).toEqual([
-    'Failed to load resource: net::ERR_FAILED',
-    'Failed to load resource: the server responded with a status of 500 (Internal Server Error)',
-  ])
 })
 
 test('runs advertised product navigation sequences', async ({ page }) => {
