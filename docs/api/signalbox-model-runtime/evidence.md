@@ -283,12 +283,47 @@ pub enum LossCause {
     TimedOut(TransportFacts),
     TransportFailed(TransportFacts),
     ResponseBodyLost(TransportFacts),
-    ResponseUnintelligible { detail: string::String },
+    ResponseUnintelligible {
+        detail: string::String,
+    },
+    ResponseEnvelopeRejected {
+        stage: ResponseEnvelopeRejectionStage,
+        detail: string::String,
+    },
     UnexpectedHttpStatus,
-    StreamEndedWithoutTerminalMarker { interruption: StreamInterruption },
-    StreamProtocolViolation { detail: string::String },
+    StreamEndedWithoutTerminalMarker {
+        interruption: StreamInterruption,
+    },
+    StreamProtocolViolation {
+        detail: string::String,
+    },
 }
 // derives: fmt::Debug, clone::Clone, cmp::PartialEq, cmp::Eq
+```
+
+## ResponseEnvelopeRejectionStage
+
+```rust
+pub enum ResponseEnvelopeRejectionStage {
+    Missing,
+    NestingBound,
+    DuplicateMembers,
+    Shape,
+    RefusalWithTools,
+    ToolCallId,
+    UndeclaredTool,
+    ToolArgumentsNesting,
+    StructuredOutputTool,
+    RequiredToolMissing,
+    NamedToolMismatch,
+    CompletionEmpty,
+    ObservationProjection,
+    StreamedCompletionEmpty,
+}
+// derives: fmt::Debug, clone::Clone, marker::Copy, cmp::PartialEq, cmp::Eq
+impl ResponseEnvelopeRejectionStage {
+    pub const fn as_str(self) -> &'static str;
+}
 ```
 
 ## StreamInterruption

@@ -170,7 +170,7 @@ private struct SessionRowView: View {
                 .foregroundStyle(.secondary)
 
                 if !session.tags.isEmpty {
-                    Text(session.tags.prefix(4).joined(separator: "  "))
+                    Text(session.tags.prefix(4).joined(separator: ", "))
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

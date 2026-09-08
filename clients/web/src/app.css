@@ -2980,20 +2980,6 @@ kbd {
   padding: 2px 34px 10px calc(10px + 16px + 8px + 20ch + 8px);
 }
 
-.session-item-expanded {
-  display: grid;
-  gap: 8px;
-  padding-bottom: 10px;
-}
-
-.session-item-expanded .session-item-detail {
-  padding-bottom: 2px;
-}
-
-.session-item-expanded .attachment-missing {
-  margin: 0 10px 0 98px;
-}
-
 .session-composer {
   display: grid;
   gap: 8px;
@@ -3039,9 +3025,6 @@ kbd {
   .session-item-detail {
     grid-template-columns: 1fr;
     padding-left: calc(10px + 16px + 8px + 20ch + 8px);
-  }
-  .session-item-expanded .attachment-missing {
-    margin-left: 84px;
   }
   .session-composer > header {
     align-items: flex-start;
