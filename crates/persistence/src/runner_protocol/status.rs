@@ -149,12 +149,17 @@ pub async fn read_runner_status(
             Some(RunnerStatusAfter::OperationFailure(id)) => Some(id),
             _ => None,
         };
-        let rows = sqlx::query("SELECT operation.*, failure.failure_kind, failure.detail
+        let rows = sqlx::query(
+            "SELECT operation.*, failure.failure_kind, failure.detail
             FROM runner_replacement_provisioning_failure AS failure
             JOIN runner_replacement_provisioning_authorization AS operation USING (authorization_id)
             WHERE ($1::uuid IS NULL OR failure.authorization_id > $1)
-            ORDER BY failure.authorization_id LIMIT $2")
-            .bind(last).bind(i64::from(page_size) + 1).fetch_all(&mut *transaction).await?;
+            ORDER BY failure.authorization_id LIMIT $2",
+        )
+        .bind(last)
+        .bind(i64::from(page_size) + 1)
+        .fetch_all(&mut *transaction)
+        .await?;
         for row in rows {
             use signalbox_domain::RunnerProvisioningFailureKind as Kind;
             let category = match row.try_get::<String, _>("failure_kind")?.as_str() {
