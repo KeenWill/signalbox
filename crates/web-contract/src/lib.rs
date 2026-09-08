@@ -3816,13 +3816,15 @@ function assertTimelineDetailPage(value) {{
         }}
         if (
           item.body.working_directory !== undefined &&
-          item.body.working_directory !== null &&
-          new TextEncoder().encode(item.body.working_directory).byteLength > 4096
+          item.body.working_directory !== null
         ) {{
-          fail(
-            `${{path}}.body.working_directory`,
-            "at most 4096 UTF-8 bytes",
-          );
+          textBytes = new TextEncoder().encode(item.body.working_directory).byteLength;
+          if (textBytes > 4096) {{
+            fail(
+              `${{path}}.body.working_directory`,
+              "at most 4096 UTF-8 bytes",
+            );
+          }}
         }}
         break;
       case "delegation": {{

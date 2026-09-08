@@ -1190,6 +1190,13 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                     state,
                 } => {
                     require_no_body_cursor(cursor)?;
+                    if let Some(directory) = working_directory {
+                        let directory_bytes = u32::try_from(directory.as_str().len())
+                            .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
+                        remaining = remaining
+                            .checked_sub(directory_bytes)
+                            .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
+                    }
                     (
                         SessionTimelineDetailBody::Runner {
                             runner_id: *runner,
