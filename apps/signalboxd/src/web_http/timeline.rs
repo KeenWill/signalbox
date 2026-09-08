@@ -118,22 +118,24 @@ pub(super) async fn session_descriptor(
         Ok(session) => session,
         Err(error) => return error.into_response(),
     };
-    let origin = match reload {
-        Some(axum::Extension(reload)) => match reload.repository_watch_origin(session).await {
-            Ok(origin) => origin,
-            Err(_) => {
-                return application_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "session_projection_unavailable",
-                    "repository-watch origin could not be read",
-                );
-            }
-        },
-        None => None,
-    };
     match repository.read_descriptor(session).await {
         Ok(Some(descriptor)) => match descriptor_dto(descriptor) {
             Ok(mut descriptor) => {
+                let origin = match reload {
+                    Some(axum::Extension(reload)) => {
+                        match reload.repository_watch_origin(session).await {
+                            Ok(origin) => origin,
+                            Err(_) => {
+                                return application_error(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "session_projection_unavailable",
+                                    "repository-watch origin could not be read",
+                                );
+                            }
+                        }
+                    }
+                    None => None,
+                };
                 descriptor.repository_watch = origin.map(repository_watch_origin_dto);
                 Json(descriptor).into_response()
             }

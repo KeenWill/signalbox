@@ -335,6 +335,11 @@ system_prompt = "Inspect repository activity."
     }
 
     async fn dispatch(&mut self) {
+        self.submit().await;
+        self.settle().await;
+    }
+
+    async fn submit(&mut self) {
         let configuration = self
             .sink
             .models
@@ -349,6 +354,9 @@ system_prompt = "Inspect repository activity."
         )
         .await
         .expect("dispatch with checkout");
+    }
+
+    async fn settle(&self) {
         let lifecycle = signalbox_ownership_seam::LifecycleEventSource::new(self.core.clone());
         while let Some(event) = lifecycle.next().await.expect("next lifecycle event") {
             self.store
@@ -774,18 +782,6 @@ async fn assert_git_status(
 #[ignore = "requires disposable PostgreSQL"]
 async fn dispatched_session_projects_retained_origin_after_rule_removal()
 -> Result<(), Box<dyn Error>> {
-    use signalbox_process_protocol::{
-        CanonicalUuid, ClientFrame, ClientRequest, ProtocolVersion, RequestId, ServerMessage,
-        decode_server_line, encode_client_line,
-    };
-    use signalbox_web_contract::WebSessionTimelineDescriptor;
-    use signalboxd::{
-        LocalProcessListener, ProcessRuntime,
-        repo_watch_runtime::{RepositoryWatchRuntime, RepositoryWatchServices},
-    };
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tower::ServiceExt;
-
     let mut fixture = CheckoutFixture::new().await?;
     let planned = fixture
         .store
@@ -837,6 +833,58 @@ async fn dispatched_session_projects_retained_origin_after_rule_removal()
         origin.event_kind(),
         RepoWatchEventKindNameV1::PullRequestOpened
     );
+
+    assert_projected_origin(&fixture, &planned, session).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn dispatched_session_projects_origin_before_ledger_settlement() -> Result<(), Box<dyn Error>>
+{
+    let mut fixture = CheckoutFixture::new().await?;
+    let planned = fixture
+        .store
+        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
+        .await?[0]
+        .clone();
+    fixture.submit().await;
+    let session = SessionId::from_uuid(
+        sqlx::query_scalar(
+            "SELECT created_session_id FROM create_session_command WHERE command_id = $1",
+        )
+        .bind(fixture.command.into_uuid())
+        .fetch_one(&fixture.core)
+        .await?,
+    );
+    let ledger: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, created_session_id FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert_eq!(ledger, (String::from("pending"), None));
+    assert_projected_origin(&fixture, &planned, session).await?;
+    fixture.settle().await;
+    assert_eq!(fixture.session().await, session);
+    assert_projected_origin(&fixture, &planned, session).await
+}
+
+async fn assert_projected_origin(
+    fixture: &CheckoutFixture,
+    planned: &signalbox_module_repo_watch_v2::PlannedCommand,
+    session: SessionId,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{
+        CanonicalUuid, ClientFrame, ClientRequest, ProtocolVersion, RequestId, ServerMessage,
+        decode_server_line, encode_client_line,
+    };
+    use signalbox_web_contract::WebSessionTimelineDescriptor;
+    use signalboxd::{
+        LocalProcessListener, ProcessRuntime,
+        repo_watch_runtime::{RepositoryWatchRuntime, RepositoryWatchServices},
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tower::ServiceExt;
 
     let models = (*fixture.sink.models).clone();
     let templates = signalboxd::SessionTemplateConfiguration::default();
@@ -890,6 +938,10 @@ async fn dispatched_session_projects_retained_origin_after_rule_removal()
         serde_json::to_value(&web.event_id)?,
         planned.event_id().into_uuid().to_string()
     );
+    assert_eq!(
+        web.action_ordinal.as_str(),
+        planned.action_ordinal().to_string()
+    );
     assert_eq!(web.rule_id, planned.rule_id().as_str());
     assert_eq!(web.repository, planned.repository().as_str());
     assert_eq!(
@@ -937,6 +989,7 @@ async fn dispatched_session_projects_retained_origin_after_rule_removal()
     };
     assert_eq!(wire.dispatch_id.into_uuid(), planned.dispatch().into_uuid());
     assert_eq!(wire.event_id.into_uuid(), planned.event_id().into_uuid());
+    assert_eq!(wire.action_ordinal.value(), planned.action_ordinal());
     assert_eq!(wire.rule_id, planned.rule_id().as_str());
     assert_eq!(wire.repository, planned.repository().as_str());
     assert_eq!(wire.pull_request.map(|number| number.value()), Some(1));

@@ -286,5 +286,6 @@ and dispatch reference. Their provenance resolves the existing dispatch ledger
 row and its created session, rule revision, event, action ordinal, repository,
 and optional pull request, without a second stored copy of the dispatch or
 session identity. Transcript snapshots and browser session descriptors project
-that retained origin; the browser workspace displays it. Held creation submits
-no initial input and creates no turn.
+that retained origin as soon as creation commits, before ledger settlement; the
+browser workspace displays it. Held creation submits no initial input and
+creates no turn.
