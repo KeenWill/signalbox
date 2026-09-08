@@ -4,6 +4,7 @@
 //! Host-side executors answer granted effects; replay uses the checked journal.
 
 pub mod effects;
+pub mod session_effects;
 
 use std::{
     cell::{Cell, RefCell},

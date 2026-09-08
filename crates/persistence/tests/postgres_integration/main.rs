@@ -42,6 +42,7 @@ mod model_credentials_and_tool_batches;
 mod oauth_credential;
 mod outbox_dispatch_and_process_read;
 mod ownership_seam_grants;
+mod program_sessions;
 mod reload_configuration;
 mod restart_recovery_and_submit;
 mod search;

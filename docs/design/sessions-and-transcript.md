@@ -37,12 +37,10 @@ after an alias retarget or a daemon restart. The rows that serialization takes,
 and their order, belong to the lock protocol in
 [persistence-protocol](../spec/persistence-protocol.md).
 
-Program creation causes. The creation-cause vocabulary gains workflow and eval
-variants for sessions created by registered programs. Each names the creating
-program run, and the eval variant also names the trial identity the
-[evaluation system](../spec/eval-system.md) defines. Both are constructible only
-by the program substrate's host-side session capability and join the stored
-closed-discriminator convention beside the three present spellings.
+Program creation causes. The creation-cause vocabulary gains an eval variant
+naming the creating program run and the trial identity the
+[evaluation system](../spec/eval-system.md) defines. It is constructible only by
+the program substrate's host-side session capability.
 
 Follow route. Only the open workspace subscribes to a session's follow stream;
 no other browser surface holds a follow subscription for the selected workspace.
@@ -119,14 +117,13 @@ A replacement against a session with a nonempty admitted set and a selection
 lacking transport or capacity is rejected with a typed rejection that leaves
 defaults and admitted set unchanged, a compatible selection succeeds, and a
 concurrent admission is ordered wholly before or after the replacement. A
-program-created session stores a workflow or eval cause naming its program run
-and, for eval, its trial; the three present spellings decode unchanged, and no
-surface outside the host-side capability can construct the new causes. A browser
-with no open workspace holds no follow subscription, and exactly one while a
-workspace is open. The session summary read reports referenced blob count and
-byte length equal to the relation's totals, nonzero for a session whose timeline
-references blobs, and no detail read fetches blob bytes. Attachment filename,
-media metadata, and derived-text classes appear in search results with reveal
+program-created eval session stores its program run and trial; no surface
+outside the host-side capability can construct that cause. A browser with no
+open workspace holds no follow subscription, and exactly one while a workspace
+is open. The session summary read reports referenced blob count and byte length
+equal to the relation's totals, nonzero for a session whose timeline references
+blobs, and no detail read fetches blob bytes. Attachment filename, media
+metadata, and derived-text classes appear in search results with reveal
 addresses only after their source committed. Every pinned replacement and every
 user-directed move appends exactly one relocation entry, the next model call
 reads a frontier containing it, each fail-closed case is rejected, and the entry

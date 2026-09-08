@@ -41,6 +41,7 @@ pub mod process_read;
 pub mod program_cancellation;
 pub mod program_journal;
 pub mod program_registration;
+pub mod program_session;
 pub mod replace_session_defaults;
 pub mod repo_watch_command;
 pub mod review_orchestration;
