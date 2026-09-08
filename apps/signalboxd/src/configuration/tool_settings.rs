@@ -3,6 +3,7 @@ use super::{
     toml_scalars::{reject_unknown_fields, required_string, required_uuid},
 };
 use signalbox_domain::{DirectModelSelection, InstructionPath, ToolApprovalPosture, ToolName};
+use signalbox_tools_exec::{SandboxConfiguration, SandboxNetwork};
 use signalbox_tools_git::GitIdentity;
 use signalbox_tools_github::{GITHUB_CREDENTIAL_REFERENCE, GitHubEgressPolicy};
 use std::{
@@ -19,6 +20,7 @@ pub struct DaemonToolConfiguration {
     git_identity: GitIdentity,
     exec_supervisor_executable: PathBuf,
     cargo_registry_cache: Option<PathBuf>,
+    sandbox: SandboxConfiguration,
 }
 
 /// Explicit non-workspace instruction roots registered by deployment configuration.
@@ -53,6 +55,11 @@ impl DaemonToolConfiguration {
     /// Optional host Cargo registry pinned read-only into sandboxed execution.
     pub fn cargo_registry_cache(&self) -> Option<&Path> {
         self.cargo_registry_cache.as_deref()
+    }
+
+    /// Explicit runtime inputs shared by sandboxed workspace tools.
+    pub fn sandbox(&self) -> &SandboxConfiguration {
+        &self.sandbox
     }
 
     /// Fixed public-GitHub-only egress policy selected by the tool registry.
@@ -212,6 +219,7 @@ pub(super) fn parse_tool_mappings(
             .ok_or(HubModelConfigurationError::MissingGitIdentityConfiguration)?,
         exec_supervisor_executable: settings.exec_supervisor_executable,
         cargo_registry_cache: settings.cargo_registry_cache,
+        sandbox: settings.sandbox,
     }))
 }
 
@@ -219,6 +227,7 @@ pub(super) fn parse_tool_mappings(
 pub(super) struct DaemonToolSettings {
     exec_supervisor_executable: PathBuf,
     cargo_registry_cache: Option<PathBuf>,
+    sandbox: SandboxConfiguration,
 }
 
 pub(super) fn parse_daemon_tool_settings(
@@ -232,7 +241,15 @@ pub(super) fn parse_daemon_tool_settings(
         .ok_or(HubModelConfigurationError::InvalidDaemonToolSettings)?;
     reject_unknown_fields(
         table,
-        &["exec_supervisor_executable", "cargo_registry_cache"],
+        &[
+            "exec_supervisor_executable",
+            "cargo_registry_cache",
+            "sandbox_network",
+            "sandbox_read_only_binds",
+            "sandbox_path_prepend",
+            "sandbox_rustup_home",
+            "sandbox_rustup_toolchain",
+        ],
     )
     .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?;
     let executable = PathBuf::from(
@@ -265,10 +282,73 @@ pub(super) fn parse_daemon_tool_settings(
             Ok(canonical)
         })
         .transpose()?;
+    let network = match table.get("sandbox_network").map(Item::as_str) {
+        None | Some(Some("none")) => SandboxNetwork::None,
+        Some(Some("host")) => SandboxNetwork::Host,
+        _ => return Err(HubModelConfigurationError::InvalidDaemonToolSettings),
+    };
+    let read_only_binds = sandbox_paths(table, "sandbox_read_only_binds")?;
+    let path_prepend = sandbox_paths(table, "sandbox_path_prepend")?;
+    let rustup_home = table
+        .get("sandbox_rustup_home")
+        .map(|_| {
+            let value = required_string(table, "sandbox_rustup_home")
+                .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?;
+            let path = PathBuf::from(value);
+            if !path.is_absolute() || !path.is_dir() || value.contains('\0') {
+                return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
+            }
+            Ok(path)
+        })
+        .transpose()?;
+    let rustup_toolchain = table
+        .get("sandbox_rustup_toolchain")
+        .map(|_| {
+            let value = required_string(table, "sandbox_rustup_toolchain")
+                .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?;
+            if value.is_empty() || value.contains('\0') {
+                return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
+            }
+            Ok(value.to_owned())
+        })
+        .transpose()?;
     Ok(Some(DaemonToolSettings {
         exec_supervisor_executable: executable,
         cargo_registry_cache,
+        sandbox: SandboxConfiguration {
+            network,
+            read_only_binds,
+            path_prepend,
+            rustup_home,
+            rustup_toolchain,
+        },
     }))
+}
+
+fn sandbox_paths(table: &Table, key: &str) -> Result<Vec<PathBuf>, HubModelConfigurationError> {
+    let Some(item) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let values = item
+        .as_array()
+        .ok_or(HubModelConfigurationError::InvalidDaemonToolSettings)?;
+    values
+        .iter()
+        .map(|value| {
+            let value = value
+                .as_str()
+                .ok_or(HubModelConfigurationError::InvalidDaemonToolSettings)?;
+            let path = PathBuf::from(value);
+            if !path.is_absolute()
+                || value.contains('\0')
+                || !path.exists()
+                || (key == "sandbox_path_prepend" && (!path.is_dir() || value.contains(':')))
+            {
+                return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
+            }
+            Ok(path)
+        })
+        .collect()
 }
 
 pub(super) fn parse_git_identity(

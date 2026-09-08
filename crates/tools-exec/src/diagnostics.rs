@@ -174,6 +174,19 @@ impl<Runner: ProcessRunner> CargoDiagnosticsTool<Runner> {
         })
     }
 
+    /// Applies explicit deployment runtime inputs to this sandbox.
+    pub fn with_sandbox_configuration(
+        mut self,
+        configuration: crate::SandboxConfiguration,
+    ) -> Self {
+        self.executor.runner.command_runner = self
+            .executor
+            .runner
+            .command_runner
+            .with_sandbox_configuration(configuration);
+        self
+    }
+
     /// Returns separate catalog and executor composition roles.
     pub fn into_parts(self) -> (CompiledToolCatalog, CargoDiagnosticsExecutor<Runner>) {
         (self.catalog, self.executor)

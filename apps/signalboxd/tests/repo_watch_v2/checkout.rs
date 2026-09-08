@@ -944,6 +944,7 @@ async fn assert_checkout_keeps_composed_runner(
         configuration.git_identity().clone(),
         configuration.exec_supervisor_executable(),
         None,
+        &Default::default(),
         WebFetchEgressPolicy::deny_all(),
     )?;
     fixture.sink.checkout_runner = tools.process_runner();
@@ -2160,6 +2161,7 @@ impl CheckoutFixture {
             configuration.git_identity().clone(),
             configuration.exec_supervisor_executable(),
             configuration.cargo_registry_cache(),
+            configuration.sandbox(),
             self.sink.models.web_fetch_egress_policy(),
         )?;
         Ok(tools.into_parts())
