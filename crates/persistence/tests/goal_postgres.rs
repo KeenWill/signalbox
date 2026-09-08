@@ -22,26 +22,27 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
-    AssistantText, CancelledModelCallTurnIdentities, CommandPrincipal,
-    CompletedModelCallIdentities, ContextCompactionId, ContextFrontierId, CreateSession,
-    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, FinishCheckVerdict, FrozenAliasDefinition, Goal,
-    GoalCommandRejection, GoalCommandResult, GoalEvent, GoalGuidance, GoalModelBlockedReasonKind,
-    GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
-    GoalUserAction, GoalUserCommand, GoalUserProvenance, LifecycleActor, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelSelectionOverride,
-    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, ParentTerminationKind,
-    PerInputConfigurationChoices, PreparedCreateSession, ProviderModelIdentity,
-    ReplaceSessionDefaults, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionInputPosition, SessionLifecycleApplication,
-    SessionLifecycleCommand, SessionLifecycleCommandResult, SessionLifecycleOperation,
-    SessionLifecycleState, SessionTerminalOutcome, StopStickiness, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId,
-    TurnId, TurnModelSettingsResolved, TurnTerminalCause, UserContent,
+    AmbiguousModelCallTurnIdentities, AssistantText, CancelledModelCallTurnIdentities,
+    CommandPrincipal, CompletedModelCallIdentities, ContextCompactionId, ContextFrontierId,
+    CreateSession, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurnIdentities, FinishCheckVerdict, FrozenAliasDefinition,
+    Goal, GoalCommandRejection, GoalCommandResult, GoalEvent, GoalGuidance,
+    GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance,
+    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, GoalUserProvenance, LifecycleActor,
+    ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    ParentTerminationKind, PerInputConfigurationChoices, PreparedCreateSession,
+    ProviderModelIdentity, ReplaceSessionDefaults, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
+    SessionLifecycleApplication, SessionLifecycleCommand, SessionLifecycleCommandResult,
+    SessionLifecycleOperation, SessionLifecycleState, SessionTerminalOutcome, StopStickiness,
+    SubmitInput, SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TranscriptAncestry,
+    TurnAttemptId, TurnId, TurnModelSettingsResolved, TurnTerminalCause, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
+    automatic_reconciliation::PostgresAutomaticReconciliationRepository,
     context_compaction::{
         ContextCompactionRepository, PrepareContextCompactionOutcome,
         PrepareContextCompactionRequest,
@@ -5182,6 +5183,164 @@ async fn a_declared_achievement_settles_achieved_declared() -> Result<(), Box<dy
     );
     assert_eq!(settled.pending_terminal(), None);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A descendant cascade preserves physical recovery evidence and keeps the
+/// child's logical terminal readable after automatic reconciliation supersedes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn descendant_cascade_terminates_recovery_parked_children() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    for (seed, disposition, expected) in [
+        (0xfd00, "stop", DispatchedDelegationOutcome::ChildStopped),
+        (
+            0xfe00,
+            "cancel",
+            DispatchedDelegationOutcome::ChildCancelled,
+        ),
+    ] {
+        let parent = seed + 1;
+        let child = seed + 2;
+        CreateSessionRepository::new(pool.clone(), credential_pin())
+            .handle(creation_fixture(seed + 3, parent, seed + 4))
+            .await?;
+        CreateSessionRepository::new(pool.clone(), credential_pin())
+            .handle(creation_fixture(seed + 5, child, seed + 6))
+            .await?;
+        insert_queued_delegation_fixture(
+            &pool,
+            DelegationFixture {
+                spawning_request: seed + 7,
+                parent_session: parent,
+                parent_turn: seed + 8,
+                child_session: child,
+                child_turn: seed + 9,
+                task_entry: seed + 10,
+                selection: seed + 6,
+                policy_kind: "bound",
+                on_parent_stopped: Some(disposition),
+                on_parent_cancelled: Some("cancel"),
+            },
+        )
+        .await?;
+        let child_turn = activated_turn(
+            StartEligibleTurnRepository::new(pool.clone())
+                .handle(session(child), activation_identities(seed + 20))
+                .await?,
+        );
+        record_empty_instruction_manifest(&pool, session(child)).await?;
+        let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 30));
+        let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+            DirectModelSelection::from_uuid(Uuid::from_u128(seed + 6)),
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+                seed + 31,
+            ))),
+        )])
+        .expect("fixture model target is unique");
+        let calls = PostgresModelCallRepository::new(
+            pool.clone(),
+            targets,
+            ModelCallCredentialReference::new("cascade-test-provider"),
+        );
+        let prepared = calls
+            .prepare_initial_call(
+                session(child),
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 32)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 34)),
+                |_| panic!("the child has no steering"),
+            )
+            .await?;
+        assert!(matches!(
+            prepared,
+            PrepareInitialModelCallOutcome::Checkpointed(_)
+        ));
+        let AuthorizeModelCallOutcome::Authorized(authorized) =
+            calls.authorize_send(session(child), call).await?
+        else {
+            panic!("the child call must authorize");
+        };
+        calls
+            .apply_terminal_observation(
+                session(child),
+                authorized
+                    .observation_correlation()
+                    .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous),
+                ModelCallTerminalIdentities::Ambiguous(AmbiguousModelCallTurnIdentities::new(
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 35)),
+                )),
+                |_| panic!("the child has no steering"),
+            )
+            .await?;
+        let reconciliation = PostgresAutomaticReconciliationRepository::new(pool.clone());
+        let _claimed = reconciliation.claim_due().await?;
+        let before: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(turn) - 'delegation_runtime_terminal' FROM turn_lifecycle AS turn WHERE turn_id = $1")
+            .bind(child_turn.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(before["active_phase_kind"], "awaiting_model_call_recovery");
+        let repository = GoalRepository::new(pool.clone());
+        assert_applied_command(
+            repository
+                .handle_user_command(
+                    GoalUserCommand::new(
+                        command(seed + 40),
+                        session(parent),
+                        GoalUserAction::Attach(statement("terminate a recovery-parked child")),
+                    ),
+                    Some(turn_candidates(seed + 50)),
+                    |_| None,
+                )
+                .await?,
+        );
+        assert_applied_command(
+            repository
+                .handle_user_command(
+                    GoalUserCommand::new(
+                        command(seed + 41),
+                        session(parent),
+                        GoalUserAction::Stop {
+                            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                        },
+                    ),
+                    None,
+                    |_| None,
+                )
+                .await?,
+        );
+        let after: (serde_json::Value, bool) = sqlx::query_as(
+            "SELECT to_jsonb(turn) - 'delegation_runtime_terminal', delegation_runtime_terminal FROM turn_lifecycle AS turn WHERE turn_id = $1")
+            .bind(child_turn.into_uuid()).fetch_one(&pool).await?;
+        assert_eq!(after, (before, true));
+        // A full one-row supersession page wraps before revisiting this child.
+        let _wrap = reconciliation.claim_due().await?;
+        let _next = reconciliation.claim_due().await?;
+        let recovery: String = sqlx::query_scalar(
+            "SELECT state_kind FROM automatic_reconciliation WHERE turn_id = $1",
+        )
+        .bind(child_turn.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(recovery, "superseded");
+        let transcript = ProcessReadRepository::new(pool.clone())
+            .read_transcript(session(child))
+            .await?
+            .expect("the logically terminated child remains readable");
+        assert!(
+            matches!(transcript.turns().first().expect("the delegated turn remains").state(),
+            ProcessTurnState::DelegationTerminated { outcome, .. } if *outcome == expected)
+        );
+        let reopened = sqlx::query("UPDATE turn_lifecycle SET active_phase_kind = 'running', recovery_model_call_id = NULL WHERE turn_id = $1")
+            .bind(child_turn.into_uuid()).execute(&pool).await;
+        assert!(
+            matches!(reopened, Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23514"))
+        );
+    }
     pool.close().await;
     drop(container);
     Ok(())

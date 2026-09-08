@@ -488,6 +488,7 @@ pub(super) async fn load_next_transcript_turn(
            LEFT JOIN automatic_reconciliation AS automatic_reconciliation
              ON automatic_reconciliation.turn_id = turn.turn_id
             AND automatic_reconciliation.session_id = turn.session_id
+            AND NOT turn.delegation_runtime_terminal
            LEFT JOIN model_call AS terminal_call
              ON terminal_call.model_call_id = turn.terminal_model_call_id
             AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
