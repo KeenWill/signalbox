@@ -34,21 +34,22 @@ pub async fn register_process(
     pool: &PgPool,
     call: ModelCallId,
     process_group: u32,
+    start_time: &str,
 ) -> Result<(), ModelCallRepositoryError> {
-    sqlx::query("UPDATE credential_invocation_reservation SET process_group_id = $2 WHERE model_call_id = $1 AND released_at IS NULL AND process_group_id IS NULL")
-        .bind(call.into_uuid()).bind(i64::from(process_group)).execute(pool).await?;
+    sqlx::query("UPDATE credential_invocation_reservation SET process_group_id = $2, process_group_start_time = $3 WHERE model_call_id = $1 AND released_at IS NULL AND process_group_id IS NULL")
+        .bind(call.into_uuid()).bind(i64::from(process_group)).bind(start_time).execute(pool).await?;
     Ok(())
 }
 
 /// Retained invocation identities awaiting proof that their process group ended.
 pub async fn active_processes(
     pool: &PgPool,
-) -> Result<Vec<(ModelCallId, u32)>, ModelCallRepositoryError> {
-    let rows: Vec<(Uuid, i64)> = sqlx::query_as("SELECT model_call_id, process_group_id FROM credential_invocation_reservation WHERE released_at IS NULL AND process_group_id IS NOT NULL")
+) -> Result<Vec<(ModelCallId, u32, String)>, ModelCallRepositoryError> {
+    let rows: Vec<(Uuid, i64, String)> = sqlx::query_as("SELECT model_call_id, process_group_id, process_group_start_time FROM credential_invocation_reservation WHERE released_at IS NULL AND process_group_id IS NOT NULL")
         .fetch_all(pool).await?;
     Ok(rows
         .into_iter()
-        .map(|(call, group)| (ModelCallId::from_uuid(call), group as u32))
+        .map(|(call, group, start_time)| (ModelCallId::from_uuid(call), group as u32, start_time))
         .collect())
 }
 
@@ -120,12 +121,12 @@ pub(crate) async fn reserve(
     Ok(())
 }
 
-/// Returns the retained process group for one unreleased invocation.
+/// Returns the retained process group and leader start time for one unreleased invocation.
 pub async fn process_group(
     pool: &PgPool,
     call: ModelCallId,
-) -> Result<Option<u32>, ModelCallRepositoryError> {
-    let group: Option<i64> = sqlx::query_scalar("SELECT process_group_id FROM credential_invocation_reservation WHERE model_call_id = $1 AND released_at IS NULL")
-        .bind(call.into_uuid()).fetch_optional(pool).await?.flatten();
-    Ok(group.map(|group| group as u32))
+) -> Result<Option<(u32, String)>, ModelCallRepositoryError> {
+    let group: Option<(i64, String)> = sqlx::query_as("SELECT process_group_id, process_group_start_time FROM credential_invocation_reservation WHERE model_call_id = $1 AND released_at IS NULL AND process_group_id IS NOT NULL")
+        .bind(call.into_uuid()).fetch_optional(pool).await?;
+    Ok(group.map(|(group, start_time)| (group as u32, start_time)))
 }

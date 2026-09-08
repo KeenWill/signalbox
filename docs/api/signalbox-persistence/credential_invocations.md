@@ -18,6 +18,7 @@ pub async fn register_process(
     pool: &sqlx_postgres::PgPool,
     call: signalbox_domain::ModelCallId,
     process_group: u32,
+    start_time: &str,
 ) -> result::Result<(), model_execution::ModelCallRepositoryError>;
 ```
 
@@ -27,7 +28,7 @@ pub async fn register_process(
 pub async fn active_processes(
     pool: &sqlx_postgres::PgPool,
 ) -> result::Result<
-    vec::Vec<(signalbox_domain::ModelCallId, u32)>,
+    vec::Vec<(signalbox_domain::ModelCallId, u32, string::String)>,
     model_execution::ModelCallRepositoryError,
 >;
 ```
@@ -55,5 +56,5 @@ pub async fn release(
 pub async fn process_group(
     pool: &sqlx_postgres::PgPool,
     call: signalbox_domain::ModelCallId,
-) -> result::Result<option::Option<u32>, model_execution::ModelCallRepositoryError>;
+) -> result::Result<option::Option<(u32, string::String)>, model_execution::ModelCallRepositoryError>;
 ```

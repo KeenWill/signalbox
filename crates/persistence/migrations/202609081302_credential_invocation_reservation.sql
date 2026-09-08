@@ -11,7 +11,9 @@ CREATE TABLE credential_invocation_reservation (
     model_call_id uuid PRIMARY KEY REFERENCES model_call,
     profile text NOT NULL REFERENCES credential_invocation_capacity,
     process_group_id bigint CHECK (process_group_id > 0 AND process_group_id <= 4294967295),
-    released_at timestamptz
+    process_group_start_time text,
+    released_at timestamptz,
+    CHECK ((process_group_id IS NULL) = (process_group_start_time IS NULL))
 );
 CREATE INDEX credential_invocation_reservation_active ON credential_invocation_reservation (profile)
     WHERE released_at IS NULL;
@@ -88,7 +90,8 @@ BEGIN
         END IF;
     ELSIF TG_OP = 'DELETE' OR OLD.released_at IS NOT NULL
        OR (NEW.model_call_id, NEW.profile) IS DISTINCT FROM (OLD.model_call_id, OLD.profile)
-       OR (OLD.process_group_id IS NOT NULL AND NEW.process_group_id IS DISTINCT FROM OLD.process_group_id) THEN
+       OR (OLD.process_group_id IS NOT NULL AND (NEW.process_group_id, NEW.process_group_start_time)
+           IS DISTINCT FROM (OLD.process_group_id, OLD.process_group_start_time)) THEN
         RAISE EXCEPTION 'invocation reservation identity is immutable' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
