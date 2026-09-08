@@ -1,5 +1,8 @@
 CREATE FUNCTION credential_wait_is_eligible(checked_wait uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
     SELECT consumed_by_attempt_id IS NULL AND (eligible OR COALESCE(deadline <= statement_timestamp(), false))
+       AND NOT EXISTS (SELECT 1 FROM credential_pool_availability_successor successor
+           WHERE successor.successor_turn_attempt_id = checked_wait
+             AND successor.retry_not_before > statement_timestamp())
       FROM credential_availability_wait WHERE wait_attempt_id = checked_wait
 $$;
 
@@ -43,3 +46,14 @@ END;
 $$;
 CREATE TRIGGER credential_wait_oauth_replaced AFTER INSERT OR UPDATE OF generation ON oauth_credential_authorization
     FOR EACH ROW EXECUTE FUNCTION wake_replaced_oauth_credential_waits();
+
+CREATE FUNCTION notify_credential_wait_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' OR NEW IS DISTINCT FROM OLD THEN
+        PERFORM pg_notify('credential_wait_changed', NEW.session_id::text);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER credential_wait_changed AFTER INSERT OR UPDATE ON credential_availability_wait
+    FOR EACH ROW EXECUTE FUNCTION notify_credential_wait_change();

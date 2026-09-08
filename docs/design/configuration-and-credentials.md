@@ -152,18 +152,15 @@ Database restore transactionally quarantines every restored `oauth` profile
 before signalboxd may start against the restored state; an ordinary restart does
 not.
 
-`max_concurrent_invocations` on a `codex_home` profile is a reserved field with
-the range 1 through 1,024. Capacity reservations, contention waits, and
-refresh-race coordination become admissible together; no accepted bound is
-inert. `round_robin` owns one durable global cursor per interned pool-policy
-revision and priority value. The repository interns the policy's complete
-canonical structural value, pool name, ordered members, each member's expected
-adapter and delivery kind, membership settings, tie-break, exhaustion rule, and
-trigger actions, under a uniqueness constraint on that value, so an unchanged
-document reuses one revision across restarts and an exact reversion reuses the
-old one; hashes accelerate lookup but never establish equality. The cursor names
-one member ordinal in that priority's declaration order. An admissible sticky
-member is still preferred; otherwise selection starts at the cursor and walks
+`round_robin` owns one durable global cursor per interned pool-policy revision
+and priority value. The repository interns the policy's complete canonical
+structural value, pool name, ordered members, each member's expected adapter and
+delivery kind, membership settings, tie-break, exhaustion rule, and trigger
+actions, under a uniqueness constraint on that value, so an unchanged document
+reuses one revision across restarts and an exact reversion reuses the old one;
+hashes accelerate lookup but never establish equality. The cursor names one
+member ordinal in that priority's declaration order. An admissible sticky member
+is still preferred; otherwise selection starts at the cursor and walks
 cyclically, skipping inadmissible members, and the transaction that commits that
 `Prepared` record advances the cursor to the next declared member even when that
 member is excluded. A sticky selection advances nothing. Preparation locks the
@@ -245,9 +242,9 @@ work.
 
 ## Compatibility constraints
 
-The configuration grammar already admits the `codex_cli` `file` spelling,
-`max_concurrent_invocations`, and `round_robin`, and rejects each at startup as
-unsupported. Supplying a surface for any of them changes no grammar.
+The configuration grammar already admits the `codex_cli` `file` spelling and
+`round_robin`, and rejects each at startup as unsupported. Supplying a surface
+for any of them changes no grammar.
 
 The session credential record and entry rows are append-only behind a guarded
 head. Any update appends one complete event and advances the head by one.
@@ -290,8 +287,7 @@ model-provider names; runner credential execution adds no such field.
 - A template selector binds the workspace before first activation, and the
   install-and-activate transition commits atomically and fails closed after
   restart on a changed root.
-- `max_concurrent_invocations` is admitted together with the reservation that
-  gives it effect, and `round_robin` selects through its durable cursor.
+- `round_robin` selects through its durable cursor.
 - An exclusion with a reported reset clears when it passes, an operator clear or
   zero-cost probe ends an indefinite policy-origin generation while a
   delivery-origin one ends by re-provisioning or deletion except a `codex_home`

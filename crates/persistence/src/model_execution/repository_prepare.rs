@@ -135,6 +135,18 @@ impl PostgresModelCallRepository {
                             PrepareInitialModelCallOutcome::Ready {
                                 request: Box::new(request),
                                 credential_reference,
+                                retained_mapped_target:
+                                    super::credential_wait::retained_mapped_target(
+                                        &mut transaction,
+                                        execution.current_attempt().id(),
+                                    )
+                                    .await?,
+                                invocation_capacity_reserved: sqlx::query_scalar(
+                                    "SELECT EXISTS (SELECT 1 FROM credential_invocation_reservation WHERE model_call_id = $1 AND released_at IS NULL)",
+                                )
+                                .bind(current_call_id.into_uuid())
+                                .fetch_one(&mut *transaction)
+                                .await?,
                                 dangerous_tool_auto_approval,
                                 recorded_user_overrides,
                                 system_prompt,

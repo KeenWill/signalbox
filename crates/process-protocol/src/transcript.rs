@@ -16,6 +16,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialAvailabilityWaitCause {
+    /// Otherwise-admissible members have their invocation capacity reserved.
+    Contended,
     /// Every pool member is excluded and at least one can become available again.
     Exhausted,
 }

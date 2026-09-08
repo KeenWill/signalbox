@@ -2953,6 +2953,7 @@ public struct SignalboxTranscriptTurn: Decodable, Equatable, Sendable {
 }
 
 public enum SignalboxCredentialAvailabilityWaitCause: String, Decodable, Equatable, Sendable {
+  case contended
   case exhausted
 }
 
@@ -5382,9 +5383,9 @@ extension Decoder {
 
 
 public enum SignalboxCredentialPoolExclusion: Decodable, Equatable, Sendable {
-  case profileQuarantine(recordGeneration: SignalboxCanonicalUInt64?)
-  case membershipExclusion(recordGeneration: SignalboxCanonicalUInt64?)
-  case sessionDisplacement(recordGeneration: SignalboxCanonicalUInt64?)
+  case profileQuarantine(recordGeneration: SignalboxCanonicalUInt64)
+  case membershipExclusion(recordGeneration: SignalboxCanonicalUInt64)
+  case sessionDisplacement(recordGeneration: SignalboxCanonicalUInt64)
   case chainExclusion(predecessorModelCallID: SignalboxCanonicalUUID)
   case transientExclusion(observationModelCallID: SignalboxCanonicalUUID)
   case headroomReserve(observedHeadroomPercent: Int64, reservePercent: UInt8)
@@ -5396,8 +5397,7 @@ public enum SignalboxCredentialPoolExclusion: Decodable, Equatable, Sendable {
     case "profile_quarantine", "membership_exclusion", "session_displacement":
       try payload.rejectUnadmittedFields(["kind", "record_generation"], decoder: decoder)
       try payload.requireFields(["record_generation"], decoder: decoder)
-      let generation: SignalboxCanonicalUInt64? = try decoder.decodeIfPresent("record_generation")
-      if let generation, generation.rawValue == 0 { throw poolEvidenceError(decoder) }
+      let generation: SignalboxCanonicalUInt64 = try decoder.decode("record_generation")
       switch kind {
       case "profile_quarantine": self = .profileQuarantine(recordGeneration: generation)
       case "membership_exclusion": self = .membershipExclusion(recordGeneration: generation)
