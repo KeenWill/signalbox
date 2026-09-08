@@ -193,6 +193,16 @@ async fn encrypted_unrecognized_visual_format_remains_locked() -> Result<(), Box
 }
 
 #[tokio::test]
+async fn encrypted_visual_entry_with_audio_original_format_is_malformed()
+-> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::encrypted_mp4_with_audio_original_format(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn next_track_id_exceeds_assigned_ids_or_uses_the_sentinel() -> Result<(), Box<dyn Error>> {
     for next in [1, 2] {
         assert_malformed(

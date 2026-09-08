@@ -1309,10 +1309,7 @@ fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<Mp4SampleDescripti
             non_video_sample_entry_seen = true;
             parse_encrypted_audio_sample_entry(entry_payload, state)?;
             encrypted_sample_entry_seen = true;
-        } else if matches!(
-            &box_type,
-            b"mp4a" | b"ac-3" | b"ac-4" | b"ec-3" | b"Opus" | b"fLaC" | b"alac"
-        ) {
+        } else if is_audio_sample_entry(box_type) {
             non_video_sample_entry_seen = true;
         } else if visual_sample_entry_configuration(box_type).is_some() {
             parse_visual_sample_entry(entry_payload, box_type, state)?;
@@ -1332,6 +1329,13 @@ fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<Mp4SampleDescripti
         non_video: non_video_sample_entry_seen,
         encrypted: encrypted_sample_entry_seen,
     })
+}
+
+fn is_audio_sample_entry(box_type: [u8; 4]) -> bool {
+    matches!(
+        &box_type,
+        b"mp4a" | b"ac-3" | b"ac-4" | b"ec-3" | b"Opus" | b"fLaC" | b"alac"
+    )
 }
 
 fn parse_encrypted_visual_sample_entry(
@@ -1410,7 +1414,9 @@ fn validate_protection_information(
                     return Err(VideoIssue::Malformed);
                 }
                 let original = <[u8; 4]>::try_from(child).map_err(|_| VideoIssue::Malformed)?;
-                if !visual && visual_sample_entry_configuration(original).is_some() {
+                if (visual && is_audio_sample_entry(original))
+                    || (!visual && visual_sample_entry_configuration(original).is_some())
+                {
                     return Err(VideoIssue::Malformed);
                 }
                 original_format_seen = true;

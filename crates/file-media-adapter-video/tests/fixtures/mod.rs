@@ -138,6 +138,14 @@ impl VideoFixture {
         fixture
     }
 
+    pub fn encrypted_mp4_with_audio_original_format() -> Self {
+        let mut fixture = Self::encrypted_mp4();
+        if let Some(offset) = fixture.bytes.windows(4).position(|kind| kind == b"frma") {
+            fixture.bytes[offset + 4..offset + 8].copy_from_slice(b"mp4a");
+        }
+        fixture
+    }
+
     pub fn mp4_with_invalid_encrypted_sample_entry() -> Self {
         Self::new(
             FixtureKind::Mp4,
