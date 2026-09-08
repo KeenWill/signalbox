@@ -1,7 +1,7 @@
 use reqwest::header::HeaderValue;
 use signalbox_application::ToolExecutorEvidence;
 use signalbox_domain::ToolExecutionErrorDetail;
-use signalbox_model_runtime::{CredentialValue, redact_text};
+use signalbox_model_runtime::CredentialValue;
 
 use super::{
     diagnostic::WebSearchExecutorError, egress::fixed_egress_diagnostic_outputs,
@@ -43,10 +43,9 @@ impl CredentialScrubber {
     }
 
     pub(super) fn redact_text(&self, text: &str) -> String {
-        let generically_redacted = redact_text(text);
-        let exact_redacted = generically_redacted.replace(&self.exact, "");
+        let exact_redacted = text.replace(&self.exact, "");
         let redacted = exact_redacted.replace(&self.json_escaped, "");
-        if self.contains_credential(&redacted) {
+        if self.contains_credential(&redacted) || format!("{redacted:?}").contains(&self.exact) {
             String::from("[redacted]")
         } else {
             redacted

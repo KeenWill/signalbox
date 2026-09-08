@@ -220,7 +220,10 @@ replacement claim and settle in one transaction. A provisioning replacement
 claims its complete request and one single-use authorization, waits without a
 transaction, and installs its exact retained receipt and terminal result
 together. Equal pending replay joins the retained operation; startup resumes
-unterminated replacement commands before admitting process clients.
+unterminated replacement commands before admitting process clients. A
+replacement staged behind a model call or tool batch claims immediately and
+completes or retires at the turn-lifecycle boundary, retaining provisioning
+authorization only when required.
 
 OAuth provisioning, re-provisioning, and deletion have distinct registry kinds
 and typed relational request and result families keyed by command identifier.
