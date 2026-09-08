@@ -11,7 +11,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{ProcessClient, TurnTerminal, await_turn_terminal, chat, presentation::Output};
+use crate::{
+    ProcessClient, TurnTerminal, await_turn_terminal, chat,
+    deployment_limits::ClientDeploymentLimits, presentation::Output,
+};
 
 async fn receive_follow(
     listener: &UnixListener,
@@ -34,7 +37,7 @@ async fn receive_follow(
 async fn receive_chat_follow(
     listener: &UnixListener,
     session: CanonicalUuid,
-    maximum_message_bytes: Option<CanonicalU64>,
+    limits: ClientDeploymentLimits,
 ) -> io::Result<(ClientFrame, OwnedWriteHalf)> {
     let (reader, mut writer) = listener.accept().await?.0.into_split();
     let mut reader = BufReader::new(reader);
@@ -49,12 +52,18 @@ async fn receive_chat_follow(
         limits_request.version(),
         limits_request.request_id(),
         ServerMessage::DeploymentLimits {
-            max_message_utf8_bytes: maximum_message_bytes,
-            max_system_prompt_utf8_bytes: None,
-            terminal_input_channel_capacity: None,
-            min_metadata_page_size: None,
-            max_metadata_page_size: None,
-            max_review_findings_per_run: None,
+            max_message_utf8_bytes: limits
+                .max_message_utf8_bytes
+                .map(|value| CanonicalU64::new(value as u64)),
+            max_system_prompt_utf8_bytes: limits
+                .max_system_prompt_utf8_bytes
+                .map(|value| CanonicalU64::new(value as u64)),
+            terminal_input_channel_capacity: limits
+                .terminal_input_channel_capacity
+                .map(|value| CanonicalU64::new(value as u64)),
+            min_metadata_page_size: limits.min_metadata_page_size.map(CanonicalU64::new),
+            max_metadata_page_size: limits.max_metadata_page_size.map(CanonicalU64::new),
+            max_review_findings_per_run: limits.max_review_findings_per_run.map(CanonicalU64::new),
         },
     )
     .map_err(io::Error::other)?;
@@ -166,7 +175,8 @@ async fn send_wait_reconnects_to_the_original_accepted_turn() -> Result<(), Box<
 }
 
 #[tokio::test]
-async fn chat_reconnects_after_snapshot_receipt_is_lost() -> Result<(), Box<dyn Error>> {
+async fn chat_reconnects_after_snapshot_loss_with_unrelated_limit_changes()
+-> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("client.sock");
     let listener = UnixListener::bind(&socket)?;
@@ -174,9 +184,22 @@ async fn chat_reconnects_after_snapshot_receipt_is_lost() -> Result<(), Box<dyn 
     let (input, mut input_writer) = tokio::io::duplex(64);
     let (done, finished) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        let (_, writer) = receive_chat_follow(&listener, session, None).await?;
+        let (_, writer) =
+            receive_chat_follow(&listener, session, ClientDeploymentLimits::unbounded()).await?;
         drop(writer);
-        let (request, mut writer) = receive_chat_follow(&listener, session, None).await?;
+        let (request, mut writer) = receive_chat_follow(
+            &listener,
+            session,
+            ClientDeploymentLimits {
+                // The smallest positive values distinguish these unrelated limits from unbounded.
+                max_system_prompt_utf8_bytes: Some(1),
+                min_metadata_page_size: Some(1),
+                max_metadata_page_size: Some(1),
+                max_review_findings_per_run: Some(1),
+                ..ClientDeploymentLimits::unbounded()
+            },
+        )
+        .await?;
         writer
             .write_all(&snapshot(&request, session, None)?)
             .await?;
@@ -207,17 +230,38 @@ async fn chat_reconnects_after_snapshot_receipt_is_lost() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
-async fn chat_rejects_changed_limits_on_reconnect() -> Result<(), Box<dyn Error>> {
+async fn chat_rejects_changed_message_limit_on_reconnect() -> Result<(), Box<dyn Error>> {
+    chat_rejects_changed_limits_on_reconnect(ClientDeploymentLimits {
+        // A finite message budget differs from the original unbounded budget.
+        max_message_utf8_bytes: Some(1),
+        ..ClientDeploymentLimits::unbounded()
+    })
+    .await
+}
+
+#[tokio::test]
+async fn chat_rejects_changed_input_capacity_on_reconnect() -> Result<(), Box<dyn Error>> {
+    chat_rejects_changed_limits_on_reconnect(ClientDeploymentLimits {
+        // A rendezvous channel differs from the original unbounded channel.
+        terminal_input_channel_capacity: Some(0),
+        ..ClientDeploymentLimits::unbounded()
+    })
+    .await
+}
+
+async fn chat_rejects_changed_limits_on_reconnect(
+    current_limits: ClientDeploymentLimits,
+) -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("client.sock");
     let listener = UnixListener::bind(&socket)?;
     let session = CanonicalUuid::from_uuid(Uuid::from_u128(9));
     let (input, _input_writer) = tokio::io::duplex(64);
     let server = tokio::spawn(async move {
-        let (_, writer) = receive_chat_follow(&listener, session, None).await?;
+        let (_, writer) =
+            receive_chat_follow(&listener, session, ClientDeploymentLimits::unbounded()).await?;
         drop(writer);
-        let (_, _writer) =
-            receive_chat_follow(&listener, session, Some(CanonicalU64::new(1))).await?;
+        let (_, _writer) = receive_chat_follow(&listener, session, current_limits).await?;
         Ok::<_, io::Error>(())
     });
     let mut stdout = Vec::new();

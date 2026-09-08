@@ -584,7 +584,9 @@ where
             async {
                 if let Some(connection) = initial_connection.take() { return Ok(connection); }
                 let (current_limits, connection) = crate::deployment_limits::follow_with_deployment_limits(client, session_id).await?;
-                if current_limits != deployment_limits {
+                if current_limits.max_message_utf8_bytes != deployment_limits.max_message_utf8_bytes
+                    || current_limits.terminal_input_channel_capacity != deployment_limits.terminal_input_channel_capacity
+                {
                     return Err(ClientError::Input("daemon deployment limits changed; restart chat to apply them"));
                 }
                 Ok(connection)
