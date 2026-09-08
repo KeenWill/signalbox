@@ -49,6 +49,20 @@ impl RangeBroker {
         }
     }
 
+    pub(crate) fn probe_result(
+        &self,
+        mut output: signalbox_file_media_runtime::ProcessorProbeOutput,
+    ) -> signalbox_file_media_runtime::ProcessorProbeOutput {
+        if let signalbox_file_media_runtime::ProcessorProbeOutput::Candidate {
+            evidence_bytes,
+            ..
+        } = &mut output
+        {
+            *evidence_bytes = self.cumulative_bytes;
+        }
+        output
+    }
+
     pub(crate) fn admit(&mut self, offset: u64, length: u64) -> Result<NonZeroU64, BrokerError> {
         let length = NonZeroU64::new(length).ok_or(BrokerError::Range)?;
         if length.get() > self.maximum_range_bytes {
@@ -258,6 +272,33 @@ mod tests {
         let mut input = frame.as_slice();
         let result = read_frame_with_limit::<_, serde_json::Value>(&mut input, frame.len()).await;
         assert_eq!(result, Err(BrokerError::Frame));
+    }
+
+    #[test]
+    fn probe_evidence_uses_broker_reads_instead_of_the_worker_claim() {
+        use signalbox_file_media_runtime::{ProbeStrength, ProcessorProbeOutput};
+        let mut broker = RangeBroker::new(
+            8,
+            WireReadEnvelope::RandomAccess {
+                ranges: 2,
+                cumulative_bytes: 8,
+            },
+            8,
+        );
+        broker.admit(0, 4).expect("first range");
+        broker.admit(4, 4).expect("second range");
+        let output = broker.probe_result(ProcessorProbeOutput::Candidate {
+            media_type: String::from("application/x-synthetic"),
+            strength: ProbeStrength::Strong,
+            evidence_bytes: 1,
+        });
+        assert!(matches!(
+            output,
+            ProcessorProbeOutput::Candidate {
+                evidence_bytes: 8,
+                ..
+            }
+        ));
     }
 
     #[test]

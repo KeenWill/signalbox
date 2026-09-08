@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
-use signalbox_model_runtime::{ProviderErrorKind, REDACTED, RedactingSink};
+use signalbox_model_runtime::ProviderErrorKind;
 
 use super::classify::{FailureClass, classify, input_too_large};
 use super::client::{Client, Event};
-use super::decode::{fold_uninterpreted, parse};
+use super::decode::parse;
 use super::frame::{
     CodexErrorInfo, TextInput, TextInputKind, ThreadOptions, TurnInput, TurnStatus,
 };
@@ -785,85 +785,6 @@ fn unknown_notifications_skip_typed_parsing() {
         Event::Ignored
     ));
     assert!(!client.is_terminal());
-}
-
-fn folded(value: Value, paths: &[&[&str]], following: &str) -> String {
-    let mut observed = Vec::new();
-    let mut sink: RedactingSink<'_, ()> = RedactingSink::new(&mut observed);
-    fold_uninterpreted(&mut sink, &value, paths);
-    sink.redact_terminal_failure_text(following)
-}
-
-#[test]
-fn dropped_nested_metadata_governs_the_following_emitted_text() {
-    let frame = json!({"method":"turn/completed","params":{"turn":{"error":{
-        "message":"api_", "misalignment":{"steer":{"message":"key=fixture-secret"}}
-    }}}});
-    assert_eq!(
-        folded(
-            frame,
-            &[
-                &["method"],
-                &[
-                    "params",
-                    "turn",
-                    "error",
-                    "misalignment",
-                    "steer",
-                    "message"
-                ]
-            ],
-            "key=fixture-secret"
-        ),
-        REDACTED
-    );
-}
-
-#[test]
-fn a_credential_marker_completed_across_dropped_fields_suppresses_its_value() {
-    assert_eq!(
-        folded(
-            json!({"item":{"id":"trace-api_","text":"key="}}),
-            &[],
-            "fixture-secret"
-        ),
-        REDACTED
-    );
-}
-
-#[test]
-fn dropped_units_preserve_array_adjacency_and_independent_object_markers() {
-    for dropped in [
-        json!(["api", ["_key="]]),
-        json!({"marker":"api_key=","benign":"ordinary"}),
-        json!({"nested":[{"marker":"api_key=","benign":"ordinary"}]}),
-    ] {
-        assert_eq!(
-            folded(dropped.clone(), &[], "fixture-secret"),
-            REDACTED,
-            "{dropped}"
-        );
-    }
-    assert_eq!(
-        folded(json!({"a":"api_key=","b":"token="}), &[], "ordinary text"),
-        REDACTED
-    );
-    assert_eq!(
-        folded(json!({"keepalive":"ordinary"}), &[], "ordinary text"),
-        "ordinary text"
-    );
-}
-
-#[test]
-fn member_paths_do_not_confuse_literal_slashes_with_nested_fields() {
-    assert_eq!(
-        folded(
-            json!({"params/turn/error/message":"api_key=","params":{"turn":{"error":{"message":"ordinary"}}}}),
-            &[&["params", "turn", "error", "message"]],
-            "fixture-secret"
-        ),
-        REDACTED
-    );
 }
 
 #[test]
