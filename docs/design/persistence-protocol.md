@@ -64,7 +64,6 @@ machine they serve is owned by
 [credential-availability](../spec/credential-availability.md), and its design
 fixes their transitions.
 
-
 ## Compatibility constraints
 
 No writer produces imported-create storage version 4, and the version gate keeps
