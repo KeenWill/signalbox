@@ -2061,7 +2061,8 @@ async fn run_hub(
             runtime_models.clone(),
             model_configuration.clone(),
             compaction.clone(),
-        );
+        )
+        .with_repository_watch_continuation(pass_nudge.clone(), tool_dispatch_gate.clone());
         let execution = execution_supervisor.with_execution(
             PostgresProviderModelExecution::new(
                 model_repository.clone(),

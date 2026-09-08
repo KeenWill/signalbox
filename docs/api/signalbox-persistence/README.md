@@ -12,6 +12,7 @@
 | blob_derivation | 3 | 0 | 0 | [blob_derivation](blob_derivation.md) |
 | commissioned_dispatch | 4 | 0 | 0 | [commissioned_dispatch](commissioned_dispatch.md) |
 | context_compaction | 11 | 0 | 0 | [context_compaction](context_compaction.md) |
+| context_compaction_continuation | 2 | 0 | 0 | [context_compaction_continuation](context_compaction_continuation.md) |
 | convergence_sweep | 9 | 0 | 0 | [convergence_sweep](convergence_sweep.md) |
 | conversation_import | 10 | 1 | 2 | [conversation_import](conversation_import.md) |
 | conversation_import_discovery | 15 | 0 | 0 | [conversation_import_discovery](conversation_import_discovery.md) |

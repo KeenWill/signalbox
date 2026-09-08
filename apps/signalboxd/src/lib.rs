@@ -103,6 +103,8 @@ pub use configuration::{
     OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
     WorkspaceInstructionConfiguration,
 };
+#[cfg(feature = "test-support")]
+pub use context_guard::repository_watch_continuation_test_request;
 pub use context_guard::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,
     ReportedUsageCompactionError,
@@ -129,6 +131,8 @@ pub use fenced_database::{
     FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation,
     reconcile_fenced_pool_floor,
 };
+#[cfg(feature = "test-support")]
+pub use goal_mode::goal_declaration_test_tools;
 pub use goal_mode::{
     CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED, GoalModeNumericBounds, PostgresGoalPassDisposition,
     PostgresGoalPassDispositionError,

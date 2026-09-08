@@ -143,6 +143,7 @@ use uuid::Uuid;
 
 mod blob_objects;
 mod compaction;
+mod continuation_compaction;
 mod fixtures;
 mod fleet_soak;
 mod imported_conversations;
