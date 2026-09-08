@@ -1432,13 +1432,11 @@ async fn proposed_tool_detail_is_unchanged_after_attempt_preparation() -> Result
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn tool_detail_continues_at_the_next_request_member() -> Result<(), Box<dyn Error>> {
     let (container, pool, _) = migrated_postgres().await?;
+    let arguments = format!(r#"{{"second":"{}"}}"#, "é🚦".repeat(150));
     let (fixture, _, _, requests) = super::checkpoint_confirmed_tool_batch(
         &pool,
         0x995700,
-        &[
-            ("current_time", "{}"),
-            ("current_time", "{\"second\":true}"),
-        ],
+        &[("current_time", "{}"), ("current_time", &arguments)],
     )
     .await?;
     let sequence: i64 = sqlx::query_scalar(
@@ -1450,42 +1448,92 @@ async fn tool_detail_continues_at_the_next_request_member() -> Result<(), Box<dy
     .await?;
     let address =
         TimelineAddress::new(NonZeroU64::new(u64::try_from(sequence)?).expect("committed address"));
-    let repository = SessionTimelineRepository::new(pool.clone());
-    let limits = TimelineDetailLimits::new(1, 256).expect("bounded detail");
-    let first = repository
-        .read_item_details(fixture.session, address, None, limits)
-        .await?
-        .expect("first member");
-    let Some(signalbox_application::TimelineDetailContinuation::MoreBody(next)) =
-        first.continuation
-    else {
-        panic!("next member is explicit")
-    };
-    assert_eq!(next.member_index, 1);
-    assert_eq!(next.offset_bytes, 0);
-    let second = repository
-        .read_item_details(
-            fixture.session,
-            address,
-            Some(signalbox_application::TimelineDetailCursor {
+    for frozen in [true, false] {
+        if !frozen {
+            remove_frozen_tool_members(&pool, sequence).await?;
+        }
+        let repository = SessionTimelineRepository::new(pool.clone());
+        let limits = TimelineDetailLimits::new(1, 256).expect("bounded detail");
+        let first = repository
+            .read_item_details(fixture.session, address, None, limits)
+            .await?
+            .expect("first member");
+        let Some(signalbox_application::TimelineDetailContinuation::MoreBody(next)) =
+            first.continuation
+        else {
+            panic!("next member is explicit")
+        };
+        assert_eq!(next.member_index, 1);
+        assert_eq!(next.offset_bytes, 0);
+        let second = repository
+            .read_item_details(
+                fixture.session,
                 address,
-                field: Some(next.field),
-                member_index: next.member_index,
-                offset_bytes: next.offset_bytes,
-            }),
-            limits,
-        )
-        .await?
-        .expect("second member");
-    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &second.items[0].body else {
-        panic!("tool body")
-    };
-    assert_eq!(tools[0].request_id, requests[1]);
-    assert_eq!(
-        tools[0].arguments.as_ref().expect("arguments").text,
-        "{\"second\":true}"
-    );
-    assert_eq!(second.continuation, None);
+                Some(signalbox_application::TimelineDetailCursor {
+                    address,
+                    field: Some(next.field),
+                    member_index: next.member_index,
+                    offset_bytes: next.offset_bytes,
+                }),
+                limits,
+            )
+            .await?
+            .expect("second member");
+        let SessionTimelineDetailBody::ToolBatch { tools, .. } = &second.items[0].body else {
+            panic!("tool body")
+        };
+        assert_eq!(tools[0].request_id, requests[1]);
+        let excerpt = tools[0].arguments.as_ref().expect("arguments");
+        assert_eq!(excerpt.total_bytes, arguments.len() as u64);
+        let mut collected = excerpt.text.clone();
+        let mut continuation = second.continuation;
+        while let Some(signalbox_application::TimelineDetailContinuation::MoreBody(next)) =
+            continuation
+        {
+            assert_eq!(next.member_index, 1);
+            assert_eq!(next.offset_bytes, collected.len() as u64);
+            let page = repository
+                .read_item_details(
+                    fixture.session,
+                    address,
+                    Some(signalbox_application::TimelineDetailCursor {
+                        address,
+                        field: Some(next.field),
+                        member_index: next.member_index,
+                        offset_bytes: next.offset_bytes,
+                    }),
+                    limits,
+                )
+                .await?
+                .expect("continued member");
+            assert!(page.projected_body_bytes <= limits.max_projected_bytes());
+            let SessionTimelineDetailBody::ToolBatch { tools, .. } = &page.items[0].body else {
+                panic!("tool body")
+            };
+            collected.push_str(&tools[0].arguments.as_ref().expect("arguments").text);
+            continuation = page.continuation;
+        }
+        assert_eq!(collected, arguments);
+        let inside_scalar = arguments.find('é').expect("multibyte fixture") as u64 + 1;
+        let error = repository
+            .read_item_details(
+                fixture.session,
+                address,
+                Some(signalbox_application::TimelineDetailCursor {
+                    address,
+                    field: Some(signalbox_application::TimelineBodyField::ToolArguments),
+                    member_index: 1,
+                    offset_bytes: inside_scalar,
+                }),
+                limits,
+            )
+            .await
+            .expect_err("mid-scalar offsets are rejected");
+        assert!(matches!(
+            error,
+            SessionTimelineRepositoryError::InvalidDetailQuery
+        ));
+    }
     pool.close().await;
     drop(container);
     Ok(())
@@ -1513,47 +1561,52 @@ async fn completed_tool_detail_continues_from_arguments_to_the_recorded_result()
     .await?;
     let address =
         TimelineAddress::new(NonZeroU64::new(u64::try_from(sequence)?).expect("committed address"));
-    let repository = SessionTimelineRepository::new(pool.clone());
-    let limits = TimelineDetailLimits::new(1, 256).expect("bounded detail");
-    let first = repository
-        .read_item_details(fixture.session, address, None, limits)
-        .await?
-        .expect("arguments page");
-    let Some(signalbox_application::TimelineDetailContinuation::MoreBody(next)) =
-        first.continuation
-    else {
-        panic!("result has an explicit continuation")
-    };
-    assert_eq!(
-        next.field,
-        signalbox_application::TimelineBodyField::ToolResult
-    );
-    let result = repository
-        .read_item_details(
-            fixture.session,
-            address,
-            Some(signalbox_application::TimelineDetailCursor {
+    for frozen in [true, false] {
+        if !frozen {
+            remove_frozen_tool_members(&pool, sequence).await?;
+        }
+        let repository = SessionTimelineRepository::new(pool.clone());
+        let limits = TimelineDetailLimits::new(1, 256).expect("bounded detail");
+        let first = repository
+            .read_item_details(fixture.session, address, None, limits)
+            .await?
+            .expect("arguments page");
+        let Some(signalbox_application::TimelineDetailContinuation::MoreBody(next)) =
+            first.continuation
+        else {
+            panic!("result has an explicit continuation")
+        };
+        assert_eq!(
+            next.field,
+            signalbox_application::TimelineBodyField::ToolResult
+        );
+        let result = repository
+            .read_item_details(
+                fixture.session,
                 address,
-                field: Some(next.field),
-                member_index: next.member_index,
-                offset_bytes: next.offset_bytes,
-            }),
-            limits,
-        )
-        .await?
-        .expect("result page");
-    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &result.items[0].body else {
-        panic!("tool body")
-    };
-    assert_eq!(
-        tools[0].state,
-        Some(signalbox_application::TimelineToolState::Completed)
-    );
-    assert_eq!(
-        tools[0].result.as_ref().expect("recorded result").text,
-        recorded_result
-    );
-    assert_eq!(result.continuation, None);
+                Some(signalbox_application::TimelineDetailCursor {
+                    address,
+                    field: Some(next.field),
+                    member_index: next.member_index,
+                    offset_bytes: next.offset_bytes,
+                }),
+                limits,
+            )
+            .await?
+            .expect("result page");
+        let SessionTimelineDetailBody::ToolBatch { tools, .. } = &result.items[0].body else {
+            panic!("tool body")
+        };
+        assert_eq!(
+            tools[0].state,
+            Some(signalbox_application::TimelineToolState::Completed)
+        );
+        assert_eq!(
+            tools[0].result.as_ref().expect("recorded result").text,
+            recorded_result
+        );
+        assert_eq!(result.continuation, None);
+    }
     pool.close().await;
     drop(container);
     Ok(())
@@ -1582,32 +1635,53 @@ async fn preauthorization_rejection_commits_and_projects_its_frozen_failure()
     .await?;
     let address =
         TimelineAddress::new(NonZeroU64::new(u64::try_from(sequence)?).expect("committed address"));
-    let page = SessionTimelineRepository::new(pool.clone())
-        .read_item_details(
-            fixture.session,
-            address,
-            Some(signalbox_application::TimelineDetailCursor {
+    for frozen in [true, false] {
+        if !frozen {
+            remove_frozen_tool_members(&pool, sequence).await?;
+        }
+        let page = SessionTimelineRepository::new(pool.clone())
+            .read_item_details(
+                fixture.session,
                 address,
-                field: Some(signalbox_application::TimelineBodyField::ToolFailure),
-                member_index: 0,
-                offset_bytes: 0,
-            }),
-            TimelineDetailLimits::new(1, 256).expect("bounded detail"),
-        )
-        .await?
-        .expect("failure detail");
-    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &page.items[0].body else {
-        panic!("tool body")
-    };
-    assert_eq!(
-        tools[0].cause_code.as_deref(),
-        Some("preauthorization_rejected")
-    );
-    assert_eq!(
-        tools[0].failure.as_ref().expect("failure text").text,
-        "blob_not_visible"
-    );
+                Some(signalbox_application::TimelineDetailCursor {
+                    address,
+                    field: Some(signalbox_application::TimelineBodyField::ToolFailure),
+                    member_index: 0,
+                    offset_bytes: 0,
+                }),
+                TimelineDetailLimits::new(1, 256).expect("bounded detail"),
+            )
+            .await?
+            .expect("failure detail");
+        let SessionTimelineDetailBody::ToolBatch { tools, .. } = &page.items[0].body else {
+            panic!("tool body")
+        };
+        assert_eq!(
+            tools[0].cause_code.as_deref(),
+            Some("preauthorization_rejected")
+        );
+        assert_eq!(
+            tools[0].failure.as_ref().expect("failure text").text,
+            "blob_not_visible"
+        );
+    }
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+async fn remove_frozen_tool_members(pool: &PgPool, sequence: i64) -> Result<(), sqlx::Error> {
+    // Model a transition committed before the satellite existed in this disposable database.
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE tool_batch_transition_detail_member DISABLE TRIGGER USER")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM tool_batch_transition_detail_member WHERE event_sequence = $1")
+        .bind(sequence)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE tool_batch_transition_detail_member ENABLE TRIGGER USER")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await
 }

@@ -202,6 +202,7 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         ClientRequest::ImportConversation { .. } => true,
         ClientRequest::CreateSession { .. }
         | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
         | ClientRequest::CreateSessionFromTemplate { .. }
@@ -277,6 +278,9 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::OverrideDeniedToolRequest { .. }
         | ClientRequest::ReplaceLostRunner { .. }
         | ClientRequest::AbandonLostRunner { .. }
+        | ClientRequest::RegisterWorkspace { .. }
+        | ClientRequest::MintGitRemote { .. }
+        | ClientRequest::WithdrawGitRemote { .. }
         | ClientRequest::PromotePendingRunner { .. }
         | ClientRequest::ProvisionOauthCredential { .. }
         | ClientRequest::ReprovisionOauthCredential { .. }

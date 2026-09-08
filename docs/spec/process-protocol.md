@@ -477,6 +477,13 @@ finishes. Successful re-provisioning replaces authorization and clears every
 OAuth delivery-origin quarantine and cached access; failed re-provisioning
 clears none.
 
+Workspace operator commands are `register_workspace`, `mint_git_remote`, and
+`withdraw_git_remote`. Each carries a command identifier and returns the
+corresponding immutable workspace, mint, or withdrawal identity. Registration
+resolves the supplied root once in the daemon filesystem before constructing the
+canonical payload. The client exposes them as `workspace register`,
+`workspace mint-remote`, and `workspace withdraw-remote`.
+
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
 carrying a user-global `command_id` and one closed `target` object. The target
@@ -508,10 +515,20 @@ durable. An equal `command_id` replay returns its stored receipt before current
 state is evaluated. Both operations are authorized as every other request is:
 reaching the owner-private socket is the authority.
 
+Program-run cancellation is the request
+`cancel_program_run { run_id, command_id }` and the receipt
+`program_run_cancellation_receipt { command_id, run_id, outcome }`. The outcome
+is `applied { terminal_state: "cancelled", result: null }`, `not_found`, or
+`already_terminal { terminal_state, result }` naming the standing terminal state
+and result the command found. An identical request bearing the same `command_id`
+replays its stored receipt even if the run's standing state later changes; the
+same identity with a different payload is conflicting reuse. Run-state semantics
+belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
+version-1 encoding, and the closed receipt algebra belong here, and a later
+incompatible shape requires a new protocol version.
+
 ## Planned
 
-- Program-run cancellation request and receipt:
-  [design](../design/process-protocol.md).
 - Runner creation and status requests, and the status read's failure evidence:
   [design](../design/process-protocol.md).
 - Typed projection of credential-pool exhaustion and of the

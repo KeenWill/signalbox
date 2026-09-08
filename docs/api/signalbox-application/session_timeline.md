@@ -1035,8 +1035,6 @@ pub enum TimelineSessionOutcome {
 
 ```rust
 pub enum TimelineOwnershipTransition {
-    CreatedOwned,
-    CreatedUnmonitored,
     Adopted,
     Released,
 }

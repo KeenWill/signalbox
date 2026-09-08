@@ -641,3 +641,222 @@ async fn sequence_state_cannot_be_primed_past_a_missing_frame() -> Result<(), Bo
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cancellation_replays_one_terminal_delivery_with_outstanding_requests()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::DurableCommandId;
+    use signalbox_persistence::program_cancellation::{
+        self as cancellation, CancelProgramRun, ProgramCancellationOutcome as Outcome,
+        ProgramCancellationResult as Result, ProgramTerminalState,
+    };
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    repository
+        .append_request(run, None, RequestKind::Now(payload(b"first")))
+        .await?;
+    repository
+        .append_request(run, None, RequestKind::Random(payload(b"second")))
+        .await?;
+    let command = CancelProgramRun {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        run_id: run,
+    };
+    assert_eq!(
+        cancellation::cancel(&pool, command.clone()).await?,
+        Result::Recorded(Outcome::Applied)
+    );
+    assert_eq!(
+        cancellation::cancel(&pool, command.clone()).await?,
+        Result::Recorded(Outcome::Applied)
+    );
+    let journal = repository.load(run).await?.expect("retained run");
+    assert_eq!(journal.entries().len(), 3);
+    assert_eq!(
+        journal.terminal_delivery().expect("cancelled run").kind(),
+        &DeliveryKind::RunCancel(InlineFramePayload::new(
+            command.command_id.into_uuid().to_string().into_bytes()
+        ))
+    );
+    assert_eq!(
+        cancellation::cancel(
+            &pool,
+            CancelProgramRun {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                run_id: run
+            }
+        )
+        .await?,
+        Result::Recorded(Outcome::AlreadyTerminal(ProgramTerminalState::Cancelled))
+    );
+    assert_eq!(repository.load(run).await?, Some(journal));
+    assert_eq!(
+        cancellation::cancel(
+            &pool,
+            CancelProgramRun {
+                command_id: command.command_id,
+                run_id: ProgramRunId::from_uuid(Uuid::now_v7())
+            }
+        )
+        .await?,
+        Result::ConflictingReuse
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cancellation_not_found_replays_after_the_run_is_created() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::DurableCommandId;
+    use signalbox_persistence::program_cancellation::{
+        self as cancellation, CancelProgramRun, ProgramCancellationOutcome as Outcome,
+        ProgramCancellationResult as Result,
+    };
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    let command = CancelProgramRun {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        run_id: run,
+    };
+    assert_eq!(
+        cancellation::cancel(&pool, command.clone()).await?,
+        Result::Recorded(Outcome::NotFound)
+    );
+    repository.create_stream(run).await?;
+    assert_eq!(
+        cancellation::cancel(&pool, command).await?,
+        Result::Recorded(Outcome::NotFound)
+    );
+    assert!(
+        repository
+            .load(run)
+            .await?
+            .expect("created run")
+            .entries()
+            .is_empty()
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cancellation_preserves_the_first_terminal_fault() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::DurableCommandId;
+    use signalbox_persistence::program_cancellation::{
+        self as cancellation, CancelProgramRun, ProgramCancellationOutcome as Outcome,
+        ProgramCancellationResult as Result, ProgramTerminalState,
+    };
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    repository
+        .append_delivery(
+            run,
+            DeliveryKind::Fault(ProgramFault::Timeout(payload(b"deadline"))),
+        )
+        .await?;
+    let journal = repository.load(run).await?.expect("faulted run");
+    let command = CancelProgramRun {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        run_id: run,
+    };
+    assert_eq!(
+        cancellation::cancel(&pool, command.clone()).await?,
+        Result::Recorded(Outcome::AlreadyTerminal(ProgramTerminalState::Faulted))
+    );
+    assert_eq!(
+        cancellation::cancel(&pool, command).await?,
+        Result::Recorded(Outcome::AlreadyTerminal(ProgramTerminalState::Faulted))
+    );
+    assert_eq!(repository.load(run).await?, Some(journal));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_cancellation_commands_append_only_one_terminal_delivery()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::DurableCommandId;
+    use signalbox_persistence::program_cancellation::{
+        self as cancellation, CancelProgramRun, ProgramCancellationOutcome as Outcome,
+        ProgramCancellationResult as Result, ProgramTerminalState,
+    };
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let first = CancelProgramRun {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        run_id: run,
+    };
+    let second = CancelProgramRun {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        run_id: run,
+    };
+    let (first, second) = tokio::join!(
+        cancellation::cancel(&pool, first),
+        cancellation::cancel(&pool, second)
+    );
+    assert!(matches!(
+        (first?, second?),
+        (
+            Result::Recorded(Outcome::Applied),
+            Result::Recorded(Outcome::AlreadyTerminal(ProgramTerminalState::Cancelled))
+        ) | (
+            Result::Recorded(Outcome::AlreadyTerminal(ProgramTerminalState::Cancelled)),
+            Result::Recorded(Outcome::Applied)
+        )
+    ));
+    assert_eq!(
+        repository
+            .load(run)
+            .await?
+            .expect("cancelled run")
+            .entries()
+            .len(),
+        1
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cancellation_receipt_requires_its_own_command_in_the_terminal_delivery()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    repository
+        .append_delivery(run, DeliveryKind::RunCancel(payload(b"another command")))
+        .await?;
+    let command = Uuid::now_v7();
+    let mut transaction = pool.begin().await?;
+    sqlx::query("INSERT INTO durable_command(command_id, command_kind, storage_version, claimed_at, issuer_kind) VALUES ($1, 'cancel_program_run', 1, transaction_timestamp(), 'operator')")
+        .bind(command).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO cancel_program_run_command(command_id, run_id, outcome, terminal_state, cancellation_position) VALUES ($1, $2, 'applied', 'cancelled', 1)")
+        .bind(command).bind(run.into_uuid()).execute(&mut *transaction).await?;
+    assert_trigger_error(
+        transaction
+            .commit()
+            .await
+            .expect_err("a foreign cancellation is not this command's effect"),
+        "applied program cancellation requires its terminal delivery",
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

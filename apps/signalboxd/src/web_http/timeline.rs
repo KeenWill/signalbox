@@ -1596,10 +1596,6 @@ fn session_outcome_detail_dto(value: TimelineSessionOutcome) -> WebTimelineSessi
 }
 fn ownership_detail_dto(value: TimelineOwnershipTransition) -> WebTimelineOwnershipTransition {
     match value {
-        TimelineOwnershipTransition::CreatedOwned => WebTimelineOwnershipTransition::CreatedOwned,
-        TimelineOwnershipTransition::CreatedUnmonitored => {
-            WebTimelineOwnershipTransition::CreatedUnmonitored
-        }
         TimelineOwnershipTransition::Adopted => WebTimelineOwnershipTransition::Adopted,
         TimelineOwnershipTransition::Released => WebTimelineOwnershipTransition::Released,
     }
