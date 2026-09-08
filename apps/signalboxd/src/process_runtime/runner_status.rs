@@ -181,6 +181,41 @@ fn redact_payload(value: &mut serde_json::Value) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn runner_status_waits_for_shared_snapshot_reader_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = ClientRequest::ReadRunnerStatus {
+            page_size: 1,
+            after: None,
+        };
+        let budget = Arc::new(Semaphore::new(1));
+        let (_shutdown, mut shutdown) = watch::channel(false);
+        let first = admit_snapshot_reader(&request, Arc::clone(&budget), &mut shutdown)
+            .await?
+            .expect("runtime is active")
+            .expect("status reserves snapshot capacity");
+        let mut second_shutdown = shutdown.clone();
+        let mut second = Box::pin(admit_snapshot_reader(
+            &request,
+            Arc::clone(&budget),
+            &mut second_shutdown,
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second)
+                .await
+                .is_err()
+        );
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(1), second)
+            .await??
+            .expect("runtime remains active")
+            .expect("next status reserves released capacity");
+        assert_eq!(budget.available_permits(), 0);
+        drop(second);
+        assert_eq!(budget.available_permits(), 1);
+        Ok(())
+    }
+
     #[test]
     fn runner_status_redacts_nested_text_without_changing_retained_detail() {
         let retained = serde_json::json!({"code":"workspace_open_failed", "message":"cannot read /home/operator/project", "payload":{"path":"/private/credential", "nested":[{"reason":"file=/tmp/key", "tries":2}], "ready":false}});

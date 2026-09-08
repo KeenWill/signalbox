@@ -700,6 +700,7 @@ impl SnapshotReaderAdmission {
         match request {
             ClientRequest::ListSessions {}
             | ClientRequest::ReadOperatorStatus {}
+            | ClientRequest::ReadRunnerStatus { .. }
             | ClientRequest::ReadGoal { .. }
             | ClientRequest::ReadTranscript { .. }
             | ClientRequest::FollowSession { .. }
@@ -723,7 +724,6 @@ impl SnapshotReaderAdmission {
             | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
             | ClientRequest::ListCredentialExclusions { .. }
-        | ClientRequest::ReadRunnerStatus { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReloadConfiguration { .. }
