@@ -777,6 +777,17 @@ impl VideoFixture {
         Self::new(FixtureKind::Mp4, bytes)
     }
 
+    pub fn mp4_with_only_unrecognized_visual_entry() -> Self {
+        let mut entry = avc1_sample_entry();
+        entry.truncate(86);
+        entry[..4].copy_from_slice(&86_u32.to_be_bytes());
+        entry[4..8].copy_from_slice(b"jpeg");
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(MP4_TIMESCALE, MP4_DURATION_UNITS, entry),
+        )
+    }
+
     pub fn mp4_video_track_with_clear_audio_entry() -> Self {
         let mut audio = vec![0_u8; 28];
         audio[6..8].copy_from_slice(&1_u16.to_be_bytes());

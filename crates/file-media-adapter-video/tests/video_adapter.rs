@@ -684,6 +684,16 @@ async fn unrecognized_visual_entry_does_not_conflict_with_supported_video()
 }
 
 #[tokio::test]
+async fn lone_unrecognized_visual_entry_remains_unclaimed() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_only_unrecognized_visual_entry().into_source()?;
+    for media_type in ["application/octet-stream", "video/mp4"] {
+        let inspection = inspect_as(&DirectProcessor::new(), &source, media_type).await?;
+        assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn clear_audio_entry_conflicts_with_video_in_the_same_track() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_video_track_with_clear_audio_entry(),

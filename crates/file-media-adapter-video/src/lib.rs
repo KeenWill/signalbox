@@ -137,9 +137,11 @@ impl FileMediaProvider for VideoProvider {
                     evidence_bytes: u64::try_from(bytes.len())
                         .map_err(|_| FileMediaProviderFailure::Failed)?,
                 }),
-                Err(VideoIssue::NoVideo | VideoIssue::UnsupportedWindow) => {
-                    Ok(ProcessorProbeOutput::NoMatch)
-                }
+                Err(
+                    VideoIssue::NoVideo
+                    | VideoIssue::UnsupportedWindow
+                    | VideoIssue::UnsupportedCodec,
+                ) => Ok(ProcessorProbeOutput::NoMatch),
                 Err(issue) => Ok(ProcessorProbeOutput::RecognizedMalformed {
                     media_type: String::from(kind.media_type()),
                     reason_code: String::from(issue.reason()),
@@ -169,6 +171,7 @@ impl FileMediaProvider for VideoProvider {
             }
             match parse(kind, &bytes, source_bytes) {
                 Ok(metadata) => validated_output(kind, request.evidence, &metadata),
+                Err(VideoIssue::UnsupportedCodec) => Ok(ProcessorValidationOutput::NoMatch),
                 Err(VideoIssue::NoVideo)
                     if request.evidence
                         == ValidationEvidence::DeclaredCandidateStructurallyValidated =>
@@ -475,6 +478,7 @@ enum VideoIssue {
     NoVideo,
     Encrypted,
     UnsupportedWindow,
+    UnsupportedCodec,
     Recursive,
     Structure,
 }
@@ -482,9 +486,11 @@ enum VideoIssue {
 impl VideoIssue {
     const fn reason(self) -> &'static str {
         match self {
-            Self::Malformed | Self::NoVideo | Self::Encrypted | Self::UnsupportedWindow => {
-                MALFORMED_REASON
-            }
+            Self::Malformed
+            | Self::NoVideo
+            | Self::Encrypted
+            | Self::UnsupportedWindow
+            | Self::UnsupportedCodec => MALFORMED_REASON,
             Self::Recursive => RECURSIVE_REASON,
             Self::Structure => STRUCTURE_REASON,
         }
@@ -574,7 +580,7 @@ impl Mp4TrackEvidence {
     }
 
     const fn is_video_track(self) -> bool {
-        self.is_complete_track() && self.video_handler && self.sample_description
+        self.is_complete_track() && self.video_handler
     }
 }
 
@@ -590,7 +596,7 @@ struct Mp4State {
     fragment_duration: Option<u64>,
     fragmented: bool,
     video_tracks: u64,
-    video_track_declared: bool,
+    supported_video: bool,
     encrypted_video: bool,
     track_ids: Vec<u32>,
     track_descriptions: Vec<(u32, u32)>,
@@ -664,14 +670,13 @@ fn parse_mp4(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssu
         if prefix_incomplete {
             return Err(VideoIssue::UnsupportedWindow);
         }
-        return Err(if state.video_track_declared {
-            VideoIssue::Malformed
-        } else {
-            VideoIssue::NoVideo
-        });
+        return Err(VideoIssue::NoVideo);
     }
     if state.encrypted_video {
         return Err(VideoIssue::Encrypted);
+    }
+    if !state.supported_video {
+        return Err(VideoIssue::UnsupportedCodec);
     }
     Ok(VideoMetadata {
         duration_milliseconds,
@@ -786,6 +791,7 @@ fn parse_mp4_boxes(
                     .track_descriptions
                     .push((track_id, evidence.sample_description_count));
                 if evidence.is_video_track() {
+                    state.supported_video |= evidence.sample_description;
                     state.encrypted_video |= evidence.encrypted_sample_description;
                     state.video_tracks = state
                         .video_tracks
@@ -844,7 +850,6 @@ fn parse_mp4_boxes(
                 handler_seen = true;
                 track_evidence.handler_seen = true;
                 track_evidence.video_handler = parse_handler(payload)?;
-                state.video_track_declared |= track_evidence.video_handler;
             }
             MP4_MINF if scope == Mp4Scope::Media => {
                 if media_information_seen {
