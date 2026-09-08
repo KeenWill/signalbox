@@ -37,6 +37,7 @@ final class ProcessSessionListViewModel: ObservableObject {
 
   private let maximumMetadataPages: UInt
   private var requestedConversation: SignalboxProcessConversation?
+  private var activeRevealID = UUID()
   private var serviceProvider: () -> (any SignalboxProcessServiceProtocol)?
   private var activeRefreshID = UUID()
   private var serviceGeneration: UInt64 = 0
@@ -91,16 +92,18 @@ final class ProcessSessionListViewModel: ObservableObject {
   }
 
   func revealSession(_ sessionID: SignalboxCanonicalUUID) async {
+    let revealID = UUID()
+    activeRevealID = revealID
     let generation = serviceGeneration
     guard let service = serviceProvider() else { return }
     do {
       let session = try await service.readSession(sessionID: sessionID)
-      guard generation == serviceGeneration else { return }
+      guard generation == serviceGeneration, activeRevealID == revealID else { return }
       requestedConversation = SignalboxProcessConversation(summary: .native(.init(
         sessionID: session.id, title: session.title, archived: session.archived,
         defaultsVersion: session.defaultsVersion)))
     } catch {
-      guard generation == serviceGeneration else { return }
+      guard generation == serviceGeneration, activeRevealID == revealID else { return }
       errorMessage = error.localizedDescription
     }
   }

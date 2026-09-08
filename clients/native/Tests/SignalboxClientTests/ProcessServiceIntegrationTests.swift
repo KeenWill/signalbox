@@ -3,6 +3,49 @@ import XCTest
 @testable import SignalboxNative
 
 final class ProcessServiceIntegrationTests: XCTestCase {
+  @MainActor
+  func testOlderSessionRevealCannotReplaceTheNewerSelectionCache() async throws {
+    let olderID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let newerID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.archivedSessionID)
+    let olderRead = ControlledProcessExchange()
+    let service = SignalboxProcessService(
+      requester: ControlledSessionRevealRequester(sessionID: olderID, exchange: olderRead),
+      policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    let older = Task { await viewModel.revealSession(olderID) }
+    await olderRead.waitForNextCallCount(1)
+    await viewModel.revealSession(newerID)
+    let selected = try XCTUnwrap(viewModel.nativeConversation(sessionID: newerID))
+
+    await olderRead.send(try ProcessDriverFixture.metadataRead())
+    await older.value
+
+    XCTAssertEqual(viewModel.conversation(id: selected.id), selected)
+    XCTAssertNil(viewModel.nativeConversation(sessionID: olderID))
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
+  func testOlderSessionRevealFailureCannotPublishOverTheNewerSelection() async throws {
+    let olderID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.activeSessionID)
+    let newerID = try SignalboxCanonicalUUID(validating: MockSignalboxFixtures.archivedSessionID)
+    let olderRead = ControlledProcessExchange()
+    let service = SignalboxProcessService(
+      requester: ControlledSessionRevealRequester(sessionID: olderID, exchange: olderRead),
+      policy: .nativeDefault)
+    let viewModel = ProcessSessionListViewModel { service }
+    let older = Task { await viewModel.revealSession(olderID) }
+    await olderRead.waitForNextCallCount(1)
+    await viewModel.revealSession(newerID)
+    let selected = try XCTUnwrap(viewModel.nativeConversation(sessionID: newerID))
+
+    await olderRead.close()
+    await older.value
+
+    XCTAssertEqual(viewModel.conversation(id: selected.id), selected)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
   func testMockUnifiedCursorKeepsImportedIdentityAfterItsNativePosition() async throws {
     let service = makeService(policy: ProcessDriverFixture.oneRowMetadataPolicy)
     let identity = try SignalboxCanonicalUUID(validating: MockProcessProtocolFixtures.importedConversationID)
@@ -6079,6 +6122,25 @@ private actor OrderedProcessDriverUpdateRecorder {
       return nil
     }
     return event.cursor.rawValue
+  }
+}
+
+private struct ControlledSessionRevealRequester: SignalboxProcessRequesting {
+  let sessionID: SignalboxCanonicalUUID
+  let exchange: ControlledProcessExchange
+  private let fallback = SignalboxProcessClient(
+    connectionFactory: MockProcessProtocolConnectionFactory())
+
+  init(sessionID: SignalboxCanonicalUUID, exchange: ControlledProcessExchange) {
+    self.sessionID = sessionID
+    self.exchange = exchange
+  }
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    if case .readSessionMetadata(let requestedID) = request, requestedID == sessionID {
+      return exchange
+    }
+    return try await fallback.open(request)
   }
 }
 
