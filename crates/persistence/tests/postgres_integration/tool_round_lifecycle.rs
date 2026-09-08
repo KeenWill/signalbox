@@ -2878,20 +2878,18 @@ async fn parked_approval_rejection_requires_a_recorded_approval_wait() -> Result
 async fn interrupt_preserves_tool_recovery_ambiguity() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x74c0;
-    let (fixture, _, _, request) =
-        checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        &[("external-tool", "{}")],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the automatic fixture has one request");
+    };
+    let request = *request;
     let repository = PostgresToolLoopRepository::new(pool.clone());
-    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
-    repository
-        .decide(
-            decide_tool_request(
-                DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
-                request,
-                ToolApprovalDecision::Approve,
-            ),
-            || issuing_attempt,
-        )
-        .await?;
     let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
     repository
         .prepare_next_attempt(
@@ -2901,9 +2899,11 @@ async fn interrupt_preserves_tool_recovery_ambiguity() -> Result<(), Box<dyn Err
             ToolEffectClass::ExternalEffect,
         )
         .await?;
-    repository
+    let issuing_attempt = repository
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
-        .await?;
+        .await?
+        .attempt()
+        .issuing_attempt();
     let mut recovery_ids = FixedStartupScanIds::new([], []);
     assert_ambiguous_tool_recovery(
         PostgresStartupScanRepository::new(pool.clone())
@@ -2986,8 +2986,27 @@ async fn interrupt_preserves_tool_recovery_ambiguity() -> Result<(), Box<dyn Err
         process_tool_reconciliation_operation(snapshot.turns()[0].state()),
         (issuing_attempt, tool_attempt)
     );
+    assert!(
+        snapshot.entries().iter().all(|entry| !matches!(
+            entry,
+            ProcessTranscriptEntry::AssistantToolUse {
+                approval: Some(_),
+                ..
+            }
+        )),
+        "automatic approval has no explicit transcript provenance"
+    );
     assert_eq!(assistant_tool_request(snapshot.entries()), request);
     assert_eq!(closed_tool_request(snapshot.entries()), request);
+    assert!(snapshot.entries().iter().any(|entry| matches!(
+        entry,
+        ProcessTranscriptEntry::ToolClosed {
+            request: closed_request,
+            approved_before_close: true,
+            ..
+        } if *closed_request == request
+    )));
+
     assert!(
         dispatched_tool_reconciliation(&pool, fixture.turn, tool_attempt).await?,
         "the tool reconciliation event must not block dispatch"
@@ -3976,6 +3995,10 @@ async fn stopped_tool_round_closes_requests_and_decision_replay() -> Result<(), 
 
     let first_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 22));
     let second_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 23));
+    let first_proposal = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24));
+    let first_closure = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25));
+    let second_proposal = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27));
+    let second_closure = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 28));
     let response = ToolUsingAssistantResponse::try_from_parts(vec![
         AssistantResponsePart::ToolCall(ToolCallProposal::new(
             ToolName::try_new(String::from("first_tool")).expect("valid fixture tool name"),
@@ -4007,18 +4030,18 @@ async fn stopped_tool_round_closes_requests_and_decision_replay() -> Result<(), 
                 StoppedToolRoundModelCallIdentities::new(
                     vec![
                         StoppedToolResponsePartIdentity::tool_call(
-                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
+                            first_proposal,
                             first_request,
-                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
-                            InitialToolApproval::Confirm,
+                            first_closure,
+                            InitialToolApproval::PolicyAuto,
                         ),
                         StoppedToolResponsePartIdentity::text(
                             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
                         ),
                         StoppedToolResponsePartIdentity::tool_call(
-                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27)),
+                            second_proposal,
                             second_request,
-                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 28)),
+                            second_closure,
                             InitialToolApproval::Confirm,
                         ),
                     ],
@@ -4033,6 +4056,40 @@ async fn stopped_tool_round_closes_requests_and_decision_replay() -> Result<(), 
         outcome,
         ModelCallTerminalOutcome::CancelledWithToolResponse(_)
     ));
+
+    let entries = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(
+            &[1, 2, 3, 4],
+            &[
+                SemanticTranscriptEntryRef::from_source(fixture.session, first_proposal),
+                SemanticTranscriptEntryRef::from_source(fixture.session, first_closure),
+                SemanticTranscriptEntryRef::from_source(fixture.session, second_proposal),
+                SemanticTranscriptEntryRef::from_source(fixture.session, second_closure),
+            ],
+        )
+        .await?;
+    let closures: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ProcessTranscriptEntry::ToolClosed {
+                request,
+                approved_before_close,
+                ..
+            } => Some((*request, *approved_before_close)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(closures, [(first_request, false), (second_request, false)]);
+    assert!(
+        entries.iter().all(|entry| !matches!(
+            entry,
+            ProcessTranscriptEntry::AssistantToolUse {
+                approval: Some(_),
+                ..
+            }
+        )),
+        "closure evidence must survive without explicit approval provenance"
+    );
 
     let rejection = PostgresToolLoopRepository::new(pool.clone())
         .decide(

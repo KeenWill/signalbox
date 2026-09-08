@@ -21,6 +21,8 @@ mod event;
 mod runtime;
 mod status;
 mod translate;
+
+pub use translate::serialized_message_bytes;
 mod wire;
 
 pub use config::ClaudeCliConfig;

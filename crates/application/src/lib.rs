@@ -262,3 +262,6 @@ pub use workspace_instructions::{
     InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
     InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
 };
+
+/// Verified host-side session attribution for program input.
+pub mod program_session;

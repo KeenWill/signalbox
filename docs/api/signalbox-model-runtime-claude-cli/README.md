@@ -4,5 +4,6 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| translate | 0 | 0 | 1 | [translate](translate.md) |
 | config | 1 | 0 | 0 | [config](config.md) |
 | runtime | 3 | 0 | 1 | [runtime](runtime.md) |

@@ -2016,6 +2016,7 @@ impl SnapshotTurnDisposition {
             | ProcessTurnState::ActiveAwaitingChild { .. }
             | ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
             | ProcessTurnState::ActiveAwaitingToolRecovery { .. }
+            | ProcessTurnState::ActiveAwaitingCredentialAvailability { .. }
             | ProcessTurnState::ActiveAwaitingRunnerRecovery { .. }
             | ProcessTurnState::Cancelled { .. }
             | ProcessTurnState::ReconciliationRequired { .. } => Self::Infrastructure,

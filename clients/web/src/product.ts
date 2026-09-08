@@ -60,7 +60,7 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
     facts: ['bounded session descriptors', 'stable-address timeline windows'],
   },
   search: {
-    kind: 'committed-unimplemented',
+    kind: 'server-backed',
     owningTrack: '#994 search and usage reads',
     facts: ['cross-session search reads'],
   },
@@ -112,6 +112,7 @@ export interface ProductTransport {
 
 export interface ProductSearchState {
   q?: string
+  queryParameterIsValid?: false
   session?: string
   sessionParameterIsValid?: false
   afterAddress?: string
@@ -249,7 +250,7 @@ export const readProductSessionState = (value: Record<string, unknown>): Product
       ? afterSession !== undefined && value.afterActivity === undefined
       : afterSession !== undefined && afterActivity !== undefined
   return {
-    q: admittedSessionSearch(value.q),
+    q: value.queryParameterIsValid === false ? undefined : admittedSessionSearch(value.q),
     sort,
     archived: value.archived === true ? true : undefined,
     afterSession: validContinuation ? afterSession : undefined,
@@ -767,7 +768,26 @@ const validateSearchPageBounds = (
   return page
 }
 
-export const readProductSearchState = (value: Record<string, unknown>): ProductSearchState => {
+export const boundedSearchText = (
+  value: string,
+  maximumBytes: number,
+): { text: string; overflow: boolean } => {
+  let bytes = 0
+  let text = ''
+  for (const character of value) {
+    const point = character.codePointAt(0) ?? 0
+    const size = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4
+    if (bytes + size > maximumBytes) return { text, overflow: true }
+    bytes += size
+    text += character
+  }
+  return { text, overflow: false }
+}
+
+export const readProductSearchState = (
+  value: Record<string, unknown>,
+  maximumQueryBytes = MAX_SEARCH_QUERY_BYTES,
+): ProductSearchState => {
   const text = (key: keyof ProductSearchState) =>
     typeof value[key] === 'string' && value[key].length > 0 ? value[key] : undefined
   const cursorText = (key: 'afterAddress' | 'afterProjection') => {
@@ -782,10 +802,16 @@ export const readProductSearchState = (value: Record<string, unknown>): ProductS
       : typeof query === 'number' || typeof query === 'boolean' || query === null
         ? String(query)
         : undefined
+  const boundedQuery = boundedSearchText(q ?? '', maximumQueryBytes)
+  const session = text('session')
   return {
-    q,
-    session: text('session'),
-    ...(value.session !== undefined && typeof value.session !== 'string'
+    q: boundedQuery.text || undefined,
+    ...(boundedQuery.overflow || (query !== undefined && q === undefined && query !== '')
+      ? { queryParameterIsValid: false as const }
+      : {}),
+    session: session?.slice(0, 45),
+    ...((value.session !== undefined && typeof value.session !== 'string') ||
+    (session?.length ?? 0) > 45
       ? { sessionParameterIsValid: false as const }
       : {}),
     afterAddress: cursorText('afterAddress'),
@@ -801,7 +827,7 @@ export const readProductRouteState = (value: Record<string, unknown>): ProductRo
   const catalog = readProductSessionState(value)
   return {
     ...catalog,
-    ...readProductSearchState(value),
+    ...readProductSearchState(value, MAX_SESSION_SEARCH_BYTES),
   }
 }
 
