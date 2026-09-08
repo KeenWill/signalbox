@@ -106,6 +106,36 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testArchiveCompletionPreservesTheNewerPageRefresh() async throws {
+    let requester = SuspendedArchivePaginationRequester()
+    let service = SignalboxProcessService(
+      requester: requester, policy: ProcessDriverFixture.oneRowMetadataPolicy)
+    let viewModel = ProcessSessionListViewModel { service }
+    await viewModel.refresh()
+    let first = try XCTUnwrap(viewModel.conversations.first)
+    let next = try XCTUnwrap(viewModel.nextAfter)
+
+    let archive = Task { await viewModel.toggleArchive(first) }
+    await requester.archive.waitUntilPaused()
+    let page = Task { await viewModel.nextPage() }
+    await requester.page.waitUntilPaused()
+    XCTAssertEqual(viewModel.pageAfter, next)
+
+    await requester.archive.resume()
+    await archive.value
+    XCTAssertTrue(viewModel.isLoading)
+    await requester.page.resume()
+    await page.value
+
+    XCTAssertEqual(viewModel.pageAfter, next)
+    XCTAssertEqual(viewModel.conversations.first?.conversationID.rawValue,
+      MockSignalboxFixtures.approvalSessionID)
+    XCTAssertNotEqual(viewModel.conversations.first?.id, first.id)
+    XCTAssertFalse(viewModel.isLoading)
+    XCTAssertNil(viewModel.errorMessage)
+  }
+
+  @MainActor
   func testArchivedScanStopsAtItsPageBudgetAndCanContinue() async throws {
     let policy = ProcessDriverFixture.singlePageMetadataPolicy
     let service = makeService(policy: policy)
@@ -6164,6 +6194,50 @@ private actor OrderedProcessDriverUpdateRecorder {
       return nil
     }
     return event.cursor.rawValue
+  }
+}
+
+private actor ProcessRequestSuspension {
+  private var completion: CheckedContinuation<Void, Never>?
+  private var started: CheckedContinuation<Void, Never>?
+
+  func pause() async {
+    await withCheckedContinuation { continuation in
+      completion = continuation
+      started?.resume()
+      started = nil
+    }
+  }
+
+  func waitUntilPaused() async {
+    guard completion == nil else { return }
+    await withCheckedContinuation { continuation in
+      started = continuation
+    }
+  }
+
+  func resume() {
+    completion?.resume()
+    completion = nil
+  }
+}
+
+private struct SuspendedArchivePaginationRequester: SignalboxProcessRequesting {
+  let archive = ProcessRequestSuspension()
+  let page = ProcessRequestSuspension()
+  private let fallback = SignalboxProcessClient(
+    connectionFactory: MockProcessProtocolConnectionFactory())
+
+  func open(_ request: SignalboxProcessClientRequest) async throws -> any SignalboxProcessExchange {
+    switch request {
+    case .replaceSessionMetadata:
+      await archive.pause()
+    case .listConversations(_, _, _, _, .some):
+      await page.pause()
+    default:
+      break
+    }
+    return try await fallback.open(request)
   }
 }
 

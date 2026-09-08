@@ -198,6 +198,7 @@ final class ProcessSessionListViewModel: ObservableObject {
     }
     let generation = serviceGeneration
     publicationGeneration &+= 1
+    let publication = publicationGeneration
     activeRefreshID = UUID()
     isLoading = false
     guard let service = serviceProvider() else {
@@ -209,7 +210,7 @@ final class ProcessSessionListViewModel: ObservableObject {
         !conversation.archived,
         conversation: conversation
       )
-      guard serviceGeneration == generation else {
+      guard serviceGeneration == generation, publicationGeneration == publication else {
         return
       }
       publicationGeneration &+= 1
@@ -221,7 +222,7 @@ final class ProcessSessionListViewModel: ObservableObject {
       conversations[index] = replacement
       errorMessage = nil
     } catch {
-      guard serviceGeneration == generation else {
+      guard serviceGeneration == generation, publicationGeneration == publication else {
         return
       }
       publicationGeneration &+= 1
