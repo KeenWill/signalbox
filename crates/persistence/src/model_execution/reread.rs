@@ -1,4 +1,7 @@
-use super::{ModelCallIdentityCollision, ModelCallRepositoryError, encode_disposition, required};
+use super::{
+    ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError, encode_disposition,
+    required,
+};
 use crate::mapping::{session_id_to_uuid, turn_id_to_uuid};
 use rust_decimal::Decimal;
 use signalbox_application::ModelCallTerminalIdentityCandidates;
@@ -35,7 +38,9 @@ pub(super) async fn terminal_observation_closure_matches(
             completed_terminal_closure_matches(connection, session, observation, response).await
         }
         ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
-            tool_round_terminal_closure_matches(connection, session, observation, response).await
+            tool_round_terminal_closure_matches(connection, session, observation, response)
+                .await
+                .map_err(retained_response_error)
         }
         ModelCallTerminalObservation::KnownFailed => {
             failed_terminal_closure_matches(connection, session, observation).await
@@ -60,6 +65,16 @@ pub(super) async fn terminal_observation_closure_matches(
         ModelCallTerminalObservation::Ambiguous => {
             ambiguous_terminal_closure_matches(connection, session, observation).await
         }
+    }
+}
+
+fn retained_response_error(error: ModelCallRepositoryError) -> ModelCallRepositoryError {
+    match error {
+        ModelCallRepositoryError::Database {
+            source: sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_),
+            ..
+        } => ModelCallCorruption::Inconsistent("retained terminal response").into(),
+        other => other,
     }
 }
 
@@ -1210,4 +1225,62 @@ pub(super) fn prepared_matches_stopped(
                 }
                 _ => true,
             })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+    use std::io;
+
+    #[test]
+    fn retained_response_decode_failures_are_corruption() {
+        for source in [
+            sqlx::Error::ColumnDecode {
+                index: String::from("assistant_text_value"),
+                source: Box::new(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid retained text",
+                )),
+            },
+            sqlx::Error::Decode(Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid retained value",
+            ))),
+        ] {
+            let error = retained_response_error(source.into());
+            assert_eq!(
+                error.operator_failure_class(),
+                OperatorFailureClass::FailClosedCorruption
+            );
+            assert!(matches!(
+                error,
+                ModelCallRepositoryError::Corruption(ModelCallCorruption::Inconsistent(
+                    "retained terminal response"
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn retained_response_io_failures_remain_infrastructure() {
+        let source = sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "database read timed out",
+        ));
+        let error = retained_response_error(source.into());
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
+        assert!(matches!(
+            error,
+            ModelCallRepositoryError::Database {
+                source: sqlx::Error::Io(_),
+                commit_ambiguous: false
+            }
+        ));
+    }
 }
