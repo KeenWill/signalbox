@@ -306,19 +306,20 @@ pub(super) async fn dispatch_updates(
                 }
                 OutboxDeliveryDecision::Delivered
             })
-            .await
-            .map_err(ProcessRuntimeError::Dispatch)?;
+            .await;
         match outcome {
-            OutboxDispatchOutcome::Delivered { .. } => {}
-            OutboxDispatchOutcome::Idle => {
+            Ok(OutboxDispatchOutcome::Delivered { .. }) => {}
+            Ok(OutboxDispatchOutcome::Idle)
+            | Err(OutboxDispatchError::Database(sqlx::Error::PoolTimedOut)) => {
                 tokio::select! {
                     () = wait_for_shutdown(&mut shutdown) => return Ok(()),
                     () = sleep(OUTBOX_IDLE_POLL_INTERVAL) => {}
                 }
             }
-            OutboxDispatchOutcome::Retry { .. } => {
+            Ok(OutboxDispatchOutcome::Retry { .. }) => {
                 return Err(ProcessRuntimeError::UnexpectedDispatcherRetry);
             }
+            Err(error) => return Err(ProcessRuntimeError::Dispatch(error)),
         }
     }
 }
@@ -634,6 +635,140 @@ mod runner_recovery_tests {
         shutdown.send(true)?;
         tokio::time::timeout(COMPLETION_DEADLINE, forwarder).await???;
         pool.close().await;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod dispatcher_tests {
+    use super::*;
+    use signalbox_application::InProcessEligibilityWorkSource;
+    use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+    use sqlx::postgres::PgPoolOptions;
+    use tokio::time::timeout;
+    use uuid::Uuid;
+
+    fn dispatcher_fanouts() -> ProcessFanouts {
+        ProcessFanouts {
+            durable: broadcast::channel(8).0,
+            streaming: broadcast::channel(8).0,
+            monitor: broadcast::channel(8).0,
+            runner_recovery: watch::channel(()).0,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_pool_closure_remains_fatal() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@localhost/fixture")
+            .expect("syntactically valid fixture URL");
+        pool.close().await;
+        let (nudge, _source) =
+            InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+        let (_shutdown, receiver) = watch::channel(false);
+        let result = dispatch_updates(pool, nudge, dispatcher_fanouts(), None, receiver).await;
+        assert!(matches!(
+            result,
+            Err(ProcessRuntimeError::Dispatch(
+                OutboxDispatchError::Database(sqlx::Error::PoolClosed)
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn dispatcher_delivers_the_pending_event_after_pool_pressure_clears()
+    -> Result<(), Box<dyn Error>> {
+        use signalbox_domain::{
+            CreateSession, SessionCreationCause, SessionCreationProvenance, TranscriptAncestry,
+        };
+        use signalbox_persistence::{
+            SessionCredentialPin, SessionModelCredential, disposable_postgres_server_args,
+            disposable_postgres_state_tmpfs_from_example, disposable_test_container_labels,
+            local_test_connection_options, migrate,
+        };
+        use testcontainers_modules::{
+            postgres::Postgres,
+            testcontainers::{ImageExt, runners::AsyncRunner},
+        };
+
+        const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+        const FIXTURE_FAMILY: &str = "fixture-family";
+        const FIXTURE_CREDENTIAL: &str = "fixture-primary";
+        let container = Postgres::default()
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
+            .with_labels(disposable_test_container_labels())
+            .start()
+            .await?;
+        let url = format!(
+            "postgres://postgres:postgres@{}:{}/postgres",
+            container.get_host().await?,
+            container.get_host_port_ipv4(5432).await?
+        );
+        let acquisition_timeout = Duration::from_millis(250);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(acquisition_timeout)
+            .connect_with(local_test_connection_options(&url)?)
+            .await?;
+        migrate(&pool).await?;
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let command = CreateSession::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            SessionCreationProvenance::new(
+                SessionCreationCause::Interactive,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(Uuid::now_v7()),
+            )),
+        )
+        .prepare(session)
+        .expect("interactive creation without ancestry is preparable");
+        let pin = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+            FIXTURE_FAMILY,
+            FIXTURE_CREDENTIAL,
+        )])
+        .expect("the fixture names one credential family");
+        CreateSessionRepository::new(pool.clone(), pin)
+            .handle(command)
+            .await?;
+        let held = pool.acquire().await?;
+        let (nudge, _source) =
+            InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+        let fanouts = dispatcher_fanouts();
+        let mut monitor = fanouts.monitor.subscribe();
+        let (shutdown, receiver) = watch::channel(false);
+        let mut dispatch = Box::pin(dispatch_updates(
+            pool.clone(),
+            nudge,
+            fanouts,
+            None,
+            receiver,
+        ));
+        let pressure_window = acquisition_timeout * 3 + OUTBOX_IDLE_POLL_INTERVAL * 2;
+        assert!(
+            timeout(pressure_window, dispatch.as_mut()).await.is_err(),
+            "pool exhaustion must leave the dispatcher running"
+        );
+        assert!(matches!(
+            monitor.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        drop(held);
+        let event = tokio::select! {
+            result = dispatch.as_mut() => panic!("dispatcher stopped before delivery: {result:?}"),
+            event = timeout(Duration::from_secs(5), monitor.recv()) => event??,
+        };
+        assert!(
+            matches!(event, ProcessMonitorUpdate::Durable { session: delivered, .. } if delivered == session)
+        );
+        shutdown.send_replace(true);
+        timeout(Duration::from_secs(5), dispatch).await??;
+        pool.close().await;
+        drop(container);
         Ok(())
     }
 }
