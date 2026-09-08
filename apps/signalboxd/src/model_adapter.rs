@@ -1247,6 +1247,8 @@ fast_mode = "request_control"
 IFS= read -r initialize
 printf '%s\n' '{"id":1,"result":{}}'
 IFS= read -r initialized
+IFS= read -r rate_limits
+printf '%s\n' '{"id":4,"result":{"rateLimits":{}}}'
 IFS= read -r thread_start
 printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-configured"}}}'
 IFS= read -r turn_start
