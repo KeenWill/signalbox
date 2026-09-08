@@ -13,6 +13,23 @@ import domain_spine_digest as digest
 
 
 class DomainSpineDigestTests(unittest.TestCase):
+    def test_current_json_requires_one_matching_crate_file(self) -> None:
+        from render_domain_spine import json_input
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / 'first', root / 'second'
+            first.mkdir()
+            second.mkdir()
+            with self.assertRaisesRegex(ValueError, 'found 0'):
+                json_input('sample-crate', [first, second])
+            source = first / 'sample_crate.json'
+            source.write_text('{}')
+            self.assertEqual(json_input('sample-crate', [first, second]), source)
+            (second / source.name).write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'found 2'):
+                json_input('sample-crate', [first, second])
+
     def test_negative_auto_trait_implementation_is_not_a_delta_item(self) -> None:
         baseline = "pub mod sample\npub struct sample::Packet\n"
         current = baseline + "impl !core::marker::Freeze for sample::Packet\n"

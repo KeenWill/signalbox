@@ -494,3 +494,280 @@ async fn credential_capacity_policy_failure_action_precedes_low_headroom()
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_exclusion_clear_replays_before_newer_generations_and_filters_origins()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::credential_exclusions::{
+        self as exclusions, ClearCredentialExclusion as Clear,
+        ClearCredentialExclusionOutcome as Outcome, ClearCredentialExclusionResult as Result,
+        CredentialExclusionTarget as Target,
+    };
+    let (container, pool, _) = migrated_postgres().await?;
+    let old_generation: i64 = sqlx::query_scalar("INSERT INTO credential_exclusion(kind,profile,origin) VALUES ('profile_quarantine','home','codex_home') RETURNING record_generation").fetch_one(&pool).await?;
+    let oauth_generation: i64 = sqlx::query_scalar("INSERT INTO credential_exclusion(kind,profile,origin) VALUES ('profile_quarantine','oauth','oauth_refresh') RETURNING record_generation").fetch_one(&pool).await?;
+    let final_generation: i64 = sqlx::query_scalar("INSERT INTO credential_exclusion(kind,profile,origin) VALUES ('profile_quarantine','z-home','codex_home') RETURNING record_generation").fetch_one(&pool).await?;
+    let old = Target::ProfileQuarantine {
+        profile: "home".into(),
+        record_generation: old_generation as u64,
+    };
+    let last = Target::ProfileQuarantine {
+        profile: "z-home".into(),
+        record_generation: final_generation as u64,
+    };
+    let page = exclusions::list(&pool, 1, None).await?;
+    assert_eq!(page.exclusions, vec![old.clone()]);
+    assert_eq!(page.next_after, Some(old.clone()));
+    let page = exclusions::list(&pool, 1, page.next_after.as_ref()).await?;
+    assert_eq!(page.exclusions, vec![last]);
+    assert_eq!(page.next_after, None);
+    let clear = Clear {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        target: old.clone(),
+    };
+    assert_eq!(
+        exclusions::clear(&pool, clear.clone()).await?,
+        Result::Recorded(Outcome::Cleared)
+    );
+    assert_eq!(
+        exclusions::clear(
+            &pool,
+            Clear {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                target: old.clone()
+            }
+        )
+        .await?,
+        Result::Recorded(Outcome::AlreadyCleared)
+    );
+    sqlx::query("INSERT INTO credential_exclusion(kind,profile,origin) VALUES ('profile_quarantine','home','codex_home')").execute(&pool).await?;
+    assert_eq!(
+        exclusions::clear(&pool, clear.clone()).await?,
+        Result::Recorded(Outcome::Cleared)
+    );
+    assert_eq!(
+        exclusions::clear(
+            &pool,
+            Clear {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                target: old
+            }
+        )
+        .await?,
+        Result::Recorded(Outcome::StaleGeneration)
+    );
+    let oauth = Target::ProfileQuarantine {
+        profile: "oauth".into(),
+        record_generation: oauth_generation as u64,
+    };
+    assert_eq!(
+        exclusions::clear(
+            &pool,
+            Clear {
+                command_id: clear.command_id,
+                target: oauth.clone()
+            }
+        )
+        .await?,
+        Result::ConflictingReuse
+    );
+    assert_eq!(
+        exclusions::clear(
+            &pool,
+            Clear {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                target: oauth
+            }
+        )
+        .await?,
+        Result::Recorded(Outcome::UnknownCredentialExclusion)
+    );
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM credential_exclusion WHERE record_generation = $1",
+    )
+    .bind(old_generation)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained, 1, "clearing retains the exact generation");
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_exclusion_clear_restores_a_quarantined_pool_member()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::credential_exclusions::{
+        self as exclusions, ClearCredentialExclusion as Clear,
+        ClearCredentialExclusionOutcome as Outcome, ClearCredentialExclusionResult as Result,
+    };
+    let (container, pool, _) = migrated_postgres().await?;
+    let call = prepare_capacity_call(
+        &pool,
+        0xf046_0000,
+        policy(vec![member(FIRST, 1)]).with_capacity_policy(
+            CredentialPoolRuntimeTieBreak::FirstListed,
+            Some(10),
+            CredentialPoolRuntimeAction::Quarantine,
+        ),
+    )
+    .await?;
+    observe_capacity(call, snapshot(1, 80)).await?;
+    let next = prepare_capacity_call(
+        &pool,
+        0xf046_0100,
+        policy(vec![member(FIRST, 1), member(SECOND, 1)]),
+    )
+    .await?;
+    assert_eq!(next.reference, SECOND);
+    let targets = exclusions::list(&pool, 100, None).await?;
+    assert_eq!(targets.exclusions.len(), 1);
+    assert_eq!(targets.exclusions[0].profile(), FIRST);
+    let clear = Clear {
+        command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+        target: targets.exclusions[0].clone(),
+    };
+    assert_eq!(
+        exclusions::clear(&pool, clear).await?,
+        Result::Recorded(Outcome::Cleared)
+    );
+    let next = prepare_capacity_call(
+        &pool,
+        0xf046_0200,
+        policy(vec![member(FIRST, 1), member(SECOND, 1)]),
+    )
+    .await?;
+    assert_eq!(
+        next.reference, FIRST,
+        "clearing changes durable selection eligibility"
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn credential_exclusion_generations_are_scoped_to_pool_policy() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_persistence::credential_exclusions::{
+        self as exclusions, ClearCredentialExclusion as Clear,
+        ClearCredentialExclusionOutcome as Outcome, ClearCredentialExclusionResult as Result,
+        CredentialExclusionTarget as Target,
+    };
+    let (container, pool, _) = migrated_postgres().await?;
+    let first = prepare_capacity_call(
+        &pool,
+        0xf046_0300,
+        policy(vec![member(FIRST, 1)]).with_capacity_policy(
+            CredentialPoolRuntimeTieBreak::FirstListed,
+            Some(10),
+            CredentialPoolRuntimeAction::AvoidNewSessions,
+        ),
+    )
+    .await?;
+    observe_capacity(first, snapshot(1, 80)).await?;
+    let old = exclusions::list(&pool, 100, None)
+        .await?
+        .exclusions
+        .remove(0);
+    let second = prepare_capacity_call(
+        &pool,
+        0xf046_0400,
+        policy(vec![member(FIRST, 1)]).with_capacity_policy(
+            CredentialPoolRuntimeTieBreak::FirstListed,
+            Some(0),
+            CredentialPoolRuntimeAction::AvoidNewSessions,
+        ),
+    )
+    .await?;
+    observe_capacity(second, snapshot(0, 80)).await?;
+    let before = exclusions::list(&pool, 100, None).await?;
+    assert_eq!(before.exclusions.len(), 2);
+    assert!(matches!(old, Target::MembershipExclusion { .. }));
+    assert_eq!(
+        exclusions::clear(
+            &pool,
+            Clear {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                target: old.clone(),
+            }
+        )
+        .await?,
+        Result::Recorded(Outcome::Cleared),
+        "a newer generation in another policy cannot make this target stale",
+    );
+    let after = exclusions::list(&pool, 100, None).await?;
+    assert_eq!(after.exclusions.len(), 1);
+    assert_ne!(after.exclusions[0], old);
+    assert!(before.exclusions.contains(&after.exclusions[0]));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Action rows remain effective when no exclusion generation has been recorded.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pool_actions_without_exclusion_generations_still_exclude_members()
+-> Result<(), Box<dyn Error>> {
+    for action in [
+        CredentialPoolRuntimeAction::Quarantine,
+        CredentialPoolRuntimeAction::AvoidNewSessions,
+    ] {
+        let (container, pool, _) = migrated_postgres().await?;
+        let call = prepare_capacity_call(
+            &pool,
+            0xf046_0500,
+            policy(vec![member(FIRST, 1)]).with_capacity_policy(
+                CredentialPoolRuntimeTieBreak::FirstListed,
+                Some(10),
+                action,
+            ),
+        )
+        .await?;
+        sqlx::query(
+            "ALTER TABLE credential_pool_member_action DISABLE TRIGGER credential_action_exclusion",
+        )
+        .execute(&pool)
+        .await?;
+        observe_capacity(call, snapshot(1, 80)).await?;
+        sqlx::query(
+            "ALTER TABLE credential_pool_member_action ENABLE TRIGGER credential_action_exclusion",
+        )
+        .execute(&pool)
+        .await?;
+        let actions: i64 = sqlx::query_scalar("SELECT count(*) FROM credential_pool_member_action")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(actions, 1);
+        let generations: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM credential_exclusion_state")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(generations, 0);
+        let next = prepare_capacity_call(
+            &pool,
+            0xf046_0600,
+            policy(vec![member(FIRST, 1), member(SECOND, 1)]),
+        )
+        .await?;
+        assert_eq!(
+            next.reference, SECOND,
+            "unprojected actions must still exclude their member"
+        );
+        let generations: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM credential_exclusion_state")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            generations, 0,
+            "selection does not backfill exclusion generations"
+        );
+        pool.close().await;
+        drop(container);
+    }
+    Ok(())
+}

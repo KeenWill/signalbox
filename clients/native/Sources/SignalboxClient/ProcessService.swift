@@ -844,6 +844,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         "The input-submission receipt named a different session."
       )
     }
+    guard submitted.termination == nil else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The input-submission receipt unexpectedly carried termination metadata."
+      )
+    }
     guard submitted.modelSettings.matches(submission.modelSelection) else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The input-submission receipt settings named a different direct model."
@@ -987,6 +992,13 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     guard submitted.sessionID == prepared.sessionID else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The stop receipt named a different session."
+      )
+    }
+    guard let termination = submitted.termination,
+      termination.descendantScope == prepared.descendantScope
+    else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The stop receipt omitted termination metadata or named a different descendant scope."
       )
     }
     guard submitted.modelSettings.matches(prepared.modelSelection) else {

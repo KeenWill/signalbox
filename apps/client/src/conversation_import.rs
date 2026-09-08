@@ -137,12 +137,20 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
         | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::ConfigurationReloaded { .. }
+        | ServerMessage::ConfigurationReloadFailed { .. }
         | ServerMessage::DeploymentLimits { .. }
         | ServerMessage::RunnerReplacementReceipt { .. }
         | ServerMessage::RunnerAbandonmentReceipt { .. }
         | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
-        | ServerMessage::OauthCredentialReceipt { .. } => ConversationImportResponse::Unexpected,
+        | ServerMessage::OauthCredentialReceipt { .. }
+        | ServerMessage::CredentialExclusionStart {}
+        | ServerMessage::CredentialExclusion { .. }
+        | ServerMessage::CredentialExclusionEnd { .. }
+        | ServerMessage::CredentialExclusionCleared { .. } => {
+            ConversationImportResponse::Unexpected
+        }
     }
 }
 

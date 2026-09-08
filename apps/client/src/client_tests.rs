@@ -611,6 +611,7 @@ fn goal_mutation_receipt_rejects_a_cross_wired_session() {
     let selected_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
     let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
     let message = ServerMessage::GoalTransitionApplied {
+        termination: None,
         session_id: foreign_session,
         event_ordinal: CanonicalU64::new(1),
         generation: CanonicalU64::new(1),
@@ -4187,6 +4188,106 @@ async fn submit_connection_failure_is_definitely_uncommitted() -> Result<(), Box
 }
 
 #[tokio::test]
+async fn submit_input_rejects_stop_termination_metadata() -> Result<(), Box<dyn Error>> {
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let content = InputContent::new(String::from("continue"));
+    let expected_request = ClientRequest::SubmitInput {
+        command_id,
+        session_id,
+        content: UserInputContent::text(content.clone().into_string()),
+        expected_defaults_version: Some(CanonicalU64::new(1)),
+        model_settings: ModelSettingsOverlay::inherit_all(),
+        delivery: None,
+    };
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &expected_request,
+            ServerMessage::InputSubmitted {
+                termination: Some(signalbox_process_protocol::TerminationReceipt {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    descendant_count: CanonicalU64::new(0),
+                }),
+                session_id,
+                accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                acceptance_position: CanonicalU64::new(1),
+                turn_id,
+                model_settings: provider_default_model_settings(),
+            },
+        )
+        .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let result = submit_input(
+        &mut client,
+        command_id,
+        session_id,
+        content,
+        Some(CanonicalU64::new(1)),
+        None,
+    )
+    .await;
+    assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_turn_rejects_stop_termination_metadata() -> Result<(), Box<dyn Error>> {
+    let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let content = InputContent::new(String::from("continue"));
+    let expected_request = ClientRequest::ReconcileTurn {
+        command_id,
+        session_id,
+        expected_active_turn_id: turn_id,
+        content: UserInputContent::text(content.clone().into_string()),
+        expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
+    };
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &expected_request,
+            ServerMessage::InputSubmitted {
+                termination: Some(signalbox_process_protocol::TerminationReceipt {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    descendant_count: CanonicalU64::new(0),
+                }),
+                session_id,
+                accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                acceptance_position: CanonicalU64::new(1),
+                turn_id,
+                model_settings: provider_default_model_settings(),
+            },
+        )
+        .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let result = reconcile_turn(
+        &mut client,
+        command_id,
+        session_id,
+        turn_id,
+        content,
+        CanonicalU64::new(1),
+    )
+    .await;
+    assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn submit_input_releases_its_connection_after_acceptance() -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("client.sock");
@@ -4218,6 +4319,7 @@ async fn submit_input_releases_its_connection_after_acceptance() -> Result<(), B
             request.version(),
             request.request_id(),
             ServerMessage::InputSubmitted {
+                termination: None,
                 session_id,
                 accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 acceptance_position: CanonicalU64::new(1),
@@ -4361,6 +4463,7 @@ async fn reconcile_turn_names_the_parked_turn_and_returns_its_successor()
             request.version(),
             request.request_id(),
             ServerMessage::InputSubmitted {
+                termination: None,
                 session_id,
                 accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 acceptance_position: CanonicalU64::new(2),
@@ -4424,6 +4527,10 @@ async fn stop_turn_names_the_active_turn_and_returns_its_successor() -> Result<(
             request.version(),
             request.request_id(),
             ServerMessage::InputSubmitted {
+                termination: Some(signalbox_process_protocol::TerminationReceipt {
+                    descendant_scope: selected_scope,
+                    descendant_count: CanonicalU64::new(2),
+                }),
                 session_id,
                 accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                 acceptance_position: CanonicalU64::new(2),
@@ -4449,7 +4556,7 @@ async fn stop_turn_names_the_active_turn_and_returns_its_successor() -> Result<(
         selected_scope,
     )
     .await?;
-    assert_eq!(accepted_successor, successor_turn_id);
+    assert_eq!(accepted_successor.turn_id, successor_turn_id);
     server.await??;
     Ok(())
 }
@@ -5153,4 +5260,138 @@ fn review_pass_snapshot() -> ReviewPassSnapshot {
         turn_id: None,
         output_frontier_id: None,
     }
+}
+
+#[tokio::test]
+async fn credential_clear_rejects_a_receipt_for_another_generation() -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{CredentialExclusionClearOutcome, CredentialExclusionTarget};
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let target = CredentialExclusionTarget::ProfileQuarantine {
+        profile: "home".into(),
+        record_generation: CanonicalU64::new(1),
+    };
+    let request_target = target.clone();
+    let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &ClientRequest::ClearCredentialExclusion {
+                command_id,
+                target: request_target,
+            },
+            ServerMessage::CredentialExclusionCleared {
+                target: CredentialExclusionTarget::ProfileQuarantine {
+                    profile: "home".into(),
+                    record_generation: CanonicalU64::new(2),
+                },
+                outcome: CredentialExclusionClearOutcome::Cleared,
+            },
+        )
+        .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = crate::credential::credential(
+        &mut client,
+        &mut Output::new(&mut stdout, &mut stderr, false),
+        crate::arguments::CredentialCommand::Clear {
+            target,
+            command_id: Some(command_id),
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(
+        stdout.is_empty(),
+        "a mismatched receipt must not be presented as cleared"
+    );
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_configuration_prints_the_correlated_installed_sections()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("reload.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        let frame = decode_client_line(&line).map_err(io::Error::other)?;
+        let ClientRequest::ReloadConfiguration { command_id } = frame.request() else {
+            return Err(io::Error::other("expected reload request"));
+        };
+        let receipt = ServerFrame::try_new_for_version(
+            frame.version(),
+            frame.request_id(),
+            ServerMessage::ConfigurationReloaded {
+                command_id: *command_id,
+                reloaded_sections: signalbox_process_protocol::ReloadedSection::ALL.to_vec(),
+            },
+        )
+        .map_err(io::Error::other)?;
+        writer
+            .write_all(&encode_server_line(&receipt).map_err(io::Error::other)?)
+            .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut output = Output::new(&mut stdout, &mut stderr, false);
+    crate::session::reload_configuration(&mut client, &mut output, None).await?;
+    assert_eq!(
+        String::from_utf8(stdout)?,
+        "reloaded model_catalog session_templates repo_watch\n"
+    );
+    assert!(String::from_utf8(stderr)?.starts_with("command_id="));
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reload_configuration_reuses_the_supplied_command_id() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("reload.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+    let expected = ClientRequest::ReloadConfiguration { command_id };
+    let receipt = ServerMessage::ConfigurationReloaded {
+        command_id,
+        reloaded_sections: signalbox_process_protocol::ReloadedSection::ALL.to_vec(),
+    };
+    let server =
+        tokio::spawn(async move { accept_request_and_reply(&listener, &expected, receipt).await });
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let identity = command_id.into_uuid().hyphenated().to_string();
+    let exit = run(
+        client_arguments(
+            &socket,
+            &["reload-configuration", "--command-id", &identity],
+        ),
+        None,
+        &mut input,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    server.await??;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    assert_eq!(
+        String::from_utf8(stdout)?,
+        "reloaded model_catalog session_templates repo_watch\n"
+    );
+    assert_eq!(
+        String::from_utf8(stderr)?,
+        format!("command_id={identity}\n")
+    );
+    Ok(())
 }

@@ -295,6 +295,13 @@ is scheduled or attempting and true only after the recovery budget in
 [turn-lifecycle-and-scheduling.md](turn-lifecycle-and-scheduling.md) is
 exhausted.
 
+A successful `stop_goal` or `stop_turn` receipt carries `termination` with the
+selected `descendant_scope` and the recorded `descendant_count`; parent-alone
+has count zero. An equal command retry reads those immutable facts without
+re-evaluating the cascade. Other goal and input receipts omit `termination`.
+Input commands retain the first handling's receipt kind across equal replay
+through either input surface.
+
 Each delegation request carries the invoking session, turn, and tool request
 identity, which must reconstitute one matching logical request before any
 mutation; reconstitution is not execution authority, and the daemon must also
@@ -371,6 +378,55 @@ provider delta or a metadata title or tag. A single explicit raw-output option
 is the only opt-in to unescaped text. A recorded review finding carries an
 opaque caller-supplied file-path key.
 
+`spawn_session` carries a bounded `task` and the closed relationship object and
+returns `session_spawned { tool_request_id, child_session_id, relationship }`.
+The placement-owned creation transaction that implements the parent-directory
+default creates the child; it preserves the exact-request and authority rules of
+the delegation contracts in
+[sessions-and-transcript](sessions-and-transcript.md), and the task string fits
+both the delegation-content ceiling and its complete normalized JSON argument
+envelope.
+
+Configuration reload is `reload_configuration { command_id }`, with a
+user-global command identity. Equal retries report busy while pending or replay
+the stored result without reading configuration again. Reloads serialize from
+file read through the terminal result. Before installation, core commits the
+complete checked replacement and prior reloadable snapshots and the checked
+rule-set digest as durable intent. Template snapshots contain accepted
+prompt-file contents.
+
+Startup reload replay shares the serial request-reload boundary. Reload pauses
+sweep admission and stops and joins active sweep attempts and affected ingestion
+tasks before rule activation and event-tail capture. Only after that activation
+commits does core reconcile convergence targets from the retained intent. On a
+stale or conflicting rule-revision rejection, recovery first validates the prior
+snapshot against the current startup-only sections. If invalid, it terminalizes
+the intent with `configuration_reload_failed` without resuming workers, and
+startup recovery fails. Otherwise it resumes ingestion and sweep admission under
+the prior snapshot before terminalizing the intent with
+`configuration_reload_failed`, without replacing the running configuration.
+Other failures after either stops leave the intent pending until recovery
+installs the replacement snapshot and resumes them before terminalizing the
+claim. The [reload-intent input](ownership-seam.md) delivers rule activation
+only, and the module activates the rules atomically and idempotently by command
+identity and digest. The activation transaction captures each repository's
+current event tail and retains it for idempotent replay. Before replay activates
+any retained effects, startup validates the retained reloadable snapshot
+together with the on-disk startup-only sections; incompatibility fails startup
+and leaves the intent pending. Startup replays any undelivered intent from its
+retained payload even if the configuration files changed, before terminalizing
+its claim.
+
+Success returns `configuration_reloaded { command_id, reloaded_sections }`, with
+exactly `model_catalog`, `session_templates`, and `repo_watch` in that order.
+Failure returns `configuration_reload_failed { command_id, phase, reason }`;
+`phase` is `read`, `validate`, `activate`, `reconcile`, or `install`, and
+`reason` is sanitized as startup logs are, with 1 through 1,024 UTF-8 bytes and
+no control characters. A pending reload returns `unavailable` with the message
+`configuration reload is busy`. The terminal client exposes
+`reload-configuration` with optional `--command-id` for retries and prints the
+installed sections or failure phase and reason.
+
 `replace_lost_runner` and `abandon_lost_runner` carry the command and session
 identities; replacement also carries a nullable complete checkout revision.
 `promote_pending_runner` carries the command identity and pending enrollment
@@ -421,17 +477,42 @@ finishes. Successful re-provisioning replaces authorization and clears every
 OAuth delivery-origin quarantine and cached access; failed re-provisioning
 clears none.
 
+Credential-exclusion administration is one `list_credential_exclusions` read
+carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
+carrying a user-global `command_id` and one closed `target` object. The target
+is `profile_quarantine { profile, record_generation }`,
+`membership_exclusion { pool_policy_id, profile, record_generation }`, or
+`session_displacement { session_id, pool_policy_id, profile, record_generation }`;
+chain exclusions remain insert-only and turn-local. The read lists every active
+exclusion the mutation admits, as its exact target object, and omits exactly the
+records the mutation rejects; the filter turns on the exclusion's origin, never
+on the profile's delivery. The origin filter rejects `oauth_refresh` quarantines
+and accepts `codex_home` quarantines. `page_size` is 1 through 100; `after` is
+null or one complete target object and is an exclusive keyset cursor. Results
+sort by target tag in the order above, then by each field's canonical order:
+UTF-8 bytes for configured names, UUID bytes for durable identities, numeric
+order for generations. The read opens with `credential_exclusion_start`, then
+one `credential_exclusion` per row, then
+`credential_exclusion_end { exclusion_count, next_after }` with a null
+`next_after` only at the end. The mutation marks exactly the named active
+generation cleared. A newer active generation at the target's own exact scope
+returns `stale_generation` before the named older generation is considered; the
+scope is the profile and origin for a profile quarantine, the pool policy and
+profile for a membership exclusion, and the session, pool policy, and profile
+for a session displacement. A target with no exactly matching retained record is
+`unknown_credential_exclusion`; an exact record an earlier command already
+cleared is `already_cleared`. Success returns
+`credential_exclusion_cleared { target, outcome }` with outcome `cleared` or
+`already_cleared`, and the inactive record is retained so the second answer is
+durable. An equal `command_id` replay returns its stored receipt before current
+state is evaluated. Both operations are authorized as every other request is:
+reaching the owner-private socket is the authority.
+
 ## Planned
 
-- Credential-exclusion administration, a listing read and a clear mutation over
-  active exclusions: [design](../design/process-protocol.md).
-- Configuration reload request: [design](../design/process-protocol.md).
 - Program-run cancellation request and receipt:
   [design](../design/process-protocol.md).
 - Runner creation and status requests, and the status read's failure evidence:
   [design](../design/process-protocol.md).
-- `spawn_session` creation of a delegated child:
-  [design](../design/process-protocol.md).
-- Cascade metadata on stop receipts: [design](../design/process-protocol.md).
 - Typed projection of credential-pool exhaustion and of the
   credential-availability wait: [design](../design/process-protocol.md).

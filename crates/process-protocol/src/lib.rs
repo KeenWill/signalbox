@@ -4,6 +4,7 @@
 //! persistence, and client presentation values remain distinct mappings
 //! (docs/spec/process-protocol.md).
 
+mod credential_exclusions;
 mod delegation;
 mod error;
 mod event;
@@ -21,6 +22,7 @@ mod shared_validation;
 mod transcript;
 mod user_input;
 
+pub use credential_exclusions::*;
 pub use delegation::*;
 pub use error::*;
 pub use event::*;

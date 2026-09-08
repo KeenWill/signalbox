@@ -148,6 +148,10 @@ For submit-input, equal replay returns the recorded result only when current
 durable state still proves that result correlates with committed effects;
 otherwise the adapter fails closed.
 
+`ClearCredentialExclusion` claims its exact target and terminal outcome in one
+append-only typed command record; equal replay returns that outcome before
+current exclusion state is evaluated.
+
 A claimed registry row whose typed record is missing, duplicated, of a
 mismatched kind, or undecodable is storage corruption, never an unseen command.
 Why: treating it as unseen would let one identifier acquire a second meaning.
@@ -188,6 +192,14 @@ content-derived identifier, reader identity, bytes, extracted text, filename,
 declared type, parser message, stderr, path, or credential. The general rule for
 what errors and logs may contain is in [process-protocol](process-protocol.md).
 
+`reload_configuration` has a closed registry kind and append-only typed request
+and result record families. Its request has no comparison fields; the command
+identity is excluded from structural equality. The request record retains the
+checked replacement and prior snapshots as canonical JSON and the rule-set
+digest; intent and terminal result may commit in separate transactions. A
+pre-effect read or validation failure claims the identity with its terminal
+result atomically.
+
 `ReplaceLostRunner`, `AbandonLostRunner`, and `PromotePendingRunner` have
 immutable typed request and result families in the user-global command registry.
 Abandonment, promotion, and an immediately installable non-provisioning
@@ -208,8 +220,6 @@ receipt.
 
 ## Planned
 
-- Registry kind and typed request/result records for configuration reload:
-  [design](../design/identity-and-commands.md).
 - A production generator for `ProviderTargetEvidenceId`:
   [design](../design/identity-and-commands.md).
 - Writers and generators for `WorkspaceId`, `GitRemoteMintId`, and

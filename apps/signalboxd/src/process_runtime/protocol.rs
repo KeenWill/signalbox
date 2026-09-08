@@ -68,6 +68,8 @@ pub(super) enum InternalDiagnostic {
     SessionDefaultsCommitAmbiguous,
     SessionDefaultsCommandKindMismatch,
     SessionDefaultsCorruption,
+    CredentialExclusionDatabase,
+    CredentialExclusionCorruption,
     SessionDelegationDatabase,
     SessionDelegationCorruption,
     SessionDelegationContract,
@@ -97,6 +99,7 @@ impl InternalDiagnostic {
             | Self::SessionCreationDatabase
             | Self::SessionMetadataDatabase
             | Self::SessionDefaultsDatabase
+            | Self::CredentialExclusionDatabase
             | Self::SessionDelegationDatabase => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
@@ -150,6 +153,7 @@ impl InternalDiagnostic {
             | Self::ConversationListingCorruption
             | Self::SessionMetadataCorruption
             | Self::SessionDefaultsCorruption
+            | Self::CredentialExclusionCorruption
             | Self::SessionDelegationCorruption
             | Self::SubmitInputCorruption
             | Self::SubmitInputModelExecutionCorruption
@@ -214,6 +218,8 @@ impl InternalDiagnostic {
             Self::SessionDefaultsCommitAmbiguous => "session_defaults_commit_ambiguous",
             Self::SessionDefaultsCommandKindMismatch => "session_defaults_command_kind_mismatch",
             Self::SessionDefaultsCorruption => "session_defaults_corruption",
+            Self::CredentialExclusionDatabase => "credential_exclusion_database",
+            Self::CredentialExclusionCorruption => "credential_exclusion_corruption",
             Self::SessionDelegationDatabase => "session_delegation_database",
             Self::SessionDelegationCorruption => "session_delegation_corruption",
             Self::SessionDelegationContract => "session_delegation_contract",
@@ -601,6 +607,20 @@ where
         .await;
     match outcome {
         Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(event))) => {
+            let termination = if !schedules_turn {
+                match recorded_termination(
+                    &services.pool,
+                    DurableCommandId::from_uuid(command_uuid),
+                    session,
+                )
+                .await
+                {
+                    Ok(receipt) => Some(receipt),
+                    Err(error) => return write_error(writer, version, request_id, error).await,
+                }
+            } else {
+                None
+            };
             if schedules_turn {
                 let _ = services.eligibility_nudge.nudge(session);
             }
@@ -609,6 +629,7 @@ where
                 version,
                 request_id,
                 ServerMessage::GoalTransitionApplied {
+                    termination,
                     session_id,
                     event_ordinal: CanonicalU64::new(event.ordinal().get()),
                     generation: CanonicalU64::new(event.generation().get()),
@@ -2203,6 +2224,8 @@ pub enum ProcessRuntimeError {
     ConnectionTask(JoinError),
     /// The durable outbox dispatcher failed.
     Dispatch(OutboxDispatchError),
+    /// The shared runner-recovery notification listener failed.
+    RunnerRecoveryNotifications(sqlx::Error),
     /// The single dispatcher produced an impossible retry result.
     UnexpectedDispatcherRetry,
     /// The revalidated socket path could not be cleaned up.
@@ -2236,6 +2259,9 @@ impl fmt::Display for ProcessRuntimeError {
             }
             Self::ConnectionTask(_) => "a local process connection task failed",
             Self::Dispatch(_) => "the durable process-update dispatcher failed",
+            Self::RunnerRecoveryNotifications(_) => {
+                "the runner recovery notification listener failed"
+            }
             Self::UnexpectedDispatcherRetry => {
                 "the process-update dispatcher unexpectedly requested retry"
             }
@@ -2252,6 +2278,7 @@ impl Error for ProcessRuntimeError {
             Self::Encode(error) => Some(error),
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
+            Self::RunnerRecoveryNotifications(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
             Self::OauthRecovery(_)
             | Self::EncodeInvariant

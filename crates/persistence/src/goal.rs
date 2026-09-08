@@ -3,6 +3,8 @@
 //! The event stream is authoritative. Loads decode every durable event and
 //! replay it through the domain aggregate; no mutable current-state row exists.
 
+mod compaction;
+
 use std::num::NonZeroU64;
 
 use rust_decimal::Decimal;
@@ -557,13 +559,15 @@ impl GoalRepository {
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
                 | CommandKind::SessionLifecycle
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner
                 | CommandKind::PromotePendingRunner
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
-                | CommandKind::DeleteOauthCredential,
+                | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion,
             ) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -889,7 +893,7 @@ impl GoalRepository {
             &mut transaction,
             session,
             generation,
-            GoalTurnSource::SuccessfulTurn(predecessor),
+            GoalTurnSource::PredecessorTurn(predecessor),
             goal.current().statement().as_str(),
             &configuration,
             GoalTurnInsertion::new(position, candidates),
@@ -1689,13 +1693,15 @@ async fn existing_or_conflicting(
         | CommandKind::RegisterWorkspace
         | CommandKind::MintGitRemote
         | CommandKind::WithdrawGitRemote
+        | CommandKind::ReloadConfiguration
         | CommandKind::SessionLifecycle
         | CommandKind::ReplaceLostRunner
         | CommandKind::AbandonLostRunner
         | CommandKind::PromotePendingRunner
         | CommandKind::ProvisionOauthCredential
         | CommandKind::ReprovisionOauthCredential
-        | CommandKind::DeleteOauthCredential => {
+        | CommandKind::DeleteOauthCredential
+        | CommandKind::ClearCredentialExclusion => {
             return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
                 command_id: command.command_id(),
             });

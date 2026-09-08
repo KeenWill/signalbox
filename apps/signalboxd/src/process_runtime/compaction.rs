@@ -558,80 +558,84 @@ pub(crate) async fn compact_automatically(
     model: &Arc<dyn ContextCompactionModel>,
     session: SessionId,
     turn: TurnId,
+    frozen_selection: Option<DirectModelSelection>,
     observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
 ) -> Result<AppliedContextCompaction, AutomaticContextCompactionError> {
-    let defaults = match ProcessReadRepository::new(model_calls.pool().clone())
-        .read_session_defaults(session, None)
-        .await
-    {
-        Ok(ProcessSessionDefaultsRead::Read(defaults)) => defaults,
-        Ok(ProcessSessionDefaultsRead::SessionNotFound)
-        | Ok(ProcessSessionDefaultsRead::VersionNotFound) => {
-            return Err(AutomaticContextCompactionError::State);
-        }
-        Err(error) => return Err(AutomaticContextCompactionError::Read(error)),
-    };
-    let selection = match defaults.defaults().model() {
-        ModelSelectionRequest::Direct(selection) => selection,
-        ModelSelectionRequest::Alias(alias) => model_configuration
-            .resolve_alias(alias)
-            .ok_or(AutomaticContextCompactionError::Configuration)?
-            .selected(),
-    };
-    let target = model_configuration
-        .target_catalog()
-        .resolve(FrozenModelSelection::Direct(selection))
-        .map_err(|_| AutomaticContextCompactionError::Configuration)?
-        .target();
-    let route = model_configuration
-        .resolve_direct_model(selection)
-        .ok_or(AutomaticContextCompactionError::Configuration)?;
-    let input_includes_cache_tokens = route.adapter().reports_cache_inclusive_input();
-    let runtime_models = model_configuration.runtime_model_catalog();
-    let definition = runtime_models
-        .resolve(target)
-        .ok_or(AutomaticContextCompactionError::Configuration)?;
-    let compaction_prompt = model_configuration.compaction_prompt();
-    let prompt_bytes = u64::try_from(compaction_prompt.len())
-        .map_err(|_| AutomaticContextCompactionError::Configuration)?;
-    let automatic_input_byte_budget = u64::from(definition.context_window_tokens())
-        .checked_sub(u64::from(definition.max_output_tokens()))
-        .and_then(|available| available.checked_sub(prompt_bytes))
-        .filter(|available| *available > 0)
-        .ok_or(AutomaticContextCompactionError::Configuration)?;
-    let credential_reference = model_calls
-        .resolve_session_credential_reference(session, target)
-        .await
-        .map_err(AutomaticContextCompactionError::Credential)?;
     let repository = ContextCompactionRepository::new(model_calls.pool().clone());
-    let preview = repository
-        .preview_automatic_range(session)
-        .await
-        .map_err(AutomaticContextCompactionError::Repository)?
-        .ok_or(AutomaticContextCompactionError::State)?;
-    let preview_positions = preview
-        .members()
-        .iter()
-        .map(|member| member.position())
-        .collect::<Vec<_>>();
-    let preview_entries = preview
-        .members()
-        .iter()
-        .map(|member| member.reference())
-        .collect::<Vec<_>>();
-    let rendered_entries = ProcessReadRepository::new(model_calls.pool().clone())
-        .read_selected_transcript_entries(&preview_positions, &preview_entries)
-        .await
-        .map_err(AutomaticContextCompactionError::Read)?;
-    let requested_through_position = automatic_context_compaction_boundary(
-        preview.members(),
-        &rendered_entries,
-        automatic_input_byte_budget,
-        &BlobCatalogRepository::new(model_calls.pool().clone()),
-    )
-    .await?
-    .ok_or(AutomaticContextCompactionError::InputDoesNotFit)?;
-    let prepared = loop {
+    let compaction_prompt = model_configuration.compaction_prompt();
+    let (prepared, automatic_input_byte_budget) = loop {
+        let defaults = match ProcessReadRepository::new(model_calls.pool().clone())
+            .read_session_defaults(session, None)
+            .await
+        {
+            Ok(ProcessSessionDefaultsRead::Read(defaults)) => defaults,
+            Ok(ProcessSessionDefaultsRead::SessionNotFound)
+            | Ok(ProcessSessionDefaultsRead::VersionNotFound) => {
+                return Err(AutomaticContextCompactionError::State);
+            }
+            Err(error) => return Err(AutomaticContextCompactionError::Read(error)),
+        };
+        let selection = match frozen_selection {
+            Some(selection) => selection,
+            None => match defaults.defaults().model() {
+                ModelSelectionRequest::Direct(selection) => selection,
+                ModelSelectionRequest::Alias(alias) => model_configuration
+                    .resolve_alias(alias)
+                    .ok_or(AutomaticContextCompactionError::Configuration)?
+                    .selected(),
+            },
+        };
+        let target = model_configuration
+            .target_catalog()
+            .resolve(FrozenModelSelection::Direct(selection))
+            .map_err(|_| AutomaticContextCompactionError::Configuration)?
+            .target();
+        let route = model_configuration
+            .resolve_direct_model(selection)
+            .ok_or(AutomaticContextCompactionError::Configuration)?;
+        let input_includes_cache_tokens = route.adapter().reports_cache_inclusive_input();
+        let runtime_models = model_configuration.runtime_model_catalog();
+        let definition = runtime_models
+            .resolve(target)
+            .ok_or(AutomaticContextCompactionError::Configuration)?;
+        let prompt_bytes = u64::try_from(compaction_prompt.len())
+            .map_err(|_| AutomaticContextCompactionError::Configuration)?;
+        let automatic_input_byte_budget = u64::from(definition.context_window_tokens())
+            .checked_sub(u64::from(definition.max_output_tokens()))
+            .and_then(|available| available.checked_sub(prompt_bytes))
+            .filter(|available| *available > 0)
+            .ok_or(AutomaticContextCompactionError::Configuration)?;
+        let credential_reference = model_calls
+            .resolve_session_credential_reference(session, target)
+            .await
+            .map_err(AutomaticContextCompactionError::Credential)?;
+        let preview = repository
+            .preview_automatic_range(session)
+            .await
+            .map_err(AutomaticContextCompactionError::Repository)?
+            .ok_or(AutomaticContextCompactionError::State)?;
+        let preview_positions = preview
+            .members()
+            .iter()
+            .map(|member| member.position())
+            .collect::<Vec<_>>();
+        let preview_entries = preview
+            .members()
+            .iter()
+            .map(|member| member.reference())
+            .collect::<Vec<_>>();
+        let rendered_entries = ProcessReadRepository::new(model_calls.pool().clone())
+            .read_selected_transcript_entries(&preview_positions, &preview_entries)
+            .await
+            .map_err(AutomaticContextCompactionError::Read)?;
+        let requested_through_position = automatic_context_compaction_boundary(
+            preview.members(),
+            &rendered_entries,
+            automatic_input_byte_budget,
+            &BlobCatalogRepository::new(model_calls.pool().clone()),
+        )
+        .await?
+        .ok_or(AutomaticContextCompactionError::InputDoesNotFit)?;
         let call = ModelCallId::from_uuid(uuid::Uuid::now_v7());
         let request = PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
@@ -663,12 +667,14 @@ pub(crate) async fn compact_automatically(
             observe_prepared(call);
         }
         match repository.prepare(request).await {
-            Ok(PrepareContextCompactionOutcome::Prepared(prepared)) => break prepared,
+            Ok(PrepareContextCompactionOutcome::Prepared(prepared)) => {
+                break (prepared, automatic_input_byte_budget);
+            }
+            Ok(PrepareContextCompactionOutcome::DefaultsChanged) => continue,
             Ok(
                 PrepareContextCompactionOutcome::Replayed(_)
                 | PrepareContextCompactionOutcome::ConflictingReuse
                 | PrepareContextCompactionOutcome::SessionNotFound
-                | PrepareContextCompactionOutcome::DefaultsChanged
                 | PrepareContextCompactionOutcome::Busy
                 | PrepareContextCompactionOutcome::NoBoundary
                 | PrepareContextCompactionOutcome::InvalidBoundary

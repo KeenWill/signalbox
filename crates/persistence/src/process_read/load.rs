@@ -498,6 +498,7 @@ pub(super) async fn open_transcript_entry_cursor(
             member.semantic_entry_id,
             entry.payload_kind,
                 entry.runner_placement_revision,
+                entry.assistant_response_part_ordinal,
             entry.origin_accepted_input_id,
             entry.steering_source_turn_id,
             entry.failed_turn_id,

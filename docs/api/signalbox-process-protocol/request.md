@@ -6,6 +6,9 @@
 
 ```rust
 pub enum ClientRequest {
+    ReloadConfiguration {
+        command_id: CommandId,
+    },
     ReplaceLostRunner {
         command_id: CommandId,
         session_id: CanonicalUuid,
@@ -30,6 +33,14 @@ pub enum ClientRequest {
     DeleteOauthCredential {
         command_id: CommandId,
         profile: string::String,
+    },
+    ListCredentialExclusions {
+        page_size: u32,
+        after: option::Option<CredentialExclusionTarget>,
+    },
+    ClearCredentialExclusion {
+        command_id: CommandId,
+        target: CredentialExclusionTarget,
     },
     CreateSession {
         command_id: CommandId,

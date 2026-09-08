@@ -96,9 +96,11 @@ where
             | CommandKind::RegisterWorkspace
             | CommandKind::MintGitRemote
             | CommandKind::WithdrawGitRemote
+            | CommandKind::ReloadConfiguration
             | CommandKind::ProvisionOauthCredential
             | CommandKind::ReprovisionOauthCredential
             | CommandKind::DeleteOauthCredential
+            | CommandKind::ClearCredentialExclusion
             | CommandKind::ReplaceLostRunner
             | CommandKind::AbandonLostRunner
             | CommandKind::PromotePendingRunner
@@ -150,9 +152,11 @@ where
                 | CommandKind::RegisterWorkspace
                 | CommandKind::MintGitRemote
                 | CommandKind::WithdrawGitRemote
+                | CommandKind::ReloadConfiguration
                 | CommandKind::ProvisionOauthCredential
                 | CommandKind::ReprovisionOauthCredential
                 | CommandKind::DeleteOauthCredential
+                | CommandKind::ClearCredentialExclusion
                 | CommandKind::ReplaceLostRunner
                 | CommandKind::AbandonLostRunner
                 | CommandKind::PromotePendingRunner

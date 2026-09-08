@@ -313,17 +313,13 @@ impl PostgresRunnerRegistrationService {
             .await
             .map_err(|error| failure(store_error(error)))?;
         match outcome {
-            RunnerRecoveryOutcome::Recorded(
-                signalbox_domain::ReplaceLostRunnerResult::Replaced { .. },
-            ) => Ok(Some(WorkspaceRecorded {
-                correlation: receipt.correlation,
-                manifest_id: manifest.manifest_id,
-                manifest_digest: receipt.ready.manifest_digest,
-            })),
-            RunnerRecoveryOutcome::Recorded(
-                signalbox_domain::ReplaceLostRunnerResult::Rejected(_),
-            )
-            | RunnerRecoveryOutcome::Pending => Ok(None),
+            RunnerRecoveryOutcome::Recorded(_) | RunnerRecoveryOutcome::Pending => {
+                Ok(Some(WorkspaceRecorded {
+                    correlation: receipt.correlation,
+                    manifest_id: manifest.manifest_id,
+                    manifest_digest: receipt.ready.manifest_digest,
+                }))
+            }
             RunnerRecoveryOutcome::ConflictingReuse => Err(failure(
                 RunnerProtocolStoreError::Domain(RunnerDomainError::CorruptStoredFacts),
             )),

@@ -23,7 +23,21 @@ def _native_runtime_impl(ctx):
             # Script launchers already select their declared interpreter.
             'IFS= read -r -n 4 magic < "$1" || true',
             'if [[ "$magic" != $\'\\x7fELF\' ]]; then exec "$@"; fi',
+            'if [[ -n "${COVERAGE_DIR:-}" ]]; then',
+            '  mkdir -p "${TEST_TMPDIR:?}/coverage-runtime"',
+        ] + [
+            '  ln -sfn "${RUNFILES_DIR}/%s" "${TEST_TMPDIR}/coverage-runtime/%s"' % (_runfile_path(file), file.basename)
+            for file in runtime.libraries
+        ] + [
+            "fi",
             "patch_binary() {",
+            '  if [[ -n "${COVERAGE_DIR:-}" ]]; then',
+            '    "${RUNFILES_DIR}/%s" --set-interpreter "${RUNFILES_DIR}/%s" --output "$2" "$1"' % (
+                _runfile_path(ctx.file.patchelf),
+                _runfile_path(runtime.loader),
+            ),
+            "    return",
+            "  fi",
             '  "${RUNFILES_DIR:?}/%s" --set-interpreter "${RUNFILES_DIR}/%s" --set-rpath "%s" --output "$2" "$1"' % (
                 _runfile_path(ctx.file.patchelf),
                 _runfile_path(runtime.loader),
@@ -47,6 +61,27 @@ def _native_runtime_impl(ctx):
             '  export CARGO_MANIFEST_DIR="${manifest%/*}"',
             '  export CARGO_TARGET_DIR="${TEST_TMPDIR}/cargo-target"',
             '  cd "${CARGO_MANIFEST_DIR}"',
+            "fi",
+            # CI allocates one worker per manifest shard; local Bazel schedules
+            # the declared shard_count itself.
+            'if [[ -n "${SIGNALBOX_TEST_TOTAL_SHARDS:-}" ]]; then',
+            '  export TEST_TOTAL_SHARDS="${SIGNALBOX_TEST_TOTAL_SHARDS}"',
+            '  export TEST_SHARD_INDEX="${SIGNALBOX_TEST_SHARD_INDEX:?}"',
+            "fi",
+            "if (( ${TEST_TOTAL_SHARDS:-0} > 1 )); then",
+            '  if [[ -n "${TEST_SHARD_STATUS_FILE:-}" ]]; then touch "$TEST_SHARD_STATUS_FILE"; fi',
+            '  "$patched_executable" "$@" --list > "${TEST_TMPDIR}/test-list"',
+            "  selected=()",
+            "  index=0",
+            "  while IFS= read -r line; do",
+            '    [[ "$line" == *": test" ]] || continue',
+            "    if (( index % TEST_TOTAL_SHARDS == TEST_SHARD_INDEX )); then",
+            '      selected+=("${line%: test}")',
+            "    fi",
+            "    index=$((index + 1))",
+            '  done < "${TEST_TMPDIR}/test-list"',
+            "  (( ${#selected[@]} )) || exit 0",
+            '  exec "$patched_executable" "$@" --exact "${selected[@]}"',
             "fi",
             'exec "$patched_executable" "$@"',
             "",

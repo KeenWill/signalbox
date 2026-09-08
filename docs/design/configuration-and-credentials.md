@@ -6,39 +6,14 @@ deleted when the work lands.
 
 ## Goal
 
-The daemon reloads its catalogs without a restart, prices a call against dated
-rate windows, declares each model's input modalities and workspace-instruction
-capacity, records the workspace roots it derives, binds a session to its
-workspace before its first turn when a template asks for it. Credential
-exclusions expire, coalesce, and clear; sessions carry the complete pool policy
-they were created under; and a runner reads, injects, and scrubs a granted
-credential for the work it dispatches.
+The daemon prices a call against dated rate windows, declares each model's input
+modalities and workspace-instruction capacity, records the workspace roots it
+derives, binds a session to its workspace before its first turn when a template
+asks for it. Credential exclusions expire, coalesce, and clear; sessions carry
+the complete pool policy they were created under; and a runner reads, injects,
+and scrubs a granted credential for the work it dispatches.
 
 ## Design
-
-Reload is one admin verb, `reload_configuration`, owned by
-[process protocol](../spec/process-protocol.md). It re-reads the configured
-paths, validates the complete replacement exactly as startup does, and swaps the
-in-memory catalogs atomically on success. The reloadable sections are the model
-and alias catalog with its rate windows, the session-template catalog, and
-repository-watch configuration; every other section is startup-only. A
-replacement whose startup-only sections differ leaves the running configuration
-in place. File watching and polling are external tooling that calls the verb;
-webhook listener and repository polling-task reload belong to
-[repository watch](repo-watch.md). A reload that adds, edits, or removes
-`repository_watch.rules` commits activations and deactivations in the
-[reconciliation transaction](../spec/repo-watch.md) that records each
-activation's repository event tail, inside the reload boundary. A reload pauses
-sweep admission and stops and joins active sweep attempts before re-running
-convergence configured-target reconciliation after rule activation and
-event-tail capture commit, inside the reload boundary, using an empty effective
-target set when repository watch is disabled; sweep admission resumes under the
-replacement snapshot on success or the prior snapshot on rule-revision rejection
-only if that snapshot validates against the current startup-only sections, as
-[reload recovery](process-protocol.md) requires. Enabling convergence while
-repository watch is enabled composes the sweep task; disabling either terminates
-the task. A running sweep reads the new targets, template, interval, and
-credential path at its next attempt.
 
 A model entry carries zero or more `[[models.rate_windows]]` entries, each one
 dated price window over that entry's own `provider_model`. A window names the
@@ -204,20 +179,17 @@ generation's effective reset is the latest reset any attached correlation
 reported, and an observation reporting no reset makes the generation indefinite;
 indefinite is absorbing. Only an operator clear, an availability probe that
 costs nothing and calls no model, or another durable availability update ends an
-indefinite policy-origin generation. An operator clear removes a pending
-`switch_next_turn` displacement or an `avoid_new_sessions` exclusion exactly as
-it clears a quarantine; the request is owned by
-[process protocol](../spec/process-protocol.md). Each profile carries a durable
-action head, and every transaction that mints, activates, or clears an exclusion
-rereads the current generation under that head's `FOR UPDATE` lock. The first
-commit mints the generation; a later commit for an exclusion already active at
-the same scope and of the same origin records its correlation against that
-generation and mints no second one. Origin is part of the coalescing key because
-a policy-origin quarantine is clearable by operator command while a
-delivery-origin one requires re-provisioning or deletion, except a `codex_home`
-quarantine, which an operator clears once the store is repaired; a
-delivery-origin failure against a profile carrying an active policy-origin
-generation mints its own, and the two are cleared and reported separately.
+indefinite policy-origin generation. Each profile carries a durable action head,
+and every transaction that mints, activates, or clears an exclusion rereads the
+current generation under that head's `FOR UPDATE` lock. The first commit mints
+the generation; a later commit for an exclusion already active at the same scope
+and of the same origin records its correlation against that generation and mints
+no second one. Origin is part of the coalescing key because a policy-origin
+quarantine is clearable by operator command while a delivery-origin one requires
+re-provisioning or deletion, except a `codex_home` quarantine, which an operator
+clears once the store is repaired; a delivery-origin failure against a profile
+carrying an active policy-origin generation mints its own, and the two are
+cleared and reported separately.
 
 The session credential history event carries a complete family-to-pool-policy
 snapshot rather than a family-to-reference one. Each immutable policy includes
@@ -303,14 +275,8 @@ which every origin-minting path shares; it is not a `SubmitInput` feature.
 The runner has no model-provider configuration field and rejects reserved
 model-provider names; runner credential execution adds no such field.
 
-Every catalog reader takes one immutable snapshot, so reload can swap the
-snapshot atomically without a reader observing two documents.
-
 ## Acceptance criteria
 
-- `reload_configuration` re-reads and validates the complete document as startup
-  does, swaps atomically on success, and leaves the running configuration in
-  place on a startup-only difference.
 - A model entry admits non-overlapping dated windows per channel, a cost read
   names the window covering the call's timestamp, and every stored call prices
   as it did under the flat rate.

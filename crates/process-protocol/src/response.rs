@@ -22,7 +22,7 @@ use crate::scalars::{
     BlobChunk, CanonicalBlobDigest, CanonicalU64, CanonicalUuid, ContentFragment,
     FrameValidationError, MAX_BLOB_READ_BYTES, MAX_MODEL_CAPABILITY_CATALOG_ENTRIES,
     ModelCallDollarCost, ModelCallTokenUsage, SystemPromptMember, SystemPromptText,
-    UsageProvenance, deserialize_required_nullable,
+    UsageProvenance, deserialize_optional_non_null, deserialize_required_nullable,
 };
 use crate::session::{
     ConversationCursor, ConversationSummary, MetadataLastWriter, SessionMetadata, SessionPlacement,
@@ -43,6 +43,14 @@ use crate::transcript::{
 };
 use crate::user_input::UserInputContent;
 use serde::{Deserialize, Serialize};
+
+/// The selected stop scope and its immutable descendant disposition count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminationReceipt {
+    pub descendant_scope: crate::goal::DescendantTerminationScope,
+    pub descendant_count: CanonicalU64,
+}
 
 /// Closed terminal OAuth administration outcomes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -147,6 +155,22 @@ pub fn validate_oauth_authorization(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerMessage {
+    /// The retained replacement configuration is installed.
+    ConfigurationReloaded {
+        /// Durable reload identity.
+        command_id: crate::CommandId,
+        /// Complete inventory installed by this reload.
+        reloaded_sections: Vec<ReloadedSection>,
+    },
+    /// Configuration reload was refused without replacing the running snapshot.
+    ConfigurationReloadFailed {
+        /// Durable reload identity.
+        command_id: crate::CommandId,
+        /// Operation that refused the reload.
+        phase: ConfigurationReloadPhase,
+        /// Bounded sanitized diagnostic, containing no configuration values.
+        reason: String,
+    },
     /// Durable replacement receipt.
     RunnerReplacementReceipt {
         /// Command whose terminal result committed.
@@ -193,6 +217,23 @@ pub enum ServerMessage {
         profile: String,
         /// Closed terminal result.
         outcome: OauthCredentialOutcome,
+    },
+    /// Opens one exclusion-listing page.
+    CredentialExclusionStart {},
+    /// One exact active clearable exclusion target.
+    CredentialExclusion {
+        target: crate::CredentialExclusionTarget,
+    },
+    /// Closes a page, retaining its exclusive continuation cursor.
+    CredentialExclusionEnd {
+        exclusion_count: CanonicalU64,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        next_after: Option<crate::CredentialExclusionTarget>,
+    },
+    /// An exact exclusion clear committed or equally replayed.
+    CredentialExclusionCleared {
+        target: crate::CredentialExclusionTarget,
+        outcome: crate::CredentialExclusionClearOutcome,
     },
     /// Session creation receipt.
     SessionCreated {
@@ -272,6 +313,13 @@ pub enum ServerMessage {
     },
     /// Input acceptance receipt.
     InputSubmitted {
+        /// Present exactly for a stop-turn acceptance.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,
         /// Accepted input.
@@ -296,6 +344,13 @@ pub enum ServerMessage {
     },
     /// A durable user goal command appended one event.
     GoalTransitionApplied {
+        /// Present exactly for a stop-goal transition.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        termination: Option<TerminationReceipt>,
         /// Owning session.
         session_id: CanonicalUuid,
         /// Appended event position.
@@ -862,6 +917,19 @@ pub enum ServerMessage {
 
 impl ServerMessage {
     pub(crate) fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::InputSubmitted {
+            termination: Some(receipt),
+            ..
+        }
+        | Self::GoalTransitionApplied {
+            termination: Some(receipt),
+            ..
+        } = self
+            && receipt.descendant_scope == crate::goal::DescendantTerminationScope::ParentAlone
+            && receipt.descendant_count.value() != 0
+        {
+            return Err(FrameValidationError::DelegationShape);
+        }
         validate_operator_status_message(self)?;
         match self {
             Self::OauthCredentialAuthorization {
@@ -874,6 +942,21 @@ impl ServerMessage {
                 validate_oauth_authorization(user_code, verification_uri)?;
             }
             Self::OauthCredentialReceipt { profile, .. } => validate_oauth_profile(profile)?,
+            Self::CredentialExclusion { target }
+            | Self::CredentialExclusionCleared { target, .. } => target.validate()?,
+            Self::CredentialExclusionEnd {
+                exclusion_count,
+                next_after,
+            } => {
+                if exclusion_count.value() > 100
+                    || (exclusion_count.value() == 0 && next_after.is_some())
+                {
+                    return Err(FrameValidationError::CredentialExclusionShape);
+                }
+                if let Some(target) = next_after {
+                    target.validate()?;
+                }
+            }
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
             Self::SessionAwaitRegistered {
                 mode: DelegationWaitMode::Foreground,
@@ -1034,6 +1117,19 @@ impl ServerMessage {
                     return Err(FrameValidationError::MetadataShape);
                 }
             }
+            Self::ConfigurationReloaded {
+                reloaded_sections, ..
+            } if reloaded_sections.as_slice() != ReloadedSection::ALL => {
+                return Err(FrameValidationError::ConfigurationReloadShape);
+            }
+            Self::ConfigurationReloadFailed { reason, .. } => {
+                if reason.is_empty()
+                    || reason.len() > MAX_CONFIGURATION_RELOAD_REASON_BYTES
+                    || reason.chars().any(char::is_control)
+                {
+                    return Err(FrameValidationError::ConfigurationReloadShape);
+                }
+            }
             Self::ConversationSummary { conversation } => conversation.validate()?,
             Self::ModelCapabilityItem { capabilities, .. } => capabilities.validate()?,
             Self::ModelCapabilitiesEnd { capability_count }
@@ -1166,4 +1262,40 @@ impl ServerMessage {
         }
         Ok(())
     }
+}
+
+/// Maximum UTF-8 length of a sanitized reload diagnostic.
+pub const MAX_CONFIGURATION_RELOAD_REASON_BYTES: usize = 1024;
+
+/// Closed inventory of reloadable sections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReloadedSection {
+    /// Models, aliases, and their rate catalog.
+    ModelCatalog,
+    /// Resolved session templates.
+    SessionTemplates,
+    /// Repository ingestion, rules, and convergence configuration.
+    RepoWatch,
+}
+
+impl ReloadedSection {
+    /// The complete catalog replacement inventory in wire order.
+    pub const ALL: [Self; 3] = [Self::ModelCatalog, Self::SessionTemplates, Self::RepoWatch];
+}
+
+/// Closed reload failure phases.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationReloadPhase {
+    /// A configured file could not be read.
+    Read,
+    /// Replacement configuration did not validate.
+    Validate,
+    /// Rule activation was refused.
+    Activate,
+    /// Convergence target reconciliation failed.
+    Reconcile,
+    /// Runtime installation failed.
+    Install,
 }

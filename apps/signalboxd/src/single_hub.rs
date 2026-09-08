@@ -3,16 +3,59 @@
 use std::{error::Error, fmt, time::Duration};
 
 use sqlx::{Connection, PgConnection, PgPool};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 const SIGNALBOX_GUARD_NAMESPACE: i32 = 1_396_856_881;
 const HUB_GUARD_NAMESPACE: i32 = 1_213_547_057;
 const GUARD_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
+/// Pause between dedicated-session guard pings, including timeout retries.
+pub const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const GUARD_CHECK_MISS_THRESHOLD: u8 = 3;
+
+#[derive(Debug, Default)]
+struct GuardCheckMisses {
+    consecutive_timeouts: u8,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum GuardCheckStatus {
+    Healthy,
+    Retry,
+}
+
+impl GuardCheckMisses {
+    fn record(
+        &mut self,
+        result: Result<(), SingleHubGuardError>,
+    ) -> Result<GuardCheckStatus, SingleHubGuardError> {
+        match result {
+            Ok(()) => {
+                self.consecutive_timeouts = 0;
+                Ok(GuardCheckStatus::Healthy)
+            }
+            Err(SingleHubGuardError::GuardLost(None)) => {
+                self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+                tracing::warn!(
+                    miss_count = self.consecutive_timeouts,
+                    timeout_seconds = GUARD_CHECK_TIMEOUT.as_secs(),
+                    "database guard ping timed out"
+                );
+                if self.consecutive_timeouts >= GUARD_CHECK_MISS_THRESHOLD {
+                    Err(SingleHubGuardError::GuardLost(None))
+                } else {
+                    Ok(GuardCheckStatus::Retry)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
 
 /// One dedicated PostgreSQL session holding the database-scoped hub guard.
 #[derive(Debug)]
 pub struct SingleHubGuard {
     connection: PgConnection,
+    misses: GuardCheckMisses,
 }
 
 impl SingleHubGuard {
@@ -32,15 +75,26 @@ impl SingleHubGuard {
         if !acquired {
             return Err(SingleHubGuardError::AlreadyRunning);
         }
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            misses: GuardCheckMisses::default(),
+        })
     }
 
     /// Proves that the exact guarded session remains usable.
+    /// Retries short ping stalls, failing after three consecutive timeouts or
+    /// immediately when a ping returns an error.
     pub async fn check(&mut self) -> Result<(), SingleHubGuardError> {
-        match timeout(GUARD_CHECK_TIMEOUT, self.connection.ping()).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(SingleHubGuardError::GuardLost(Some(error))),
-            Err(_) => Err(SingleHubGuardError::GuardLost(None)),
+        loop {
+            let result = match timeout(GUARD_CHECK_TIMEOUT, self.connection.ping()).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(SingleHubGuardError::GuardLost(Some(error))),
+                Err(_) => Err(SingleHubGuardError::GuardLost(None)),
+            };
+            match self.misses.record(result)? {
+                GuardCheckStatus::Healthy => return Ok(()),
+                GuardCheckStatus::Retry => sleep(GUARD_CHECK_INTERVAL).await,
+            }
         }
     }
 
@@ -93,5 +147,76 @@ impl Error for SingleHubGuardError {
             Self::GuardLost(Some(error)) => Some(error),
             Self::AlreadyRunning | Self::GuardLost(None) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GuardCheckMisses, GuardCheckStatus, SingleHubGuardError};
+
+    #[test]
+    fn guard_check_recovery_resets_consecutive_timeouts() {
+        let mut misses = GuardCheckMisses::default();
+
+        assert_eq!(
+            misses
+                .record(Err(SingleHubGuardError::GuardLost(None)))
+                .unwrap(),
+            GuardCheckStatus::Retry
+        );
+        assert_eq!(
+            misses
+                .record(Err(SingleHubGuardError::GuardLost(None)))
+                .unwrap(),
+            GuardCheckStatus::Retry
+        );
+        assert_eq!(misses.record(Ok(())).unwrap(), GuardCheckStatus::Healthy);
+        assert_eq!(
+            misses
+                .record(Err(SingleHubGuardError::GuardLost(None)))
+                .unwrap(),
+            GuardCheckStatus::Retry
+        );
+        assert_eq!(
+            misses
+                .record(Err(SingleHubGuardError::GuardLost(None)))
+                .unwrap(),
+            GuardCheckStatus::Retry
+        );
+    }
+
+    #[test]
+    fn guard_check_three_consecutive_timeouts_lose_guard() {
+        let mut misses = GuardCheckMisses::default();
+
+        assert_eq!(
+            misses
+                .record(Err(SingleHubGuardError::GuardLost(None)))
+                .unwrap(),
+            GuardCheckStatus::Retry
+        );
+        assert_eq!(
+            misses
+                .record(Err(SingleHubGuardError::GuardLost(None)))
+                .unwrap(),
+            GuardCheckStatus::Retry
+        );
+        assert!(matches!(
+            misses.record(Err(SingleHubGuardError::GuardLost(None))),
+            Err(SingleHubGuardError::GuardLost(None))
+        ));
+    }
+
+    #[test]
+    fn guard_check_ping_error_loses_guard_immediately() {
+        let mut misses = GuardCheckMisses::default();
+
+        assert!(matches!(
+            misses.record(Err(SingleHubGuardError::GuardLost(Some(sqlx::Error::Io(
+                std::io::ErrorKind::ConnectionReset.into()
+            ))))),
+            Err(SingleHubGuardError::GuardLost(Some(sqlx::Error::Io(error))))
+                if error.kind() == std::io::ErrorKind::ConnectionReset
+        ));
     }
 }

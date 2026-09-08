@@ -1,6 +1,23 @@
 use super::*;
 
 impl<'a> Output<'a> {
+    pub(crate) fn termination_receipt(
+        &mut self,
+        receipt: signalbox_process_protocol::TerminationReceipt,
+    ) -> io::Result<()> {
+        let scope = match receipt.descendant_scope {
+            signalbox_process_protocol::DescendantTerminationScope::ParentAlone => "parent_alone",
+            signalbox_process_protocol::DescendantTerminationScope::ParentAndDescendants => {
+                "parent_and_descendants"
+            }
+        };
+        writeln!(
+            self.stdout,
+            "descendant_scope={scope} descendant_count={}",
+            receipt.descendant_count.value()
+        )
+    }
+
     pub(crate) fn blob_metadata(
         &mut self,
         digest: CanonicalBlobDigest,
@@ -131,6 +148,26 @@ impl<'a> Output<'a> {
             None => writeln!(self.stderr, "chat: exiting; no turn is queued or running"),
         }?;
         self.stderr.flush()
+    }
+
+    pub(crate) fn configuration_reloaded(
+        &mut self,
+        sections: &[signalbox_process_protocol::ReloadedSection],
+    ) -> io::Result<()> {
+        use signalbox_process_protocol::ReloadedSection;
+        write!(self.stdout, "reloaded")?;
+        for section in sections {
+            write!(
+                self.stdout,
+                " {}",
+                match section {
+                    ReloadedSection::ModelCatalog => "model_catalog",
+                    ReloadedSection::SessionTemplates => "session_templates",
+                    ReloadedSection::RepoWatch => "repo_watch",
+                }
+            )?;
+        }
+        writeln!(self.stdout)
     }
 
     pub(crate) fn recovery_value(&mut self, name: &str, value: &str) -> io::Result<()> {
