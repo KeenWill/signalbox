@@ -157,8 +157,9 @@ does not recognize fails closed.
 Version admission is the one centralized wire gate: an unknown version produces
 `unsupported_version` and the server closes the connection. The server may close
 a connection after any error, and a client never reinterprets an unknown message
-as a known one. An oversized outbound frame terminates only its connection;
-every other encoding failure is fatal runtime evidence.
+as a known one. Outbound encoding failures close and log only the affected
+connection. Recoverable listener accept errors retry with a bounded delay;
+permanent listener errors remain fatal.
 
 A connection processes one request at a time, and a follow request consumes its
 connection until it closes. Inbound admission is bounded globally by an

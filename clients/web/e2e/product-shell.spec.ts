@@ -445,6 +445,23 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('clears the session inspector description when navigating to Imports', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await useDeterministicImportApi(page)
+  await page.goto(`/sessions?workspace=true&session=${sessionWorkspaceFixture.id}`)
+  await page.getByRole('option', { name: /43 turn completed/ }).click()
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector).toContainText(
+    'Bounded server-provided timeline projection for the selected record.',
+  )
+  await page.getByRole('link', { name: /Imports/ }).click()
+  await expect(inspector).toContainText(
+    'Select an available operational record to inspect its server-provided evidence.',
+  )
+  await expect(inspector).not.toContainText('Bounded server-provided timeline projection')
+})
+
 test('opens and inspects a bounded production session without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -1371,6 +1388,51 @@ test('locks product navigation while an ambiguous continuation command is retain
     'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
   expect(problems.pageErrors).toEqual([])
   expect(problems.consoleErrors.every((error) => error === expectedResourceError)).toBe(true)
+})
+
+test('retains exact retry after a lost acknowledgement and corrupt continuation receipt', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  const requests: string[] = []
+  await page.route('**/api/imports/*/continuations', (route) => {
+    requests.push(route.request().postData() ?? '')
+    if (requests.length === 1) return route.abort('failed')
+    if (requests.length > 2) return route.fallback()
+    return route.fulfill({
+      status: 500,
+      json: {
+        error: { kind: 'application', code: 'continuation_corrupt', message: 'Corrupt evidence.' },
+      },
+    })
+  })
+  await page.goto(importsProductFixture.path)
+  await page
+    .getByRole('textbox', { name: 'Initial model selection UUID' })
+    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  const corruptReceipt = page.waitForResponse((response) => response.status() === 500)
+  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await corruptReceipt
+  await expect(page.getByRole('alert')).toContainText('The continuation outcome is unresolved.')
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Settings/ })).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  )
+  await page.getByRole('link', { name: /Settings/ }).click({ force: true })
+  await expect(page).toHaveURL(/\/imports$/)
+  await page.getByRole('button', { name: 'Retry exact command' }).click()
+  await expect(page.getByText('Session created:', { exact: false })).toBeVisible()
+  expect(requests).toHaveLength(3)
+  expect(requests[1]).toBe(requests[0])
+  expect(requests[2]).toBe(requests[0])
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toHaveCount(0)
+  expect(problems.pageErrors).toEqual([])
 })
 
 test('runs advertised product navigation sequences', async ({ page }) => {
