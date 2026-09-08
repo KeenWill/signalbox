@@ -500,6 +500,11 @@ loopback `Host` authority; another authority receives a 403
 browser DTO. Application errors are a separate error kind and are never inferred
 from HTTP status alone.
 
+Blob descriptor, content, and download routes reject
+`Sec-Fetch-Site: cross-site` with a 403 `cross_site_blob_request_rejected`
+before storage access. This rejection precedes the loopback authority check.
+Other or absent fetch-site values pass this gate.
+
 Browser mutation routes use POST, require `application/json`, and when `Origin`
 is supplied require its host and effective port to equal the request `Host`
 authority. A `Host` without an explicit port has effective port 80 because the
@@ -715,6 +720,15 @@ successful code-host result, is scrubbed of that value and its JSON-escaped form
 before it crosses into evidence. An `ambient` or `codex_home` profile gives the
 daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
+
+The GitHub and code-host adapters share `github-primary`, which needs API access
+to read pull requests, publish reviews and comments, reply to and resolve review
+threads, read repository files and directories, read checks and CI job logs, and
+rerun failed jobs. Neither adapter pushes Git changes. The repository-watch
+credential needs read access for polling and checkout provisioning; it does not
+need push or workflow-write authority. Classic `repo` is broader than read-only
+access, so a fine-grained read credential limits that role to the watched
+repositories.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
