@@ -580,6 +580,27 @@ test('keeps artifact inspector inputs in their editing context on Search', async
   }
 })
 
+test('returns palette focus to main when history removes its opener', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/settings')
+  await page.getByRole('link', { name: /^Search Global and session search/ }).click()
+  await page.getByRole('button', { name: 'Search', exact: true }).focus()
+  await page.keyboard.press('ControlOrMeta+k')
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+
+  await page.goBack()
+  await expect(page).toHaveURL(/\/settings$/)
+  await expect(
+    page.getByRole('heading', { name: 'Operator preferences', includeHidden: true }),
+  ).toBeVisible()
+  await expect(palette).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await expect(palette).toBeHidden()
+  await expect(page.getByRole('main')).toBeFocused()
+})
+
 test('restores surviving product focus when history removes a search control', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/settings')

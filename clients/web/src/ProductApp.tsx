@@ -209,10 +209,12 @@ function CommandPalette({
   context,
   openerRef,
   helpOpenerRef,
+  fallbackRef,
 }: {
   context: ProductCommandContext
   openerRef: RefObject<HTMLElement | null>
   helpOpenerRef: RefObject<HTMLElement | null>
+  fallbackRef: RefObject<HTMLElement | null>
 }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
@@ -249,7 +251,7 @@ function CommandPalette({
             if (context.getState().app.overlay !== null) return
             event.preventDefault()
             if (opener?.isConnected && opener.getClientRects().length > 0) opener.focus()
-            else document.querySelector<HTMLElement>('[role="main"]')?.focus()
+            else fallbackRef.current?.focus()
           }}
         >
           <div className="dialog-heading">
@@ -1181,6 +1183,7 @@ export function ProductApp({
         context={context}
         openerRef={paletteOpenerRef}
         helpOpenerRef={helpOpenerRef}
+        fallbackRef={mainRef}
       />
       <KeyboardHelp context={context} openerRef={helpOpenerRef} fallbackRef={mainRef} />
       <Dialog.Root
