@@ -26,13 +26,25 @@ describe('search and usage projection identity', () => {
       { ...group, profile_id: 'exact:another-profile' },
       { ...group, input_semantics: 'cache_inclusive' as const },
       { ...group, coverage: { ...group.coverage, cache_creation_input: true } },
-      {
-        ...group,
-        cost: { status: 'unavailable' as const, reason: 'configuration_unavailable' as const },
-      },
     ]
     expect(new Set(variants.map(usageGroupIdentity)).size).toBe(variants.length)
     expect(usageGroupIdentity({ ...group, call_count: '1000' })).toBe(usageGroupIdentity(group))
+  })
+
+  it('retains an aggregate key when a refetch changes derived cost metadata', async () => {
+    const summary = await new SearchUsageScenarioSource().usageSummary({})
+    const group = summary.groups[0]
+    if (!group || group.cost.status !== 'derived') throw new Error('Missing derived usage group')
+    const costs: (typeof group)['cost'][] = [
+      { ...group.cost, label: 'metered_equivalent' },
+      { ...group.cost, rate_version: 'refetched-rates' },
+      { ...group.cost, amount_usd: '2.50' },
+      { status: 'unavailable', reason: 'configuration_unavailable' },
+      { status: 'unavailable', reason: 'no_token_evidence' },
+    ]
+    for (const cost of costs) {
+      expect(usageGroupIdentity({ ...group, cost })).toBe(usageGroupIdentity(group))
+    }
   })
 
   it('renders cache creation and cache read as separate token evidence', () => {

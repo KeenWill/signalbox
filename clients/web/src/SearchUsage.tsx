@@ -69,9 +69,6 @@ export const usageGroupIdentity = (group: WebUsageSummary['groups'][number]): st
     group.coverage.output,
     group.coverage.cache_creation_input,
     group.coverage.cache_read_input,
-    group.cost.status === 'derived'
-      ? [group.cost.status, group.cost.label, group.cost.rate_version]
-      : [group.cost.status, group.cost.reason],
   ])
 
 interface SnippetPart {
