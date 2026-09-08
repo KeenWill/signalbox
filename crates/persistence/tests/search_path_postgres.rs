@@ -508,6 +508,9 @@ fn cte_header_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
                 break;
             };
             headers.extend(name..cursor);
+            let Some(after) = after_cte_search_and_cycle(tokens, after) else {
+                break;
+            };
             cursor = after;
             if tokens.get(cursor) != Some(&BodyToken::Comma) {
                 break;
@@ -516,6 +519,87 @@ fn cte_header_positions(tokens: &[BodyToken]) -> BTreeSet<usize> {
         }
     }
     headers
+}
+
+fn after_cte_search_and_cycle(tokens: &[BodyToken], mut cursor: usize) -> Option<usize> {
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.is_keyword("search"))
+    {
+        cursor += 1;
+        if !tokens
+            .get(cursor)
+            .is_some_and(|token| token.is_keyword("breadth") || token.is_keyword("depth"))
+        {
+            return None;
+        }
+        cursor += 1;
+        for keyword in ["first", "by"] {
+            if !tokens
+                .get(cursor)
+                .is_some_and(|token| token.is_keyword(keyword))
+            {
+                return None;
+            }
+            cursor += 1;
+        }
+        cursor = after_cte_column_list_and_mark(tokens, cursor)?;
+    }
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.is_keyword("cycle"))
+    {
+        cursor = after_cte_column_list_and_mark(tokens, cursor + 1)?;
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.is_keyword("to"))
+        {
+            // CYCLE mark/default values are AexprConst in PostgreSQL's grammar.
+            // Skip their type modifiers as balanced groups, including commas.
+            cursor += 1;
+            while !tokens.get(cursor)?.is_keyword("using") {
+                if tokens.get(cursor) == Some(&BodyToken::Open) {
+                    cursor = after_parenthesized(tokens, cursor)?;
+                } else {
+                    cursor += 1;
+                }
+            }
+        }
+        if !tokens
+            .get(cursor)
+            .is_some_and(|token| token.is_keyword("using"))
+            || !tokens
+                .get(cursor + 1)
+                .is_some_and(BodyToken::is_relation_name)
+        {
+            return None;
+        }
+        cursor += 2;
+    }
+    Some(cursor)
+}
+
+fn after_cte_column_list_and_mark(tokens: &[BodyToken], mut cursor: usize) -> Option<usize> {
+    loop {
+        if !tokens.get(cursor).is_some_and(BodyToken::is_relation_name) {
+            return None;
+        }
+        cursor += 1;
+        if tokens.get(cursor) != Some(&BodyToken::Comma) {
+            break;
+        }
+        cursor += 1;
+    }
+    if !tokens
+        .get(cursor)
+        .is_some_and(|token| token.is_keyword("set"))
+        || !tokens
+            .get(cursor + 1)
+            .is_some_and(BodyToken::is_relation_name)
+    {
+        return None;
+    }
+    Some(cursor + 2)
 }
 
 fn after_parenthesized(tokens: &[BodyToken], start: usize) -> Option<usize> {
@@ -744,6 +828,7 @@ async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<d
     table_alias_column_lists_do_not_add_call_edges(&keywords);
     function_sources_remain_call_edges(&keywords);
     cte_column_lists_preserve_calls_inside_each_body(&keywords);
+    recursive_cte_clauses_preserve_following_cte_headers(&keywords);
     parenthesized_body_ends_after_nested_groups(&keywords);
     unterminated_parenthesized_body_has_no_end(&keywords);
     expression_keywords_do_not_turn_calls_into_relation_aliases(&keywords);
@@ -928,6 +1013,29 @@ fn cte_column_lists_preserve_calls_inside_each_body(keywords: &BTreeMap<String, 
         ),
         BTreeSet::from([String::from(RESTORE_PROBE_TAIL)])
     );
+}
+
+fn recursive_cte_clauses_preserve_following_cte_headers(keywords: &BTreeMap<String, KeywordUse>) {
+    for clause in [
+        "SEARCH DEPTH FIRST BY n SET ord",
+        "SEARCH BREADTH FIRST BY n, set SET ord",
+        "CYCLE n, set SET mark USING path",
+        "CYCLE n SET mark TO true DEFAULT false USING path",
+        "CYCLE n SET mark TO numeric(4, 1) '1' DEFAULT numeric(4, 1) '0' USING path",
+        r#"SEARCH DEPTH FIRST BY "set", n SET "cycle" CYCLE "set", n SET mark TO 'using' DEFAULT 'set' USING path"#,
+    ] {
+        let source = format!(
+            "WITH RECURSIVE first(n, set) AS (SELECT restore_probe_tail(), 1) {clause},
+             restore_probe_head(v) AS (SELECT restore_probe_tail()),
+             restore_probe_middle(v) AS (SELECT restore_probe_tail())
+             SELECT * FROM restore_probe_middle"
+        );
+        assert_eq!(
+            body_call_names(&source, keywords),
+            BTreeSet::from([String::from(RESTORE_PROBE_TAIL)]),
+            "{clause}"
+        );
+    }
 }
 
 fn parenthesized_body_ends_after_nested_groups(keywords: &BTreeMap<String, KeywordUse>) {
