@@ -191,9 +191,11 @@ leaves exhausted waits unchanged; deadline-free waits have no timer.
 
 A parked turn projects `active_awaiting_credential_availability` with its ended
 wait attempt and closed cause. Transcript reads and initial follow snapshots
-retain the active turn and its slot without rejection detail.
+retain the active turn and its slot without rejection detail. A released wait
+uses its retained effective serving target with its retained pool policy through
+call preparation and send authorization.
 
 ## Planned
 
-- Contention and capacity reservations, their startup re-evaluation, and the
-  typed wait projection ([design](../design/credential-availability.md)).
+- Contention and capacity reservations, their startup re-evaluation,
+  ([design](../design/credential-availability.md)).

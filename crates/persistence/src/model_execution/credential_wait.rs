@@ -160,6 +160,30 @@ pub(crate) async fn load_phase(
     ))
 }
 
+pub(super) async fn retain_serving_target<'a>(
+    connection: &mut PgConnection,
+    attempt: TurnAttemptId,
+    families: Option<&'a crate::ModelCredentialFamilyCatalog>,
+    mut serving: super::credential_pool::PreparedServingEvidence<'a>,
+) -> Result<super::credential_pool::PreparedServingEvidence<'a>, ModelCallRepositoryError> {
+    let target: Option<Uuid> = sqlx::query_scalar(
+        "SELECT waiting.effective_target_id FROM credential_availability_wait_release release
+         JOIN credential_availability_wait waiting USING (wait_attempt_id)
+         WHERE release.turn_attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_optional(connection)
+    .await?;
+    if let Some(target) = target {
+        serving.effective_target = ResolvedProviderTarget::naming(
+            signalbox_domain::ProviderModelIdentity::from_uuid(target),
+        );
+        serving.credential_model_family =
+            families.and_then(|families| families.family(serving.effective_target));
+    }
+    Ok(serving)
+}
+
 pub(super) async fn prepare_release(
     connection: &mut PgConnection,
     repository: &PostgresModelCallRepository,
@@ -213,6 +237,13 @@ pub(super) async fn prepare_release(
         target,
         fast,
     );
+    let serving = retain_serving_target(
+        connection,
+        successor,
+        repository.credential_families.as_ref(),
+        serving,
+    )
+    .await?;
     let selected = super::credential_pool::select_runtime_pool_credential(
         connection,
         session_id,
