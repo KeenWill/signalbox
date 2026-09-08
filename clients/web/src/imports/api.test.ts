@@ -178,13 +178,15 @@ describe('HttpImportApi correlation', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it('cancels a declared oversized catalog response before parsing it', async () => {
-    const cancel = vi.fn()
-    const body = new ReadableStream({ cancel })
+  it('preserves the catalog size error when body cancellation fails', async () => {
+    const cancel = vi.fn().mockRejectedValue(new Error('cancellation failed'))
     vi.stubGlobal(
       'fetch',
       vi.fn(
-        async () => new Response(body, { headers: { 'Content-Length': String(1024 * 1024 + 1) } }),
+        async () =>
+          new Response(new ReadableStream({ cancel }), {
+            headers: { 'Content-Length': String(1024 * 1024 + 1) },
+          }),
       ),
     )
 

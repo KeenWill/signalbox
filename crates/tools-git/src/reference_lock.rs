@@ -386,10 +386,11 @@ impl ReferenceLock {
                 before_rollback.take().ok_or(LocalGitFailure::Operation)?();
                 if publication_is_current {
                     let prepared = self.prepared.ok_or(LocalGitFailure::Operation)?;
-                    let _ =
-                        remove_published_reference_if_current(&self.parent, &self.leaf, prepared);
+                    return Err(LocalGitFailure::Operation.after_rollback(
+                        remove_published_reference_if_current(&self.parent, &self.leaf, prepared),
+                    ));
                 }
-                return Err(LocalGitFailure::Operation);
+                return Err(LocalGitFailure::Ambiguous);
             }
             self.committed = true;
             return Ok(());
@@ -425,7 +426,7 @@ impl ReferenceLock {
                         self.committed = true;
                         return Ok(());
                     }
-                    return Err(LocalGitFailure::Operation);
+                    return Err(LocalGitFailure::Ambiguous);
                 }
             };
         let displaced = read_reference_leaf(&self.parent, &self.lock_name, authority, &self.name);
@@ -446,15 +447,17 @@ impl ReferenceLock {
         {
             before_rollback.take().ok_or(LocalGitFailure::Operation)?();
             if publication_is_current {
-                let _ = rollback_reference_exchange_if_current(
-                    &self.parent,
-                    &self.leaf,
-                    &self.lock_name,
-                    displaced_after_exchange,
-                    self.prepared.ok_or(LocalGitFailure::Operation)?,
-                );
+                return Err(LocalGitFailure::Operation.after_rollback(
+                    rollback_reference_exchange_if_current(
+                        &self.parent,
+                        &self.leaf,
+                        &self.lock_name,
+                        displaced_after_exchange,
+                        self.prepared.ok_or(LocalGitFailure::Ambiguous)?,
+                    ),
+                ));
             }
-            return Err(LocalGitFailure::Operation);
+            return Err(LocalGitFailure::Ambiguous);
         }
         before_cleanup();
         let final_postconditions_hold = packed_reference_state(authority, &self.name)
@@ -462,14 +465,15 @@ impl ReferenceLock {
             && self.post_publication_layout_is_current(authority)
             && self.hierarchy_is_current(authority);
         if !final_postconditions_hold {
-            let _ = rollback_reference_exchange_if_current(
-                &self.parent,
-                &self.leaf,
-                &self.lock_name,
-                displaced_after_exchange,
-                self.prepared.ok_or(LocalGitFailure::Operation)?,
-            );
-            return Err(LocalGitFailure::Operation);
+            return Err(LocalGitFailure::Operation.after_rollback(
+                rollback_reference_exchange_if_current(
+                    &self.parent,
+                    &self.leaf,
+                    &self.lock_name,
+                    displaced_after_exchange,
+                    self.prepared.ok_or(LocalGitFailure::Ambiguous)?,
+                ),
+            ));
         }
         finalize_reference_exchange_if_current(
             &self.parent,
@@ -478,7 +482,8 @@ impl ReferenceLock {
             expected_leaf_snapshot,
             self.prepared.ok_or(LocalGitFailure::Operation)?,
             after_displaced_quarantine,
-        )?;
+        )
+        .map_err(|_| LocalGitFailure::Ambiguous)?;
         self.committed = true;
         Ok(())
     }
