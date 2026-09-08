@@ -314,7 +314,7 @@ async fn process_transcript_is_one_authoritative_snapshot() -> Result<(), Box<dy
         .expect("the committed session has a transcript projection");
 
     assert_eq!(queued_snapshot.session(), session);
-    assert_eq!(queued_snapshot.cursor(), 4);
+    assert_eq!(queued_snapshot.cursor(), 5);
     assert_eq!(queued_snapshot.turns().len(), 1);
     assert_eq!(queued_snapshot.turns()[0].turn(), turn);
     assert_eq!(queued_snapshot.turns()[0].acceptance_position(), 1);
@@ -365,7 +365,7 @@ async fn process_transcript_is_one_authoritative_snapshot() -> Result<(), Box<dy
         .expect("the committed session has a transcript projection");
 
     assert_eq!(snapshot.session(), session);
-    assert_eq!(snapshot.cursor(), 5);
+    assert_eq!(snapshot.cursor(), 7);
     assert_eq!(snapshot.turns().len(), 1);
     assert_eq!(snapshot.turns()[0].turn(), turn);
     assert_eq!(snapshot.turns()[0].acceptance_position(), 1);
@@ -1564,6 +1564,18 @@ async fn scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn
             .await?,
         OutboxDispatchOutcome::Delivered { sequence: 2 }
     );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                assert!(matches!(
+                    event.kind(),
+                    DispatchedOutboxEventKind::SessionStateChanged(_)
+                ));
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
     let mut accepted = None;
     assert_eq!(
         dispatcher
@@ -1572,7 +1584,7 @@ async fn scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
+        OutboxDispatchOutcome::Delivered { sequence: 4 }
     );
     let accepted = accepted.expect("the input acceptance event was offered");
     assert_eq!(accepted.session(), Some(session));
@@ -1593,7 +1605,7 @@ async fn scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 4 }
+        OutboxDispatchOutcome::Delivered { sequence: 5 }
     );
     assert_eq!(
         settled
@@ -1605,6 +1617,18 @@ async fn scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn
         }
     );
 
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                assert!(matches!(
+                    event.kind(),
+                    DispatchedOutboxEventKind::SessionStateChanged(_)
+                ));
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 6 }
+    );
     let mut activation = None;
     assert_eq!(
         dispatcher
@@ -1613,7 +1637,7 @@ async fn scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 5 }
+        OutboxDispatchOutcome::Delivered { sequence: 7 }
     );
     let activation = activation.expect("the turn activation event was offered");
     assert_eq!(activation.session(), Some(session));
@@ -1644,7 +1668,7 @@ async fn scheduling_transitions_dispatch_in_commit_order() -> Result<(), Box<dyn
     .bind(attempt.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_counts, (1, 1, Decimal::from(5)));
+    assert_eq!(durable_counts, (1, 1, Decimal::from(7)));
 
     pool.close().await;
     drop(container);
@@ -1696,41 +1720,24 @@ async fn turn_activation_dispatch_requires_authoritative_attempt() -> Result<(),
     );
     assert_eq!(startup.execute().await?.recovered_turn_count(), 1);
 
+    let sequence = sqlx::query_scalar(
+        "SELECT event_sequence FROM turn_activated_outbox_event WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
     let dispatcher = OutboxDispatcher::new(pool.clone());
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 1 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 4 }
-    );
     let mut activation = None;
-    assert_eq!(
+    assert!(matches!(
         dispatcher
             .dispatch_next(|event| {
                 activation = Some(event.clone());
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 5 }
-    );
+        OutboxDispatchOutcome::Delivered { .. }
+    ));
     assert_eq!(
         activation
             .expect("the retained terminal attempt authorizes dispatch")
@@ -1762,26 +1769,7 @@ async fn turn_activation_dispatch_requires_authoritative_attempt() -> Result<(),
     sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query(
-        "ALTER TABLE outbox_consumer_cursor
-         DISABLE TRIGGER outbox_consumer_cursor_advances_prefix",
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "UPDATE outbox_consumer_cursor
-            SET delivered_through = 4,
-                last_delivery_xid = pg_current_xact_id()
-          WHERE consumer_name = 'process_protocol'",
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "ALTER TABLE outbox_consumer_cursor
-         ENABLE TRIGGER outbox_consumer_cursor_advances_prefix",
-    )
-    .execute(&pool)
-    .await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
 
     assert!(matches!(
         dispatcher
@@ -1819,47 +1807,24 @@ async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(),
         )
         .await?;
 
+    let sequence = sqlx::query_scalar(
+        "SELECT event_sequence FROM model_call_transition_outbox_event WHERE model_call_id = $1 AND call_state_kind = 'prepared'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
     let dispatcher = OutboxDispatcher::new(pool.clone());
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 1 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 4 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 5 }
-    );
     let mut prepared_transition = None;
-    assert_eq!(
+    assert!(matches!(
         dispatcher
             .dispatch_next(|event| {
                 prepared_transition = Some(event.clone());
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 6 }
-    );
+        OutboxDispatchOutcome::Delivered { .. }
+    ));
     assert_eq!(
         prepared_transition
             .expect("historical Prepared transition is offered")
@@ -1870,7 +1835,7 @@ async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(),
             state: DispatchedModelCallState::Prepared,
         }
     );
-    assert_eq!(
+    assert!(matches!(
         dispatcher
             .dispatch_next(|event| {
                 assert_eq!(
@@ -1884,8 +1849,17 @@ async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(),
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 7 }
-    );
+        OutboxDispatchOutcome::Delivered { .. }
+    ));
+
+    let terminal_sequence = sqlx::query_scalar(
+        "SELECT event_sequence FROM model_call_transition_outbox_event
+          WHERE model_call_id = $1 AND call_state_kind = 'terminal'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    rewind_outbox_delivery_before(&pool, terminal_sequence).await?;
 
     sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
@@ -1934,38 +1908,14 @@ async fn terminal_model_call_dispatch_requires_exact_disposition() -> Result<(),
 async fn model_call_dispatch_rejects_an_unreached_transition() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = checkpoint_restart_model_call(&pool, 0xe98, false).await?;
+    let sequence = sqlx::query_scalar(
+        "SELECT event_sequence FROM model_call_transition_outbox_event WHERE model_call_id = $1 AND call_state_kind = 'prepared'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
     let dispatcher = OutboxDispatcher::new(pool.clone());
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 1 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 4 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 5 }
-    );
-
     sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -2192,20 +2142,14 @@ async fn dispatcher_rejects_crosswired_accepted_content() -> Result<(), Box<dyn 
         )
         .await?;
 
+    let sequence = sqlx::query_scalar(
+        "SELECT event_sequence FROM input_accepted_outbox_event WHERE accepted_input_id = $1",
+    )
+    .bind(accepted_input.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
     let dispatcher = OutboxDispatcher::new(pool.clone());
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 1 }
-    );
-    assert_eq!(
-        dispatcher
-            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-            .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
-    );
-
     sqlx::query("ALTER TABLE accepted_input_content_part DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
