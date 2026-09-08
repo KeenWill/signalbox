@@ -791,6 +791,7 @@ export function ProductApp({
   const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
     productHotkeyBindings
+      .filter((binding) => productCommandAvailable(binding.commandId, context))
       .filter(
         (binding) =>
           !binding.commandId.startsWith('imports.') ||

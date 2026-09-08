@@ -827,10 +827,8 @@ test('runs product navigation sequences but leaves Mod+K to an editing field', a
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
   await expect(search).toHaveAttribute('data-mod-k-default-prevented', 'false')
 
-  // The landed shell keeps `surface.escape` away from every editable product control, so Escape
-  // does not release the field and the sequence stays ordinary text input. Narrowing that guard is
-  // deferred on KeenWill/signalbox#1316.
-  await search.press('Escape')
+  // Navigation sequences remain ordinary text while the search field owns focus.
+  await expect(search).toBeFocused()
   await page.keyboard.press('g')
   await page.keyboard.press('a')
   await expect(page).toHaveURL(/\/search$/)
@@ -1240,6 +1238,26 @@ test('withholds Search focus after cached bootstrap refetch failure and restores
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
   await page.keyboard.press('Escape')
+  await page.evaluate(() => {
+    let shortcutEvent: KeyboardEvent | undefined
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.shiftKey && event.key.toLowerCase() === 'f') {
+          shortcutEvent = event
+        }
+      },
+      true,
+    )
+    document.addEventListener('keyup', (event) => {
+      if (event.key.toLowerCase() === 'f' && shortcutEvent) {
+        document.body.dataset.searchFocusDefaultPrevented = String(shortcutEvent.defaultPrevented)
+      }
+    })
+  })
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+Shift+f`)
+  await expect(page.locator('body')).toHaveAttribute('data-search-focus-default-prevented', 'false')
 
   await useDeterministicBootstrap(page)
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
@@ -1248,8 +1266,8 @@ test('withholds Search focus after cached bootstrap refetch failure and restores
   await page.getByRole('button', { name: /Focus lexical search/ }).click()
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
   await page.keyboard.press('Escape')
-  const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+Shift+f`)
+  await expect(page.locator('body')).toHaveAttribute('data-search-focus-default-prevented', 'true')
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
 })
 
