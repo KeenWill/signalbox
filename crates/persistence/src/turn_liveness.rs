@@ -18,7 +18,7 @@ use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId, SessionId,
     TurnAttemptId, TurnTerminalCause,
 };
-use sqlx::{PgConnection, PgPool, Row, types::Decimal, types::Uuid};
+use sqlx::{Connection, PgConnection, PgPool, Row, types::Decimal, types::Uuid};
 use tokio::time::timeout;
 
 use crate::mapping::{
@@ -401,9 +401,13 @@ impl PostgresTurnLivenessRepository {
     where
         Generator: signalbox_application::StartupScanIdGenerator + Send,
     {
-        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+        let mut connection = optional_timeout(self.bounds.acquire_wait, self.pool.acquire())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let mut transaction = connection
+            .begin()
+            .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         sqlx::query("SELECT set_config('lock_timeout', $1, true)")
             .bind(postgres_lock_timeout(self.bounds.lock_wait))
@@ -468,9 +472,13 @@ impl PostgresTurnLivenessRepository {
         session: SessionId,
         abandoned_call: ModelCallId,
     ) -> Result<Option<StartupScanSessionOutcome>, TurnLivenessRepositoryError> {
-        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+        let mut connection = optional_timeout(self.bounds.acquire_wait, self.pool.acquire())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let mut transaction = connection
+            .begin()
+            .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         sqlx::query("SELECT set_config('lock_timeout', $1, true)")
             .bind(postgres_lock_timeout(self.bounds.lock_wait))
@@ -519,9 +527,13 @@ impl PostgresTurnLivenessRepository {
     where
         Generator: signalbox_application::StartupScanIdGenerator + Send,
     {
-        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+        let mut connection = optional_timeout(self.bounds.acquire_wait, self.pool.acquire())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let mut transaction = connection
+            .begin()
+            .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         // Bounded before anything is read or written, so the only statement it
         // can interrupt is the one waiting for the scheduler row. A bound that

@@ -1324,6 +1324,18 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  struct DelegationUpdate {
+    let title: String
+    let detail: String
+  }
+
+  @Published private(set) var delegationUpdate: DelegationUpdate?
+
+  private func showDelegationUpdate(_ title: String, _ detail: String) {
+    delegationUpdate = DelegationUpdate(title: title,
+      detail: SignalboxProcessPresentation.retainedLabel(detail))
+  }
+
   @Published private(set) var timeline: [SignalboxTimelineItem] = []
   @Published private(set) var pendingInputs: [SignalboxProcessPendingInput] = []
   @Published private(set) var acceptedInputsAwaitingTranscript: [SignalboxProcessPendingInput] = []
@@ -1759,6 +1771,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .phase(let phase):
         self.phase = phase
       case .authoritativeSnapshot(let snapshot):
+        delegationUpdate = nil
         let projection = try projector.projectAuthoritativeSnapshot(snapshot)
         runner = snapshot.runner
         runnerTransition = nil
@@ -1993,6 +2006,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private func resetServiceOwnedPresentation() {
     serviceGeneration &+= 1
     timeline = []
+    delegationUpdate = nil
     pendingInputs = []
     acceptedInputsAwaitingTranscript = []
     acceptedInputTimelineOffsets = [:]
@@ -2025,6 +2039,23 @@ final class ProcessSessionDetailViewModel: ObservableObject {
 
   private func applyLiveEvent(_ followed: SignalboxFollowedSessionEvent) {
     switch followed.event {
+    case .goalTurnRetired(let turnID):
+      pendingInputs.removeAll { $0.turnID == turnID }
+      acceptedInputsAwaitingTranscript.removeAll { $0.turnID == turnID }
+      if pendingInputs.isEmpty, activeTurnID == nil, activity.state == .queued {
+        activity = .unavailable
+      }
+    case .childSpawned(_, let child, _):
+      showDelegationUpdate("Child spawned", "Session \(child.rawValue)")
+    case .childWaiting(_, _, let child, let mode):
+      showDelegationUpdate("Waiting for child", "Session \(child.rawValue) · \(mode.rawValue)")
+    case .sessionMessage(_, _, let sender, _, _, _, let content):
+      showDelegationUpdate("Message from \(sender.rawValue)", content)
+    case .childResult(_, let child, let outcome, let content, let reason, _):
+      showDelegationUpdate("Child \(outcome.rawValue)",
+        "Session \(child.rawValue) · \(reason.rawValue)\n\(content ?? "")")
+    case .childLifecycleDisposition(_, let child, let outcome, let reason, _):
+      showDelegationUpdate("Child \(outcome.rawValue)", "Session \(child.rawValue) · \(reason.rawValue)")
     case .inputAccepted(let acceptedInputID, let turnID, let acceptancePosition, let content):
       if !materializedAcceptedInputIDs.contains(acceptedInputID) {
         let acceptedInput = SignalboxProcessPendingInput(
@@ -2693,6 +2724,17 @@ struct ProcessSessionDetailScreen: View {
             .padding(12)
             .background(.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             .accessibilityIdentifier("provider-streamed-text")
+          }
+          if let update = viewModel.delegationUpdate {
+            VStack(alignment: .leading, spacing: 6) {
+              Text("Latest delegation update").font(.caption).foregroundStyle(.secondary)
+              Text(update.title).font(.headline)
+              Text(update.detail).textSelection(.enabled)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityIdentifier("delegation-update")
           }
           if viewModel.timeline.isEmpty && viewModel.pendingInputs.isEmpty
             && viewModel.acceptedInputsAwaitingTranscript.isEmpty

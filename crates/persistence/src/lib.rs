@@ -158,20 +158,25 @@ fn default_passfile_is_present() -> bool {
 /// (`whoami`), and the host from a probe of the local PostgreSQL socket
 /// directories that falls back to `localhost`. Each may be stated in the URL's
 /// authority or in the query parameter SQLx reads for it — `user` for the user
-/// name, `host` or `hostaddr` for the host. Port and database name are left to
+/// name, `host` or `hostaddr` for the TLS host. A socket path selects the
+/// transport without stating the TLS host. Port and database name are left to
 /// SQLx: an omitted port is the fixed 5432, and an omitted database name lets
 /// the server apply the user name the URL states, so neither reaches outside
 /// the URL once the ambient variables are refused.
 fn parameters_taken_from_outside_the_url(url: &Url) -> Vec<&'static str> {
-    let mut host_is_stated = url.host_str().is_some_and(|host| !host.is_empty());
+    let mut host_is_stated = url.host_str().is_some_and(|host| {
+        !host.is_empty()
+            && !host.starts_with('/')
+            && !host
+                .get(..3)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("%2f"))
+    });
     let mut user_is_stated = !url.username().is_empty();
     for (parameter, value) in url.query_pairs() {
-        if value.is_empty() {
-            continue;
-        }
         match &*parameter {
-            "host" | "hostaddr" => host_is_stated = true,
-            "user" => user_is_stated = true,
+            "host" if !value.starts_with('/') => host_is_stated = !value.is_empty(),
+            "hostaddr" => host_is_stated = !value.is_empty(),
+            "user" => user_is_stated = !value.is_empty(),
             _ => {}
         }
     }
@@ -630,6 +635,62 @@ mod tests {
 
         assert_eq!(options.get_host(), "database.example");
         assert_eq!(options.get_username(), "signalbox");
+    }
+
+    #[test]
+    fn production_options_reject_socket_paths_without_a_tls_host() {
+        for url in [
+            "postgres:///signalbox?user=signalbox&host=/var/run/postgresql",
+            "postgres:///signalbox?user=signalbox&host=%2Fvar%2Frun%2Fpostgresql",
+            "postgres://signalbox@%2Fvar%2Frun%2Fpostgresql/signalbox",
+            "postgres://signalbox@%2fvar%2frun%2fpostgresql/signalbox",
+        ] {
+            let error = production_connection_options_with_environment(
+                url,
+                no_ambient_variables,
+                no_default_passfile,
+            )
+            .expect_err("a socket path does not state the TLS peer hostname");
+
+            expect!["error with configuration: the process account and host filesystem would supply production connection parameters the database URL omits: host; state every connection parameter in the database URL"].assert_eq(&error.to_string());
+        }
+    }
+
+    #[test]
+    fn production_socket_options_verify_the_tls_host_stated_in_the_url() {
+        for url in [
+            "postgres://signalbox@database.example/signalbox?host=/var/run/postgresql",
+            "postgres:///signalbox?user=signalbox&host=/var/run/postgresql&host=database.example",
+            "postgres://signalbox@%2Fvar%2Frun%2Fpostgresql/signalbox?host=database.example",
+        ] {
+            let options = production_connection_options_with_environment(
+                url,
+                no_ambient_variables,
+                no_default_passfile,
+            )
+            .expect("the URL states both socket transport and TLS peer hostname");
+
+            assert_eq!(options.get_host(), "database.example");
+            assert_eq!(
+                options.get_socket().map(|path| path.as_path()),
+                Some(std::path::Path::new("/var/run/postgresql"))
+            );
+            assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+        }
+    }
+
+    #[test]
+    fn production_options_reject_empty_query_overrides_of_stated_parameters() {
+        for parameter in ["host", "user"] {
+            let error = production_connection_options_with_environment(
+                &format!("{DATABASE_URL}?{parameter}="),
+                no_ambient_variables,
+                no_default_passfile,
+            )
+            .expect_err("an empty query override erases the authority parameter");
+
+            assert!(error.to_string().contains(&format!("omits: {parameter};")));
+        }
     }
 
     #[test]

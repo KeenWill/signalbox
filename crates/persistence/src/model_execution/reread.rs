@@ -1,4 +1,7 @@
-use super::{ModelCallIdentityCollision, ModelCallRepositoryError, encode_disposition, required};
+use super::{
+    ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError, encode_disposition,
+    required,
+};
 use crate::mapping::{session_id_to_uuid, turn_id_to_uuid};
 use rust_decimal::Decimal;
 use signalbox_application::ModelCallTerminalIdentityCandidates;
@@ -35,7 +38,9 @@ pub(super) async fn terminal_observation_closure_matches(
             completed_terminal_closure_matches(connection, session, observation, response).await
         }
         ModelCallTerminalObservation::CompletedWithTools { response, .. } => {
-            tool_round_terminal_closure_matches(connection, session, observation, response).await
+            tool_round_terminal_closure_matches(connection, session, observation, response)
+                .await
+                .map_err(retained_response_error)
         }
         ModelCallTerminalObservation::KnownFailed => {
             failed_terminal_closure_matches(connection, session, observation).await
@@ -60,6 +65,16 @@ pub(super) async fn terminal_observation_closure_matches(
         ModelCallTerminalObservation::Ambiguous => {
             ambiguous_terminal_closure_matches(connection, session, observation).await
         }
+    }
+}
+
+fn retained_response_error(error: ModelCallRepositoryError) -> ModelCallRepositoryError {
+    match error {
+        ModelCallRepositoryError::Database {
+            source: sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_),
+            ..
+        } => ModelCallCorruption::Inconsistent("retained terminal response").into(),
+        other => other,
     }
 }
 
@@ -134,78 +149,58 @@ async fn tool_round_terminal_closure_matches(
         return Ok(false);
     }
     let call = observation.call().into_uuid();
-    let matches = stored_parts
-        .into_iter()
-        .zip(response.parts())
-        .all(|(stored, expected)| {
-            let payload_kind = stored.try_get::<String, _>("payload_kind").ok();
-            let assistant_text = stored
-                .try_get::<Option<String>, _>("assistant_text_value")
-                .ok()
-                .flatten();
-            let producing_call = stored
-                .try_get::<Option<Uuid>, _>("producing_model_call_id")
-                .ok()
-                .flatten();
-            let request = stored
-                .try_get::<Option<Uuid>, _>("assistant_tool_request_id")
-                .ok()
-                .flatten();
-            let tool_name = stored
-                .try_get::<Option<String>, _>("tool_name")
-                .ok()
-                .flatten();
-            let arguments_kind = stored
-                .try_get::<Option<String>, _>("arguments_kind")
-                .ok()
-                .flatten();
-            let arguments_text = stored
-                .try_get::<Option<String>, _>("arguments_text")
-                .ok()
-                .flatten();
-            match expected {
-                AssistantResponsePart::Text(expected) => {
-                    payload_kind.as_deref() == Some("assistant_text")
-                        && assistant_text.as_deref() == Some(expected.as_str())
-                        && producing_call == Some(call)
-                        && request.is_none()
-                        && tool_name.is_none()
-                        && arguments_kind.is_none()
-                        && arguments_text.is_none()
-                }
-                AssistantResponsePart::ProviderCompaction(expected) => {
-                    payload_kind.as_deref() == Some("provider_compaction")
-                        && assistant_text.as_deref() == Some(expected.as_json())
-                        && producing_call == Some(call)
-                        && request.is_none()
-                        && tool_name.is_none()
-                        && arguments_kind.is_none()
-                        && arguments_text.is_none()
-                }
-                AssistantResponsePart::ProviderReasoning(expected) => {
-                    payload_kind.as_deref() == Some("provider_reasoning")
-                        && assistant_text.as_deref() == Some(expected.as_json())
-                        && producing_call == Some(call)
-                        && request.is_none()
-                        && tool_name.is_none()
-                        && arguments_kind.is_none()
-                        && arguments_text.is_none()
-                }
-                AssistantResponsePart::ToolCall(expected) => {
-                    let expected_kind = match expected.arguments().kind() {
-                        signalbox_domain::ToolArgumentsKind::Json => "json",
-                        signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
-                    };
-                    payload_kind.as_deref() == Some("assistant_tool_use")
-                        && assistant_text.is_none()
-                        && producing_call == Some(call)
-                        && request.is_some()
-                        && tool_name.as_deref() == Some(expected.name().as_str())
-                        && arguments_kind.as_deref() == Some(expected_kind)
-                        && arguments_text.as_deref() == Some(expected.arguments().as_str())
-                }
+    let mut matches = true;
+    for (stored, expected) in stored_parts.into_iter().zip(response.parts()) {
+        let payload_kind: String = required(&stored, "payload_kind")?;
+        let assistant_text: Option<String> = stored.try_get("assistant_text_value")?;
+        let producing_call: Option<Uuid> = stored.try_get("producing_model_call_id")?;
+        let request: Option<Uuid> = stored.try_get("assistant_tool_request_id")?;
+        let tool_name: Option<String> = stored.try_get("tool_name")?;
+        let arguments_kind: Option<String> = stored.try_get("arguments_kind")?;
+        let arguments_text: Option<String> = stored.try_get("arguments_text")?;
+        matches &= match expected {
+            AssistantResponsePart::Text(expected) => {
+                payload_kind == "assistant_text"
+                    && assistant_text.as_deref() == Some(expected.as_str())
+                    && producing_call == Some(call)
+                    && request.is_none()
+                    && tool_name.is_none()
+                    && arguments_kind.is_none()
+                    && arguments_text.is_none()
             }
-        });
+            AssistantResponsePart::ProviderCompaction(expected) => {
+                payload_kind == "provider_compaction"
+                    && assistant_text.as_deref() == Some(expected.as_json())
+                    && producing_call == Some(call)
+                    && request.is_none()
+                    && tool_name.is_none()
+                    && arguments_kind.is_none()
+                    && arguments_text.is_none()
+            }
+            AssistantResponsePart::ProviderReasoning(expected) => {
+                payload_kind == "provider_reasoning"
+                    && assistant_text.as_deref() == Some(expected.as_json())
+                    && producing_call == Some(call)
+                    && request.is_none()
+                    && tool_name.is_none()
+                    && arguments_kind.is_none()
+                    && arguments_text.is_none()
+            }
+            AssistantResponsePart::ToolCall(expected) => {
+                let expected_kind = match expected.arguments().kind() {
+                    signalbox_domain::ToolArgumentsKind::Json => "json",
+                    signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
+                };
+                payload_kind == "assistant_tool_use"
+                    && assistant_text.is_none()
+                    && producing_call == Some(call)
+                    && request.is_some()
+                    && tool_name.as_deref() == Some(expected.name().as_str())
+                    && arguments_kind.as_deref() == Some(expected_kind)
+                    && arguments_text.as_deref() == Some(expected.arguments().as_str())
+            }
+        };
+    }
     Ok(matches)
 }
 
@@ -1230,4 +1225,62 @@ pub(super) fn prepared_matches_stopped(
                 }
                 _ => true,
             })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+    use std::io;
+
+    #[test]
+    fn retained_response_decode_failures_are_corruption() {
+        for source in [
+            sqlx::Error::ColumnDecode {
+                index: String::from("assistant_text_value"),
+                source: Box::new(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid retained text",
+                )),
+            },
+            sqlx::Error::Decode(Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid retained value",
+            ))),
+        ] {
+            let error = retained_response_error(source.into());
+            assert_eq!(
+                error.operator_failure_class(),
+                OperatorFailureClass::FailClosedCorruption
+            );
+            assert!(matches!(
+                error,
+                ModelCallRepositoryError::Corruption(ModelCallCorruption::Inconsistent(
+                    "retained terminal response"
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn retained_response_io_failures_remain_infrastructure() {
+        let source = sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "database read timed out",
+        ));
+        let error = retained_response_error(source.into());
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
+        assert!(matches!(
+            error,
+            ModelCallRepositoryError::Database {
+                source: sqlx::Error::Io(_),
+                commit_ambiguous: false
+            }
+        ));
+    }
 }

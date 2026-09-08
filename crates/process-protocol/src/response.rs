@@ -162,6 +162,24 @@ pub enum ServerMessage {
         /// Complete configured member order.
         policy_members: Vec<String>,
     },
+    /// Opens one runner-status page.
+    RunnerStatusStart {},
+    /// One current enrollment or session placement.
+    RunnerStatus { status: crate::RunnerStatusFact },
+    /// One retained refusal with redacted diagnostic detail.
+    RunnerOperationFailure {
+        failure: crate::RunnerOperationFailure,
+    },
+    /// One retained workspace leak.
+    RunnerWorkspaceLeak { leak: crate::RunnerWorkspaceLeak },
+    /// Closes the page and names its exclusive continuation.
+    RunnerStatusEnd {
+        runner_count: CanonicalU64,
+        failure_count: CanonicalU64,
+        leak_count: CanonicalU64,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        next_after: Option<crate::RunnerStatusCursor>,
+    },
     /// Immutable workspace registration receipt.
     WorkspaceRegistered {
         command_id: crate::CommandId,
@@ -965,6 +983,30 @@ impl ServerMessage {
             return Err(FrameValidationError::CredentialExclusionShape);
         }
 
+        match self {
+            Self::RunnerOperationFailure { failure } => failure.validate()?,
+            Self::RunnerWorkspaceLeak { leak } => leak.validate()?,
+            Self::RunnerStatusEnd {
+                runner_count,
+                failure_count,
+                leak_count,
+                next_after,
+                ..
+            } => {
+                let count = runner_count
+                    .value()
+                    .checked_add(failure_count.value())
+                    .and_then(|count| count.checked_add(leak_count.value()))
+                    .ok_or(FrameValidationError::RunnerStatusShape)?;
+                if count > 100 || (count == 0 && next_after.is_some()) {
+                    return Err(FrameValidationError::RunnerStatusShape);
+                }
+                if let Some(cursor) = next_after {
+                    cursor.validate()?;
+                }
+            }
+            _ => {}
+        }
         match self {
             Self::OauthCredentialAuthorization {
                 profile,

@@ -26,6 +26,7 @@ where
 /// from pairing independent positional labels. No variant carries payload text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum InternalDiagnostic {
+    WorkspaceCorruption,
     BlobReadIntegrity,
     ReviewWorkflowProjectionCorruption,
     ReviewOrchestrationStoreCorruption,
@@ -137,7 +138,8 @@ impl InternalDiagnostic {
             | Self::SubmitInputIdentityCollision
             | Self::SubmitInputModelExecutionIdentityCollision
             | Self::ToolLoopIdentityCollision => OperatorFailureClass::IdentityCollision,
-            Self::BlobReadIntegrity
+            Self::WorkspaceCorruption
+            | Self::BlobReadIntegrity
             | Self::ReviewWorkflowProjectionCorruption
             | Self::ReviewOrchestrationStoreCorruption
             | Self::ReviewOrchestrationWorkflowCorruption
@@ -172,6 +174,7 @@ impl InternalDiagnostic {
 
     pub(super) const fn cause_code(self) -> &'static str {
         match self {
+            Self::WorkspaceCorruption => "workspace_corruption",
             Self::BlobReadIntegrity => "blob_read_integrity",
             Self::ReviewWorkflowProjectionCorruption => "review_workflow_projection_corruption",
             Self::ReviewOrchestrationStoreCorruption => "review_orchestration_store_corruption",

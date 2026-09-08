@@ -1,9 +1,8 @@
 import { readFileSync } from 'node:fs'
-
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import { imageArtifact, jpegDescriptor } from '../src/features/artifacts/artifactScenario'
 import { decodeWebBlobDescriptor } from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, type TestInfo, test } from './fontTest'
 
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const thumbnailFixture = readFileSync(new URL('./fixtures/thumbnail.png', import.meta.url))
@@ -271,6 +270,104 @@ test('recovers after a descriptor response violates the generated contract', asy
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('keeps focus moved during a pending descriptor retry', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useRecoveringArtifactScenario(page)
+  await page.goto('/sessions?workspace=true')
+  await submitArtifactWithoutMouse(page)
+  await expect(page.getByRole('alert')).toContainText(incompatibleDescriptorMessage)
+
+  const response = Promise.withResolvers<void>()
+  await page.route('**/api/blobs/**/descriptor?*', async (route) => {
+    await response.promise
+    await route.fulfill({ json: imageArtifact })
+  })
+  const request = page.waitForRequest('**/api/blobs/**/descriptor?*')
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
+  await request
+  const filename = page.getByRole('textbox', { name: 'Display filename' })
+  await filename.focus()
+  response.resolve()
+  await expect(
+    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
+  await expect(filename).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps focus moved during a pending bootstrap retry', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: incompatibleDescriptorFixture }),
+  )
+  await page.goto('/sessions?workspace=true')
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+
+  const response = Promise.withResolvers<void>()
+  await page.route('**/api/bootstrap', async (route) => {
+    await response.promise
+    await route.fulfill({ json: webContractBootstrapFixture })
+  })
+  const request = page.waitForRequest('**/api/bootstrap')
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await request
+  const navigation = page.getByRole('link', { name: /Settings/ })
+  await navigation.focus()
+  response.resolve()
+  await expect(page.getByText('Contract rejected')).toHaveCount(0)
+  await expect(navigation).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('preserves an intentional blur during a pending descriptor retry', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useRecoveringArtifactScenario(page)
+  await page.goto('/sessions?workspace=true')
+  await submitArtifactWithoutMouse(page)
+  await expect(page.getByRole('alert')).toContainText(incompatibleDescriptorMessage)
+
+  const response = Promise.withResolvers<void>()
+  await page.route('**/api/blobs/**/descriptor?*', async (route) => {
+    await response.promise
+    await route.fulfill({ json: imageArtifact })
+  })
+  const request = page.waitForRequest('**/api/blobs/**/descriptor?*')
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
+  await request
+  await page.getByText('Operator workstation', { exact: true }).click()
+  await expect(page.locator('body')).toBeFocused()
+  response.resolve()
+  await expect(
+    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
+  await expect(page.locator('body')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('preserves an intentional blur during a pending bootstrap retry', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: incompatibleDescriptorFixture }),
+  )
+  await page.goto('/sessions?workspace=true')
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+
+  const response = Promise.withResolvers<void>()
+  await page.route('**/api/bootstrap', async (route) => {
+    await response.promise
+    await route.fulfill({ json: webContractBootstrapFixture })
+  })
+  const request = page.waitForRequest('**/api/bootstrap')
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await request
+  await page.getByText('Operator workstation', { exact: true }).click()
+  await expect(page.locator('body')).toBeFocused()
+  response.resolve()
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.locator('body')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('captures desktop and responsive artifact evidence', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
@@ -279,11 +376,11 @@ test('captures desktop and responsive artifact evidence', async ({ page }, testI
   await page.goto('/sessions?workspace=true')
   await resolveArtifactWithoutMouse(page)
 
-  await expect(page).toHaveScreenshot('artifact-inspector-desktop-dark.png', {
+  await expect.soft(page).toHaveScreenshot('artifact-inspector-desktop-dark.png', {
     animations: 'disabled',
   })
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await expect(page).toHaveScreenshot('artifact-inspector-desktop-light.png', {
+  await expect.soft(page).toHaveScreenshot('artifact-inspector-desktop-light.png', {
     animations: 'disabled',
   })
   await page.getByRole('button', { name: 'Close artifact inspector' }).click()
@@ -292,7 +389,7 @@ test('captures desktop and responsive artifact evidence', async ({ page }, testI
   await expect(
     page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
-  await expect(page).toHaveScreenshot('artifact-inspector-mobile-light.png', {
+  await expect.soft(page).toHaveScreenshot('artifact-inspector-mobile-light.png', {
     animations: 'disabled',
   })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
