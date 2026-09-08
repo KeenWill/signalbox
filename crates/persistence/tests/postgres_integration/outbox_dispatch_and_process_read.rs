@@ -188,10 +188,28 @@ async fn process_session_summary_page_batches_placement_projection() -> Result<(
         .next_summary()
         .await?
         .ok_or("the earlier session summary is present")?;
+    let first_query_started: String = sqlx::query_scalar(
+        "SELECT query_start::text FROM pg_stat_activity
+          WHERE state = 'idle in transaction'
+            AND query LIKE '%runner_current_session_placement%'",
+    )
+    .fetch_one(&pool)
+    .await?;
     let later = summaries
         .next_summary()
         .await?
         .ok_or("the later session summary is present")?;
+    let last_query_started: String = sqlx::query_scalar(
+        "SELECT query_start::text FROM pg_stat_activity
+          WHERE state = 'idle in transaction'
+            AND query LIKE '%runner_current_session_placement%'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        last_query_started, first_query_started,
+        "yielding another summary from the same page must not query the database"
+    );
     assert!(summaries.next_summary().await?.is_none());
 
     assert_eq!(summaries.summary_count(), Some(2));
@@ -206,6 +224,8 @@ async fn process_session_summary_page_batches_placement_projection() -> Result<(
     assert_eq!(later.defaults_version(), 1);
     assert_eq!(later.model_selection(), ProcessModelSelection::Alias(alias));
     assert_eq!(later.placement().placement(), &later_placement);
+    assert_eq!(earlier.runner(), None);
+    assert_eq!(later.runner(), None);
 
     pool.close().await;
     drop(container);

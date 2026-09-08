@@ -537,6 +537,7 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListCredentialExclusions { .. }
+        | ClientRequest::ReadRunnerStatus { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
@@ -741,6 +742,7 @@ impl SnapshotReaderAdmission {
         match request {
             ClientRequest::ListSessions {}
             | ClientRequest::ReadOperatorStatus {}
+            | ClientRequest::ReadRunnerStatus { .. }
             | ClientRequest::ReadGoal { .. }
             | ClientRequest::ReadTranscript { .. }
             | ClientRequest::FollowSession { .. }
