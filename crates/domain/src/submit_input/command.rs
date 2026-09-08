@@ -42,6 +42,15 @@ use std::hash::Hasher;
 /// Equality and hashing intentionally exclude [`DurableCommandId`]. They
 /// include the command discriminator by type and every other caller-supplied
 /// semantic field.
+///
+/// Core attribution is available only through the core-specific constructors.
+///
+/// ```compile_fail
+/// use signalbox_domain::{Actor, DeliveryRequest, DurableCommandId, SessionId, SubmitInput, UserContent};
+/// fn forge(id: DurableCommandId, session: SessionId, content: UserContent, delivery: DeliveryRequest) {
+///     let _ = SubmitInput::from_recorded_fields(id, session, Actor::Core, content, delivery);
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct SubmitInput {
     pub(super) command_id: DurableCommandId,
@@ -92,13 +101,63 @@ impl SubmitInput {
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
-        capability: crate::ProgramSessionCapability,
+        run: crate::ProgramActor,
     ) -> Self {
-        Self::from_recorded_fields(command_id, session, capability.actor(), content, delivery)
+        Self::from_recorded_fields(
+            command_id,
+            session,
+            Actor::Program { run },
+            content,
+            delivery,
+        )
+    }
+
+    /// Reconstitutes stored model input after storage validates its references.
+    pub const fn from_recorded_model(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        turn: TurnId,
+    ) -> Self {
+        Self::from_recorded_fields(
+            command_id,
+            session,
+            Actor::Model { turn },
+            content,
+            delivery,
+        )
+    }
+
+    /// Reconstitutes stored tool input after storage validates its references.
+    pub const fn from_recorded_tool(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        request: crate::ToolRequestId,
+    ) -> Self {
+        Self::from_recorded_fields(
+            command_id,
+            session,
+            Actor::Tool { request },
+            content,
+            delivery,
+        )
+    }
+
+    /// Reconstitutes stored recovery input after storage validates its references.
+    pub const fn from_recorded_recovery(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+    ) -> Self {
+        Self::from_recorded_fields(command_id, session, Actor::Recovery, content, delivery)
     }
 
     /// Reconstitutes canonical fields after storage validates their references and spelling.
-    pub const fn from_recorded_fields(
+    const fn from_recorded_fields(
         command_id: DurableCommandId,
         session: SessionId,
         actor: Actor,

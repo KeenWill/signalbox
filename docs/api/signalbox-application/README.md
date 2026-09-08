@@ -5,6 +5,7 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | workspace | 1 | 1 | 0 | [workspace](workspace.md) |
+| program_session | 2 | 1 | 0 | [program_session](program_session.md) |
 | approval_judge | 7 | 1 | 0 | [approval_judge](approval_judge.md) |
 | attention | 16 | 1 | 6 | [attention](attention.md) |
 | blob_derivation | 6 | 3 | 0 | [blob_derivation](blob_derivation.md) |

@@ -29,13 +29,14 @@ pub enum CommandPrincipal {
 
 impl CommandPrincipal {
     /// Returns the principal a command carrying this domain actor is issued
-    /// under when no module composed it.
-    pub const fn for_actor(actor: Actor) -> Self {
+    /// under when no module composed it. Program provenance confers no principal.
+    pub const fn for_actor(actor: Actor) -> Option<Self> {
         match actor {
-            Actor::User => Self::Operator,
-            Actor::Core => Self::Core,
-            Actor::Recovery => Self::Watchdog,
-            Actor::Model { .. } | Actor::Tool { .. } | Actor::Program { .. } => Self::Core,
+            Actor::User => Some(Self::Operator),
+            Actor::Core => Some(Self::Core),
+            Actor::Recovery => Some(Self::Watchdog),
+            Actor::Model { .. } | Actor::Tool { .. } => Some(Self::Core),
+            Actor::Program { .. } => None,
         }
     }
 

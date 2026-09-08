@@ -499,7 +499,41 @@ pub(super) fn decode_complete(
         command_model_settings_override,
         "command delivery",
     )?;
-    let command = SubmitInput::from_recorded_fields(command_id, session, actor, content, delivery);
+    let command = match actor {
+        Actor::User => SubmitInput::new(command_id, session, content, delivery),
+        Actor::Program { run } => {
+            SubmitInput::new_program(command_id, session, content, delivery, run)
+        }
+        Actor::Model { turn } => {
+            SubmitInput::from_recorded_model(command_id, session, content, delivery, turn)
+        }
+        Actor::Tool { request } => {
+            SubmitInput::from_recorded_tool(command_id, session, content, delivery, request)
+        }
+        Actor::Recovery => {
+            SubmitInput::from_recorded_recovery(command_id, session, content, delivery)
+        }
+        Actor::Core => match delivery {
+            DeliveryRequest::StartWhenNoActiveTurn { configuration } => {
+                SubmitInput::new_core_continuation(command_id, session, content, configuration)
+            }
+            DeliveryRequest::Interrupt {
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            } => SubmitInput::new_core_interrupt(
+                command_id,
+                session,
+                content,
+                expected_active_turn,
+                descendant_scope,
+                configuration,
+            ),
+            DeliveryRequest::NextSafePoint { .. } | DeliveryRequest::AfterCurrentTurn { .. } => {
+                return Err(SubmitInputCorruption::Inconsistent("core input delivery").into());
+            }
+        },
+    };
 
     let result_kind: String = required(&row, "result_kind")?;
     let rejection_kind: Option<String> = row.try_get("rejection_kind")?;

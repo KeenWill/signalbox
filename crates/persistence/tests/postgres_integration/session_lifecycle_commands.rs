@@ -220,6 +220,11 @@ async fn a_core_issued_interrupt_records_the_core_actor_and_envelope_principal()
             .fetch_one(&pool)
             .await?;
     assert_eq!(actor, "core");
+    let retained = SubmitInputRepository::new(pool.clone())
+        .load(command_id)
+        .await?
+        .expect("core interrupt receipt is retained");
+    assert_eq!(retained.command().actor(), signalbox_domain::Actor::Core);
 
     pool.close().await;
     drop(container);
@@ -1623,6 +1628,32 @@ async fn a_park_closure_settles_its_turn_and_preserves_failure_evidence()
         .expect_err("an operator interrupt cannot bypass a committed closure");
     assert!(matches!(
         operator_error,
+        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+            "session has a pending terminal handoff"
+        ))
+    ));
+    // A retained program run is provenance, not permission to settle this handoff.
+    let program_run = signalbox_domain::ProgramRunId::from_uuid(Uuid::from_u128(0x11fe_c230));
+    signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone())
+        .create_stream(program_run)
+        .await?;
+    let program_interrupt = SubmitInput::new_program(
+        interrupt.command_id(),
+        interrupt.session(),
+        interrupt.content().clone(),
+        interrupt.delivery(),
+        signalbox_domain::ProgramActor::from_recorded_run(program_run),
+    );
+    let program_error = SubmitInputRepository::new(pool.clone())
+        .handle(
+            program_interrupt,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x11fe_c221)),
+            Some(successor),
+        )
+        .await
+        .expect_err("program provenance cannot bypass a committed closure");
+    assert!(matches!(
+        program_error,
         SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
             "session has a pending terminal handoff"
         ))

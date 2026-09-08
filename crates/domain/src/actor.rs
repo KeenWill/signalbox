@@ -44,31 +44,14 @@ pub struct ProgramActor {
 }
 
 impl ProgramActor {
-    /// Returns the exact issuing run.
-    pub const fn run(self) -> ProgramRunId {
-        self.run
-    }
-}
-
-/// The host-side session capability's attribution for one retained run.
-///
-/// This value grants no authentication, lifecycle, approval, or execution authority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProgramSessionCapability {
-    run: ProgramRunId,
-}
-
-impl ProgramSessionCapability {
-    /// Reconstitutes the host capability after storage verifies the retained run reference.
-    pub const fn reconstitute(run: ProgramRunId) -> Self {
+    /// Reconstitutes attribution after the storage reader verifies the retained run reference.
+    pub const fn from_recorded_run(run: ProgramRunId) -> Self {
         Self { run }
     }
 
-    /// Fixes input attribution to this capability's run.
-    pub const fn actor(self) -> Actor {
-        Actor::Program {
-            run: ProgramActor { run: self.run },
-        }
+    /// Returns the exact issuing run.
+    pub const fn run(self) -> ProgramRunId {
+        self.run
     }
 }
 

@@ -49,7 +49,7 @@ pub(super) async fn handle_in_transaction<
 >(
     connection: &mut PgConnection,
     command: SubmitInput,
-    principal: CommandPrincipal,
+    principal: Option<CommandPrincipal>,
     cascade_root_kind: ParentTerminationKind,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
@@ -114,7 +114,9 @@ where
         None => {}
     }
 
-    let issuer = crate::command_registry::issuer_columns(principal);
+    let issuer = principal
+        .map(crate::command_registry::issuer_columns)
+        .unwrap_or(("program", None));
     let claimed = sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at,

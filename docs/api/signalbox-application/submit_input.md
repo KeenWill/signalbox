@@ -51,7 +51,7 @@ impl SubmitInputRequest {
         session: signalbox_domain::SessionId,
         content: signalbox_domain::UserContent,
         delivery: signalbox_domain::DeliveryRequest,
-        capability: signalbox_domain::ProgramSessionCapability,
+        capability: program_session::ProgramSessionCapability,
     ) -> result::Result<Self, SubmitInputRequestError>;
     pub fn try_new_core_interrupt(
         command_id: signalbox_domain::DurableCommandId,

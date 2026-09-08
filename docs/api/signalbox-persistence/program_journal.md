@@ -134,4 +134,28 @@ impl program_journal::ProgramJournalRepository {
         program_journal::ProgramJournalRepositoryError,
     >;
 }
+impl signalbox_application::program_session::ProgramRunVerifier
+    for program_journal::ProgramJournalRepository
+{
+    type Error = program_journal::ProgramJournalRepositoryError;
+    async fn verify_run(
+        &self,
+        run: signalbox_domain::ProgramRunId,
+    ) -> result::Result<
+        bool,
+        <Self as signalbox_application::program_session::ProgramRunVerifier>::Error,
+    >;
+}
+```
+
+## ProgramSessionCapability
+
+```rust
+pub use signalbox_application::program_session::ProgramSessionCapability;
+```
+
+## ProgramSessionHost
+
+```rust
+pub use signalbox_application::program_session::ProgramSessionHost;
 ```

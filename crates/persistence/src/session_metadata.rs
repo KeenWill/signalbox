@@ -148,7 +148,9 @@ impl SessionMetadataRepository {
         }
 
         let issuer = crate::command_registry::issuer_columns(
-            signalbox_domain::CommandPrincipal::for_actor(command.actor()),
+            signalbox_domain::CommandPrincipal::for_actor(command.actor()).ok_or(
+                SessionMetadataCorruption::Inconsistent("program metadata actor"),
+            )?,
         );
         let claimed = sqlx::query(
             "INSERT INTO durable_command

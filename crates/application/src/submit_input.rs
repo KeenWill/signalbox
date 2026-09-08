@@ -62,7 +62,7 @@ pub struct SubmitInputRequest {
 enum SubmitInputRequestKind {
     User(DeliveryRequest),
     Program {
-        capability: signalbox_domain::ProgramSessionCapability,
+        capability: crate::program_session::ProgramSessionCapability,
         delivery: DeliveryRequest,
     },
     CoreContinuation(PerInputConfigurationChoices),
@@ -149,7 +149,7 @@ impl SubmitInputRequest {
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
-        capability: signalbox_domain::ProgramSessionCapability,
+        capability: crate::program_session::ProgramSessionCapability,
     ) -> Result<Self, SubmitInputRequestError> {
         Self::admit(
             command_id,
@@ -461,7 +461,13 @@ where
             SubmitInputRequestKind::Program {
                 capability,
                 delivery,
-            } => DomainSubmitInput::new_program(command_id, session, content, delivery, capability),
+            } => DomainSubmitInput::new_program(
+                command_id,
+                session,
+                content,
+                delivery,
+                capability.reference(),
+            ),
             SubmitInputRequestKind::CoreInterrupt {
                 expected_active_turn,
                 descendant_scope,
@@ -1289,9 +1295,23 @@ mod tests {
     fn program_admission_passes_its_exact_actor_to_the_transaction() {
         let id = command_id(1);
         // The run is an arbitrary retained-reference fixture.
-        let capability = signalbox_domain::ProgramSessionCapability::reconstitute(
-            signalbox_domain::ProgramRunId::from_uuid(Uuid::from_u128(3)),
-        );
+        struct RetainedRun;
+        impl crate::program_session::ProgramRunVerifier for RetainedRun {
+            type Error = std::convert::Infallible;
+            async fn verify_run(
+                &self,
+                _: signalbox_domain::ProgramRunId,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+        let capability = run_ready(
+            crate::program_session::ProgramSessionHost::new(RetainedRun).session_capability(
+                signalbox_domain::ProgramRunId::from_uuid(Uuid::from_u128(3)),
+            ),
+        )
+        .expect("fixture verification succeeds")
+        .expect("fixture run is retained");
         let admitted = SubmitInputRequest::try_new_program(
             id,
             session_id(2),

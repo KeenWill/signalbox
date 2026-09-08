@@ -5277,7 +5277,7 @@ async fn creation_runner_placement_replay_compares_explicit_and_template_payload
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn program_submit_records_its_run_and_conflicts_with_user_replay()
 -> Result<(), Box<dyn Error>> {
-    use signalbox_domain::{Actor, ProgramRunId, ProgramSessionCapability};
+    use signalbox_domain::{Actor, ProgramRunId};
     let (_container, pool, _database_url) = migrated_postgres().await?;
     // These values are arbitrary, independent fixture identities.
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -5287,7 +5287,12 @@ async fn program_submit_records_its_run_and_conflicts_with_user_replay()
     signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone())
         .create_stream(run)
         .await?;
-    let capability = ProgramSessionCapability::reconstitute(run);
+    let capability = signalbox_persistence::program_journal::ProgramSessionHost::new(
+        signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone()),
+    )
+    .session_capability(run)
+    .await?
+    .expect("program run is retained");
     let user_command = start_input(
         0x5704,
         0x5702,
@@ -5327,7 +5332,7 @@ async fn program_submit_records_its_run_and_conflicts_with_user_replay()
             .bind(user_command.command_id().into_uuid())
             .fetch_one(&pool)
             .await?;
-    assert_eq!(issuer, "core");
+    assert_eq!(issuer, "program");
     let user_request = SubmitInputRequest::try_new(
         user_command.command_id(),
         user_command.session(),

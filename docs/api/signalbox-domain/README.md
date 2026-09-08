@@ -5,7 +5,7 @@
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
 | accepted_input | 5 | 0 | 0 | [accepted_input](accepted_input.md) |
-| actor | 3 | 0 | 0 | [actor](actor.md) |
+| actor | 2 | 0 | 0 | [actor](actor.md) |
 | applied_interrupt | 2 | 0 | 0 | [applied_interrupt](applied_interrupt.md) |
 | blob | 10 | 0 | 0 | [blob](blob.md) |
 | configuration | 24 | 0 | 0 | [configuration](configuration.md) |

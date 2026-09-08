@@ -25,12 +25,25 @@ impl SubmitInput {
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
-        capability: ProgramSessionCapability,
+        run: ProgramActor,
     ) -> Self;
-    pub const fn from_recorded_fields(
+    pub const fn from_recorded_model(
         command_id: DurableCommandId,
         session: SessionId,
-        actor: Actor,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        turn: TurnId,
+    ) -> Self;
+    pub const fn from_recorded_tool(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        request: ToolRequestId,
+    ) -> Self;
+    pub const fn from_recorded_recovery(
+        command_id: DurableCommandId,
+        session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
     ) -> Self;

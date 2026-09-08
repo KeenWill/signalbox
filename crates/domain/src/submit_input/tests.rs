@@ -4048,12 +4048,11 @@ fn preparation_rejects_a_cross_wired_session() {
 
 #[test]
 fn program_submit_replay_compares_the_issuing_run_and_excludes_command_identity() {
-    use crate::{ProgramRunId, ProgramSessionCapability};
+    use crate::{ProgramActor, ProgramRunId};
     // These run values are arbitrary fixture identities.
     let capability =
-        ProgramSessionCapability::reconstitute(ProgramRunId::from_uuid(uuid::Uuid::from_u128(1)));
-    let other =
-        ProgramSessionCapability::reconstitute(ProgramRunId::from_uuid(uuid::Uuid::from_u128(2)));
+        ProgramActor::from_recorded_run(ProgramRunId::from_uuid(uuid::Uuid::from_u128(1)));
+    let other = ProgramActor::from_recorded_run(ProgramRunId::from_uuid(uuid::Uuid::from_u128(2)));
     let user = start_command(1, "program input", 1);
     let program = |id, capability| {
         SubmitInput::new_program(

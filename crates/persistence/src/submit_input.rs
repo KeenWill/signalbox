@@ -446,7 +446,7 @@ impl SubmitInputRepository {
     >(
         &self,
         command: SubmitInput,
-        principal: CommandPrincipal,
+        principal: impl Into<Option<CommandPrincipal>>,
         cascade_root_kind: ParentTerminationKind,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
@@ -468,6 +468,7 @@ impl SubmitInputRepository {
         NextClosureDecision: FnMut() -> DurableCommandId + Send,
         NextClosureAttempt: FnMut() -> TurnAttemptId + Send,
     {
+        let principal = principal.into();
         let command_id = command.command_id();
         let mut transaction = self.pool.begin().await?;
         let decision = Box::pin(handle_in_transaction(
@@ -689,10 +690,11 @@ fn decode_actor(
             version,
         ) {
             ("program", None, None, Some(run), Some(verified), 4) if run == verified => {
-                Ok(signalbox_domain::ProgramSessionCapability::reconstitute(
-                    signalbox_domain::ProgramRunId::from_uuid(run),
-                )
-                .actor())
+                Ok(Actor::Program {
+                    run: signalbox_domain::ProgramActor::from_recorded_run(
+                        signalbox_domain::ProgramRunId::from_uuid(run),
+                    ),
+                })
             }
             _ => Err(
                 SubmitInputCorruption::Inconsistent("program actor reference or version").into(),

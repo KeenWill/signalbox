@@ -229,13 +229,13 @@ impl ProgramHost {
     pub async fn session_capability(
         &self,
         run: ProgramRunId,
-    ) -> Result<Option<signalbox_domain::ProgramSessionCapability>, ProgramJournalRepositoryError>
-    {
-        Ok(self
-            .journal
-            .load(run)
-            .await?
-            .map(|journal| signalbox_domain::ProgramSessionCapability::reconstitute(journal.run())))
+    ) -> Result<
+        Option<signalbox_persistence::program_journal::ProgramSessionCapability>,
+        ProgramJournalRepositoryError,
+    > {
+        signalbox_persistence::program_journal::ProgramSessionHost::new(self.journal.clone())
+            .session_capability(run)
+            .await
     }
 
     #[allow(
