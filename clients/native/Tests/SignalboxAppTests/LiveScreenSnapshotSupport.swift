@@ -275,12 +275,10 @@ extension SnapshotCanvas {
 /// golden is a presentation the application never makes: nothing here drives a
 /// sheet onto a screen that did not present one.
 ///
-/// Snapshotting sheet content standalone on `SnapshotCanvas.sheet` is the
-/// second way to record a sheet and not a correction of the first. It exists
-/// for content whose declared minimum width the presenting canvas cannot give
-/// it, where the presented rendering would record the form clipped; the two
-/// tests for the creation sheet are the pair, and the note on each says which
-/// question it answers.
+/// Snapshotting sheet content standalone on `SnapshotCanvas.sheet` records
+/// the form separately from its presentation. The creation sheet has no iOS
+/// minimum width: its presented test uses the available presentation width,
+/// while the standalone test uses the explicit sheet canvas.
 ///
 /// The second cost is the destination, and it is bounded rather than absent.
 /// Everything a layout resolves against is pinned below — size, scale, size

@@ -1106,12 +1106,9 @@ final class LiveScreenSnapshotTests: XCTestCase {
         )
     }
 
-    /// The sheet's content as its own screen, on the canvas a sheet declares
-    /// for itself. Compositing it onto the window that presents it is what
-    /// `testSessionListPresentingTheCreationSheet` records; this is the same
-    /// content at the size its own minimum width asks for, which is what a
-    /// reader comparing the form's fields wants and what the presented golden
-    /// crops.
+    /// Records creation-sheet content on the standalone sheet canvas. iOS
+    /// imposes no minimum width; the presented-sheet test separately records
+    /// the form at the width the presentation gives it.
     func testSessionCreationSheetContent() async {
         await assertDirectSnapshot(of: processCreationSheet(), canvas: .sheet)
     }
