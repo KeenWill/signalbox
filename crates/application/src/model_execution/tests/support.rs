@@ -17,11 +17,12 @@ use super::{
     ModelCallReconstitutionState, ModelCallTerminalIdentityCandidates,
     ModelCallTerminalObservation, ModelConversationMessage, ModelSelectionOverride,
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, ModelToolResultContent,
-    ModelUserContent, ModelUserContentPart, NormalizedToolArguments, OperatorFailureClass,
-    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, PreparedModelCallFailureCause, PreparedModelCallRequest,
-    PreparedModelOperation, ProviderModelIdentity, ResolvedContextFrontierReconstitutionInput,
-    ResolvedProviderTarget, ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
+    ModelUserContent, ModelUserContentPart, NonZeroU64, NormalizedToolArguments,
+    OperatorFailureClass, PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput,
+    PrepareModelCallOutcome, PrepareModelCallTransaction, PreparedModelCallFailureCause,
+    PreparedModelCallRequest, PreparedModelOperation, ProviderModelIdentity,
+    ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
+    ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
     RetainedPreparedFailureStatus, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -32,8 +33,8 @@ use super::{
     SubmitInputTurnOriginReconstitutionInput, ToolApprovalDecision,
     ToolApprovalResolutionReconstitutionInput, ToolDenialReason, ToolName, ToolRequest,
     ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
-    TranscriptAncestry, TurnAttemptId, TurnId, UserContent, Uuid, VecDeque, Write, fmt, io,
-    projected_frontier_content_bytes, render_model_user_content,
+    TranscriptAncestry, TurnAttemptId, TurnId, UserContent, UserContentPart, Uuid, VecDeque, Write,
+    fmt, io, projected_frontier_content_bytes, render_model_user_content,
 };
 
 #[derive(Clone, Default)]
@@ -231,6 +232,17 @@ pub(super) fn prepared_execution_fixture() -> signalbox_domain::ModelCallExecuti
 pub(super) fn prepared_execution_with_content_fixture(
     content: UserContent,
 ) -> signalbox_domain::ModelCallExecution {
+    // Attachment fixtures use the widest byte-length spelling for exact stub accounting.
+    let attachment_blob_facts = content
+        .parts()
+        .iter()
+        .filter_map(|part| match part {
+            UserContentPart::Attachment { digest, .. } => Some(
+                signalbox_domain::AttachmentBlobFact::new(*digest, NonZeroU64::MAX),
+            ),
+            UserContentPart::Text { .. } => None,
+        })
+        .collect::<Vec<_>>();
     let session_id = identity(1, SessionId::from_uuid);
     let direct = identity(2, DirectModelSelection::from_uuid);
     let accepted_input = identity(3, AcceptedInputId::from_uuid);
@@ -363,6 +375,7 @@ pub(super) fn prepared_execution_with_content_fixture(
         None,
         Vec::new(),
     )
+    .with_attachment_blob_facts(attachment_blob_facts.clone())
     .reconstitute()
     .expect("fixture activation reconstructs execution");
     let prepared = initial
@@ -388,6 +401,7 @@ pub(super) fn prepared_execution_with_content_fixture(
             ModelCallReconstitutionState::Prepared,
         )],
     )
+    .with_attachment_blob_facts(attachment_blob_facts)
     .reconstitute()
     .expect("fixture Prepared facts reconstruct")
 }
@@ -1476,10 +1490,6 @@ pub(super) fn rendered_content_bytes(messages: &[ModelConversationMessage]) -> u
             | ModelConversationMessage::Assistant { content, .. } => content.as_str().len(),
             ModelConversationMessage::ProviderCompaction { block, .. } => block.as_json().len(),
             ModelConversationMessage::ProviderReasoning { item, .. } => item.as_json().len(),
-            // Mirrors `user_content_text_bytes`: attachment stubs carry a
-            // fixed-width digest and bounded declarations held under
-            // `MAX_RENDERED_ATTACHMENT_STUB_BYTES`, so they sit outside the
-            // retained-content sum on both sides of this comparison.
             ModelConversationMessage::User { content, .. } => {
                 content
                     .parts()
@@ -1488,7 +1498,14 @@ pub(super) fn rendered_content_bytes(messages: &[ModelConversationMessage]) -> u
                         ModelUserContentPart::Text(value) => {
                             total.saturating_add(value.as_str().len())
                         }
-                        ModelUserContentPart::AttachmentStub(_) => total,
+                        ModelUserContentPart::AttachmentStub(stub) => total
+                            .saturating_add(stub.rendered.len())
+                            .saturating_add(stub.media_type.as_str().len())
+                            .saturating_add(
+                                stub.display_filename
+                                    .as_ref()
+                                    .map_or(0, |name| name.as_str().len()),
+                            ),
                     })
             }
             ModelConversationMessage::DelegatedTask { content, .. }

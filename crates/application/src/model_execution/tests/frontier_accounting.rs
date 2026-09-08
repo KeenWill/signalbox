@@ -579,3 +579,57 @@ async fn evidence_loading_limit_closes_before_provider_preparation() {
         ModelCallExecutionOutcome::ToolRoundLimitReached(Box::new(failed))
     );
 }
+
+#[test]
+fn attachment_heap_content_spends_the_budget_before_rendering() {
+    let content = UserContent::try_parts(vec![super::UserContentPart::Attachment {
+        digest: super::BlobDigest::digest(b"attachment heap fixture"),
+        kind: super::AttachmentKind::Document,
+        media_type: signalbox_domain::DeclaredMediaType::try_new("\"".repeat(255))
+            .expect("bounded media type"),
+        display_filename: Some(
+            signalbox_domain::AttachmentDisplayFilename::try_new("\u{1}".repeat(255))
+                .expect("bounded filename"),
+        ),
+    }])
+    .expect("one attachment part");
+    let request = super::support::prepared_execution_with_content_fixture(content)
+        .resume_prepared_call()
+        .expect("fixture call resumes");
+    // The canonical stub is 2,242 bytes at u64::MAX, plus two 255-byte metadata values.
+    let expected_heap_bytes = 2_752;
+    let representation_bytes = request.frontier_entries().count()
+        * std::mem::size_of::<super::ModelConversationMessage>()
+        + std::mem::size_of::<super::ModelUserContentPart>();
+    let limit = representation_bytes + expected_heap_bytes;
+    let operation = PreparedModelOperation::render_within(
+        request.clone(),
+        credential_reference(),
+        None,
+        Box::new([]),
+        &[],
+        &[],
+        limit,
+    )
+    .expect("the exact retained allocation fits");
+    assert_eq!(
+        rendered_content_bytes(operation.messages()),
+        expected_heap_bytes
+    );
+    assert_eq!(
+        PreparedModelOperation::render_within(
+            request,
+            credential_reference(),
+            None,
+            Box::new([]),
+            &[],
+            &[],
+            limit - 1,
+        )
+        .expect_err("attachment heap content exceeds the one-byte-smaller budget"),
+        ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {
+            observed_bytes: limit,
+            limit_bytes: limit - 1,
+        }
+    );
+}

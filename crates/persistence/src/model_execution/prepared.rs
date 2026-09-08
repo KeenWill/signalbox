@@ -376,8 +376,18 @@ pub(super) async fn load_tool_conversation_entries(
             }
             _ => 0,
         };
+        let tool_entry_bytes = match entry.payload() {
+            SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolInadmissible { .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { .. } => {
+                std::mem::size_of::<ResolvedToolConversationEntry>()
+            }
+            _ => 0,
+        };
         bytes
-            .saturating_add(std::mem::size_of::<ResolvedToolConversationEntry>())
+            .saturating_add(tool_entry_bytes)
             .saturating_add(std::mem::size_of::<
                 signalbox_application::ModelConversationMessage,
             >())
