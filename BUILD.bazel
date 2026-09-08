@@ -49,9 +49,15 @@ py_test(
     data = [
         "tooling/sweep-test-containers.sh",
         ":rust_source_manifest",
+        "//crates/derive:module_sources",
         "//crates/persistence:Cargo.toml",
+        "//tooling/bazel:native_runtime",
     ],
-    env = {"SIGNALBOX_RUST_SOURCE_MANIFEST": "$(rootpath :rust_source_manifest)"},
+    env = {
+        "SIGNALBOX_RUST_MODULE_SOURCES": "$(rootpath //crates/derive:module_sources)",
+        "SIGNALBOX_RUST_MODULE_RUNTIME": "$(rootpath //tooling/bazel:native_runtime)",
+        "SIGNALBOX_RUST_SOURCE_MANIFEST": "$(rootpath :rust_source_manifest)",
+    },
     main = "tooling/test_sweep_test_containers.py",
     tags = ["external"],
 )

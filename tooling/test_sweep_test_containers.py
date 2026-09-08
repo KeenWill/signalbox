@@ -13,6 +13,7 @@ be asked to demonstrate on demand.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import json
 import os
 import re
@@ -161,84 +162,34 @@ MARKED_START = re.compile(
 # rather than reaching into whatever precedes an unrecognized statement.
 CHAIN_LINE_LIMIT = 40
 
-def rust_module_sources(crate_root: Path) -> set[Path]:
-    """Follow a target's file and inline module declarations, including path attributes."""
-    token = re.compile(
-        r'\s+|//[^\n]*|/\*|(?:b|c)?r(?P<hashes>\#*)".*?"(?P=hashes)'
-        r'|(?:b|c)?"(?:\\.|[^"\\])*"|b?\'(?:\\.|[^\'\\])\'|\w+|.',
-        re.DOTALL,
+@functools.cache
+def module_sources_command() -> list[str]:
+    binary = os.environ.get("SIGNALBOX_RUST_MODULE_SOURCES")
+    if binary is None:
+        build = subprocess.run(
+            ["cargo", "build", "--quiet", "-p", "signalbox-derive", "--bin", "module_sources", "--message-format=json"],
+            cwd=Path(__file__).absolute().parent.parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        artifacts = [json.loads(line) for line in build.stdout.splitlines()]
+        binary = next(artifact["executable"] for artifact in artifacts if artifact.get("executable"))
+    command = [str(Path(binary).absolute())]
+    runtime = os.environ.get("SIGNALBOX_RUST_MODULE_RUNTIME")
+    if runtime is not None:
+        command.insert(0, str(Path(runtime).absolute()))
+    return command
+
+
+def rust_module_sources(crate_root: Path, *excluded_roots: Path) -> set[Path]:
+    inventory = subprocess.run(
+        [*module_sources_command(), str(crate_root), *map(str, excluded_roots)],
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    sources = set()
-    pending = [(crate_root.resolve(), crate_root.resolve().parent)]
-    while pending:
-        source, module_directory = pending.pop()
-        if source in sources or not source.is_file():
-            continue
-        sources.add(source)
-        text = source.read_text()
-        tokens = []
-        position = 0
-        while position < len(text):
-            found = token.match(text, position)
-            value = found.group()
-            position = found.end()
-            if value == "/*":
-                depth = 1
-                while depth:
-                    delimiter = re.search(r'/\*|\*/', text[position:])
-                    if delimiter is None:
-                        position = len(text)
-                        break
-                    depth += 1 if delimiter.group() == "/*" else -1
-                    position += delimiter.end()
-            elif not value.isspace() and not value.startswith("//"):
-                tokens.append(value)
-        directories = [(module_directory, source.parent)]
-        explicit_path = None
-        index = 0
-        while index < len(tokens):
-            value = tokens[index]
-            if tokens[index:index + 2] == ["#", "["]:
-                end = index + 2
-                depth = 1
-                while end < len(tokens) and depth:
-                    depth += (tokens[end] == "[") - (tokens[end] == "]")
-                    end += 1
-                attribute = tokens[index + 2:end - 1]
-                if attribute[:2] == ["path", "="]:
-                    literal = attribute[2]
-                    explicit_path = literal[literal.index('"') + 1:literal.rindex('"')]
-                index = end
-                continue
-            directory, path_directory = directories[-1]
-            if value == "mod" and index + 2 < len(tokens):
-                name, delimiter = tokens[index + 1:index + 3]
-                if delimiter == ";":
-                    candidates = (
-                        [path_directory / explicit_path] if explicit_path is not None
-                        else [directory / f"{name}.rs", directory / name / "mod.rs"]
-                    )
-                    for child in candidates:
-                        child = child.resolve()
-                        child_directory = child.parent if child.name == "mod.rs" else child.with_suffix("")
-                        pending.append((child, child_directory))
-                    explicit_path = None
-                    index += 3
-                    continue
-                if delimiter == "{":
-                    nested = path_directory / explicit_path if explicit_path is not None else directory / name
-                    directories.append((nested, nested))
-                    explicit_path = None
-                    index += 3
-                    continue
-            if value == "{":
-                directories.append(directories[-1])
-            elif value == "}":
-                directories.pop()
-            if value in {";", "{", "}"}:
-                explicit_path = None
-            index += 1
-    return sources
+    return {Path(path) for path in inventory.stdout.split("\0") if path}
 
 
 def persistence_library_sources() -> set[Path]:
@@ -267,10 +218,7 @@ def persistence_library_sources() -> set[Path]:
     build = settings.get("build", "build.rs")
     if build is not False:
         other_roots.add(package / ("build.rs" if build is True else build))
-    sources = rust_module_sources(library)
-    for root in other_roots:
-        sources.difference_update(rust_module_sources(root))
-    return sources
+    return rust_module_sources(library, *sorted(other_roots))
 
 
 def container_start_sites() -> tuple[list[str], list[str]]:
@@ -598,9 +546,11 @@ class SweepTestContainersTest(unittest.TestCase):
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.write_text(
                     "use testcontainers::runners::AsyncRunner;\n"
+                    "async fn fixture() {\n"
                     "let container = Postgres::default()\n"
                     f"    .with_labels({case['qualifier']}disposable_test_container_labels())\n"
-                    "    .start().await?;\n"
+                    "    .start().await;\n"
+                    "}\n"
                 )
                 (root / "sources.json").write_text(json.dumps([case["file"]]))
                 with mock.patch(f"{__name__}.REPOSITORY", root), mock.patch.dict(
@@ -614,9 +564,11 @@ class SweepTestContainersTest(unittest.TestCase):
     def test_crate_labels_follow_cargo_target_modules(self) -> None:
         chain = (
             "use testcontainers::runners::AsyncRunner;\n"
+            "async fn fixture() {\n"
             "let container = Postgres::default()\n"
             "    .with_labels(crate::disposable_test_container_labels())\n"
-            "    .start().await?;\n"
+            "    .start().await;\n"
+            "}\n"
         )
         cases = [
             ("library sibling", {"src/lib.rs": "mod fixture;", "src/fixture.rs": chain}, "", 0),
@@ -629,12 +581,14 @@ class SweepTestContainersTest(unittest.TestCase):
             ("binary path", {"src/lib.rs": "mod fixture;", "src/main.rs": '#[path = "fixture.rs"] mod other;', "src/fixture.rs": chain}, "", 1),
             ("comment", {"src/lib.rs": "/* mod fixture; */", "src/fixture.rs": chain}, "", 1),
             ("string", {"src/lib.rs": 'const TEXT: &str = "mod fixture;";', "src/fixture.rs": chain}, "", 1),
+            ("raw library identifier", {"src/lib.rs": "mod r#type;", "src/type.rs": chain}, "", 0),
+            ("raw binary identifier", {"src/lib.rs": "mod r#type;", "src/main.rs": "mod r#type;", "src/type.rs": chain}, "", 1),
         ]
-        for literal in ('r"fixture.rs"', 'r#"fixture.rs"#', 'r##"fixture.rs"##'):
+        for literal in ('r"fixture.rs"', 'r#"fixture.rs"#', 'r##"fixture.rs"##', r'"fi\x78ture.rs"', r'"fi\u{78}ture.rs"'):
             declaration = f"#[path = {literal}] mod fixture;"
             cases.extend([
-                (f"raw library path {literal}", {"src/lib.rs": declaration, "src/fixture.rs": chain}, "", 0),
-                (f"raw binary path {literal}", {"src/lib.rs": "mod fixture;", "src/main.rs": declaration, "src/fixture.rs": chain}, "", 1),
+                (f"literal library path {literal}", {"src/lib.rs": declaration, "src/fixture.rs": chain}, "", 0),
+                (f"literal binary path {literal}", {"src/lib.rs": "mod fixture;", "src/main.rs": declaration, "src/fixture.rs": chain}, "", 1),
             ])
         for name, files, targets, expected_unmarked in cases:
             with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
