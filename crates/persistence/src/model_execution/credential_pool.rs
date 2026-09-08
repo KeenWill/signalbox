@@ -348,21 +348,6 @@ pub(super) async fn load_durable_pool_exclusions(
     .into_iter()
     .collect::<HashSet<_>>();
     excluded.extend(crate::oauth_credential::quarantined_profiles(connection, policy).await?);
-    let (observed_at, transient_exclusions): (sqlx::types::time::OffsetDateTime, Vec<String>) =
-        sqlx::query_as(
-            "WITH observation AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
-             SELECT observation.observed_at,
-                    ARRAY(SELECT DISTINCT credential_reference
-                          FROM credential_pool_transient_exclusion
-                          WHERE credential_reference = ANY($1)
-                            AND reset_at > observation.observed_at)
-               FROM observation",
-        )
-        .bind(&member_references)
-        .fetch_one(&mut *connection)
-        .await?;
-    let now = std::time::SystemTime::from(observed_at);
-    excluded.extend(transient_exclusions);
     let actions = sqlx::query_as::<_, (i64, String, String, Uuid, Uuid)>(
         "SELECT action_id, credential_reference, action_kind,
                 observed_session_id, observed_turn_id
@@ -410,6 +395,21 @@ pub(super) async fn load_durable_pool_exclusions(
     excluded.extend(sqlx::query_scalar::<_, String>(
         "SELECT profile FROM credential_exclusion_state WHERE active AND kind = 'profile_quarantine' AND origin <> 'pool_trigger' AND profile = ANY($1)")
         .bind(&member_references).fetch_all(&mut *connection).await?);
+    let (observed_at, transient_exclusions): (sqlx::types::time::OffsetDateTime, Vec<String>) =
+        sqlx::query_as(
+            "WITH observation AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
+             SELECT observation.observed_at,
+                    ARRAY(SELECT DISTINCT credential_reference
+                          FROM credential_pool_transient_exclusion
+                          WHERE credential_reference = ANY($1)
+                            AND reset_at > observation.observed_at)
+               FROM observation",
+        )
+        .bind(&member_references)
+        .fetch_one(&mut *connection)
+        .await?;
+    let now = std::time::SystemTime::from(observed_at);
+    excluded.extend(transient_exclusions);
     let mut headroom = HashMap::new();
     for member in policy.members().iter().filter(|member| {
         policy.tie_break == CredentialPoolRuntimeTieBreak::LeastUsed
