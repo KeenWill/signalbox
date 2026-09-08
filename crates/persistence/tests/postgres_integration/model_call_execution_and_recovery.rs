@@ -190,20 +190,11 @@ async fn oauth_quarantine_committing_during_selection_prevents_a_call_checkpoint
         },
     );
     tokio::pin!(checkpoint);
-    let waiting_for_profile = async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%oauth_credential_profile%')",
-            ).fetch_one(&pool).await?;
-            if waiting {
-                return Ok::<_, sqlx::Error>(());
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    };
     tokio::select! {
-        result = &mut checkpoint => panic!("checkpoint escaped the profile lock: {result:?}"),
-        waiting = tokio::time::timeout(Duration::from_secs(5), waiting_for_profile) => waiting??,
+        result = &mut checkpoint => panic!("checkpoint escaped the credential lock: {result:?}"),
+        waiting = blocked_backends_reached(&pool, 1) => {
+            assert!(waiting?, "checkpoint waits for the held credential lease");
+        }
     }
     lease
         .quarantine(OauthQuarantineCause::RefreshRejected)
@@ -3023,9 +3014,10 @@ pub(crate) async fn park_restart_ambiguity(
         PostgresStartupScanRepository::new(pool.clone()),
     );
     let outcome = scan.execute().await?;
-    assert_eq!(
-        outcome.awaiting_recovery_decision_sessions(),
-        &[parked.session]
+    assert!(
+        outcome
+            .awaiting_recovery_decision_sessions()
+            .contains(&parked.session)
     );
     Ok(parked)
 }
@@ -5002,5 +4994,55 @@ async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
 
     restarted_pool.close().await;
     drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn exhausted_page_settles_attempt_outside_abandoned_page() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let spent = park_restart_ambiguity(&pool, 0xdc00).await?;
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
+        Some(2),
+        Some(Duration::from_secs(120)),
+        Some(Duration::from_secs(120)),
+    );
+    let first = repository.claim_due().await?;
+    repository
+        .record_failure(
+            first.claimed()[0],
+            AutomaticReconciliationFailureKind::Infrastructure,
+        )
+        .await?;
+    sqlx::query("UPDATE automatic_reconciliation SET next_attempt_at = statement_timestamp() WHERE turn_id = $1")
+        .bind(spent.turn.into_uuid()).execute(&pool).await?;
+    let final_attempt = repository.claim_due().await?.claimed()[0];
+    let retryable = park_restart_ambiguity(&pool, 0xe000).await?;
+    let earlier_attempt = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let page = repository.claim_due().await?;
+            if let Some(attempt) = page.claimed().first() {
+                break Ok::<_, Box<dyn Error>>(*attempt);
+            }
+        }
+    })
+    .await??;
+    sqlx::query(
+        "UPDATE automatic_reconciliation
+            SET next_attempt_at = statement_timestamp() - CASE WHEN turn_id = $1 THEN interval '2 seconds' ELSE interval '1 second' END",
+    ).bind(retryable.turn.into_uuid()).execute(&pool).await?;
+
+    let batch = repository.claim_due().await?;
+    let settled: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM automatic_reconciliation_attempt
+          WHERE ((turn_id = $1 AND attempt_ordinal = $2) OR (turn_id = $3 AND attempt_ordinal = $4))
+            AND outcome_kind = 'infrastructure_failure' AND finished_at IS NOT NULL ORDER BY turn_id",
+    ).bind(spent.turn.into_uuid()).bind(i32::try_from(final_attempt.attempt().get())?)
+        .bind(retryable.turn.into_uuid()).bind(i32::try_from(earlier_attempt.attempt().get())?)
+        .fetch_all(&pool).await?;
+    assert_eq!(batch.exhausted()[0].turn(), spent.turn);
+    assert_eq!(settled.len(), 2);
+    assert!(settled.contains(&spent.turn.into_uuid()));
+    assert!(settled.contains(&retryable.turn.into_uuid()));
     Ok(())
 }
