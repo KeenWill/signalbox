@@ -571,9 +571,12 @@ Credential admission waits project the active turn state
 `wait_attempt_id` and the closed `contended` or `exhausted` cause. The terminal
 client keeps following that turn.
 
+A terminal credential wait release after a provider call projects
+`failed_after_credential_wait`, naming the fresh call-free terminal attempt and
+its known-failed predecessor with the retained provider cause. Its live terminal
+event is `turn_failed`; it emits no pool-exhaustion event.
+
 ## Planned
 
 - Runner creation and status requests, and the status read's failure evidence:
-  [design](../design/process-protocol.md).
-- Typed projection of the credential-availability wait:
   [design](../design/process-protocol.md).

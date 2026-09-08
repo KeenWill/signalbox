@@ -7,12 +7,10 @@ owner has committed and the daemon and terminal client do not implement.
 ## Goal
 
 Future implementation of these surfaces under protocol version 1 must pair each
-daemon handler with its terminal-client consumer in the same change:
-runner placement facts, and the typed projection of
-the credential-availability wait.
+daemon handler with its terminal-client consumer in the same change: runner
+placement facts.
 
 ## Design
-
 
 Runner placement facts are a paged `read_runner_status` read beside the built
 `runner_state_transition` event. The read carries `page_size` 1 through 100 and
@@ -46,12 +44,6 @@ later runner facts: a new fact adds a state and its members to this event kind,
 never a second kind. A snapshot's session summary carries the same runner
 object, with connection health present exactly for a pinned placement.
 
-The credential-availability wait projects as an active turn state retaining the
-same turn and session slot. The after-call wait-transition failure projects the
-predecessor call identity alongside its call-free terminal attempt. The endings
-these shapes project belong to
-[credential-availability.md](../spec/credential-availability.md).
-
 ## Compatibility constraints
 
 A retry-bound failure with an admissible fallback keeps the generic failed
@@ -79,9 +71,6 @@ until the daemon and client implement its surface together.
 No response code is reserved for an authorization failure, because client
 identity, authentication, authorization, and revocation are undecided.
 
-Admitting `park` in static configuration alone does not make the wait reachable;
-whatever first makes either wait reachable includes this projection.
-
 ## Acceptance criteria
 
 Every request and message above decodes under version 1 with unknown fields
@@ -92,6 +81,3 @@ decoder and projection updates.
 A follower learns a live runner loss, change, or relocation through
 `runner_state_transition` and the current runner state from its snapshot, and
 every retained runner failure serializes in the status read.
-
-The credential-availability wait projects as an active state that keeps its turn
-and session slot, and reconnect and live follow project the same typed cause.

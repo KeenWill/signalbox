@@ -112,7 +112,6 @@ anchor, unless the anchor is a heading on the linking page.
 - [Model-runtime substrate design](../design/runtime-substrate.md)
 - [Model and session settings design](../design/model-session-settings.md)
 - [Configuration and credentials design](../design/configuration-and-credentials.md)
-- [Credential availability design](../design/credential-availability.md)
 - [Identity and commands design](../design/identity-and-commands.md)
 - [Process protocol design](../design/process-protocol.md)
 - [Ownership seam design](../design/ownership-seam.md)

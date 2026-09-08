@@ -155,6 +155,18 @@ impl<'a> Output<'a> {
                     placement_revision.value()
                 ),
             },
+            TurnState::FailedAfterCredentialWait {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                predecessor_model_call,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=failed_after_credential_wait frontier={terminal_frontier_id} attempt={terminal_attempt_id} predecessor_call={} predecessor_cause={}",
+                predecessor_model_call.model_call_id(),
+                predecessor_model_call
+                    .cause()
+                    .map_or("none", failed_model_call_cause)
+            ),
             TurnState::FailedCredentialPoolExhausted {
                 terminal_frontier_id,
                 terminal_attempt_id,

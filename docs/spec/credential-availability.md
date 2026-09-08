@@ -206,6 +206,7 @@ A parked turn projects `active_awaiting_credential_availability` with its ended
 wait attempt and closed cause. Transcript reads and initial follow snapshots
 retain the active turn and its slot without rejection detail.
 
-## Planned
-
-- The typed wait projection ([design](../design/credential-availability.md)).
+A terminal release after a predecessor call projects
+`failed_after_credential_wait` with the fresh terminal attempt and the
+predecessor's provider failure. A release without a predecessor uses the typed
+pre-call exhaustion state and live event.

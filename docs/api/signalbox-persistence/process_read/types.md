@@ -360,6 +360,12 @@ pub enum ProcessModelCallRecoveryPrecondition {
 
 ```rust
 pub enum ProcessTurnState {
+    FailedAfterCredentialWait {
+        terminal_frontier: signalbox_domain::ContextFrontierId,
+        terminal_attempt: signalbox_domain::TurnAttemptId,
+        predecessor_call: signalbox_domain::ModelCallId,
+        provider_cause: process_read::ProcessProviderModelCallFailureCause,
+    },
     ActiveAwaitingCredentialAvailability {
         wait: signalbox_domain::CredentialAvailabilityWait,
     },

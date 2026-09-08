@@ -355,6 +355,8 @@ pub(super) async fn load_next_transcript_turn(
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
             turn.terminal_tool_attempt_id,
+            wait_failure.predecessor_model_call_id AS wait_failure_predecessor_call_id,
+            wait_predecessor.terminal_provider_failure_cause AS wait_failure_provider_cause,
             terminal_call.terminal_disposition_kind
                 AS terminal_model_call_disposition_kind,
             terminal_call.terminal_provider_failure_cause
@@ -494,6 +496,19 @@ pub(super) async fn load_next_transcript_turn(
            LEFT JOIN credential_availability_wait AS credential_wait
              ON credential_wait.turn_id = turn.turn_id AND credential_wait.session_id = turn.session_id
             AND credential_wait.consumed_by_attempt_id IS NULL
+           LEFT JOIN credential_availability_wait_failure AS wait_failure
+             ON wait_failure.turn_attempt_id = turn.terminal_attempt_id
+           LEFT JOIN credential_availability_wait_release AS wait_release
+             ON wait_release.turn_attempt_id = turn.terminal_attempt_id
+           LEFT JOIN credential_availability_wait AS released_wait
+             ON released_wait.wait_attempt_id = wait_release.wait_attempt_id
+            AND released_wait.consumed_by_attempt_id = turn.terminal_attempt_id
+            AND released_wait.predecessor_model_call_id = wait_failure.predecessor_model_call_id
+           LEFT JOIN model_call AS wait_predecessor
+             ON wait_predecessor.model_call_id = released_wait.predecessor_model_call_id
+            AND wait_predecessor.turn_id = turn.turn_id AND wait_predecessor.session_id = turn.session_id
+            AND wait_predecessor.state_kind = 'terminal'
+            AND wait_predecessor.terminal_disposition_kind = 'known_failed'
            LEFT JOIN model_call AS terminal_call
              ON terminal_call.model_call_id = turn.terminal_model_call_id
             AND terminal_call.turn_attempt_id = turn.terminal_attempt_id

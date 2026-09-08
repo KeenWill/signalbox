@@ -284,6 +284,46 @@ pub(super) fn decode_transcript_turn(
     let recovery_model_call_frontier =
         recovery_model_call_frontier.map(ContextFrontierId::from_uuid);
 
+    if let Some(predecessor) = row.try_get::<Option<Uuid>, _>("wait_failure_predecessor_call_id")? {
+        if state_kind != "terminal"
+            || terminal_disposition.as_deref() != Some("failed")
+            || active_phase.is_some()
+            || current_attempt.is_some()
+            || current_model_call.is_some()
+            || terminal_call.is_some()
+            || starting_frontier.is_none()
+        {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "terminal credential wait release shape",
+            )
+            .into());
+        }
+        let frontier = ContextFrontierId::from_uuid(required(row, "terminal_frontier_id")?);
+        let attempt = TurnAttemptId::from_uuid(required(row, "terminal_attempt_id")?);
+        let cause = decode_provider_failure_cause(&required::<String>(
+            row,
+            "wait_failure_provider_cause",
+        )?)?;
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    model_settings,
+                    state: ProcessTurnState::FailedAfterCredentialWait {
+                        terminal_frontier: frontier,
+                        terminal_attempt: attempt,
+                        predecessor_call: ModelCallId::from_uuid(predecessor),
+                        provider_cause: cause,
+                    },
+                },
+                start_lineage,
+                latest_frontier: Some(frontier),
+            },
+            logical_terminal,
+        );
+    }
+
     if matches!(
         active_phase.as_deref(),
         Some("awaiting_credential_availability")

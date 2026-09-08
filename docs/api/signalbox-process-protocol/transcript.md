@@ -95,6 +95,11 @@ impl<'de> de::Deserialize<'de> for FailedTerminalModelCall {
 
 ```rust
 pub enum TurnState {
+    FailedAfterCredentialWait {
+        terminal_frontier_id: CanonicalUuid,
+        terminal_attempt_id: CanonicalUuid,
+        predecessor_model_call: FailedTerminalModelCall,
+    },
     ActiveAwaitingCredentialAvailability {
         wait_attempt_id: CanonicalUuid,
         cause: CredentialAvailabilityWaitCause,
