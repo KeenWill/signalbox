@@ -217,7 +217,7 @@ pub enum RunnerToolPermissionOverride {
 }
 
 /// Checked bounded per-tool permission override inventory.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RunnerToolPermissionOverrides(BTreeMap<ToolName, RunnerToolPermissionOverride>);
 
 impl RunnerToolPermissionOverrides {
