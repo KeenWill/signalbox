@@ -202,6 +202,7 @@ pub enum ImportedSessionSeedReconstitutionFailure {
     AncestryNotImported,
     ImportedConversationMismatch,
     ImportedFrontierNotFound,
+    DuplicateImportedEntry { entry: ImportedTranscriptEntryId },
     MissingSeedRecord,
     DuplicateSeedRecord,
     SeedSessionMismatch,

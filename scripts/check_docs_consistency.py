@@ -80,7 +80,7 @@ class AnchorParser(HTMLParser):
 
 def tracked_files(root: Path) -> list[Path]:
     result = subprocess.run(
-        ["git", "ls-files", "-z", "--cached"],
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         cwd=root,
         capture_output=True,
         check=False,
@@ -273,7 +273,7 @@ def check_machine_owner_links(root: Path) -> list[Violation]:
 
 
 def cargo_package_names(root: Path) -> set[str]:
-    """Return package names declared by tracked Cargo manifests."""
+    """Return package names declared by workspace Cargo manifests."""
     names: set[str] = set()
     for manifest in (path for path in tracked_files(root) if path.name == "Cargo.toml"):
         try:

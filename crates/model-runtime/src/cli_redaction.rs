@@ -58,7 +58,24 @@ const VALUE_CREDENTIAL_MARKERS: &[&str] = &[
     "session_token:",
     "\"session_token\":",
 ];
-const TOKEN_PREFIXES: &[&str] = &["sk-", "eyJ"];
+const TOKEN_PREFIXES: &[&str] = &[
+    "sk-",
+    "eyJ",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "xoxs-",
+    "AKIA",
+    "ASIA",
+    "glpat-",
+];
 const SPACE_SEPARATED_CREDENTIAL_FLAGS: &[&str] = &["--password", "--api-key", "--passphrase"];
 const CURL_USER_FLAGS: &[&str] = &["-u", "--user", "-U", "--proxy-user"];
 /// PEM armor opening a block, and the label substring that makes the block a
@@ -175,6 +192,7 @@ fn text_might_contain_credential(text: &str) -> bool {
     CREDENTIAL_INDICATORS
         .iter()
         .any(|indicator| find_ascii_case_insensitive(text, indicator).is_some())
+        || TOKEN_PREFIXES.iter().any(|prefix| text.contains(prefix))
         || has_normalized_pwd_assignment_name(text)
 }
 
@@ -901,7 +919,7 @@ pub fn redact_json(raw: &str) -> String {
 }
 
 fn redact_json_for_tool_arguments(raw: &str) -> ToolArgumentRedaction {
-    let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
+    let Ok(mut value) = crate::provider_json::parse_json_value(raw) else {
         return ToolArgumentRedaction::Admitted(redact_text(raw));
     };
     let changed = redact_value(&mut value);
@@ -1368,17 +1386,61 @@ fn find_ascii_case_insensitive(text: &str, needle: &str) -> Option<usize> {
         .position(|candidate| candidate.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+fn is_aws_prefix(prefix: &str) -> bool {
+    matches!(prefix, "AKIA" | "ASIA")
+}
+
+fn aws_key_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+// AWS access-key IDs have a four-byte prefix and 16 uppercase alphanumeric bytes.
+fn possible_aws_key_suffix(text: &str, start: usize) -> bool {
+    let suffix = &text[start..];
+    suffix.len() <= 20
+        && !text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(aws_key_word_character)
+        && suffix
+            .bytes()
+            .skip(4)
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+fn complete_aws_key_at(text: &str, start: usize) -> bool {
+    let end = start + 20;
+    text.get(..end)
+        .is_some_and(|prefix| possible_aws_key_suffix(prefix, start))
+        && !text[end..]
+            .chars()
+            .next()
+            .is_some_and(aws_key_word_character)
+}
+
 fn redact_prefixed_token(text: &str, prefix: &str) -> String {
     let mut remaining = text;
     let mut output = String::with_capacity(text.len());
     while let Some(index) = remaining.find(prefix) {
+        if is_aws_prefix(prefix) && !complete_aws_key_at(text, text.len() - remaining.len() + index)
+        {
+            let next = index + prefix.len();
+            output.push_str(&remaining[..next]);
+            remaining = &remaining[next..];
+            continue;
+        }
         output.push_str(&remaining[..index]);
         output.push_str(REDACTED);
-        let token_end = remaining[index..]
-            .find(|character: char| {
-                character.is_whitespace() || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
-            })
-            .map_or(remaining.len(), |length| index + length);
+        let token_end = if is_aws_prefix(prefix) {
+            index + 20
+        } else {
+            remaining[index..]
+                .find(|character: char| {
+                    character.is_whitespace()
+                        || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
+                })
+                .map_or(remaining.len(), |length| index + length)
+        };
         remaining = &remaining[token_end..];
     }
     output.push_str(remaining);
@@ -2155,7 +2217,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             self.dropped_context_rescan_bytes = 0;
             self.dropped_context_continues_candidate = false;
             self.dropped_context_next_rescan_len = 0;
-            if chained {
+            let suffix = &pending.text[pending.candidate_start..];
+            let incomplete_aws_key = suffix.len() < 20
+                && ["AKIA", "ASIA"]
+                    .iter()
+                    .any(|prefix| prefix.starts_with(suffix) || suffix.starts_with(prefix))
+                && possible_aws_key_suffix(suffix, 0);
+            if !chained && incomplete_aws_key {
+                self.emit_original(pending.fragments);
+            } else if chained {
                 self.emit_redacted(pending.fragments);
             } else if candidate {
                 self.emit_candidate_from_stored_origin(pending);
@@ -2272,7 +2342,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             } else if candidate && (dirty || unfinished_url_password) {
                 self.emit_candidate_from_stored_origin(pending);
             } else {
-                self.emit_original(pending.fragments);
+                self.emit_clean(pending.fragments);
             }
             self.emitted_context.clear();
             self.dropped_context.clear();
@@ -2290,6 +2360,17 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         let (safe, redacted) = split_stream_fragments(pending.fragments, pending.candidate_start);
         self.emit_original(safe);
         self.emit_redacted(redacted);
+    }
+
+    fn emit_clean(&mut self, fragments: Vec<StreamFragment<C>>) {
+        for fragment in fragments {
+            self.emit(
+                fragment.field,
+                fragment.index,
+                fragment.correlation,
+                fragment.text,
+            );
+        }
     }
 
     fn emit_original(&mut self, fragments: Vec<StreamFragment<C>>) {
@@ -2557,7 +2638,7 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
                 self.emit_redacted(pending.fragments);
                 self.suppress_remaining();
             }
-            (false, None) => self.emit_original(pending.fragments),
+            (false, None) => self.emit_clean(pending.fragments),
         }
     }
 
@@ -2808,8 +2889,9 @@ fn stream_candidate_starts_at_zero(text: &str) -> bool {
                         && text.as_bytes()[..marker.len()].eq_ignore_ascii_case(marker.as_bytes()))
             })
         || TOKEN_PREFIXES.iter().any(|prefix| {
-            (text.len() <= prefix.len() && prefix.as_bytes()[..text.len()] == *text.as_bytes())
-                || text.starts_with(prefix)
+            ((text.len() <= prefix.len() && prefix.as_bytes()[..text.len()] == *text.as_bytes())
+                || text.starts_with(prefix))
+                && (!is_aws_prefix(prefix) || possible_aws_key_suffix(text, 0))
         })
         || json_credential_value_at_start(text).is_some()
         || unterminated_json_key_start(text) == Some(0)
@@ -3098,7 +3180,9 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
     }
     for marker in TOKEN_PREFIXES {
         let length = trailing_marker_prefix(text, marker, false);
-        if length > 0 {
+        if length > 0
+            && (!is_aws_prefix(marker) || possible_aws_key_suffix(text, text.len() - length))
+        {
             earliest = Some(earliest.map_or(text.len() - length, |current: usize| {
                 current.min(text.len() - length)
             }));
@@ -3117,10 +3201,15 @@ fn unsafe_stream_suffix_start(text: &str) -> Option<usize> {
             });
     }
     for prefix in TOKEN_PREFIXES {
-        earliest = unterminated_marker_start(text, prefix, ValueTermination::Token)
-            .map_or(earliest, |start| {
-                Some(earliest.map_or(start, |current| current.min(start)))
-            });
+        let start = if is_aws_prefix(prefix) {
+            text.match_indices(prefix)
+                .find_map(|(start, _)| possible_aws_key_suffix(text, start).then_some(start))
+        } else {
+            unterminated_marker_start(text, prefix, ValueTermination::Token)
+        };
+        earliest = start.map_or(earliest, |start| {
+            Some(earliest.map_or(start, |current| current.min(start)))
+        });
     }
     if let Some(start) = unterminated_json_credential_start(text) {
         earliest = Some(earliest.map_or(start, |current| current.min(start)));
@@ -3769,6 +3858,19 @@ mod tests {
 
         assert!(output.contains(NUMERIC_LEXEME));
         assert!(output.contains(REDACTED));
+    }
+
+    #[test]
+    fn credential_json_redaction_preserves_reserved_number_key_objects() {
+        let fixture =
+            r#"{"nested":{"$serde_json::private::Number":"1"},"api_key":"synthetic-secret"}"#;
+
+        let output = redact_json(fixture);
+
+        assert_eq!(
+            output,
+            r#"{"api_key":"[redacted]","nested":{"$serde_json::private::Number":"1"}}"#
+        );
     }
 
     /// Credential redaction: quoted credential-shaped values are removed as one value.
@@ -4421,6 +4523,108 @@ mod tests {
     }
 
     #[test]
+    fn bare_vendor_tokens_are_redacted_without_assignment_markers() {
+        for value in [
+            "ghp_1234567890abcdefgh",
+            "gho_1234567890abcdefgh",
+            "ghu_1234567890abcdefgh",
+            "ghs_1234567890abcdefgh",
+            "ghr_1234567890abcdefgh",
+            "github_pat_1234567890abcdefgh",
+            "xoxb-1234567890-abcdefgh",
+            "xoxp-1234567890-abcdefgh",
+            "xoxa-1234567890-abcdefgh",
+            "xoxr-1234567890-abcdefgh",
+            "xoxs-1234567890-abcdefgh",
+            "AKIA1234567890ABCDEF",
+            "ASIA1234567890ABCDEF",
+            "glpat-1234567890abcdefgh",
+        ] {
+            assert_eq!(
+                redact_text(value),
+                REDACTED,
+                "unmarked vendor value: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn aws_access_keys_require_a_complete_bounded_token() {
+        for text in [
+            "ASIA Pacific",
+            "EURASIA",
+            "ASIA",
+            "AKIA123",
+            "ASIA1234567890abcdef",
+            "XASIA1234567890ABCDEF",
+            "ASIA1234567890ABCDEFX",
+        ] {
+            assert_eq!(redact_text(text), text);
+        }
+        assert_eq!(redact_text("(ASIA1234567890ABCDEF)."), "([redacted]).");
+        assert_two_delta_split_is_byte_exact("ASIA", " Pacific");
+        assert_two_delta_split_is_byte_exact("EUR", "ASIA");
+        assert_two_delta_split_is_byte_exact("AS", "IA");
+        assert_two_delta_split_is_byte_exact("ASIA1234567890ABCDEF", "X");
+    }
+
+    #[test]
+    fn aws_access_keys_are_redacted_at_every_stream_split() {
+        for value in ["ASIA1234567890ABCDEF", "AKIA1234567890ABCDEF"] {
+            for split in 0..=value.len() {
+                let mut observed = Vec::new();
+                {
+                    let mut sink = RedactingSink::new(&mut observed);
+                    for text in [&value[..split], &value[split..]] {
+                        sink.observe(Observation {
+                            correlation: 7_u8,
+                            fact: ObservationFact::TextDelta {
+                                index: 0,
+                                text: text.to_owned(),
+                            },
+                        });
+                    }
+                    sink.finish();
+                }
+                let emitted = observed
+                    .into_iter()
+                    .map(observation_text)
+                    .collect::<String>();
+                assert!(!emitted.is_empty());
+                assert_eq!(
+                    emitted.replace(REDACTED, ""),
+                    "",
+                    "{value} split at {split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vendor_token_prefixes_are_held_across_stream_chunks() {
+        let mut observed = Vec::new();
+        {
+            let mut sink = RedactingSink::new(&mut observed);
+            for text in ["github_", "pat_1234567890abcdefgh"] {
+                sink.observe(Observation {
+                    correlation: 7_u8,
+                    fact: ObservationFact::TextDelta {
+                        index: 0,
+                        text: text.to_owned(),
+                    },
+                });
+            }
+            sink.finish();
+        }
+        let emitted = observed
+            .into_iter()
+            .map(observation_text)
+            .collect::<String>();
+        assert!(!emitted.is_empty());
+        assert_eq!(emitted.replace(REDACTED, ""), "");
+    }
+
+    #[test]
     fn every_scanner_key_is_reachable_through_the_fast_path() {
         assert_fast_path_covers(
             LINE_CREDENTIAL_MARKERS
@@ -4670,7 +4874,7 @@ mod tests {
     /// text yields nothing to rescan.
     #[test]
     fn trailing_credential_context_is_the_unsafe_suffix() {
-        assert_eq!(trailing_credential_context("the quick brown fox"), "");
+        assert_eq!(trailing_credential_context("the quick brown fox "), "");
         assert_eq!(
             trailing_credential_context("some text Authorization:"),
             "Authorization:"

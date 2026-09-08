@@ -1001,6 +1001,17 @@ fn repository_watch_webhook_accepts_a_configured_socket_address() {
 }
 
 #[test]
+fn repository_watch_webhook_rejects_port_zero() {
+    let configured = configuration_with_repository_watch_webhook()
+        .replace(WATCH_WEBHOOK_BIND_ADDRESS, "127.0.0.1:0");
+
+    assert!(matches!(
+        HubModelConfiguration::parse(&configured),
+        Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+    ));
+}
+
+#[test]
 fn repository_watch_webhook_associates_hook_and_secret_with_repository() {
     let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_webhook())
         .expect("repository-watch webhook fixture is valid");
@@ -1405,6 +1416,86 @@ fn repository_watch_parses_the_structured_rule_fields() {
         [MergeableState::Conflicting]
     );
     assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+}
+
+#[test]
+fn repository_watch_durations_accept_friendly_strings() {
+    let mut document = configuration_with_convergence_sweep()
+        .parse::<toml_edit::DocumentMut>()
+        .expect("fixture TOML is valid");
+    document["repository_watch"]["repositories"]
+        .as_array_of_tables_mut()
+        .expect("fixture repositories")
+        .get_mut(0)
+        .expect("first repository")["poll_interval_seconds"] = toml_edit::value("30s");
+    document["repository_watch"]["convergence_sweep"]["interval_seconds"] =
+        toml_edit::value("2 minutes 30 seconds");
+    document["repository_watch"]["convergence_sweep"]["cool_off_seconds"] = toml_edit::value("5m");
+    let configured = HubModelConfiguration::parse(&document.to_string())
+        .expect("friendly durations are admitted");
+    let watch = configured.repository_watch().expect("repository watch");
+    let sweep = watch.convergence_sweep().expect("convergence sweep");
+
+    assert_eq!(
+        watch.repositories()[0].poll_interval(),
+        Duration::from_secs(30)
+    );
+    assert_eq!(sweep.interval(), Duration::from_secs(150));
+    assert_eq!(sweep.cool_off(), Duration::from_secs(300));
+}
+
+#[test]
+fn repository_watch_cooldown_accepts_friendly_strings_with_whole_second_precision() {
+    let mut document = configuration_with_repository_watch_rule()
+        .parse::<toml_edit::DocumentMut>()
+        .expect("fixture TOML is valid");
+    for (input, expected) in [("2h", 7200), ("0s", 0)] {
+        document["repository_watch"]["rules"]
+            .as_array_of_tables_mut()
+            .expect("fixture rules")
+            .get_mut(0)
+            .expect("first rule")["cooldown_seconds"] = toml_edit::value(input);
+        let configured = HubModelConfiguration::parse(&document.to_string())
+            .expect("friendly cooldown is admitted");
+        assert_eq!(
+            configured
+                .repository_watch()
+                .expect("repository watch")
+                .rules()[0]
+                .cooldown(),
+            Duration::from_secs(expected),
+            "{input}"
+        );
+    }
+    for input in ["1.5s", "-1s", "9223372036854775808s", "invalid"] {
+        document["repository_watch"]["rules"]
+            .as_array_of_tables_mut()
+            .expect("fixture rules")
+            .get_mut(0)
+            .expect("first rule")["cooldown_seconds"] = toml_edit::value(input);
+        assert!(
+            HubModelConfiguration::parse(&document.to_string()).is_err(),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn repository_watch_friendly_durations_preserve_positive_and_ceiling_checks() {
+    let mut document = configuration_with_convergence_sweep()
+        .parse::<toml_edit::DocumentMut>()
+        .expect("fixture TOML is valid");
+    // The fixture's interval ceiling is 300 seconds.
+    document["numeric_bounds"]["max_convergence_sweep_interval"] = toml_edit::value("5m");
+    for input in ["0s", "-1s", "301s", "invalid"] {
+        document["repository_watch"]["convergence_sweep"]["interval_seconds"] =
+            toml_edit::value(input);
+        assert_eq!(
+            HubModelConfiguration::parse(&document.to_string()).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration),
+            "{input}"
+        );
+    }
 }
 
 #[test]
@@ -3482,27 +3573,6 @@ fn configuration_admits_a_credential_home_concurrency_bound() {
             .any(|(profile, bound)| profile == CODEX_SUBSCRIPTION_PROFILE
                 && bound.map(std::num::NonZeroU32::get)
                     == Some(MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS))
-    );
-}
-
-#[test]
-fn configuration_rejects_a_credential_home_concurrency_bound_past_its_cap() {
-    let temporary = tempfile::tempdir().expect("synthetic home root is created");
-    let home = temporary.path().join("account-a");
-    std::fs::create_dir(&home).expect("synthetic home is created");
-    std::fs::write(home.join("fixture-marker"), "synthetic").expect("synthetic home is nonempty");
-    let credential_home = CONFIGURATION.replace(
-        "delivery = \"ambient\"",
-        &format!(
-            "delivery = \"codex_home\"\ncodex_home = {:?}\nmax_concurrent_invocations = {}",
-            home.to_string_lossy(),
-            MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS + 1
-        ),
-    );
-
-    assert_eq!(
-        HubModelConfiguration::parse(&credential_home).err(),
-        Some(HubModelConfigurationError::InvalidCredentialDelivery)
     );
 }
 

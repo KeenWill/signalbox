@@ -1534,9 +1534,34 @@ fn reconstitute(
             ModelCallExecutionReconstitutionFailure::UnreferencedOriginContent,
         ));
     }
+    let projected =
+        match crate::ContextFrontierProjection::from_complete_entries(&input.frontier_entries) {
+            Ok(projection) => projection.ordered_entries().collect::<BTreeSet<_>>(),
+            Err(_) => {
+                return Err(fail(
+                    input,
+                    ModelCallExecutionReconstitutionFailure::FrontierEntryMismatch,
+                ));
+            }
+        };
+    let rendered_origins = input
+        .frontier_entries
+        .iter()
+        .filter(|entry| projected.contains(&entry.reference()))
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+                Some(*accepted_input)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     let referenced_attachments = origin_contents
-        .values()
-        .flat_map(UserContent::parts)
+        .iter()
+        .filter(|(accepted_input, _)| {
+            rendered_origins.contains(*accepted_input) || pending_inputs.contains(*accepted_input)
+        })
+        .flat_map(|(_, content)| content.parts())
         .filter_map(|part| match part {
             crate::UserContentPart::Attachment { digest, .. } => Some(*digest),
             crate::UserContentPart::Text { .. } => None,

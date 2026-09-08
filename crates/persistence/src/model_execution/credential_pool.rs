@@ -544,9 +544,9 @@ pub(super) async fn select_runtime_pool_credential(
             (Some(policy), Some(reference), rotated)
         }
         None => (
-            credential_pool_records::session_policy(
+            credential_pool_records::admission_policy(
                 connection,
-                session,
+                attempt,
                 serving_evidence.effective_target,
                 policies,
             )

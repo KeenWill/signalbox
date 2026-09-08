@@ -1,14 +1,5 @@
 ALTER TABLE credential_pool_availability_successor ADD COLUMN non_acceptance_proven boolean NOT NULL;
 
-CREATE TABLE session_credential_pool_policy (
-    session_id uuid NOT NULL REFERENCES session,
-    effective_target_id uuid NOT NULL,
-    pool_policy_id uuid NOT NULL REFERENCES credential_pool_policy,
-    PRIMARY KEY (session_id, effective_target_id)
-);
-CREATE TRIGGER session_credential_pool_policy_immutable BEFORE UPDATE OR DELETE ON session_credential_pool_policy
-    FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
-
 CREATE TABLE credential_availability_wait (
     wait_attempt_id uuid PRIMARY KEY REFERENCES turn_attempt,
     session_id uuid NOT NULL REFERENCES session,
@@ -85,17 +76,16 @@ BEGIN
           AND NOT EXISTS (SELECT 1 FROM model_call WHERE turn_attempt_id = attempt.turn_attempt_id)) THEN
         RAISE EXCEPTION 'credential wait requires its call-free yielded attempt' USING ERRCODE = '23514';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM session_credential_pool_policy policy
-        WHERE policy.session_id = waiting.session_id AND policy.effective_target_id = waiting.effective_target_id
-          AND policy.pool_policy_id = waiting.pool_policy_id) THEN
-        RAISE EXCEPTION 'credential wait policy differs from session admission' USING ERRCODE = '23514';
-    END IF;
     IF waiting.predecessor_model_call_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM credential_pool_availability_successor successor
         JOIN model_call predecessor ON predecessor.model_call_id = successor.predecessor_model_call_id
         WHERE successor.successor_turn_attempt_id = waiting.wait_attempt_id
           AND successor.predecessor_model_call_id = waiting.predecessor_model_call_id
           AND successor.non_acceptance_proven = waiting.predecessor_non_acceptance_proven
+          AND EXISTS (SELECT 1 FROM model_call_credential_pool_policy policy
+              WHERE policy.model_call_id = predecessor.model_call_id
+                AND policy.pool_policy_id = waiting.pool_policy_id)
+          AND predecessor.effective_provider_model_identity_id = waiting.effective_target_id
           AND predecessor.session_id = waiting.session_id AND predecessor.turn_id = waiting.turn_id
           AND predecessor.state_kind = 'terminal' AND predecessor.terminal_disposition_kind = 'known_failed'
     ) THEN
