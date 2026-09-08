@@ -31,6 +31,11 @@ def _native_runtime_impl(ctx):
         ] + [
             "fi",
             "patch_binary() {",
+            # Bubblewrap's host profile exposes system libraries, not Bazel runfiles.
+            '  if [[ -n "${SIGNALBOX_RUN_BWRAP_INTEGRATION:-}" ]]; then',
+            '    "${RUNFILES_DIR}/%s" --set-interpreter /lib64/ld-linux-x86-64.so.2 --remove-rpath --output "$2" "$1"' % _runfile_path(ctx.file.patchelf),
+            "    return",
+            "  fi",
             '  if [[ -n "${COVERAGE_DIR:-}" ]]; then',
             '    "${RUNFILES_DIR}/%s" --set-interpreter "${RUNFILES_DIR}/%s" --output "$2" "$1"' % (
                 _runfile_path(ctx.file.patchelf),

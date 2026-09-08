@@ -706,6 +706,7 @@ mod tests {
             pool.clone(),
             RepositoryWatchServices {
                 core_pool: pool,
+                checkout_runner: None,
                 models: Arc::new(
                     crate::configuration::checked_in_example_configuration().expect("models"),
                 ),
