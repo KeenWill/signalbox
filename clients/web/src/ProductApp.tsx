@@ -716,21 +716,21 @@ export function ProductApp({
           if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
         }),
       unwindSurface: () => {
-        if (surface === 'sessions' && sessionState.workspace) {
-          updateSessionSearch({ ...sessionState, workspace: undefined }, 'close')
-          return true
-        }
-        if (surface === 'sessions' && sessionState.session) {
-          updateSessionSearch({ ...sessionState, session: undefined }, 'close')
+        if (surface === 'sessions' && (sessionState.workspace || sessionState.session)) {
+          updateSessionSearch(
+            { ...sessionState, workspace: undefined, session: undefined },
+            'close',
+          )
           return true
         }
         return surfaceEscapeRef.current?.() ?? false
       },
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
-      loadTimelineWindow: sessionState.workspace
-        ? (anchor) =>
-            setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
-        : undefined,
+      loadTimelineWindow:
+        sessionState.workspace || sessionState.session
+          ? (anchor) =>
+              setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 }))
+          : undefined,
       navigate: (path) => {
         // A retained exact continuation command owns the surface until it is retried or abandoned.
         if (navigationDisabled) return
@@ -939,7 +939,9 @@ export function ProductApp({
           </div>
         </section>
       </div>
-    ) : surface === 'sessions' && bootstrap.isSuccess && sessionState.workspace ? (
+    ) : surface === 'sessions' &&
+      bootstrap.isSuccess &&
+      (sessionState.workspace || sessionState.session) ? (
       <SessionWorkspaceSurface
         key={sessionState.session ?? 'unselected'}
         onSessionOpen={(session) =>
