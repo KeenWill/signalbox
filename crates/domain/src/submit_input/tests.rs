@@ -2155,6 +2155,7 @@ fn attachment_authority_rejections_reconstitute_exact_evidence() {
             stored_actor: Actor::User,
             result_session: session_id(1),
             result_digest: digest,
+            verified_prefix: Some(Box::new([])),
         },
     )
     .reconstitute()
@@ -2206,6 +2207,7 @@ fn attachment_authority_rejections_reconstitute_exact_evidence() {
             stored_actor: Actor::User,
             result_session: session_id(1),
             result_digest: BlobDigest::from_bytes([0x6b; 32]),
+            verified_prefix: Some(Box::new([])),
         },
     )
     .reconstitute()
@@ -4044,4 +4046,45 @@ fn preparation_rejects_a_cross_wired_session() {
         }
     );
     assert_eq!(error.command(), &command);
+}
+
+#[test]
+fn missing_attachment_reconstitution_requires_its_canonical_verified_prefix() {
+    let first = BlobDigest::from_bytes([0x11; 32]);
+    let missing = BlobDigest::from_bytes([0x22; 32]);
+    let later = BlobDigest::from_bytes([0x33; 32]);
+    let parts = [later, missing, first]
+        .into_iter()
+        .map(|digest| attachment_command(0x1300, digest).content().parts()[0].clone())
+        .collect();
+    let command = SubmitInput::new(
+        command_id(0x1300),
+        session_id(1),
+        UserContent::try_parts(parts).expect("three valid attachment parts"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    for result_digest in [first, missing, later] {
+        let input = SubmitInputReconstitutionInput::rejected_attachment_blob_not_found(
+            SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
+                command: command.clone(),
+                stored_actor: Actor::User,
+                result_session: session_id(1),
+                result_digest,
+                verified_prefix: Some(vec![first].into_boxed_slice()),
+            },
+        );
+        if result_digest == missing {
+            assert!(input.reconstitute().is_ok());
+        } else {
+            assert_eq!(
+                input
+                    .reconstitute()
+                    .expect_err("another referenced digest changes the checked prefix")
+                    .failure(),
+                SubmitInputReconstitutionFailure::AttachmentDigestMismatch
+            );
+        }
+    }
 }
