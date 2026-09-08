@@ -23,16 +23,16 @@ use super::review_slog::{author_class, disposition_class, finding_title};
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
     ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, ChildStackState,
-    CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCursor, CodeHostNumericBounds,
-    CodeHostOperation, CodeHostRepository, CodeHostResult, CodeHostResultCompleteness,
-    CodeHostTransport, CodeHostTransportFailure, ConvergenceReadResult, ConvergenceStateArguments,
-    FilePatchResult, RepositoryDirectoryEntry, RepositoryFileContentFields, RepositoryLineRange,
-    RepositoryListDirectoryResult, RepositoryObjectKind, RepositoryReadFileResult,
-    RerunFailedJobsResult, ReviewDispositionClass, ReviewGateCheckArguments, ReviewThread,
-    ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
-    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult, StackStateArguments,
-    StackStateFields, StackStateResult, ThreadInventoryArguments, ThreadInventoryResult,
-    ThreadReplyResult, ThreadResolveResult,
+    CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCursor, CodeHostHttpFailure,
+    CodeHostNumericBounds, CodeHostOperation, CodeHostRepository, CodeHostResult,
+    CodeHostResultCompleteness, CodeHostTransport, CodeHostTransportFailure, ConvergenceReadResult,
+    ConvergenceStateArguments, FilePatchResult, RepositoryDirectoryEntry,
+    RepositoryFileContentFields, RepositoryLineRange, RepositoryListDirectoryResult,
+    RepositoryObjectKind, RepositoryReadFileResult, RerunFailedJobsResult, ReviewDispositionClass,
+    ReviewGateCheckArguments, ReviewThread, ReviewThreadComment, ReviewThreadFields,
+    ReviewThreadInventoryFields, ReviewThreadInventoryItem, ReviewThreadResolution,
+    ReviewThreadsResult, StackStateArguments, StackStateFields, StackStateResult,
+    ThreadInventoryArguments, ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult,
 };
 
 const REST_BASE_URL: &str = "https://api.github.com/";
@@ -535,11 +535,15 @@ impl GitHubCodeHostTransport {
                 if repository_contents_response_names_missing_revision(response, revision).await? {
                     Ok(RepositoryPathLookup::RevisionNotFound)
                 } else {
-                    Err(CodeHostTransportFailure::Rejected)
+                    Err(CodeHostTransportFailure::Http(
+                        CodeHostHttpFailure::NotFound,
+                    ))
                 }
             }
-            status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
-            _ => Err(CodeHostTransportFailure::DispatchUnknown),
+            _ => Err(unexpected_http_response(
+                response.status(),
+                response.headers(),
+            )),
         }
     }
 
@@ -563,11 +567,15 @@ impl GitHubCodeHostTransport {
                 if repository_commit_response_names_missing_revision(response, revision).await? {
                     Ok(RepositoryRevisionResolution::DefinitiveMissing)
                 } else {
-                    Err(CodeHostTransportFailure::Rejected)
+                    Err(CodeHostTransportFailure::Http(
+                        CodeHostHttpFailure::Validation,
+                    ))
                 }
             }
-            status if status.is_client_error() => Err(CodeHostTransportFailure::Rejected),
-            _ => Err(CodeHostTransportFailure::DispatchUnknown),
+            _ => Err(unexpected_http_response(
+                response.status(),
+                response.headers(),
+            )),
         }
     }
 
@@ -582,7 +590,7 @@ impl GitHubCodeHostTransport {
         let response = self
             .send_authenticated_with_accept(Method::GET, url, None, BLOB_RAW_ACCEPT, credential)
             .await?;
-        ensure_expected_status(response.status(), StatusCode::OK)?;
+        ensure_expected_status(&response, StatusCode::OK)?;
         select_repository_file_content(
             response.bytes_stream(),
             line_range,
@@ -628,7 +636,9 @@ impl GitHubCodeHostTransport {
         match &outcome {
             Ok(_) | Err(CodeHostTransportFailure::NotFound) => {}
             Err(
-                CodeHostTransportFailure::InvalidCredential
+                CodeHostTransportFailure::Http(_)
+                | CodeHostTransportFailure::HttpBeforeMutation(_)
+                | CodeHostTransportFailure::InvalidCredential
                 | CodeHostTransportFailure::Rejected
                 | CodeHostTransportFailure::ThreadNotInChangeRequest
                 | CodeHostTransportFailure::InvalidResponse
@@ -1448,7 +1458,7 @@ impl GitHubCodeHostTransport {
         let response = self
             .send_authenticated(Method::GET, url, None, credential)
             .await?;
-        ensure_expected_status(response.status(), StatusCode::FOUND)?;
+        ensure_expected_status(&response, StatusCode::FOUND)?;
         let location = response
             .headers()
             .get(LOCATION)
@@ -1471,7 +1481,7 @@ impl GitHubCodeHostTransport {
             .send()
             .await
             .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
-        ensure_expected_status(response.status(), StatusCode::OK)?;
+        ensure_expected_status(&response, StatusCode::OK).map_err(credential_free_failure)?;
         let retained_limit =
             minimum_optional_limit(self.bounds.job_log_bytes(), self.bounds.result_text_bytes());
         let (bytes, completeness) =
@@ -1505,11 +1515,10 @@ impl GitHubCodeHostTransport {
                 .ok_or(CodeHostTransportFailure::InvalidResponse)?;
             return Ok(CodeHostResult::RerunFailedJobs(result));
         }
-        if response.status().is_client_error() {
-            Err(CodeHostTransportFailure::Rejected)
-        } else {
-            Err(CodeHostTransportFailure::DispatchUnknown)
-        }
+        Err(unexpected_http_response(
+            response.status(),
+            response.headers(),
+        ))
     }
 
     fn repository_url(
@@ -1591,12 +1600,14 @@ impl GitHubCodeHostTransport {
         response: Response,
         expected: StatusCode,
     ) -> Result<serde_json::Value, CodeHostTransportFailure> {
-        ensure_expected_status(response.status(), expected)?;
+        ensure_expected_status(&response, expected)?;
         self.json_page(response, expected)
             .await
             .map(|(value, _completeness)| value)
             .map_err(|failure| match failure {
-                CodeHostTransportFailure::InvalidCredential
+                CodeHostTransportFailure::Http(_)
+                | CodeHostTransportFailure::HttpBeforeMutation(_)
+                | CodeHostTransportFailure::InvalidCredential
                 | CodeHostTransportFailure::Rejected
                 | CodeHostTransportFailure::NotFound => failure,
                 CodeHostTransportFailure::ThreadNotInChangeRequest
@@ -1615,7 +1626,7 @@ impl GitHubCodeHostTransport {
         response: Response,
         expected: StatusCode,
     ) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
-        ensure_expected_status(response.status(), expected)?;
+        ensure_expected_status(&response, expected)?;
         let completeness = if response
             .headers()
             .get(reqwest::header::LINK)
@@ -1809,7 +1820,7 @@ async fn bounded_json_page(
     expected: StatusCode,
     limit: usize,
 ) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
-    ensure_expected_status(response.status(), expected)?;
+    ensure_expected_status(&response, expected)?;
     let completeness = if response
         .headers()
         .get(reqwest::header::LINK)
@@ -2198,15 +2209,60 @@ where
 }
 
 fn ensure_expected_status(
-    status: StatusCode,
+    response: &Response,
     expected: StatusCode,
 ) -> Result<(), CodeHostTransportFailure> {
-    if status == expected {
+    if response.status() == expected {
         Ok(())
-    } else if status.is_client_error() {
-        Err(CodeHostTransportFailure::Rejected)
     } else {
-        Err(CodeHostTransportFailure::DispatchUnknown)
+        Err(unexpected_http_response(
+            response.status(),
+            response.headers(),
+        ))
+    }
+}
+
+fn unexpected_http_response(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> CodeHostTransportFailure {
+    let http = match status {
+        StatusCode::UNAUTHORIZED => CodeHostHttpFailure::CredentialUnavailable,
+        StatusCode::FORBIDDEN
+            if headers
+                .get("x-github-sso")
+                .is_some_and(|value| value.as_bytes().starts_with(b"required;")) =>
+        {
+            CodeHostHttpFailure::CredentialUnavailable
+        }
+        StatusCode::FORBIDDEN
+            if headers.contains_key("retry-after")
+                || headers
+                    .get("x-ratelimit-remaining")
+                    .is_some_and(|value| value == "0") =>
+        {
+            CodeHostHttpFailure::RateLimited
+        }
+        StatusCode::FORBIDDEN => CodeHostHttpFailure::Forbidden,
+        StatusCode::TOO_MANY_REQUESTS => CodeHostHttpFailure::RateLimited,
+        StatusCode::NOT_FOUND => CodeHostHttpFailure::NotFound,
+        StatusCode::CONFLICT => CodeHostHttpFailure::Conflict,
+        StatusCode::UNPROCESSABLE_ENTITY => CodeHostHttpFailure::Validation,
+        status if status.is_server_error() => CodeHostHttpFailure::Server,
+        status if status.is_client_error() => return CodeHostTransportFailure::Rejected,
+        _ => return CodeHostTransportFailure::DispatchUnknown,
+    };
+    CodeHostTransportFailure::Http(http)
+}
+
+// The redirected download receives no daemon credential, so its authentication
+// refusal cannot establish that the daemon's credential is unavailable.
+const fn credential_free_failure(failure: CodeHostTransportFailure) -> CodeHostTransportFailure {
+    match failure {
+        CodeHostTransportFailure::Http(CodeHostHttpFailure::CredentialUnavailable) => {
+            CodeHostTransportFailure::Http(CodeHostHttpFailure::Forbidden)
+        }
+        _ => failure,
     }
 }
 
@@ -2752,6 +2808,8 @@ fn thread_in_change_request(
 /// never presented as a commit-ambiguous mutation.
 const fn ownership_evidence_failure(failure: CodeHostTransportFailure) -> CodeHostTransportFailure {
     match failure {
+        CodeHostTransportFailure::Http(http) => CodeHostTransportFailure::HttpBeforeMutation(http),
+        CodeHostTransportFailure::HttpBeforeMutation(_) => failure,
         CodeHostTransportFailure::InvalidCredential
         | CodeHostTransportFailure::Rejected
         | CodeHostTransportFailure::ThreadNotInChangeRequest
@@ -3440,7 +3498,10 @@ mod tests {
             .expect_err("an unrelated validation failure cannot prove revision absence");
         let request = repository_server_result(server).await;
 
-        assert_eq!(failure, CodeHostTransportFailure::Rejected);
+        assert_eq!(
+            failure,
+            CodeHostTransportFailure::Http(CodeHostHttpFailure::Validation)
+        );
         assert_eq!(request, revision_request());
     }
 
@@ -3511,7 +3572,10 @@ mod tests {
             .expect_err("metadata-only access cannot prove revision absence");
         let requests = repository_server_result(server).await;
 
-        assert_eq!(failure, CodeHostTransportFailure::Rejected);
+        assert_eq!(
+            failure,
+            CodeHostTransportFailure::Http(CodeHostHttpFailure::NotFound)
+        );
         assert_eq!(requests, path_lookup_requests("src/lib.rs"));
     }
 
@@ -3539,7 +3603,10 @@ mod tests {
             .expect_err("a rejected request cannot produce absence evidence");
         let request = repository_server_result(server).await;
 
-        assert_eq!(failure, CodeHostTransportFailure::Rejected);
+        assert_eq!(
+            failure,
+            CodeHostTransportFailure::Http(CodeHostHttpFailure::Forbidden)
+        );
         assert_eq!(request, revision_request());
     }
 
@@ -4891,10 +4958,122 @@ mod tests {
     /// A read-only server failure remains an infrastructure failure rather
     /// than becoming definitive known-failure evidence.
     #[test]
-    fn server_status_is_dispatch_unknown() {
+    fn server_status_retains_server_failure_class() {
         assert_eq!(
-            ensure_expected_status(StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK),
-            Err(CodeHostTransportFailure::DispatchUnknown)
+            unexpected_http_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &reqwest::header::HeaderMap::new()
+            ),
+            CodeHostTransportFailure::Http(CodeHostHttpFailure::Server)
+        );
+    }
+
+    /// HTTP rejection details carry a safe class, never the response payload.
+    #[tokio::test]
+    async fn repository_authentication_failure_discards_response_content() {
+        let (transport, listener) = repository_test_transport().await;
+        let server = tokio::spawn(async move {
+            serve_test_response(
+                &listener,
+                TestHttpResponse::Json {
+                    status: "401 Unauthorized",
+                    body: br#"{"message":"fixture-secret-token"}"#,
+                },
+            )
+            .await
+        });
+        let failure = transport
+            .repository_read_file(
+                repository_read_arguments("src/lib.rs", None),
+                &test_credential(),
+            )
+            .await
+            .expect_err("the credential was rejected");
+        repository_server_result(server).await;
+
+        assert_eq!(
+            failure,
+            CodeHostTransportFailure::Http(CodeHostHttpFailure::CredentialUnavailable)
+        );
+        assert!(!format!("{failure:?}").contains("fixture-secret-token"));
+    }
+
+    /// A 403 has different actionable causes depending on GitHub's headers.
+    #[test]
+    fn forbidden_response_distinguishes_sso_and_rate_limits() {
+        for (name, value, expected) in [
+            (
+                "x-github-sso",
+                "required; url=https://github.example/secret",
+                CodeHostHttpFailure::CredentialUnavailable,
+            ),
+            (
+                "x-ratelimit-remaining",
+                "0",
+                CodeHostHttpFailure::RateLimited,
+            ),
+            ("retry-after", "60", CodeHostHttpFailure::RateLimited),
+            (
+                "x-ratelimit-remaining",
+                "50",
+                CodeHostHttpFailure::Forbidden,
+            ),
+        ] {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(name, value.parse().expect("fixture header"));
+            assert_eq!(
+                unexpected_http_response(StatusCode::FORBIDDEN, &headers),
+                CodeHostTransportFailure::Http(expected),
+                "{name}: {value}"
+            );
+        }
+    }
+
+    /// Definitive HTTP refusals retain the reason operators can act on.
+    #[test]
+    fn http_refusals_retain_safe_status_classes() {
+        for (status, expected) in [
+            (StatusCode::FORBIDDEN, CodeHostHttpFailure::Forbidden),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                CodeHostHttpFailure::RateLimited,
+            ),
+            (StatusCode::NOT_FOUND, CodeHostHttpFailure::NotFound),
+            (StatusCode::CONFLICT, CodeHostHttpFailure::Conflict),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                CodeHostHttpFailure::Validation,
+            ),
+        ] {
+            assert_eq!(
+                unexpected_http_response(status, &reqwest::header::HeaderMap::new()),
+                CodeHostTransportFailure::Http(expected),
+                "{status}"
+            );
+        }
+    }
+
+    /// The signed download can refuse access without invalidating the daemon credential.
+    #[test]
+    fn credential_free_download_refusal_does_not_blame_daemon_credentials() {
+        let failure =
+            unexpected_http_response(StatusCode::UNAUTHORIZED, &reqwest::header::HeaderMap::new());
+        assert_eq!(
+            credential_free_failure(failure),
+            CodeHostTransportFailure::Http(CodeHostHttpFailure::Forbidden)
+        );
+    }
+
+    /// Ownership HTTP failures retain their cause while proving no mutation dispatch.
+    #[test]
+    fn ownership_server_failure_proves_no_mutation_dispatch() {
+        let failure = unexpected_http_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &reqwest::header::HeaderMap::new(),
+        );
+        assert_eq!(
+            ownership_evidence_failure(failure),
+            CodeHostTransportFailure::HttpBeforeMutation(CodeHostHttpFailure::Server)
         );
     }
 
