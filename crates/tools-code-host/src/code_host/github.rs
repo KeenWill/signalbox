@@ -822,10 +822,7 @@ impl GitHubCodeHostTransport {
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         let mut parsed = Vec::with_capacity(nodes.len());
         for node in nodes {
-            let thread = self
-                .complete_thread_comments(node.clone(), credential)
-                .await?;
-            parsed.push(parse_review_thread(self.bounds, &thread)?);
+            parsed.push(parse_review_thread(self.bounds, node)?);
         }
         let completeness = if nested_bool(threads, &["pageInfo", "hasNextPage"])? {
             CodeHostResultCompleteness::Truncated
@@ -5405,11 +5402,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_threads_reads_nested_comment_pages() {
-        let (transport, listener) = graphql_test_transport().await;
+    async fn review_threads_returns_the_capped_first_page_without_a_continuation() {
+        let (mut transport, listener) = graphql_test_transport().await;
+        transport.bounds.result_items = None;
+        transport.bounds.result_text_bytes = None;
+        let mut response: serde_json::Value =
+            serde_json::from_slice(&paginated_thread_response("Finding title"))
+                .expect("fixture decodes");
+        let comments = &mut response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            [0]["comments"];
+        let first = comments["nodes"][0].clone();
+        // The initial query requests the complete 100-member model-facing ceiling.
+        comments["nodes"] = serde_json::Value::Array(
+            (0..100)
+                .map(|index| {
+                    let mut comment = first.clone();
+                    comment["id"] = serde_json::json!(format!("PRRC_{index}"));
+                    comment
+                })
+                .collect(),
+        );
         let server = tokio::spawn(async move {
-            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await;
-            serve_graphql_response(&listener, &thread_comments_response()).await
+            // Dropping the listener after this response makes any continuation fail.
+            serve_graphql_response(&listener, response.to_string().as_bytes()).await
         });
         let arguments = serde_json::from_value(
             serde_json::json!({"repository": "owner/repository", "number": 17}),
@@ -5418,33 +5433,39 @@ mod tests {
         let result = transport
             .review_threads(arguments, &test_credential())
             .await
-            .expect("nested pages read")
+            .expect("first page completes the bounded read")
             .into_json_value();
-        let request: serde_json::Value =
-            serde_json::from_str(&repository_server_result(server).await).expect("request decodes");
-        assert_eq!(
-            request["variables"],
-            serde_json::json!({"thread": "PRRT_fixture", "cursor": "first-page"})
-        );
+        repository_server_result(server).await;
         assert_eq!(
             result["threads"][0]["comments"]
                 .as_array()
                 .expect("comments present")
                 .len(),
-            2
+            100
         );
-        assert_eq!(result["threads"][0]["comments"][1]["id"], "PRRC_reply");
-        assert_eq!(result["threads"][0]["comments_truncated"], false);
+        assert_eq!(result["threads"][0]["comments"][99]["id"], "PRRC_99");
+        assert_eq!(result["threads"][0]["comments_truncated"], true);
     }
 
     #[tokio::test]
-    async fn review_threads_truncates_completed_comments_to_the_configured_bound() {
+    async fn review_threads_truncates_first_page_comments_to_the_configured_bound() {
         let (mut transport, listener) = graphql_test_transport().await;
-        // One retained comment makes the two-page fixture exceed the configured item bound.
+        // One retained comment makes the two-comment first page exceed the configured bound.
         transport.bounds.result_items = Some(1);
+        let mut response: serde_json::Value =
+            serde_json::from_slice(&paginated_thread_response("Finding title"))
+                .expect("fixture decodes");
+        let continuation: serde_json::Value =
+            serde_json::from_slice(&thread_comments_response()).expect("fixture decodes");
+        let comments = &mut response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            [0]["comments"];
+        comments["nodes"]
+            .as_array_mut()
+            .expect("comment nodes")
+            .push(continuation["data"]["node"]["comments"]["nodes"][0].clone());
+        comments["pageInfo"]["hasNextPage"] = serde_json::json!(false);
         let server = tokio::spawn(async move {
-            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await;
-            serve_graphql_response(&listener, &thread_comments_response()).await
+            serve_graphql_response(&listener, response.to_string().as_bytes()).await
         });
         let arguments = serde_json::from_value(
             serde_json::json!({"repository": "owner/repository", "number": 17}),
@@ -5490,7 +5511,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_threads_rejects_a_repeated_comment_cursor() {
+    async fn thread_inventory_rejects_a_repeated_comment_cursor() {
         let (transport, listener) = graphql_test_transport().await;
         let mut continuation: serde_json::Value =
             serde_json::from_slice(&thread_comments_response()).expect("fixture decodes");
@@ -5505,14 +5526,14 @@ mod tests {
         )
         .expect("arguments decode");
         let result = transport
-            .review_threads(arguments, &test_credential())
+            .thread_inventory(arguments, &test_credential())
             .await;
         repository_server_result(server).await;
         assert_eq!(result, Err(CodeHostTransportFailure::InvalidResponse));
     }
 
     #[tokio::test]
-    async fn review_threads_rejects_a_continuation_for_another_thread() {
+    async fn thread_inventory_rejects_a_continuation_for_another_thread() {
         let (transport, listener) = graphql_test_transport().await;
         let mut continuation: serde_json::Value =
             serde_json::from_slice(&thread_comments_response()).expect("fixture decodes");
@@ -5526,7 +5547,7 @@ mod tests {
         )
         .expect("arguments decode");
         let result = transport
-            .review_threads(arguments, &test_credential())
+            .thread_inventory(arguments, &test_credential())
             .await;
         repository_server_result(server).await;
         assert_eq!(result, Err(CodeHostTransportFailure::InvalidResponse));
@@ -5578,15 +5599,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_threads_comment_pages_share_one_operation_deadline() {
+    async fn review_threads_obeys_the_operation_deadline() {
         let (mut transport, listener) = graphql_test_transport().await;
-        // Each page fits within 300 ms; the two 200 ms delays exceed one operation budget.
+        // The initial response exceeds the configured 300 ms operation budget.
         transport.bounds.request_timeout = Some(Duration::from_millis(300));
         let server = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await;
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            serve_graphql_response(&listener, &thread_comments_response()).await
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            serve_graphql_response(&listener, &paginated_thread_response("Finding title")).await
         });
         let arguments = serde_json::from_value(
             serde_json::json!({"repository": "owner/repository", "number": 17}),
