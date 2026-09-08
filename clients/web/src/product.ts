@@ -19,9 +19,11 @@ import {
   type WebSearchPage,
   type WebSessionCatalogSnapshot,
   type WebSessionLiveStreamEvent,
+  type WebSessionTimelineDetailPage,
   type WebSubmitInputRequest,
   type WebTimelineDetailContinuation,
 } from './generated/web-contract.mjs'
+import { validateDetailContinuation } from './session-timeline/model'
 
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
@@ -1157,7 +1159,17 @@ export async function readSessionTranscript(
   continuation: WebTimelineDetailContinuation | null,
   limits: SessionTranscriptLimits,
   signal?: AbortSignal,
+  previous?: WebSessionTimelineDetailPage,
 ) {
+  if (
+    !Number.isSafeInteger(limits.max_timeline_detail_items) ||
+    limits.max_timeline_detail_items < 1 ||
+    limits.max_timeline_detail_items > 128 ||
+    !Number.isSafeInteger(limits.max_timeline_detail_bytes) ||
+    limits.max_timeline_detail_bytes < 256 ||
+    limits.max_timeline_detail_bytes > SESSION_TRANSCRIPT_MAX_BYTES
+  )
+    throw new TypeError('Invalid advertised timeline detail limits')
   const maxItems = Math.min(SESSION_TRANSCRIPT_MAX_ITEMS, limits.max_timeline_detail_items)
   const maxBytes = Math.min(SESSION_TRANSCRIPT_MAX_BYTES, limits.max_timeline_detail_bytes)
   const query = new URLSearchParams({
@@ -1197,24 +1209,7 @@ export async function readSessionTranscript(
     )
   )
     throw new TypeError('Transcript detail belongs to another window')
-  if (continuation !== null) {
-    const initial = page.items[0]
-    const address =
-      continuation.type === 'more_at' ? continuation.address : continuation.body.address
-    if (initial?.address.event_sequence !== address.event_sequence)
-      throw new TypeError('Transcript detail does not match the requested continuation address')
-    if (continuation.type === 'more_body') {
-      const cursor = continuation.body
-      const excerpt =
-        cursor.field === 'input_text' && initial.body.type === 'user_input'
-          ? initial.body.text
-          : cursor.field === 'model_response' && initial.body.type === 'model_call'
-            ? initial.body.response
-            : null
-      if (cursor.member_index !== 0 || excerpt?.offset_bytes !== cursor.offset_bytes)
-        throw new TypeError('Transcript detail does not match the requested body continuation')
-    }
-  }
+  validateDetailContinuation(page, continuation, previous)
   return page
 }
 

@@ -98,6 +98,47 @@ const useDeterministicSession = async (
   await page.route('**/api/sessions/**', (route) => {
     const pathname = new URL(route.request().url()).pathname
     const requestedSessionId = decodeURIComponent(pathname.split('/')[3] ?? '')
+    if (pathname.endsWith('/timeline-detail')) {
+      const query = new URL(route.request().url()).searchParams
+      const items = ['41', '42', '43']
+        .filter(
+          (address) =>
+            BigInt(address) >= BigInt(query.get('first') ?? '41') &&
+            BigInt(address) <= BigInt(query.get('through') ?? '43'),
+        )
+        .map((address) => {
+          const kind =
+            timelineKind(requestedSessionId, address) ??
+            (address === '41'
+              ? 'input_accepted'
+              : address === '42'
+                ? 'turn_activated'
+                : 'turn_completed')
+          const body =
+            kind === 'input_accepted'
+              ? {
+                  type: 'user_input',
+                  turn_id: requestedSessionId,
+                  text: { text: '', offset_bytes: '0', total_bytes: '0', continuation: null },
+                  attachments: [],
+                }
+              : {
+                  type: 'turn_lifecycle',
+                  turn_id: requestedSessionId,
+                  lifecycle: kind === 'turn_activated' ? 'activated' : 'terminalized',
+                  cause_code: kind.slice('turn_'.length),
+                }
+          return { address: { event_sequence: address }, kind, body, projected_body_bytes: 128 }
+        })
+      return route.fulfill({
+        json: {
+          session_id: requestedSessionId,
+          items,
+          projected_body_bytes: items.length * 128,
+          continuation: null,
+        },
+      })
+    }
     if (pathname.endsWith('/timeline')) {
       if (shouldFailTimeline(requestedSessionId)) {
         return route.fulfill({ status: 503, body: 'temporarily unavailable' })
@@ -488,7 +529,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.locator('#session-timeline-disclosure-43')).toHaveText('Expanded')
   await expect(page.locator('#session-timeline-detail-43')).toBeVisible()
   await expect(
-    page.getByText('Durable event metadata; message text appears in the transcript above'),
+    page.getByRole('article', { name: 'turn completed detail' }).getByText('terminalized'),
   ).toBeVisible()
   const inspector = page.getByLabel('Inspector')
   await expect(inspector.getByText(sessionWorkspaceFixture.id, { exact: true })).toBeVisible()
@@ -497,12 +538,10 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(inspector.getByText('78', { exact: true })).toBeVisible()
 
   const accepted = page.getByRole('option', { name: /41 input accepted/ })
-  await accepted.click()
+  await accepted.getByText('input accepted', { exact: true }).click()
   await expect(page.locator('#session-timeline-detail-41')).toBeVisible()
-  await expect(
-    page.getByRole('region', { name: 'transcript attachments unavailable' }),
-  ).toBeVisible()
-  await accepted.click()
+  await expect(page.getByRole('region', { name: 'User input', exact: true })).toBeVisible()
+  await accepted.getByText('input accepted', { exact: true }).click()
   await expect(page.locator('#session-timeline-detail-41')).toBeHidden()
 
   const first = page.getByRole('button', { name: /First/ })

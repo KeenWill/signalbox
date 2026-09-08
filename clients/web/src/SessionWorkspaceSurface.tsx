@@ -11,10 +11,10 @@ import {
   useState,
 } from 'react'
 import { invokeCommand } from './commands'
-import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
+import { SessionItemDetail } from './SessionItemDetail'
 import { SessionTranscriptText } from './SessionTranscriptText'
 import {
   BoundedSessionHistory,
@@ -414,6 +414,7 @@ export function SessionWorkspaceSurface({
       toggleTimelineExpansion: toggleSelectedExpansion,
     })
   const handleTimelineKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target instanceof Element && event.target.closest('.session-item-detail')) return
     if ((event.key === 'Enter' || event.key === ' ') && selected !== null) {
       event.preventDefault()
       invokeTimelineCommand('selection.toggleExpansion')
@@ -665,12 +666,18 @@ export function SessionWorkspaceSurface({
                     else rowRefs.current.delete(id)
                   }}
                   className={selected === id ? 'selected' : undefined}
-                  onClick={() => {
+                  onClick={(event) => {
+                    if (
+                      event.target instanceof Element &&
+                      event.target.closest('.session-item-detail')
+                    )
+                      return
                     select(id)
                     invokeTimelineCommand('selection.toggleExpansion')
                     timelineRef.current?.focus()
                   }}
                   onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return
                     if (event.key !== 'Enter' && event.key !== ' ') return
                     event.preventDefault()
                     event.stopPropagation()
@@ -692,28 +699,16 @@ export function SessionWorkspaceSurface({
                     <strong>{item.kind.replaceAll('_', ' ')}</strong>
                     <small>{item.projected_structured_bytes} B</small>
                   </div>
-                  {isExpanded && (
-                    <>
-                      <dl id={`session-timeline-detail-${id}`} className="session-item-detail">
-                        <div>
-                          <dt>Address</dt>
-                          <dd>
-                            {sessionId}:{id}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt>Projection</dt>
-                          <dd>
-                            {transcriptAvailable
-                              ? 'Durable event metadata; message text appears in the transcript above'
-                              : 'Durable event metadata; transcript text is unavailable'}
-                          </dd>
-                        </div>
-                      </dl>
-                      {item.kind === 'input_accepted' && (
-                        <MissingAttachmentState placement="transcript" />
-                      )}
-                    </>
+                  {isExpanded && sessionId !== null && (
+                    <div id={`session-timeline-detail-${id}`} className="session-item-detail">
+                      <SessionItemDetail
+                        key={`${sessionId}:${id}`}
+                        sessionId={sessionId}
+                        item={item}
+                        limits={transcriptLimits}
+                        onComplete={() => timelineRef.current?.focus()}
+                      />
+                    </div>
                   )}
                 </div>
               )

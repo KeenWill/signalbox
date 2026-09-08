@@ -436,3 +436,19 @@ it('relays provider text and replaces the follow stream when its consumer reques
   await follow.return(undefined)
   expect(fetch).toHaveBeenCalledTimes(3)
 })
+
+it.each([
+  { max_timeline_detail_items: 0, max_timeline_detail_bytes: 256 },
+  { max_timeline_detail_items: 129, max_timeline_detail_bytes: 256 },
+  { max_timeline_detail_items: 1.5, max_timeline_detail_bytes: 256 },
+  { max_timeline_detail_items: 1, max_timeline_detail_bytes: 255 },
+  { max_timeline_detail_items: 1, max_timeline_detail_bytes: 65537 },
+  { max_timeline_detail_items: 1, max_timeline_detail_bytes: Number.NaN },
+])('rejects invalid advertised detail limits before fetching %j', async (advertised) => {
+  const fetch = vi.fn()
+  vi.stubGlobal('fetch', fetch)
+  await expect(readTranscript(sessionId, '1', '1', null, advertised)).rejects.toThrow(
+    'advertised timeline detail limits',
+  )
+  expect(fetch).not.toHaveBeenCalled()
+})
