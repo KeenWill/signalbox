@@ -148,6 +148,7 @@ pub struct ReportedUsageCompaction {
     runtime_models: RuntimeModelCatalog,
     model_configuration: HubModelConfiguration,
     compaction_model: Arc<dyn ContextCompactionModel>,
+    blob_registry: Option<Arc<crate::BlobStoreRegistry>>,
     continuation: Option<RepositoryWatchContinuation>,
 }
 
@@ -188,8 +189,18 @@ impl ReportedUsageCompaction {
             runtime_models,
             model_configuration,
             compaction_model,
+            blob_registry: None,
             continuation: None,
         }
+    }
+
+    /// Supplies the configured stores for verification before compaction authorization.
+    pub fn with_blob_store_registry(
+        mut self,
+        registry: Option<Arc<crate::BlobStoreRegistry>>,
+    ) -> Self {
+        self.blob_registry = registry;
+        self
     }
 
     /// Enables bounded successor admission for repository-watch continuation failures.
@@ -251,6 +262,7 @@ impl ReportedUsageCompaction {
             turn,
             continuation_selection,
             observe_prepared,
+            self.blob_registry.as_deref(),
         )
         .await
         {
@@ -625,6 +637,7 @@ pub struct ContextGuardedTurnPass<Counter, Catalog, Execution> {
     runtime_models: RuntimeModelCatalog,
     model_configuration: HubModelConfiguration,
     compaction_model: Arc<dyn ContextCompactionModel>,
+    blob_registry: Option<Arc<crate::BlobStoreRegistry>>,
     reported_usage_compaction: Option<ReportedUsageCompaction>,
     workspace_instructions: Option<WorkspaceInstructionRuntime>,
     execution: Execution,
@@ -676,11 +689,21 @@ impl<Counter, Catalog, Execution> ContextGuardedTurnPass<Counter, Catalog, Execu
             runtime_models,
             model_configuration,
             compaction_model,
+            blob_registry: None,
             reported_usage_compaction: None,
             workspace_instructions: None,
             execution,
             occupancy_recovery: None,
         }
+    }
+
+    /// Supplies the configured stores for verification before compaction authorization.
+    pub fn with_blob_store_registry(
+        mut self,
+        registry: Option<Arc<crate::BlobStoreRegistry>>,
+    ) -> Self {
+        self.blob_registry = registry;
+        self
     }
 
     /// Keeps the reported-usage preflight for adapters without provider estimation.
@@ -769,6 +792,7 @@ where
         let runtime_models = self.runtime_models.clone();
         let model_configuration = self.model_configuration.clone();
         let compaction_model = Arc::clone(&self.compaction_model);
+        let blob_registry = self.blob_registry.clone();
         let reported_usage_compaction = self.reported_usage_compaction.clone();
         let workspace_instructions = self.workspace_instructions.clone();
         let execution = self.execution.clone();
@@ -1041,6 +1065,7 @@ where
                             turn,
                             None,
                             observe_prepared.as_deref(),
+                            blob_registry.as_deref(),
                         )
                         .await;
                         drop(compaction_window);

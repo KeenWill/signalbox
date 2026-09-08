@@ -17,11 +17,11 @@ use super::{
     ModelCallReconstitutionState, ModelCallTerminalIdentityCandidates,
     ModelCallTerminalObservation, ModelConversationMessage, ModelSelectionOverride,
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, ModelToolResultContent,
-    ModelUserContent, ModelUserContentPart, NormalizedToolArguments, OperatorFailureClass,
-    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, PreparedModelCallFailureCause, PreparedModelCallRequest,
-    PreparedModelOperation, ProviderModelIdentity, ResolvedContextFrontierReconstitutionInput,
-    ResolvedProviderTarget, ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
+    ModelUserContent, NormalizedToolArguments, OperatorFailureClass, PerInputConfigurationChoices,
+    PinnedProviderTargetReconstitutionInput, PrepareModelCallOutcome, PrepareModelCallTransaction,
+    PreparedModelCallFailureCause, PreparedModelCallRequest, PreparedModelOperation,
+    ProviderModelIdentity, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
+    ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
     RetainedPreparedFailureStatus, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -1469,20 +1469,10 @@ pub(super) fn rendered_content_bytes(messages: &[ModelConversationMessage]) -> u
             | ModelConversationMessage::Assistant { content, .. } => content.as_str().len(),
             ModelConversationMessage::ProviderCompaction { block, .. } => block.as_json().len(),
             ModelConversationMessage::ProviderReasoning { item, .. } => item.as_json().len(),
-            // Mirrors `user_content_text_bytes`: attachment stubs carry a
-            // fixed-width digest and bounded declarations held under
-            // `MAX_RENDERED_ATTACHMENT_STUB_BYTES`, so they sit outside the
-            // retained-content sum on both sides of this comparison.
             ModelConversationMessage::User { content, .. } => {
-                content
-                    .parts()
-                    .iter()
-                    .fold(0_usize, |total, part| match part {
-                        ModelUserContentPart::Text(value) => {
-                            total.saturating_add(value.as_str().len())
-                        }
-                        ModelUserContentPart::AttachmentStub(_) => total,
-                    })
+                content.parts().iter().fold(0_usize, |total, part| {
+                    total.saturating_add(part.as_str().len())
+                })
             }
             ModelConversationMessage::DelegatedTask { content, .. }
             | ModelConversationMessage::DelegationMessage { content, .. } => content.as_str().len(),
