@@ -10,6 +10,7 @@ from pathlib import Path
 
 from check_docs_consistency import (
     TrackedFilesError,
+    cargo_package_names,
     github_slug,
     run_checks,
     tracked_files,
@@ -155,11 +156,25 @@ class DocsConsistencyTests(unittest.TestCase):
         )
         self.assertEqual(run_checks(self.root), [])
 
-    def test_untracked_markdown_is_ignored(self) -> None:
+    def test_untracked_markdown_links_are_checked(self) -> None:
         (self.root / "docs/untracked.md").write_text(
             "[Missing](absent.md)\n", encoding="utf-8"
         )
+        self.assertIn("relative-link", self.categories())
+
+    def test_ignored_untracked_markdown_is_excluded(self) -> None:
+        self.write_and_track(".gitignore", "docs/ignored.md\n")
+        (self.root / "docs/ignored.md").write_text("[Missing](absent.md)\n")
         self.assertEqual(run_checks(self.root), [])
+
+    def test_untracked_source_is_in_the_inventory(self) -> None:
+        source = self.root / "new.rs"
+        source.write_text("//! New source.\n")
+        self.assertIn(source.resolve(), tracked_files(self.root))
+
+    def test_untracked_cargo_manifest_contributes_its_package(self) -> None:
+        (self.root / "Cargo.toml").write_text('[package]\nname = "new-package"\n')
+        self.assertIn("new-package", cargo_package_names(self.root))
 
     def test_machine_projection_requires_owner_link(self) -> None:
         self.write_and_track(
