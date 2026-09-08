@@ -1483,7 +1483,7 @@ mod tests {
         assert_eq!(codex.get(&source), Some(&(expected_cli.len() as u64)));
         assert_eq!(claude.get(&source), Some(&(expected_cli.len() as u64)));
 
-        let expected_anthropic = r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"00000000-0000-0000-0000-000000000003","content":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}","is_error":true}]}"#;
+        let expected_anthropic = r#"[{"role":"user","content":[{"type":"tool_result","tool_use_id":"00000000-0000-0000-0000-000000000003","content":"{\"error\":{\"detail\":null,\"kind\":\"closed_by_turn_end\"}}","is_error":true,"cache_control":{"type":"ephemeral"}}]}]"#;
         let anthropic = rendered_entry_bytes(&messages, &[], &models, |message| {
             signalbox_model_runtime_anthropic::serialized_message_bytes(message, false)
         })
