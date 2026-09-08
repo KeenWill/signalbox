@@ -898,7 +898,12 @@ async fn registrations_distinguish_names_and_grants_and_pin_run_authority()
     assert_ne!(first.content.source_digest, first.artifact_digest);
     assert_eq!(first.artifact_digest, renamed.artifact_digest);
     assert_eq!(first.content.source_digest, renamed.content.source_digest);
-    let run = repository.start_run(first.id).await?;
+    let run = repository
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            first.id,
+        )
+        .await?;
     assert_eq!(repository.for_run(run).await?, Some(first.clone()));
     assert!(
         sqlx::query(
@@ -935,7 +940,12 @@ async fn child_registration_refuses_widening_without_creating_a_registration()
     parent_request.grants =
         ProgramGrants::new([ProgramCapability::Register, ProgramCapability::Session]);
     let parent = repository.register_user(parent_request).await?;
-    let run = repository.start_run(parent.id).await?;
+    let run = repository
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            parent.id,
+        )
+        .await?;
     let mut child_request = registration_request("child");
     child_request.grants = ProgramGrants::new([ProgramCapability::Judge]);
     assert!(matches!(
@@ -944,12 +954,61 @@ async fn child_registration_refuses_widening_without_creating_a_registration()
     ));
     child_request.grants = ProgramGrants::new([ProgramCapability::Session]);
     let child = repository.register_child(run, child_request).await?;
-    let child_run = repository.start_run(child.id).await?;
+    let child_run = repository
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            child.id,
+        )
+        .await?;
     let grandchild = registration_request("grandchild");
     assert!(matches!(
         repository.register_child(child_run, grandchild).await,
         Err(ProgramRegistrationError::GrantsDenied)
     ));
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn run_creation_retries_preserve_the_binding_and_journal() -> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::program_registration::{
+        ProgramRegistrationError, ProgramRegistrationRepository,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let registrations = ProgramRegistrationRepository::new(pool.clone());
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let first = registrations
+        .register_user(registration_request("first"))
+        .await?;
+    let other = registrations
+        .register_user(registration_request("other"))
+        .await?;
+    let run = ProgramRunId::from_uuid(Uuid::now_v7());
+    assert_eq!(registrations.start_run(run, first.id).await?, run);
+    journal
+        .append_request(run, None, RequestKind::Now(payload(b"retained request")))
+        .await?;
+    assert_eq!(registrations.start_run(run, first.id).await?, run);
+    assert!(
+        matches!(registrations.start_run(run, other.id).await, Err(ProgramRegistrationError::RunConflict { run: conflict }) if conflict == run)
+    );
+    assert_eq!(registrations.for_run(run).await?, Some(first.clone()));
+    assert_eq!(
+        journal
+            .load(run)
+            .await?
+            .expect("retained run")
+            .entries()
+            .len(),
+        1
+    );
+    let bare = ProgramRunId::from_uuid(Uuid::now_v7());
+    journal.create_stream(bare).await?;
+    assert!(
+        matches!(registrations.start_run(bare, first.id).await, Err(ProgramRegistrationError::RunConflict { run: conflict }) if conflict == bare)
+    );
+    assert!(registrations.for_run(bare).await?.is_none());
     pool.close().await;
     Ok(())
 }

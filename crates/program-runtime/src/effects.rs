@@ -75,9 +75,8 @@ impl ProgramHost {
         let registrations = self.journal.registrations();
         let registration = registrations
             .for_run(run)
-            .await
-            .map_err(registration_failure)?
-            .ok_or_else(|| registration_failure(ProgramRegistrationError::RunMissing))?;
+            .await?
+            .ok_or(ProgramRegistrationError::RunMissing)?;
         let recovered = journal
             .entries()
             .iter()

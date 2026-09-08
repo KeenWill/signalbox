@@ -750,22 +750,107 @@ async fn stale_loaded_tail_cannot_append_or_mutate_the_journal() -> Result<(), B
     Ok(())
 }
 
+/// Fixture registration names are arbitrary and distinct.
+async fn registration_fixture(
+    pool: &PgPool,
+    grants: signalbox_domain::program_registration::ProgramGrants,
+    artifact: &str,
+) -> Result<ProgramRunId, Box<dyn Error>> {
+    use signalbox_domain::program_registration::ProgramRegistrationRequest;
+    use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+    let repository = ProgramRegistrationRepository::new(pool.clone());
+    let registration = repository
+        .register_user(ProgramRegistrationRequest {
+            name: Uuid::now_v7().to_string(),
+            revision: "fixture-revision".into(),
+            source: artifact.as_bytes().to_vec(),
+            artifact: artifact.into(),
+            grants,
+        })
+        .await?;
+    Ok(repository
+        .start_run(
+            signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
+            registration.id,
+        )
+        .await?)
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_capability_requires_a_retained_program_run() -> Result<(), Box<dyn Error>> {
+async fn session_capability_requires_a_registered_run_with_the_session_grant()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ProgramCapability, program_registration::ProgramGrants};
     let (_container, pool) = migrated_postgres().await?;
-    let journal = ProgramJournalRepository::new(pool);
+    let journal = ProgramJournalRepository::new(pool.clone());
     let host = ProgramHost::new(journal.clone());
-    let run = ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID));
-    assert!(host.session_capability(run).await?.is_none());
-    journal.create_stream(run).await?;
+    let unregistered = run_id();
+    assert!(host.session_capability(unregistered).await?.is_none());
+    journal.create_stream(unregistered).await?;
+    assert!(host.session_capability(unregistered).await?.is_none());
+    let ungranted = registration_fixture(&pool, ProgramGrants::new([]), "export {};").await?;
+    assert!(host.session_capability(ungranted).await?.is_none());
+    let granted = registration_fixture(
+        &pool,
+        ProgramGrants::new([ProgramCapability::Session]),
+        "export {};",
+    )
+    .await?;
     let capability = host
-        .session_capability(run)
+        .session_capability(granted)
         .await?
-        .expect("run is retained");
+        .expect("registered session grant");
     assert!(
-        matches!(capability.actor(), signalbox_domain::Actor::Program { run: reference } if reference.run() == run)
+        matches!(capability.actor(), signalbox_domain::Actor::Program { run: reference } if reference.run() == granted)
     );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn registered_run_executes_its_stored_artifact() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ProgramCapability, program_registration::ProgramGrants};
+    let (_container, pool) = migrated_postgres().await?;
+    let artifact = immediately_requesting_artifact();
+    let run = registration_fixture(
+        &pool,
+        ProgramGrants::new([ProgramCapability::Time]),
+        artifact.source(),
+    )
+    .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let expected_request = request(1, RequestKind::Now(payload(&[FIRST_LIVE_REQUEST_BYTE])));
+    let mut deliveries = ScriptedDeliveries::new([DeliveryKind::Answer {
+        resolves: expected_request.ordinal(),
+        payload: payload(&[FIRST_LIVE_ANSWER_BYTE]),
+    }]);
+    let mut effects = EffectProbe {
+        policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    assert_eq!(
+        ProgramHost::new(journal.clone())
+            .execute_registered(run, &mut deliveries, &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed,
+    );
+    assert_eq!(
+        deliveries.observed_outstanding,
+        vec![vec![expected_request]]
+    );
+    assert_eq!(
+        journal
+            .load(run)
+            .await?
+            .expect("registered journal")
+            .entries()
+            .len(),
+        2
+    );
+    pool.close().await;
     Ok(())
 }
 
@@ -796,7 +881,9 @@ async fn registered_run(
             grants,
         })
         .await?;
-    Ok(repository.start_run(registration.id).await?)
+    Ok(repository
+        .start_run(ProgramRunId::from_uuid(Uuid::now_v7()), registration.id)
+        .await?)
 }
 
 struct EffectProbe {

@@ -78,6 +78,7 @@ pub enum ProgramExecutionOutcome {
 ```rust
 pub enum ProgramHostError {
     Journal(signalbox_persistence::program_journal::ProgramJournalRepositoryError),
+    Registration(signalbox_persistence::program_registration::ProgramRegistrationError),
     JournalMissing(signalbox_domain::ProgramRunId),
     Isolate(error::CoreError),
     LiveDelivery(LiveDeliveryFailure),
@@ -94,6 +95,11 @@ impl fmt::Display for ProgramHostError {
 }
 impl error::Error for ProgramHostError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl convert::From<signalbox_persistence::program_registration::ProgramRegistrationError>
+    for ProgramHostError
+{
+    fn from(error: signalbox_persistence::program_registration::ProgramRegistrationError) -> Self;
 }
 impl convert::From<signalbox_persistence::program_journal::ProgramJournalRepositoryError>
     for ProgramHostError
@@ -155,7 +161,7 @@ impl ProgramHost {
         run: signalbox_domain::ProgramRunId,
     ) -> result::Result<
         option::Option<signalbox_domain::program_session::ProgramSessionCapability>,
-        signalbox_persistence::program_journal::ProgramJournalRepositoryError,
+        signalbox_persistence::program_journal::ProgramSessionCapabilityError,
     >;
     #[cfg(feature = "postgres-integration")]
     pub async fn execute_unregistered(

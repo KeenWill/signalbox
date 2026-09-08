@@ -10,6 +10,9 @@ pub enum ProgramRegistrationError {
         source: error::Error,
         commit_ambiguous: bool,
     },
+    RunConflict {
+        run: signalbox_domain::ProgramRunId,
+    },
     Corruption(&'static str),
     GrantsDenied,
     RunMissing,
@@ -50,6 +53,7 @@ impl program_registration::ProgramRegistrationRepository {
     >;
     pub async fn start_run(
         &self,
+        run: signalbox_domain::ProgramRunId,
         registration: signalbox_domain::ProgramRegistrationId,
     ) -> result::Result<
         signalbox_domain::ProgramRunId,

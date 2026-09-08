@@ -1010,10 +1010,35 @@ fn scope_ordinal(
 
 pub use signalbox_application::program_session::{ProgramSessionCapability, ProgramSessionHost};
 
+/// Failure while resolving registration authority for session capability issuance.
+#[derive(Debug, signalbox_derive::OperatorError)]
+pub enum ProgramSessionCapabilityError {
+    #[error(transparent)]
+    Journal(#[source] ProgramJournalRepositoryError),
+    #[error(transparent)]
+    Registration(#[source] crate::program_registration::ProgramRegistrationError),
+}
+
 impl signalbox_application::program_session::ProgramRunVerifier for ProgramJournalRepository {
-    type Error = ProgramJournalRepositoryError;
+    type Error = ProgramSessionCapabilityError;
 
     async fn verify_run(&self, run: signalbox_domain::ProgramRunId) -> Result<bool, Self::Error> {
-        Ok(self.load(run).await?.is_some())
+        let Some(registration) = self
+            .registrations()
+            .for_run(run)
+            .await
+            .map_err(ProgramSessionCapabilityError::Registration)?
+        else {
+            return Ok(false);
+        };
+        Ok(registration
+            .content
+            .grants
+            .contains(signalbox_domain::ProgramCapability::Session)
+            && self
+                .load(run)
+                .await
+                .map_err(ProgramSessionCapabilityError::Journal)?
+                .is_some())
     }
 }

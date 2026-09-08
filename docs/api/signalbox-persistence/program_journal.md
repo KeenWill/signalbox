@@ -138,7 +138,7 @@ impl program_journal::ProgramJournalRepository {
 impl signalbox_domain::program_session::ProgramRunVerifier
     for program_journal::ProgramJournalRepository
 {
-    type Error = program_journal::ProgramJournalRepositoryError;
+    type Error = program_journal::ProgramSessionCapabilityError;
     async fn verify_run(
         &self,
         run: signalbox_domain::ProgramRunId,
@@ -156,4 +156,20 @@ pub use signalbox_application::program_session::ProgramSessionCapability;
 
 ```rust
 pub use signalbox_application::program_session::ProgramSessionHost;
+```
+
+## ProgramSessionCapabilityError
+
+```rust
+pub enum ProgramSessionCapabilityError {
+    Journal(program_journal::ProgramJournalRepositoryError),
+    Registration(program_registration::ProgramRegistrationError),
+}
+// derives: fmt::Debug
+impl fmt::Display for program_journal::ProgramSessionCapabilityError {
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl error::Error for program_journal::ProgramSessionCapabilityError {
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
 ```
