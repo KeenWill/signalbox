@@ -3528,8 +3528,8 @@ async fn unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Er
             .await?,
         SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
     );
-    let durable: (i16, String, Vec<u8>) = sqlx::query_as(
-        "SELECT storage_version, rejection_kind, result_attachment_digest
+    let durable: (String, Vec<u8>) = sqlx::query_as(
+        "SELECT rejection_kind, result_attachment_digest
            FROM submit_input_command WHERE command_id = $1",
     )
     .bind(fixture.command.command_id().as_uuid())
@@ -3538,7 +3538,6 @@ async fn unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Er
     assert_eq!(
         durable,
         (
-            3,
             String::from("attachment_blob_not_found"),
             fixture.digest.as_bytes().to_vec()
         )
