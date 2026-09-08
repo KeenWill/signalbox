@@ -1101,10 +1101,18 @@ fn stage_mutation(
     mutation: &WorkspaceFileMutation,
 ) -> Result<StagedMutation, WorkspaceMutationCommitError> {
     let path = mutation.path().clone();
-    let (parent, target) = open_mutation_parent(root, &path)?;
     let had_original = expected
         .content(&path)
         .is_some_and(|content| content.is_some());
+    let (parent, target) = open_mutation_parent(
+        root,
+        &path,
+        if had_original {
+            precondition_errno
+        } else {
+            commit_errno
+        },
+    )?;
     let backup = had_original.then(|| transaction_name("backup"));
     let (stage, installed_file) = match mutation {
         WorkspaceFileMutation::Write { content, .. } => {
@@ -1132,6 +1140,7 @@ fn stage_mutation(
 fn open_mutation_parent(
     root: &WorkspaceRoot,
     path: &WorkspaceMutationPath,
+    map_errno: fn(&WorkspaceMutationPath, rustix::io::Errno) -> WorkspaceMutationCommitError,
 ) -> Result<(OwnedFd, OsString), WorkspaceMutationCommitError> {
     let supplied = Path::new(path.as_str());
     let target = supplied
@@ -1148,7 +1157,7 @@ fn open_mutation_parent(
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|error| precondition_errno(path, error))?;
+    .map_err(|error| map_errno(path, error))?;
     if let Some(parent) = supplied.parent() {
         for component in parent.components() {
             let Component::Normal(name) = component else {
@@ -1160,7 +1169,7 @@ fn open_mutation_parent(
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|error| precondition_errno(path, error))?;
+            .map_err(|error| map_errno(path, error))?;
         }
     }
     Ok((current, target))
@@ -1170,7 +1179,7 @@ fn revalidate_mutation_parent(
     root: &WorkspaceRoot,
     staged: &StagedMutation,
 ) -> Result<OwnedFd, WorkspaceMutationCommitError> {
-    let (parent, _) = open_mutation_parent(root, &staged.path)?;
+    let (parent, _) = open_mutation_parent(root, &staged.path, precondition_errno)?;
     let before = fstat(&staged.parent).map_err(|error| commit_errno(&staged.path, error))?;
     let current = fstat(&parent).map_err(|error| commit_errno(&staged.path, error))?;
     if before.st_dev != current.st_dev || before.st_ino != current.st_ino {
@@ -1642,6 +1651,68 @@ mod tests {
             ADDED
         );
         assert!(!workspace.path().join(GONE_PATH).exists());
+    }
+
+    #[test]
+    fn an_initially_missing_parent_is_a_filesystem_failure() {
+        let workspace = tempfile::tempdir().expect("workspace constructs");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root = WorkspaceMutationFileSystem::open_root(&filesystem, workspace.path())
+            .expect("root opens");
+        let path = WorkspaceMutationPath::try_new("missing/file.txt").expect("path validates");
+        let expected = filesystem
+            .snapshot(
+                &root,
+                std::slice::from_ref(&path),
+                MAX_WORKSPACE_MUTATION_FILE_BYTES,
+            )
+            .expect("absent target snapshots");
+
+        let result = filesystem.commit_atomically(
+            &root,
+            &expected,
+            &[WorkspaceFileMutation::Write {
+                path,
+                content: String::from("tool content"),
+            }],
+        );
+
+        assert_eq!(result, Err(WorkspaceMutationCommitError::Filesystem));
+        assert!(immediate_entry_names(&workspace).is_empty());
+    }
+
+    #[test]
+    fn a_present_targets_parent_removed_before_staging_is_a_conflict() {
+        let workspace = tempfile::tempdir().expect("workspace constructs");
+        let parent = workspace.path().join("parent");
+        std::fs::create_dir(&parent).expect("parent creates");
+        std::fs::write(parent.join("file.txt"), "original").expect("target writes");
+        let filesystem = LocalWorkspaceFileSystem;
+        let root = WorkspaceMutationFileSystem::open_root(&filesystem, workspace.path())
+            .expect("root opens");
+        let path = WorkspaceMutationPath::try_new("parent/file.txt").expect("path validates");
+        let expected = filesystem
+            .snapshot(
+                &root,
+                std::slice::from_ref(&path),
+                MAX_WORKSPACE_MUTATION_FILE_BYTES,
+            )
+            .expect("present target snapshots");
+        std::fs::remove_dir_all(parent).expect("concurrent writer removes parent");
+
+        let error = stage_mutation(
+            &root,
+            &expected,
+            &WorkspaceFileMutation::Write {
+                path,
+                content: String::from("tool content"),
+            },
+        )
+        .err()
+        .expect("missing parent rejects staging");
+
+        assert_eq!(error, WorkspaceMutationCommitError::Conflict);
+        assert!(immediate_entry_names(&workspace).is_empty());
     }
 
     #[test]
