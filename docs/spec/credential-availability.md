@@ -218,7 +218,9 @@ call preparation, and send authorization use the wait's retained effective
 target with its retained policy; a missing current selection leaves the wait
 unconsumed. Release pins a pre-call wait's retained target on its turn, and
 domain call preparation retains that pin across catalog reloads. Parking retains
-the exclusions that selected the wait.
+the exclusions that selected the wait. An exclusion with an absent or zero
+record generation is the oldest generation and cannot make its member wakeable
+by an operator clear.
 
 A terminal release after a predecessor call projects
 `failed_after_credential_wait` with the fresh terminal attempt and the
