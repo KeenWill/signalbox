@@ -21,7 +21,7 @@
 | create_session_from_imported_frontier | 4 | 0 | 0 | [create_session_from_imported_frontier](create_session_from_imported_frontier.md) |
 | credential_capacity | 0 | 0 | 1 | [credential_capacity](credential_capacity.md) |
 | credential_exclusions | 6 | 0 | 2 | [credential_exclusions](credential_exclusions.md) |
-| goal | 7 | 0 | 0 | [goal](goal.md) |
+| goal | 8 | 0 | 0 | [goal](goal.md) |
 | goal_turn | 2 | 0 | 0 | [goal_turn](goal_turn.md) |
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
@@ -59,6 +59,7 @@
 | tool_loop | 3 | 0 | 0 | [tool_loop](tool_loop.md) |
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |
+| workspace | 3 | 0 | 0 | [workspace](workspace.md) |
 | workspace_instructions | 6 | 0 | 0 | [workspace_instructions](workspace_instructions.md) |
 | reload_configuration | 8 | 0 | 0 | [reload_configuration](reload_configuration.md) |
 | root | 0 | 0 | 10 | [root](root.md) |
