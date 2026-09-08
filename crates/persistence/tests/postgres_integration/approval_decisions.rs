@@ -3950,3 +3950,131 @@ async fn judge_offer_migration_retains_existing_rows_and_checks_new_completions(
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_replay_rejects_a_mismatch_after_a_runtime_safety_denial()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x138000;
+    let (fixture, model_repository, authorized) =
+        authorize_checkpointed_model_call(&pool, seed).await?;
+    let response = ToolUsingAssistantResponse::try_from_parts(vec![
+        AssistantResponsePart::ToolCall(ToolCallProposal::new(
+            ToolName::try_new(String::from(JUDGED_TOOL_NAME)).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from(APPROVAL_ARGUMENTS))
+                .expect("fixture arguments are valid"),
+        )),
+        AssistantResponsePart::ToolCall(ToolCallProposal::suppressed(
+            ToolName::try_new(String::from(APPROVAL_TOOL_NAME)).expect("fixture name is valid"),
+        )),
+    ])
+    .expect("the two proposals form a tool-using response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+            response,
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        });
+    let judged_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x120));
+    let suppressed_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x121));
+    let outcome = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![
+                    ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x122)),
+                        judged_request,
+                        InitialToolApproval::Delegated,
+                    ),
+                    ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x123)),
+                        suppressed_request,
+                        InitialToolApproval::RuntimeSafetyDeny,
+                    ),
+                ],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x124)),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
+        panic!("the mixed batch reaches a tool round")
+    };
+    assert_eq!(
+        round.next_phase(),
+        &ActiveTurnPhase::AwaitingApproval {
+            request: judged_request,
+        },
+        "the earlier delegated request is the one the judge must decide"
+    );
+    let suppressed_source: String = sqlx::query_scalar(
+        "SELECT decision_source FROM tool_approval_decision WHERE request_id = $1",
+    )
+    .bind(suppressed_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        suppressed_source, "runtime_safety",
+        "the later request must carry the proposal-time source this probe has to recognize"
+    );
+
+    let judge = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        judge
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x125)),
+                None,
+            )
+            .await?,
+    );
+    drop(authorized_approval_judge(judge.authorize(&prepared).await?));
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+    let persisted_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x126));
+    let conflicting_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x127));
+    assert_eq!(
+        judge
+            .complete(
+                &prepared,
+                DelegateApprovalRecommendation::Approve,
+                rationale.clone(),
+                ProviderReportedTokenUsage::unreported(),
+                approval_judge_completion_identities(
+                    seed,
+                    persisted_attempt.into_uuid().as_u128(),
+                ),
+                approval_judge_closed_result_entry,
+            )
+            .await?,
+        CompleteApprovalJudgeOutcome::Decided
+    );
+    let error = judge
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            approval_judge_completion_identities(
+                seed + 0x10,
+                conflicting_attempt.into_uuid().as_u128(),
+            ),
+            approval_judge_closed_result_entry,
+        )
+        .await
+        .expect_err("a replay after a runtime-safety denial cannot substitute another continuation identity");
+    assert_eq!(
+        error.operator_failure_class(),
+        OperatorFailureClass::FailClosedCorruption,
+        "unexpected replay error: {error:?}"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

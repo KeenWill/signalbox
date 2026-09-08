@@ -777,5 +777,6 @@ fn selection_display(selection: ModelSelection) -> String {
 #[path = "client_tests.rs"]
 mod tests;
 
+mod credential_pool;
 #[cfg(test)]
 mod reconnect_tests;

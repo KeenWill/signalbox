@@ -293,6 +293,7 @@ private func requireImportedConversationID(
     .conversationImportAlreadyImported(let importedConversationID):
     return importedConversationID
   case .sessionCreated, .inputSubmitted, .toolRequestDecided, .toolDenialOverridden, .sessionDefaults,
+    .credentialPoolPolicy,
     .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,
     .sessionMetadataSummary, .sessionMetadataPageEnd, .sessionMetadata,
     .sessionMetadataReplaced, .conversationPageStart, .conversationSummary,

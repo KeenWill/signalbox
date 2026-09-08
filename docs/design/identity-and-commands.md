@@ -13,8 +13,6 @@ program-driven turn is never recorded as user-issued.
 
 ## Design
 
-A replacement staged behind an in-flight call or its tool batch completes or
-retires at the [turn-lifecycle boundary](turn-lifecycle-and-scheduling.md).
 
 `ProviderTargetEvidenceId` gains a UUIDv7 generator with the durable
 provider-target evidence that
@@ -47,9 +45,6 @@ that adds the field states how each earlier version reconstitutes.
   assumes the submit-input actor is always the user.
 - Replace-session-defaults gains no actor field until a non-user boundary issues
   it.
-- Workspace-provisioning or staged replacement may span claim and
-  terminal-result transactions; every other new kind is one
-  claim-and-terminal-result transaction.
 
 ## Acceptance criteria
 
@@ -57,10 +52,6 @@ that adds the field states how each earlier version reconstitutes.
   deferred typed-record trigger and the append-only trigger, a hand-written
   structural equality that excludes the command identifier, and a closed-kind
   test that names it.
-- An equal replay of a runner replacement during provisioning or staging returns
-  the pending disposition; after the result row commits it returns that result.
-- A runner replacement claimed but unterminated at process exit is resumed at
-  startup before clients are admitted, and terminates under its own identifier.
 - `ProviderTargetEvidenceId` has a production generator once durable
   provider-target evidence lands.
 - A program-issued submit-input records the program actor, and replaying its

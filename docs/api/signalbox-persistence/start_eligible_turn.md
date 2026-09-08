@@ -109,6 +109,7 @@ impl start_eligible_turn::PreparedActivationPreview {
 ```rust
 pub enum CommitActivationPreviewOutcome {
     Activated(boxed::Box<signalbox_domain::ActivatedTurn>),
+    PoolExhausted(signalbox_domain::TurnId),
     Stale,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
@@ -161,6 +162,7 @@ impl start_eligible_turn::StartEligibleTurnRepository {
         preview: start_eligible_turn::PreparedActivationPreview,
         prospective: model_execution::ProspectiveModelCall,
         model_calls: &model_execution::PostgresModelCallRepository,
+        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
         instruction_evidence: option::Option<
             workspace_instructions::CountedActivationInstructionEvidence<'_>,
         >,

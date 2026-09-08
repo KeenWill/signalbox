@@ -142,6 +142,23 @@ impl<'a> Output<'a> {
                     placement_revision.value()
                 ),
             },
+            TurnState::FailedCredentialPoolExhausted {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                failure_entry_id,
+                pool_policy_id,
+                policy_members,
+                members,
+            } => {
+                write!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=failed_credential_pool_exhausted frontier={terminal_frontier_id} attempt={terminal_attempt_id} entry={failure_entry_id} pool_policy={pool_policy_id} policy_members="
+                )?;
+                self.json_value(policy_members)?;
+                write!(self.stdout, " members=")?;
+                self.json_value(members)?;
+                writeln!(self.stdout)
+            }
             TurnState::Failed {
                 terminal_frontier_id,
                 terminal_attempt_id,
