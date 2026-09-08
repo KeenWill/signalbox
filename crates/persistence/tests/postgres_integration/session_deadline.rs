@@ -55,6 +55,11 @@ async fn activity_supersedes_an_expired_template_admission_deadline() -> Result<
         let turns_before: Vec<serde_json::Value> = sqlx::query_scalar(
             "SELECT to_jsonb(turn_lifecycle) FROM turn_lifecycle WHERE session_id = $1 ORDER BY turn_id",
         ).bind(session.into_uuid()).fetch_all(&pool).await?;
+        // An unsettled admission record can remain over already-started work.
+        sqlx::query("UPDATE session_deadline SET settled = false WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .execute(&pool)
+            .await?;
         const TEMPLATE_ADMISSION_DEADLINE: Duration = Duration::from_secs(15 * 60);
         let deadline = PostgresSessionDeadlineRepository::new(
             pool.clone(),
@@ -87,13 +92,72 @@ async fn activity_supersedes_an_expired_template_admission_deadline() -> Result<
             turns_after, turns_before,
             "supersession leaves the turn untouched"
         );
-        let deadline_remains: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM session_deadline WHERE session_id = $1)",
+        let settled = sqlx::query(
+            "SELECT settled, expires_at IS NULL AS expiry_cleared
+               FROM session_deadline WHERE session_id = $1",
         )
         .bind(session.into_uuid())
         .fetch_one(&pool)
         .await?;
-        assert!(!deadline_remains);
+        assert!(settled.try_get::<bool, _>("settled")?);
+        assert!(settled.try_get::<bool, _>("expiry_cleared")?);
+        let violations: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM session_lifecycle_deadline_violation WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(violations, 0);
+        assert_eq!(
+            deadline.expire_next().await?,
+            SessionDeadlinePassOutcome::Idle
+        );
+
+        lifecycle
+            .park(
+                session,
+                SessionParkCause::ModulePark,
+                SessionParkResponder::Module {
+                    module: DispatchingModule::RepositoryWatch,
+                },
+                None,
+                LifecycleActor::Module {
+                    module: DispatchingModule::RepositoryWatch,
+                },
+            )
+            .await?;
+        assert!(
+            signalbox_persistence::test_support::restore_module_park(
+                &pool,
+                session,
+                DispatchingModule::RepositoryWatch,
+            )
+            .await?
+        );
+        assert_eq!(
+            lifecycle
+                .load(session)
+                .await?
+                .expect("session exists")
+                .state(),
+            SessionLifecycleState::Created
+        );
+        let restored = sqlx::query(
+            "SELECT settled, expires_at IS NULL AS expiry_cleared
+               FROM session_deadline WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert!(restored.try_get::<bool, _>("settled")?);
+        assert!(restored.try_get::<bool, _>("expiry_cleared")?);
+        let violations: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM session_lifecycle_deadline_violation WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(violations, 0);
         assert_eq!(
             deadline.expire_next().await?,
             SessionDeadlinePassOutcome::Idle

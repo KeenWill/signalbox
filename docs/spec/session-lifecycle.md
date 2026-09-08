@@ -27,12 +27,12 @@ the two machines never disagree.
 Waiting carries a typed kind and the party expected to end the wait. Only an
 owned session carries a deadline, and its state sets the kind: admission covers
 created and dispatched, active stall covers active and recovering, and waiting
-covers waiting, each of those states with exactly one deadline unless admission
-was superseded by activity; blocked and parked carry none. The admission and
-waiting bounds come from configuration. A parked session, reached only by an
-expired waiting deadline or a module park, carries a machine-readable cause and
-the responder who must act, the operator queue or one module. The operator queue
-is every parked session; the recorded responder does not filter it.
+covers waiting, each of those states with exactly one deadline record; blocked
+and parked carry none. The admission and waiting bounds come from configuration.
+A parked session, reached only by an expired waiting deadline or a module park,
+carries a machine-readable cause and the responder who must act, the operator
+queue or one module. The operator queue is every parked session; the recorded
+responder does not filter it.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a finish check passed and declared when no check ran; a failed check blocks
@@ -83,8 +83,10 @@ attention is owed. Every other implemented deadline expiry, the waiting
 deadline, parks; active-stall expiry is planned.
 
 An admission deadline that expires after a turn has started is superseded: the
-deadline pass clears it idempotently without retiring the session or changing
-its turns and logs the supersession at INFO.
+deadline pass marks its retained record settled and clears its expiry without
+retiring the session or changing its turns, and logs the supersession at INFO.
+Settled deadlines are excluded from expiry passes and deadline violations.
+Admission is not rearmed after activity, including when a module park is lifted.
 
 The lifecycle actor classifies the domain actor rather than replacing it; the
 domain actor algebra, its wire projection, and its replay-equality rule are
@@ -141,8 +143,7 @@ The attention classifier that
 of lifecycle state and turn phase, never an independent machine.
 
 An absent configured bound leaves a deadline unbounded. An owned session in a
-deadline-bearing state with no deadline row is a violation unless admission was
-superseded by activity.
+deadline-bearing state with no deadline row is a violation.
 
 A park takes effect at the next scheduler admission. Work already in flight
 completes; any further pass waits for resume. A stop ends the active turn. A

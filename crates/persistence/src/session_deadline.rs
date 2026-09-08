@@ -35,7 +35,7 @@ pub enum SessionDeadlinePassOutcome {
     Idle,
     /// One supported deadline materialized its configured expiry.
     Armed { session: SessionId },
-    /// Admission expired after turn activity, so its deadline was cleared.
+    /// Admission expired after turn activity, so its deadline was settled.
     Superseded { session: SessionId },
     /// Admission expired and the session retired.
     Retired { session: SessionId },
@@ -110,7 +110,8 @@ impl PostgresSessionDeadlineRepository {
         let candidate: Option<Uuid> = sqlx::query_scalar(
             "SELECT session_id
                FROM session_deadline
-              WHERE (deadline_kind = 'admission'
+              WHERE NOT settled
+                AND ((deadline_kind = 'admission'
                      AND (expires_at IS DISTINCT FROM CASE
                               WHEN $1::BIGINT IS NULL THEN NULL
                               ELSE armed_at + $1 * INTERVAL '1 millisecond'
@@ -121,7 +122,7 @@ impl PostgresSessionDeadlineRepository {
                               WHEN $2::BIGINT IS NULL THEN NULL
                               ELSE armed_at + $2 * INTERVAL '1 millisecond'
                           END
-                          OR expires_at <= clock_timestamp()))
+                          OR expires_at <= clock_timestamp())))
               ORDER BY COALESCE(
                            expires_at,
                            CASE deadline_kind
@@ -151,7 +152,7 @@ impl PostgresSessionDeadlineRepository {
                     WHEN 'admission' THEN armed_at + $2 * INTERVAL '1 millisecond'
                     WHEN 'waiting' THEN armed_at + $3 * INTERVAL '1 millisecond'
                 END
-             WHERE session_id = $1
+             WHERE session_id = $1 AND NOT settled
          RETURNING session_deadline.deadline_kind,
                    session_deadline.expires_at <= clock_timestamp() AS due",
         )
@@ -201,13 +202,14 @@ impl PostgresSessionDeadlineRepository {
                 .map_err(database_failure("read_admission_activity"))?;
                 if has_activity {
                     sqlx::query(
-                        "DELETE FROM session_deadline
+                        "UPDATE session_deadline
+                            SET settled = true, expires_at = NULL
                           WHERE session_id = $1 AND deadline_kind = 'admission'",
                     )
                     .bind(candidate)
                     .execute(&mut *transaction)
                     .await
-                    .map_err(database_failure("clear_superseded_admission_deadline"))?;
+                    .map_err(database_failure("settle_superseded_admission_deadline"))?;
                     SessionDeadlinePassOutcome::Superseded { session }
                 } else {
                     retire_queued_turns(&mut transaction, session)
