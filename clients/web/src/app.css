@@ -1323,7 +1323,7 @@ kbd {
   background: var(--surface-2);
   cursor: default;
 }
-.import-entry-row:hover {
+.import-entry-row:not([aria-disabled="true"]):hover {
   background: var(--surface-3);
 }
 .import-entry-row[aria-selected="true"] {
