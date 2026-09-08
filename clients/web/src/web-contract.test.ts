@@ -74,7 +74,9 @@ const settings = {
   effective: { reasoning_level: null, fast_mode: 'disabled', service_tier: null },
 } as const
 const selection = { kind: 'direct', selection_id: detailSessionId } as const
-const variants: Array<[WebSessionTimelineDetail['kind'], WebSessionTimelineDetail['body']]> = [
+const variants: Array<
+  [WebSessionTimelineDetail['kind'], WebSessionTimelineDetail['body'], number?]
+> = [
   [
     'session_created',
     { type: 'session_created', cause: { type: 'interactive' }, imported_evidence: null },
@@ -204,6 +206,7 @@ const variants: Array<[WebSessionTimelineDetail['kind'], WebSessionTimelineDetai
       working_directory: '/workspace',
       state: 'pinned',
     },
+    138, // The 128-byte envelope plus the 10-byte directory.
   ],
   [
     'delegation_update',
@@ -237,10 +240,8 @@ const variants: Array<[WebSessionTimelineDetail['kind'], WebSessionTimelineDetai
   ],
 ]
 
-it.each(variants)('decodes and presents the %s body', (kind, body) => {
-  const page = detailPage([
-    { address: { event_sequence: '1' }, kind, body, projected_body_bytes: 128 },
-  ])
+it.each(variants)('decodes and presents the %s body', (kind, body, projected_body_bytes = 128) => {
+  const page = detailPage([{ address: { event_sequence: '1' }, kind, body, projected_body_bytes }])
   const decoded = decodeWebSessionTimelineDetailPage(page)
   expect(decoded.items[0]?.body).toEqual(body)
   expect(isCompatibleDetailBody(kind, body)).toBe(true)
