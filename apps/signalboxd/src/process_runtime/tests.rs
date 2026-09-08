@@ -3340,7 +3340,7 @@ mod tests {
         let session = SessionId::from_uuid(Uuid::now_v7());
         let nudge = RecordingEligibilityNudge::default();
         for state in [DispatchedRunnerState::Replaced, DispatchedRunnerState::WorkingDirectoryChanged, DispatchedRunnerState::Abandoned] {
-            nudge_eligible_outbox_wake(&nudge, session, &DispatchedOutboxEventKind::RunnerStateTransition {
+            let _ = nudge_eligible_outbox_wake(&nudge, session, &DispatchedOutboxEventKind::RunnerStateTransition {
                 runner: signalbox_domain::RunnerId::from_uuid(Uuid::now_v7()),
                 placement_revision: signalbox_domain::RunnerGeneration::try_from_u64(2).expect("replacement revision is positive"),
                 sandbox: signalbox_domain::RunnerSandboxProfile::Ambient,

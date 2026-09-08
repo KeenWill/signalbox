@@ -1421,9 +1421,6 @@ impl PostgresToolLoopRepository {
             .runner_recovery
             .as_ref()
             .and_then(crate::runner_protocol::RunnerProtocolStore::recovery_notifications);
-        if let Some(notifications) = &mut notifications {
-            notifications.borrow_and_update();
-        }
         loop {
             let mut waiting_for_replacement = false;
             let mut transaction = self.pool.begin().await?;

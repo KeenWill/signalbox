@@ -844,8 +844,17 @@ async fn disarm_staging_sweep_unless_guarded(
 /// I/O, and join-error prose is never formatted into the classification.
 fn process_runtime_failure_class(error: &ProcessRuntimeError) -> OperatorFailureClass {
     use signalbox_persistence::outbox::OutboxDispatchError;
+    use signalbox_persistence::runner_protocol::{RunnerProtocolStoreError, RunnerRecoveryError};
 
     match error {
+        ProcessRuntimeError::RunnerRecoveryCommands(RunnerRecoveryError::Store(
+            RunnerProtocolStoreError::CommitAmbiguous(_),
+        )) => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: true,
+        },
+        ProcessRuntimeError::RunnerRecoveryCommands(RunnerRecoveryError::Store(
+            RunnerProtocolStoreError::Corruption(_),
+        )) => OperatorFailureClass::FailClosedCorruption,
         ProcessRuntimeError::OauthRecovery(error) => OperatorFailureClass::Infrastructure {
             commit_ambiguous: matches!(error, signalbox_persistence::oauth_credential::OauthCredentialRepositoryError::CommitAmbiguous),
         },

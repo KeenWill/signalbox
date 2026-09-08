@@ -205,6 +205,7 @@ impl ProcessRuntime {
                 )
             })?,
         );
+        resume_runner_replacements_and_notify(&recovery_store, &fanouts.runner_recovery).await?;
         let recovery_notifications = forward_runner_recovery_notifications(
             recovery_listener,
             recovery_store,
@@ -242,6 +243,18 @@ impl ProcessRuntime {
     }
 }
 
+async fn resume_runner_replacements_and_notify(
+    store: &signalbox_persistence::runner_protocol::RunnerProtocolStore,
+    notifications: &watch::Sender<()>,
+) -> Result<(), ProcessRuntimeError> {
+    store
+        .resume_runner_replacements()
+        .await
+        .map_err(ProcessRuntimeError::RunnerRecoveryCommands)?;
+    notifications.send_replace(());
+    Ok(())
+}
+
 async fn forward_runner_recovery_notifications(
     mut listener: sqlx::postgres::PgListener,
     store: signalbox_persistence::runner_protocol::RunnerProtocolStore,
@@ -252,12 +265,6 @@ async fn forward_runner_recovery_notifications(
         if *shutdown.borrow() {
             return Ok(());
         }
-        store
-            .resume_runner_replacements()
-            .await
-            .map_err(ProcessRuntimeError::RunnerRecoveryCommands)?;
-        // Also wake continuations after the initial scan and listener reconnects.
-        notifications.send_replace(());
         tokio::select! {
             notification = listener.try_recv() => {
                 notification.map_err(ProcessRuntimeError::RunnerRecoveryNotifications)?;
@@ -266,6 +273,7 @@ async fn forward_runner_recovery_notifications(
                 if changed.is_err() || *shutdown.borrow() { return Ok(()); }
             }
         }
+        resume_runner_replacements_and_notify(&store, &notifications).await?;
     }
 }
 
@@ -658,13 +666,15 @@ mod runner_recovery_tests {
             .map(|_| notifications.subscribe())
             .collect();
         let (shutdown, receiver) = watch::channel(false);
+        let store = signalbox_persistence::runner_protocol::RunnerProtocolStore::new(
+            pool.clone(),
+            crate::runner_protocol_runtime::registration_only_catalog()
+                .expect("registration catalog is valid"),
+        );
+        resume_runner_replacements_and_notify(&store, &notifications).await?;
         let forwarder = tokio::spawn(forward_runner_recovery_notifications(
             listener,
-            signalbox_persistence::runner_protocol::RunnerProtocolStore::new(
-                pool.clone(),
-                crate::runner_protocol_runtime::registration_only_catalog()
-                    .expect("registration catalog is valid"),
-            ),
+            store,
             notifications,
             receiver,
         ));

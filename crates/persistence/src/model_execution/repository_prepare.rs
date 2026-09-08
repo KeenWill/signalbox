@@ -492,9 +492,6 @@ impl PostgresModelCallRepository {
             .runner_recovery
             .as_ref()
             .and_then(crate::runner_protocol::RunnerProtocolStore::recovery_notifications);
-        if let Some(notifications) = &mut notifications {
-            notifications.borrow_and_update();
-        }
         loop {
             let mut transaction = self.pool.begin().await?;
             let result = async {
