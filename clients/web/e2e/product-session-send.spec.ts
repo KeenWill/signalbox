@@ -205,6 +205,7 @@ test('reads durable transcript growth and sends a message by keyboard', async ({
 test('follows new active work after restoring an inactive session position', async ({ page }) => {
   const api = await sessionApi(page)
   await openSession(page)
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await page.getByRole('row', { name: /41 input accepted/ }).click()
   await expect
     .poll(() =>
@@ -376,10 +377,11 @@ test('keeps header-only history when transcript detail is not advertised', async
     if (request.url().includes('/timeline-detail')) detailRequests.push(request.url())
   })
   await page.goto(`/sessions?workspace=true&session=${sessionId}`)
-  await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Transcript text' })).toHaveCount(0)
   await expect(page.getByRole('textbox', { name: 'Message to session' })).toBeVisible()
   api.grow()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(page.getByRole('row')).toHaveCount(3)
   await page.getByRole('row').first().press('Enter')
   await expect(page.getByText('Timeline detail is unavailable.', { exact: true })).toBeVisible()

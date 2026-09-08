@@ -24,6 +24,7 @@ import {
   type WebSubmitInputRequest,
   type WebTimelineDetailContinuation,
 } from './generated/web-contract.mjs'
+import { hasConversationContent } from './session-timeline/conversation'
 import { validateDetailContinuation } from './session-timeline/model'
 
 export const productRoutes = [
@@ -1241,6 +1242,7 @@ async function readSessionTextPage(
   let scannedItems = 0
   let scannedBytes = 0
   let cursor = continuation
+  let previous: WebSessionTimelineDetailPage | undefined
   do {
     const page = await readSessionTranscript(
       sessionId,
@@ -1252,14 +1254,13 @@ async function readSessionTextPage(
         max_timeline_detail_bytes: maxBytes - scannedBytes,
       },
       signal,
+      previous,
     )
     scannedItems += page.items.length
     scannedBytes += page.projected_body_bytes
+    previous = page
     for (const item of page.items) {
-      if (
-        item.body.type === 'user_input' ||
-        (item.body.type === 'model_call' && item.body.response != null)
-      ) {
+      if (hasConversationContent(item, items)) {
         items.push(item)
         bytes += item.projected_body_bytes
       }
@@ -1273,7 +1274,8 @@ async function readSessionTextPage(
       throw new TypeError('Transcript continuation does not advance')
     }
   } while (
-    cursor?.type === 'more_at' &&
+    (cursor?.type === 'more_at' ||
+      (cursor?.type === 'more_body' && cursor.body.offset_bytes === '0')) &&
     scannedItems < maxItems &&
     maxBytes - scannedBytes >= MIN_SESSION_TRANSCRIPT_PAGE_BYTES
   )

@@ -1,6 +1,6 @@
-import { expect, type Page, test } from '@playwright/test'
 import type { WebTimelineCreationCause } from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, test } from './fontTest'
 import {
   detailItems,
   detailLive,
@@ -93,8 +93,18 @@ async function openDetails(
     if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: timelineWindow })
     if (url.pathname.endsWith('/timeline-detail')) {
       reads.push(url)
-      if (url.searchParams.get('first') !== url.searchParams.get('through'))
+      if (url.searchParams.get('first') !== url.searchParams.get('through')) {
+        if (url.searchParams.get('cursor_field') === 'tool_result')
+          return route.fulfill({
+            json: detailPage([toolResultItem()], {
+              type: 'more_at',
+              address: { event_sequence: '3' },
+            }),
+          })
+        if (url.searchParams.get('cursor_address') === '3')
+          return route.fulfill({ json: detailPage(items.slice(2)) })
         return route.fulfill({ json: detailPage(items.slice(0, 2), resultCursor) })
+      }
       let selected = items.find(
         (item) => item.address.event_sequence === url.searchParams.get('first'),
       )
@@ -151,6 +161,7 @@ async function openDetails(
   await page.getByRole('textbox', { name: 'Exact session ID' }).fill(detailSessionId)
   await page.getByRole('button', { name: 'Open workspace' }).click()
   await expect(page.getByRole('heading', { name: detailSessionId })).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   return reads
 }
 
@@ -243,3 +254,36 @@ for (const cause of [
     }
   })
 }
+
+test('reads tool arguments and output in conversation order with events hidden', async ({
+  page,
+}) => {
+  await openDetails(page)
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
+  const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+  await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
+  await expect(conversation.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
+    'release status --json',
+  )
+  await expect(conversation.getByRole('region', { name: 'Output', exact: true })).toContainText(
+    'passed',
+  )
+  await expect(
+    conversation.getByText('The release checks passed. Publishing remains unapproved.', {
+      exact: true,
+    }),
+  ).toBeVisible()
+  await expect
+    .poll(() =>
+      conversation
+        .locator('[data-event-sequence]')
+        .evaluateAll((entries) =>
+          entries.map((entry) => entry.getAttribute('data-event-sequence')),
+        ),
+    )
+    .toEqual(['1', '2', '2', '4'])
+  await conversation.focus()
+  await expect(conversation).toBeFocused()
+  await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
+  await expect(toolRow(page)).toBeVisible()
+})

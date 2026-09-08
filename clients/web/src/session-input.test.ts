@@ -477,9 +477,9 @@ it('reads only new transcript addresses and keeps appended text within the item 
 it('loads messages beyond metadata-only detail pages within the scan budget', async () => {
   const metadata = Array.from({ length: 4 }, (_, index) => ({
     address: { event_sequence: String(index + 1) },
-    kind: 'injection_settled',
+    kind: 'goal_turn_retired',
     projected_body_bytes: 128,
-    body: { type: 'event_fact', kind: 'injection_settled' },
+    body: { type: 'event_fact', kind: 'goal_turn_retired' },
   }))
   const message = inputPage(1)
   message.items = message.items.map((item) => ({ ...item, address: { event_sequence: '5' } }))
@@ -518,9 +518,9 @@ it.each([
         session_id: sessionId,
         items: Array.from({ length: count }, (_, index) => ({
           address: { event_sequence: String(index + 1) },
-          kind: 'injection_settled',
+          kind: 'goal_turn_retired',
           projected_body_bytes: bytes / count,
-          body: { type: 'event_fact', kind: 'injection_settled' },
+          body: { type: 'event_fact', kind: 'goal_turn_retired' },
         })),
         projected_body_bytes: bytes,
         continuation,

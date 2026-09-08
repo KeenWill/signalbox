@@ -3030,14 +3030,45 @@ kbd {
 }
 
 .session-transcript-text {
-  max-height: 55vh;
-  overflow: auto;
   padding: 0.75rem;
   border-block: 1px solid var(--border);
 }
-.session-message-entry:has(.session-message-text) {
+.session-message-entry {
   padding-block: 0.6rem;
   border-bottom: 1px solid var(--border);
+}
+.session-events-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.75rem;
+}
+.session-timeline[hidden] {
+  display: none;
+}
+.session-tool-entry > strong {
+  font-family: var(--signalbox-font-mono, ui-monospace), monospace;
+  font-size: 0.8rem;
+}
+.session-tool-text {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+}
+.session-tool-text > strong {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.session-tool-text pre {
+  margin: 0.3rem 0;
+  padding: 0.6rem;
+  background: var(--surface-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.session-turn-outcome {
+  color: var(--danger);
+  font-size: 0.8rem;
 }
 .session-message-text {
   margin: 0.4rem 0;

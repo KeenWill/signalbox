@@ -154,6 +154,7 @@ export function SessionWorkspaceSurface({
     initialSessionId === undefined ? undefined : app.lastLogicalPositions[initialSessionId],
   )
   const [refetchRequest, setRefetchRequest] = useState(0)
+  const [showEvents, setShowEvents] = useState(false)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const manualAnchorRef = useRef<SessionWindowAnchor | null>(null)
@@ -267,7 +268,10 @@ export function SessionWorkspaceSurface({
     })
   }, [timelineIds])
 
-  useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
+  useEffect(
+    () => onTimelineIds(showEvents ? timelineIds : []),
+    [onTimelineIds, timelineIds, showEvents],
+  )
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
     const preferred =
@@ -625,8 +629,12 @@ export function SessionWorkspaceSurface({
               ))}
             </section>
           )}
-          {transcriptAvailable &&
-            displayedSession.descriptor.sizes.projected_text_bytes !== '0' && (
+          <section
+            ref={showEvents ? undefined : timelineRef}
+            tabIndex={showEvents ? -1 : 0}
+            aria-label="Conversation"
+          >
+            {transcriptAvailable ? (
               <SessionTranscriptText
                 sessionId={sessionId ?? ''}
                 first={
@@ -640,9 +648,21 @@ export function SessionWorkspaceSurface({
                 observed={displayedSession.descriptor.observed_through}
                 limits={transcriptLimits}
               />
+            ) : (
+              <p>Conversation unavailable</p>
             )}
+          </section>
+          <label className="session-events-toggle">
+            <input
+              type="checkbox"
+              checked={showEvents}
+              onChange={(event) => setShowEvents(event.target.checked)}
+            />
+            Events
+          </label>
           {/* biome-ignore lint/a11y/useSemanticElements: The bounded timeline uses a scrollable ARIA grid. */}
           <div
+            hidden={!showEvents}
             className={`session-timeline presentation-${app.detail}`}
             aria-label="Session timeline"
             aria-activedescendant={
@@ -650,7 +670,7 @@ export function SessionWorkspaceSurface({
                 ? `session-timeline-option-${selected}`
                 : undefined
             }
-            ref={timelineRef}
+            ref={showEvents ? timelineRef : undefined}
             role="grid"
             tabIndex={0}
             onKeyDown={handleTimelineKeyDown}

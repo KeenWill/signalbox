@@ -505,7 +505,9 @@ Pagination resets when the session, window bounds, or observation cursor
 changes; the response bound includes their attachment references. Text pages
 advance past metadata-only detail records automatically within the item and
 projected-byte page budgets; discarded records consume both budgets. The
-continuation remains available when either budget is exhausted.
+continuation remains available when either budget is exhausted. The conversation
+shows user and assistant text, tool arguments and output, and unsuccessful turn
+outcomes in event order. Bookkeeping is hidden until Events is selected.
 
 The session timeline descriptor reports the first and latest addresses, the item
 and projected-size facts, the active and queued turn counts, and the observation
