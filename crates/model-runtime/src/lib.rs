@@ -84,7 +84,7 @@ pub use evidence::{
     TerminalEvidence, TerminalReport, ToolCallsAtLoss, TransportFacts, UnsentCause,
     parse_retry_after,
 };
-pub use input_count::{InputTokenCountOutcome, ModelInputTokenCounter};
+pub use input_count::{InputTokenCountFailure, InputTokenCountOutcome, ModelInputTokenCounter};
 pub use message::{
     AssistantPart, ConversationMessage, ConversationRole, MessagePart, ToolResultRecord,
 };
