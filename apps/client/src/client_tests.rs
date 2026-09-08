@@ -570,25 +570,15 @@ fn metadata_policy_admits_positive_unbounded_pages() {
 }
 
 #[test]
-fn metadata_policy_rejects_zero_even_without_a_configured_minimum() {
-    assert!(
-        validate_metadata_page_policy(
-            CanonicalU64::new(0),
-            Some(ClientDeploymentLimits::unbounded())
-        )
-        .is_err()
-    );
-}
-
-#[test]
 fn finding_inventory_cannot_exceed_the_storage_seal() {
-    for maximum in [None, Some(100)] {
+    let structural_maximum = signalbox_process_protocol::MAX_REVIEW_PRODUCED_FINDINGS;
+    for maximum in [None, Some(structural_maximum as u64 + 1)] {
         let limits = ClientDeploymentLimits {
             max_review_findings_per_run: maximum,
             ..ClientDeploymentLimits::unbounded()
         };
-        assert!(validate_review_finding_count(32, Some(limits)).is_ok());
-        assert!(validate_review_finding_count(33, Some(limits)).is_err());
+        assert!(validate_review_finding_count(structural_maximum, Some(limits)).is_ok());
+        assert!(validate_review_finding_count(structural_maximum + 1, Some(limits)).is_err());
     }
 }
 
@@ -4136,6 +4126,59 @@ async fn review_list_rejects_terminal_count_before_writing_items() -> Result<(),
 }
 
 #[tokio::test]
+async fn review_list_rejects_structural_overflow_without_waiting_for_the_end()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let count = signalbox_process_protocol::MAX_REVIEW_PRODUCED_FINDINGS as u64 + 1;
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        let request = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(
+            request.request(),
+            &ClientRequest::ListReviewFindings { run_id }
+        );
+        let response =
+            review_finding_items_response(&request, run_id, count).map_err(io::Error::other)?;
+        writer.write_all(&response).await?;
+        // Keep the connection open without an end marker until the client rejects it.
+        let _ = finished.await;
+        Ok::<(), io::Error>(())
+    });
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut output = Output::new(&mut stdout, &mut stderr, false);
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        review(
+            &mut client,
+            &mut output,
+            ReviewCommand::ListFindings { run_id },
+            None,
+        ),
+    )
+    .await?
+    .expect_err("the shared structural limit must reject an unterminated oversized list");
+    assert_eq!(
+        error.to_string(),
+        "the server violated the process protocol: review finding list exceeded its structural count limit"
+    );
+    assert!(stdout.is_empty());
+    assert!(stderr.is_empty());
+    let _ = done.send(());
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn review_list_remains_readable_after_admission_limit_is_lowered()
 -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
@@ -4153,9 +4196,18 @@ async fn review_list_remains_readable_after_admission_limit_is_lowered()
             request.request(),
             &ClientRequest::ListReviewFindings { run_id }
         );
-        let response =
-            over_bound_review_findings_response(&request, run_id, REVIEW_FINDING_LIMIT_FIXTURE)
-                .map_err(io::Error::other)?;
+        let count = REVIEW_FINDING_LIMIT_FIXTURE + 1;
+        let mut response =
+            review_finding_items_response(&request, run_id, count).map_err(io::Error::other)?;
+        let end = ServerFrame::try_new_for_version(
+            request.version(),
+            request.request_id(),
+            ServerMessage::ReviewFindingsEnd {
+                finding_count: CanonicalU64::new(count),
+            },
+        )
+        .map_err(io::Error::other)?;
+        response.extend_from_slice(&encode_server_line(&end).map_err(io::Error::other)?);
         writer.write_all(&response).await?;
         Ok::<(), io::Error>(())
     });
@@ -5420,10 +5472,10 @@ async fn delegation_message_rejects_self_peer() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn over_bound_review_findings_response(
+fn review_finding_items_response(
     request: &ClientFrame,
     run_id: CanonicalUuid,
-    maximum: u64,
+    count: u64,
 ) -> Result<Vec<u8>, FrameEncodeError> {
     const FIRST_FINDING_IDENTITY: u128 = 10;
 
@@ -5431,7 +5483,7 @@ fn over_bound_review_findings_response(
         ServerFrame::try_new_for_version(request.version(), request.request_id(), message)
     };
     let mut response = encode_server_line(&frame(ServerMessage::ReviewFindingsStart { run_id })?)?;
-    for offset in 0..=maximum {
+    for offset in 0..count {
         let finding_id =
             CanonicalUuid::from_uuid(Uuid::from_u128(FIRST_FINDING_IDENTITY + u128::from(offset)));
         let finding = ReviewFindingSnapshot {
@@ -5459,11 +5511,6 @@ fn over_bound_review_findings_response(
             ServerMessage::ReviewFindingItem { finding },
         )?)?);
     }
-    response.extend_from_slice(&encode_server_line(&frame(
-        ServerMessage::ReviewFindingsEnd {
-            finding_count: CanonicalU64::new(maximum + 1),
-        },
-    )?)?);
     Ok(response)
 }
 

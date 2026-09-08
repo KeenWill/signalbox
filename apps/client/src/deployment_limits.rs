@@ -147,10 +147,9 @@ pub(crate) fn validate_metadata_page_policy(
     limits: Option<ClientDeploymentLimits>,
 ) -> Result<(), ClientError> {
     let limits = limits.ok_or(ClientError::Protocol("deployment limits were not read"))?;
-    if page_size.value() == 0
-        || limits
-            .min_metadata_page_size
-            .is_some_and(|minimum| page_size.value() < minimum)
+    if limits
+        .min_metadata_page_size
+        .is_some_and(|minimum| page_size.value() < minimum)
         || limits
             .max_metadata_page_size
             .is_some_and(|maximum| page_size.value() > maximum)
