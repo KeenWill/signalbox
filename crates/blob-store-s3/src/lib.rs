@@ -46,7 +46,7 @@ use tokio::{
 };
 use tokio_util::io::StreamReader;
 use url::Url;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -78,6 +78,7 @@ pub struct S3BlobStore {
     bucket: Bucket,
     credentials_file: PathBuf,
     client: Client,
+    upload_client: Client,
     publication_locks: Box<[AsyncMutex<()>]>,
     namespace_marker: Option<NamespaceMarker>,
 }
@@ -153,24 +154,31 @@ impl S3BlobStore {
         let bucket = Bucket::new(endpoint, UrlStyle::Path, bucket.into(), region.into())
             .map_err(|_| S3BlobStoreConstructionError::Endpoint)?;
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = Client::builder()
-            .tls_backend_rustls()
-            .tls_version_min(reqwest::tls::Version::TLS_1_2)
-            .tls_danger_accept_invalid_certs(false)
-            .tls_danger_accept_invalid_hostnames(false)
-            .no_proxy()
-            .redirect(Policy::none())
-            .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0)
-            .connect_timeout(CONNECT_TIMEOUT)
+        let client_builder = || {
+            Client::builder()
+                .tls_backend_rustls()
+                .tls_version_min(reqwest::tls::Version::TLS_1_2)
+                .tls_danger_accept_invalid_certs(false)
+                .tls_danger_accept_invalid_hostnames(false)
+                .no_proxy()
+                .redirect(Policy::none())
+                .retry(reqwest::retry::never())
+                .pool_max_idle_per_host(0)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(OPERATION_DEADLINE)
+        };
+        let client = client_builder()
             .read_timeout(IDLE_TIMEOUT)
-            .timeout(OPERATION_DEADLINE)
+            .build()
+            .map_err(|_| S3BlobStoreConstructionError::Transport)?;
+        let upload_client = client_builder()
             .build()
             .map_err(|_| S3BlobStoreConstructionError::Transport)?;
         Ok(Self {
             bucket,
             credentials_file,
             client,
+            upload_client,
             publication_locks: (0..PUBLICATION_LOCK_STRIPES)
                 .map(|_| AsyncMutex::new(()))
                 .collect::<Vec<_>>()
@@ -461,6 +469,8 @@ impl S3BlobStore {
             pending: None,
         }));
         let mut producer = Some(tokio::spawn(produce_source(source, expected, sender)));
+        let part_count = expected.byte_length().div_ceil(part_bytes) as usize;
+        let mut completion_budget = MultipartCompletionBudget::new(&self.bucket, part_count);
         let mut etags = Vec::new();
         let mut offset = 0_u64;
         let mut part_number = 1_u16;
@@ -473,7 +483,7 @@ impl S3BlobStore {
                 self.bucket
                     .upload_part(Some(credentials), key.as_str(), part_number, upload_id);
             let request = self
-                .client
+                .upload_client
                 .put(action.sign(SIGNED_URL_LIFETIME))
                 .header(reqwest::header::CONTENT_LENGTH, length)
                 .body(reqwest::Body::wrap(body));
@@ -495,6 +505,9 @@ impl S3BlobStore {
                 .and_then(|value| value.to_str().ok())
                 .filter(|value| !value.is_empty() && value.len() <= MAX_ETAG_BYTES)
                 .ok_or_else(|| BlobStoreError::unavailable("read S3 multipart ETag"))?;
+            if !completion_budget.admit(&self.bucket, etag) {
+                return Err(BlobStoreError::unavailable("bound S3 multipart completion"));
+            }
             etags.push(String::from(etag));
             offset += length;
             part_number = part_number
@@ -529,7 +542,7 @@ impl S3BlobStore {
         let completion_length = completion_body.len() as u64;
         let (progress, observed_progress) = watch::channel(0_u64);
         let request = self
-            .client
+            .upload_client
             .post(signed)
             .header(reqwest::header::CONTENT_TYPE, "application/xml")
             .header(reqwest::header::CONTENT_LENGTH, completion_length)
@@ -971,6 +984,39 @@ async fn require_success(
     }
 }
 
+struct MultipartCompletionBudget {
+    single_empty_bytes: usize,
+    total_bytes: usize,
+}
+
+impl MultipartCompletionBudget {
+    fn new(bucket: &Bucket, part_count: usize) -> Self {
+        Self {
+            single_empty_bytes: completion_document_bytes(bucket, std::iter::once("")),
+            total_bytes: completion_document_bytes(bucket, std::iter::repeat_n("", part_count)),
+        }
+    }
+
+    fn admit(&mut self, bucket: &Bucket, etag: &str) -> bool {
+        // The baseline already carries every part number and XML element.
+        // Replacing one empty tag adds exactly the serializer's escaped text.
+        let extra = completion_document_bytes(bucket, std::iter::once(etag))
+            .saturating_sub(self.single_empty_bytes);
+        self.total_bytes = self.total_bytes.saturating_add(extra);
+        self.total_bytes <= MAX_COMPLETE_BODY_BYTES
+    }
+}
+
+fn completion_document_bytes<'a>(
+    bucket: &'a Bucket,
+    etags: impl Iterator<Item = &'a str>,
+) -> usize {
+    bucket
+        .complete_multipart_upload(None, "", "", etags)
+        .body()
+        .len()
+}
+
 async fn send_with_upload_idle_timeout(
     request: reqwest::RequestBuilder,
     mut progress: watch::Receiver<u64>,
@@ -980,7 +1026,10 @@ async fn send_with_upload_idle_timeout(
     tokio::pin!(send);
     loop {
         if *progress.borrow() >= length {
-            return send.await.map_err(|_| ());
+            return tokio::time::timeout(IDLE_TIMEOUT, send)
+                .await
+                .map_err(|_| ())?
+                .map_err(|_| ());
         }
         tokio::select! {
             response = &mut send => return response.map_err(|_| ()),
@@ -1042,7 +1091,10 @@ async fn bounded_response(
 ) -> Result<Vec<u8>, BlobStoreError> {
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = tokio::time::timeout(IDLE_TIMEOUT, stream.next())
+        .await
+        .map_err(|_| BlobStoreError::unavailable(operation))?
+    {
         let chunk = chunk.map_err(|_| BlobStoreError::io(operation, SanitizedS3Failure))?;
         let next = bytes
             .len()
@@ -1481,20 +1533,18 @@ fn read_credentials(path: &Path) -> Result<CredentialDocument, CredentialFileErr
     {
         return Err(CredentialFileError);
     }
-    let mut bytes =
-        Vec::with_capacity(usize::try_from(metadata.len()).map_err(|_| CredentialFileError)?);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(metadata.len()).map_err(|_| CredentialFileError)?,
+    ));
     file.by_ref()
         .take(MAX_CREDENTIAL_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| CredentialFileError)?;
     if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
-        bytes.zeroize();
         return Err(CredentialFileError);
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| CredentialFileError)?;
-    let document = toml::from_str::<CredentialDocument>(text).map_err(|_| CredentialFileError);
-    bytes.zeroize();
-    let document = document?;
+    let document = toml::from_str::<CredentialDocument>(text).map_err(|_| CredentialFileError)?;
     document.validate()?;
     Ok(document)
 }
@@ -1860,14 +1910,82 @@ mod tests {
     }
 
     #[test]
-    fn multipart_part_size_bounds_part_count_without_buffering_a_part() {
+    fn a_tiny_multipart_object_uses_the_minimum_part_size() {
         assert_eq!(multipart_part_bytes(1), Some(MIN_MULTIPART_PART_BYTES));
+    }
+
+    #[test]
+    fn the_part_count_ceiling_still_admits_the_minimum_part_size() {
         assert_eq!(
             multipart_part_bytes(MIN_MULTIPART_PART_BYTES * MAX_MULTIPART_PARTS),
             Some(MIN_MULTIPART_PART_BYTES)
         );
+    }
+
+    #[test]
+    fn the_maximum_s3_object_has_a_valid_part_size() {
         assert!(multipart_part_bytes(MAX_S3_OBJECT_BYTES).is_some());
+    }
+
+    #[test]
+    fn an_object_above_the_s3_size_ceiling_is_rejected() {
         assert_eq!(multipart_part_bytes(MAX_S3_OBJECT_BYTES + 1), None);
+    }
+
+    #[test]
+    fn a_long_opaque_etag_fits_a_small_completion() -> Result<(), Box<dyn Error>> {
+        let store = S3BlobStore::try_new(
+            Url::parse(ENDPOINT)?,
+            "fixture-region",
+            BUCKET,
+            PathBuf::from("/fixture/credentials"),
+        )?;
+        let etag = "\"".repeat(super::MAX_ETAG_BYTES);
+        let mut budget = super::MultipartCompletionBudget::new(&store.bucket, 1);
+        assert!(budget.admit(&store.bucket, &etag));
+        assert_eq!(
+            budget.total_bytes,
+            super::completion_document_bytes(&store.bucket, std::iter::once(etag.as_str()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_completion_is_refused_before_all_parts_transfer() -> Result<(), Box<dyn Error>> {
+        let store = S3BlobStore::try_new(
+            Url::parse(ENDPOINT)?,
+            "fixture-region",
+            BUCKET,
+            PathBuf::from("/fixture/credentials"),
+        )?;
+        let etag = "\"".repeat(super::MAX_ETAG_BYTES);
+        let part_count = MAX_MULTIPART_PARTS as usize;
+        let mut budget = super::MultipartCompletionBudget::new(&store.bucket, part_count);
+        let admitted = (0..part_count)
+            .take_while(|_| budget.admit(&store.bucket, &etag))
+            .count();
+        assert!(admitted > 0 && admitted < part_count);
+        let accepted_document = std::iter::repeat_n(etag.as_str(), admitted)
+            .chain(std::iter::repeat_n("", part_count - admitted));
+        assert!(
+            super::completion_document_bytes(&store.bucket, accepted_document)
+                <= super::MAX_COMPLETE_BODY_BYTES
+        );
+        let rejected_document = std::iter::repeat_n(etag.as_str(), admitted + 1)
+            .chain(std::iter::repeat_n("", part_count - admitted - 1));
+        assert!(
+            super::completion_document_bytes(&store.bucket, rejected_document)
+                > super::MAX_COMPLETE_BODY_BYTES
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_utf8_credentials_are_rejected() -> Result<(), Box<dyn Error>> {
+        let (_directory, path) = credential_fixture(&credential_body())?;
+        fs::write(&path, b"\xffsynthetic-credential")?;
+        assert!(matches!(read_credentials(&path), Err(CredentialFileError)));
+        Ok(())
     }
 
     #[tokio::test]
@@ -2038,4 +2156,5 @@ mod tests {
         assert!(!debug.contains(SECRET_KEY));
         Ok(())
     }
+    mod upload_deadlines;
 }

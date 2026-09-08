@@ -157,6 +157,11 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
         | ServerMessage::CredentialExclusionEnd { .. }
+        | ServerMessage::RunnerStatusStart {}
+        | ServerMessage::RunnerStatus { .. }
+        | ServerMessage::RunnerOperationFailure { .. }
+        | ServerMessage::RunnerWorkspaceLeak { .. }
+        | ServerMessage::RunnerStatusEnd { .. }
         | ServerMessage::CredentialExclusionCleared { .. } => BlobUploadResponse::Unexpected,
     }
 }
