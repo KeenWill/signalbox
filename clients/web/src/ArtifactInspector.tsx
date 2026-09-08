@@ -220,8 +220,20 @@ export function ArtifactInspector({
               type="button"
               onClick={(event) => {
                 const opener = event.currentTarget
-                const restoreFocus = document.activeElement === opener
+                let restoreFocus = document.activeElement === opener
+                const recordBlur = () => {
+                  queueMicrotask(() => {
+                    if (opener.isConnected) restoreFocus = false
+                  })
+                }
+                const recordPointerMove = () => {
+                  restoreFocus = false
+                }
+                opener.addEventListener('blur', recordBlur)
+                document.addEventListener('pointerdown', recordPointerMove)
                 void descriptor.refetch().then((result) => {
+                  opener.removeEventListener('blur', recordBlur)
+                  document.removeEventListener('pointerdown', recordPointerMove)
                   if (result.isSuccess && restoreFocus) {
                     requestAnimationFrame(() => {
                       if (

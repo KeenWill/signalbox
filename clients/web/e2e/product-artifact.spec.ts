@@ -320,6 +320,55 @@ test('keeps focus moved during a pending bootstrap retry', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('preserves an intentional blur during a pending descriptor retry', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useRecoveringArtifactScenario(page)
+  await page.goto('/sessions?workspace=true')
+  await submitArtifactWithoutMouse(page)
+  await expect(page.getByRole('alert')).toContainText(incompatibleDescriptorMessage)
+
+  const response = Promise.withResolvers<void>()
+  await page.route('**/api/blobs/**/descriptor?*', async (route) => {
+    await response.promise
+    await route.fulfill({ json: imageArtifact })
+  })
+  const request = page.waitForRequest('**/api/blobs/**/descriptor?*')
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
+  await request
+  await page.getByText('Operator workstation', { exact: true }).click()
+  await expect(page.locator('body')).toBeFocused()
+  response.resolve()
+  await expect(
+    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
+  await expect(page.locator('body')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('preserves an intentional blur during a pending bootstrap retry', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: incompatibleDescriptorFixture }),
+  )
+  await page.goto('/sessions?workspace=true')
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+
+  const response = Promise.withResolvers<void>()
+  await page.route('**/api/bootstrap', async (route) => {
+    await response.promise
+    await route.fulfill({ json: webContractBootstrapFixture })
+  })
+  const request = page.waitForRequest('**/api/bootstrap')
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await request
+  await page.getByText('Operator workstation', { exact: true }).click()
+  await expect(page.locator('body')).toBeFocused()
+  response.resolve()
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.locator('body')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('captures desktop and responsive artifact evidence', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
