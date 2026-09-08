@@ -281,6 +281,23 @@ for (const returnMethod of ['Escape', 'Back'] as const) {
   })
 }
 
+test('consumes return focus before a later catalog remount', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
+  await session.click()
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
+  await expect(session).toBeFocused()
+  await page.getByRole('link', { name: /Settings/ }).click()
+  const sessionsLink = page.getByRole('link', { name: /Sessions/ })
+  await sessionsLink.click()
+  await expect(session).toBeVisible()
+  await expect(page.getByRole('main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('shows unavailable timelines after opening a catalog row', async ({ page }, testInfo) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)

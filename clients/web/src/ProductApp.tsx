@@ -637,6 +637,9 @@ export function ProductApp({
   const [catalogLifecycleFilter, setCatalogLifecycleFilter] = useState('all')
   const [catalogPageOrder, setCatalogPageOrder] = useState('activity')
   const catalogReturnSessionId = useRef<string | undefined>(undefined)
+  const consumeCatalogReturnFocus = useCallback(() => {
+    catalogReturnSessionId.current = undefined
+  }, [])
   const updateSessionSearch = useCallback(
     (next: ProductSessionState, mode: 'push' | 'close' | 'replace' = 'push') => {
       if (mode === 'push' && next.workspace && next.session)
@@ -967,6 +970,7 @@ export function ProductApp({
     ) : surface === 'sessions' && bootstrap.isSuccess ? (
       <SessionCatalogSurface
         returnSessionId={catalogReturnSessionId.current}
+        onReturnFocusConsumed={consumeCatalogReturnFocus}
         lifecycleFilter={catalogLifecycleFilter}
         pageOrder={catalogPageOrder}
         onLifecycleFilterChange={setCatalogLifecycleFilter}

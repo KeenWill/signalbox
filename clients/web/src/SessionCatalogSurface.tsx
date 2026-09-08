@@ -35,6 +35,7 @@ const SessionTitle = ({ summary }: { summary: SessionSummary }) => (
 
 export function SessionCatalogSurface({
   returnSessionId,
+  onReturnFocusConsumed,
   lifecycleFilter,
   pageOrder,
   onLifecycleFilterChange,
@@ -44,6 +45,7 @@ export function SessionCatalogSurface({
   onTimelineIds,
 }: {
   returnSessionId?: string
+  onReturnFocusConsumed: () => void
   lifecycleFilter: string
   pageOrder: string
   onLifecycleFilterChange: (value: string) => void
@@ -126,7 +128,8 @@ export function SessionCatalogSurface({
     const target = sessionButtons.current.get(pendingReturnFocus.current)
     pendingReturnFocus.current = undefined
     target?.focus()
-  }, [sessions.data, overlay])
+    onReturnFocusConsumed()
+  }, [sessions.data, overlay, onReturnFocusConsumed])
   useEffect(() => {
     if (!sessions.data || !restorePageFocus.current) return
     restorePageFocus.current = false
