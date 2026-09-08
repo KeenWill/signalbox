@@ -4022,8 +4022,14 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(receipt.termination?.descendantCount.rawValue, UInt64.max)
   }
 
-  func testPresentTerminationMetadataCannotBeNull() throws {
-    XCTAssertThrowsError(try ProcessDriverFixture.inputSubmitted(terminationJSON: "null"))
+  func testNullTerminationMetadataIsRejectedAsAnUnknownReceipt() throws {
+    let frame = try ProcessDriverFixture.inputSubmitted(terminationJSON: "null")
+    guard case .unknown(let kind, let payload, let diagnostic) = frame.message else {
+      return XCTFail("A null termination must not decode as an accepted receipt.")
+    }
+    XCTAssertEqual(kind, "input_submitted")
+    XCTAssertEqual(payload["termination"], .null)
+    XCTAssertNotNil(diagnostic)
   }
 
   func testOrdinarySubmissionRejectsTerminationMetadata() async throws {
@@ -7483,7 +7489,23 @@ private enum ProcessProjectionFixture {
        "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
        "recovery_tool_attempt_id":"\(ProcessDriverFixture.modelCall)",
        "automatic_reconciliation_attempts":"1","operator_action_required":true}
-      """
+      """,
+      modelCallUsage: [
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage_provenance":"reported",
+          "usage":{
+            "input_tokens":null,"output_tokens":null,
+            "cache_creation_input_tokens":null,"cache_read_input_tokens":null
+          },
+          "cost":null
+        }
+        """,
+      ]
     )
   }
 
@@ -7860,7 +7882,8 @@ private enum ProcessProjectionFixture {
 
   private static func snapshotWithActiveTurnState(
     _ state: String,
-    cursor: UInt64 = 1
+    cursor: UInt64 = 1,
+    modelCallUsage: [String] = []
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -7880,7 +7903,10 @@ private enum ProcessProjectionFixture {
           "state":\(state)
         }
         """,
-        emptyModelCallsBoundary,
+      ] + modelCallUsage + [
+        """
+        {"type":"transcript_model_calls_end","model_call_count":"\(modelCallUsage.count)"}
+        """,
         """
         {
           "type":"transcript_snapshot_end",
