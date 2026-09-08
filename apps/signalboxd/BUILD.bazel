@@ -136,6 +136,7 @@ rust_unit_test(
         "//:config/session-templates.example.toml",
         "//:config/signalboxd.example.toml",
         "//crates/convergence:examples/repository.toml",
+        "//crates/convergence:fixtures",
         "//crates/model-runtime-claude-cli:signalbox-claude-mcp-bridge",
     ],
     # Unix socket paths must fit sockaddr_un even under a long Bazel output root.

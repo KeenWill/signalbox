@@ -687,7 +687,9 @@ fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
         ),
         None => router.fallback(static_assets_not_configured),
     };
-    router.layer(middleware::from_fn(validate_loopback_host))
+    router
+        .layer(middleware::from_fn(validate_loopback_host))
+        .layer(middleware::from_fn(origin::validate_blob_fetch_site))
 }
 
 #[derive(Clone, Debug)]

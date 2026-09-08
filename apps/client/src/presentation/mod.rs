@@ -120,6 +120,26 @@ pub(crate) struct Output<'a> {
 }
 
 impl<'a> Output<'a> {
+    pub(crate) fn runner_status(
+        &mut self,
+        message: &signalbox_process_protocol::ServerMessage,
+    ) -> io::Result<()> {
+        if let signalbox_process_protocol::ServerMessage::RunnerStatusEnd { next_after, .. } =
+            message
+        {
+            if let Some(cursor) = next_after {
+                writeln!(
+                    self.stdout,
+                    "next_after {}",
+                    serde_json::to_string(cursor).map_err(io::Error::other)?
+                )?;
+            }
+            return Ok(());
+        }
+        serde_json::to_writer(&mut self.stdout, message).map_err(io::Error::other)?;
+        writeln!(self.stdout)
+    }
+
     pub(crate) fn runner_recovery_receipt(
         &mut self,
         receipt: &signalbox_process_protocol::ServerMessage,

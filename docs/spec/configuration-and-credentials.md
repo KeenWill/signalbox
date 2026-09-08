@@ -93,7 +93,10 @@ names `claude_cli` requires a `[claude_cli]` table carrying that adapter's
 `[numeric_bounds]` table holds the central numeric-bound inventory and the
 loader supplies no default for any member, while other tables carry their own
 configured limits. Numeric-bound duration policies use Jiff's friendly
-unsigned-duration syntax. `repository_watch_webhook_retention` must be positive
+unsigned-duration syntax. `max_review_findings_per_run` must be finite and no
+greater than its domain bound. A finite `max_blob_replica_count` must admit the
+durable catalog's full store bound. Disabling reconciliation requires an
+unbounded nudge buffer. `repository_watch_webhook_retention` must be positive
 and finite and governs authenticated webhook `expires_at` and
 merged-pull-request baseline retention as described in
 [repository watch](repo-watch.md). `codex_cli_version_probe_bound` bounds a
@@ -500,6 +503,11 @@ loopback `Host` authority; another authority receives a 403
 browser DTO. Application errors are a separate error kind and are never inferred
 from HTTP status alone.
 
+Blob descriptor, content, and download routes reject
+`Sec-Fetch-Site: cross-site` with a 403 `cross_site_blob_request_rejected`
+before storage access. This rejection precedes the loopback authority check.
+Other or absent fetch-site values pass this gate.
+
 Browser mutation routes use POST, require `application/json`, and when `Origin`
 is supplied require its host and effective port to equal the request `Host`
 authority. A `Host` without an explicit port has effective port 80 because the
@@ -716,10 +724,21 @@ before it crosses into evidence. An `ambient` or `codex_home` profile gives the
 daemon no value, so a CLI child's output receives only the credential-shape
 redaction owned by [runtime substrate](runtime-substrate.md).
 
+The GitHub and code-host adapters share `github-primary`, which needs API access
+to read pull requests, publish reviews and comments, reply to and resolve review
+threads, read repository files and directories, read checks and CI job logs, and
+rerun failed jobs. Neither adapter pushes Git changes. The repository-watch
+credential needs read access for polling and checkout provisioning; it does not
+need push or workflow-write authority. Classic `repo` is broader than read-only
+access, so a fine-grained read credential limits that role to the watched
+repositories.
+
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
 true; false disables module polling, webhook listening, and command dispatch,
 including convergence-sweep target enrollment and session commissioning.
+Repository-watch duration fields accept integer seconds or Jiff's friendly
+unsigned-duration strings; rule cooldowns retain whole-second precision.
 
 The optional `[convergence]` table deserializes the
 [shared convergence policy](../../crates/convergence/README.md), including its

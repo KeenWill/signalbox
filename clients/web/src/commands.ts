@@ -10,6 +10,7 @@ export interface CommandContext {
   artifactPreviewIds: readonly string[]
   artifactOriginalIds: readonly string[]
   artifactSelectionTarget?: string
+  removeAttachment?: () => void
   paneSize?: number
   submitSessionInput?: () => void
   sessionId?: string
@@ -63,7 +64,9 @@ const hasSelectedArtifactPreview = (context: CommandContext) => {
 }
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const transcriptDetail = (context: CommandContext) =>
-  context.timelineIds.length > 0 || context.configuresTranscriptDetail === true
+  context.timelineIds.length > 0 ||
+  context.timelineWindowAvailable === true ||
+  context.configuresTranscriptDetail === true
 const paneSizeProvided = (context: CommandContext) => context.paneSize !== undefined
 const setLayout = (layout: LayoutMode) => (context: CommandContext) =>
   context.dispatch(actions.layoutSet(layout))
@@ -73,6 +76,15 @@ const setTheme = (theme: ThemeMode) => (context: CommandContext) =>
   context.dispatch(actions.themeSet(theme))
 const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
+  {
+    id: 'artifact.attachment.remove',
+    title: 'Remove composer attachment',
+    description: 'Remove the attachment targeted by the invoking control.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => context.removeAttachment !== undefined,
+    run: (context) => context.removeAttachment?.(),
+  },
   {
     id: 'artifact.select',
     title: 'Select artifact',

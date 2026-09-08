@@ -562,6 +562,13 @@ struct RunnerArguments {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum RunnerCommand {
+    /// Read one page of runner placements and retained diagnostics.
+    Status {
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100))]
+        page_size: u32,
+        #[arg(long, value_parser = parse_runner_status_cursor)]
+        after: Option<signalbox_process_protocol::RunnerStatusCursor>,
+    },
     /// Replace the lost runner of one session.
     Replace {
         /// Session whose runner is lost.
@@ -592,6 +599,12 @@ pub(crate) enum RunnerCommand {
         #[arg(long, value_name = "COMMAND_ID", value_parser = command_id)]
         command_id: Option<CommandId>,
     },
+}
+
+fn parse_runner_status_cursor(
+    text: &str,
+) -> Result<signalbox_process_protocol::RunnerStatusCursor, String> {
+    serde_json::from_str(text).map_err(|error| error.to_string())
 }
 
 #[derive(Debug, ClapArgs)]

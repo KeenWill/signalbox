@@ -289,7 +289,10 @@ A committed, client-visible transition becomes an event only through the outbox
 append on the same connection, inside the same transaction. No separate step
 publishes after the commit. Delivery is ordered and at-least-once, and consumers
 deduplicate by cursor. A runner transition event is validated against the
-placement revision it names, never against the session's current placement.
+placement revision it names, never against the session's current placement. Each
+nonterminal session state change appends a session-state-changed event from the
+lifecycle row in the same transaction; terminal transitions append the separate
+session-terminal event.
 
 Schemas whose names begin with `mod_` contain only derived or module-local
 state, which may be pruned. The transactional outbox is the sole immutable-fact
@@ -603,6 +606,19 @@ evidence. Rejected staging workspaces retain exact manifest and connection-epoch
 cleanup authority, and a release receipt records completion only under that
 authority.
 
+Runner status reads current enrollment authority, enrollment-request receipts,
+current session placements, and retained replacement-provisioning failures in
+one read-only repeatable-read transaction, closed before protocol output. The
+daemon spools the complete page to an anonymous temporary file before
+transmission. Failure rows join their immutable provisioning authorization and
+order by its UUID bytes; an `operation_failure { authorization_id }` cursor
+continues exclusively, with one lookahead row establishing whether another page
+exists. The shared page budget traverses enrollments by runner UUID, placements
+by session UUID, then failures; each query is limited to the remaining budget
+plus one lookahead row. Enrollment and placement cursors continue exclusively. A
+`workspace_leak { runner_id, locator, entry_digest }` cursor is beyond failures;
+there are no retained leak rows.
+
 OAuth provisioning locks its profile and every retained pool co-member in
 reference order, rereads membership, and retries acquisition if membership grew.
 Pool-policy insertion locks every member in the same order. Authorization
@@ -631,8 +647,6 @@ retaining registration and history.
 - Instruction admitted-set storage and its locks:
   [persistence-protocol design](../design/persistence-protocol.md).
 - Credential-pool state, capacity reservations, and availability-wait storage:
-  [persistence-protocol design](../design/persistence-protocol.md).
-- A producer for the session-state-changed outbox event:
   [persistence-protocol design](../design/persistence-protocol.md).
 - OAuth refresh member-availability wakeups:
   [persistence-protocol design](../design/persistence-protocol.md).

@@ -1,8 +1,9 @@
 use super::load::configured_defaults_version;
 use super::{APPLIED, REJECTED, descendant_scope_to_str};
 use crate::mapping::{
-    accepted_input_id_to_uuid, defaults_version_to_numeric, durable_command_id_to_uuid,
-    input_position_to_numeric, model_settings_overlay_to_json, turn_id_to_uuid,
+    AttachmentRejectionStorageKind, accepted_input_id_to_uuid, attachment_rejection_kind_to_str,
+    defaults_version_to_numeric, durable_command_id_to_uuid, input_position_to_numeric,
+    model_settings_overlay_to_json, turn_id_to_uuid,
 };
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -288,7 +289,9 @@ pub(super) fn encode_result(
             digest,
         }) => EncodedResult {
             kind: REJECTED,
-            rejection_kind: Some("attachment_blob_not_found"),
+            rejection_kind: Some(attachment_rejection_kind_to_str(
+                AttachmentRejectionStorageKind::BlobNotFound,
+            )),
             session: command_session,
             accepted_input: None,
             turn: None,
@@ -307,7 +310,9 @@ pub(super) fn encode_result(
             maximum_bytes,
         }) => EncodedResult {
             kind: REJECTED,
-            rejection_kind: Some("attachment_byte_budget_exceeded"),
+            rejection_kind: Some(attachment_rejection_kind_to_str(
+                AttachmentRejectionStorageKind::ByteBudgetExceeded,
+            )),
             session: command_session,
             accepted_input: None,
             turn: None,

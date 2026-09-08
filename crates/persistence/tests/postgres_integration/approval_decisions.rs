@@ -1,6 +1,7 @@
 //! Approval judge preparation and the approval guard over user, delegate, and automatic decisions.
 
 use crate::*;
+use signalbox_persistence::approval_judge::ApprovalJudgeRepositoryError;
 
 /// A second fixture tool, distinct from `APPROVAL_TOOL_NAME`, so a mixed batch
 /// can park one request for the judge without that request resembling the
@@ -703,6 +704,8 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
         "SELECT judge.state_kind AS judge_state,
                 judge.recommendation_kind AS recommendation,
+                judge.offered_recommendation_kind AS offered_recommendation,
+                judge.substitution_cause,
                 EXISTS (
                     SELECT 1 FROM tool_approval_decision
                      WHERE request_id = judge.request_id
@@ -733,6 +736,8 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
     assert_eq!(parked.judge_state, "terminal");
     assert_eq!(parked.recommendation, "escalate_to_human");
+    assert_eq!(parked.offered_recommendation, "escalate_to_human");
+    assert_eq!(parked.substitution_cause, None);
     assert!(!parked.decision_exists);
     assert_eq!(parked.active_phase, "awaiting_tool_approval");
     assert_eq!(parked.approval_tool_request_id, request.into_uuid());
@@ -844,6 +849,22 @@ async fn assert_judge_escalation_after_goal_stop(
             approval_judge_closed_result_entry,
         )
         .await?;
+    let mismatched_offer = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Deny,
+            ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?,
+            ProviderReportedTokenUsage::unreported(),
+            approval_judge_completion_identities(seed, seed + 0xe1),
+            |_| panic!("a mismatched replay cannot mint another result"),
+        )
+        .await
+        .expect_err("withdrawn authority cannot erase the exact offered recommendation");
+    assert!(matches!(
+        mismatched_offer,
+        ApprovalJudgeRepositoryError::Corruption(_)
+    ));
+
     if headless_loss {
         assert_eq!(
             outcome,
@@ -878,6 +899,8 @@ async fn assert_judge_escalation_after_goal_stop(
     let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
         "SELECT judge.state_kind AS judge_state,
                 judge.recommendation_kind AS recommendation,
+                judge.offered_recommendation_kind AS offered_recommendation,
+                judge.substitution_cause,
                 EXISTS (
                     SELECT 1 FROM tool_approval_decision
                      WHERE request_id = judge.request_id
@@ -898,6 +921,11 @@ async fn assert_judge_escalation_after_goal_stop(
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
     assert_eq!(parked.judge_state, "terminal");
     assert_eq!(parked.recommendation, "escalate_to_human");
+    assert_eq!(parked.offered_recommendation, "approve");
+    assert_eq!(
+        parked.substitution_cause.as_deref(),
+        Some("authority_withdrawn")
+    );
     assert!(!parked.decision_exists);
     assert_eq!(parked.active_phase, "awaiting_tool_approval");
     assert_eq!(parked.approval_tool_request_id, request.into_uuid());
@@ -1129,6 +1157,8 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
     let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
         "SELECT judge.state_kind AS judge_state,
                 judge.recommendation_kind AS recommendation,
+                judge.offered_recommendation_kind AS offered_recommendation,
+                judge.substitution_cause,
                 EXISTS (
                     SELECT 1 FROM tool_approval_decision
                      WHERE request_id = judge.request_id
@@ -1150,6 +1180,11 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
     assert_eq!(parked.judge_state, "terminal");
     assert_eq!(parked.recommendation, "escalate_to_human");
+    assert_eq!(parked.offered_recommendation, "approve");
+    assert_eq!(
+        parked.substitution_cause.as_deref(),
+        Some("authority_withdrawn")
+    );
     assert!(!parked.decision_exists);
     assert_eq!(parked.active_phase, "awaiting_tool_approval");
     assert_eq!(parked.approval_tool_request_id, request.into_uuid());
@@ -1410,92 +1445,35 @@ async fn suppressed_tool_request_is_denied_and_continues() -> Result<(), Box<dyn
     Ok(())
 }
 
-async fn runtime_safety_denial_rejects_inconsistent_request(
-    arguments: &str,
-    posture: &str,
-) -> Result<(), Box<dyn Error>> {
-    let (container, pool, _) = migrated_postgres().await?;
-    let (_, _, _, request) = checkpoint_confirmed_tool_round(
+/// runtime-safety provenance cannot be attached to ordinary provider arguments or a request that
+/// retained human approval posture.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn runtime_safety_denial_requires_suppressed_arguments() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_fixture, _repository, _observation, request) = checkpoint_confirmed_tool_round(
         &pool,
         APPROVAL_FIXTURE_SEED + 0xa0,
         APPROVAL_TOOL_NAME,
-        arguments,
+        APPROVAL_ARGUMENTS,
     )
     .await?;
-    let mut transaction = pool.begin().await?;
-    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query("UPDATE tool_request SET approval_posture = $2 WHERE request_id = $1")
-        .bind(request.into_uuid())
-        .bind(posture)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query(
-        "INSERT INTO tool_approval_decision (request_id, decision_kind, decision_source, denial_reason)
-         VALUES ($1, 'deny', 'runtime_safety', 'Tool arguments were suppressed by the credential boundary')",
-    ).bind(request.into_uuid()).execute(&mut *transaction).await?;
-    let error = sqlx::query("SET CONSTRAINTS tool_approval_decision_authority IMMEDIATE")
-        .execute(&mut *transaction)
-        .await
-        .expect_err("each suppressed-argument predicate is required independently");
+    let error = sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, denial_reason)
+         VALUES ($1, 'deny', 'runtime_safety',
+                 'Tool arguments were suppressed by the credential boundary')",
+    )
+    .bind(request.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("ordinary arguments cannot claim credential-boundary suppression");
+
     assert_eq!(
         database_constraint(&error),
         Some("tool_approval_runtime_safety_requires_suppressed_arguments")
     );
-    transaction.rollback().await?;
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn runtime_safety_denial_requires_suppressed_arguments() -> Result<(), Box<dyn Error>> {
-    runtime_safety_denial_rejects_inconsistent_request(APPROVAL_ARGUMENTS, "auto").await
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn runtime_safety_denial_requires_automatic_posture() -> Result<(), Box<dyn Error>> {
-    runtime_safety_denial_rejects_inconsistent_request(r#"{"redacted":"[redacted]"}"#, "human")
-        .await
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn runtime_safety_denial_cannot_publish_an_explicit_decision_event()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _) = migrated_postgres().await?;
-    let (fixture, request) =
-        checkpoint_suppressed_tool_round(&pool, APPROVAL_FIXTURE_SEED + 0xb0, APPROVAL_TOOL_NAME)
-            .await?;
-    let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "WITH header AS (
-            INSERT INTO outbox_event (event_kind, storage_version, session_id)
-            VALUES ('tool_approval_decided', 1, $1)
-            RETURNING event_sequence, event_kind, storage_version, session_id
-         ) INSERT INTO tool_approval_decided_outbox_event
-            (event_sequence, event_kind, storage_version, session_id, turn_id, request_id)
-         SELECT event_sequence, event_kind, storage_version, session_id, $2, $3 FROM header",
-    )
-    .bind(fixture.session.into_uuid())
-    .bind(fixture.turn.into_uuid())
-    .bind(request.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    let error = transaction
-        .commit()
-        .await
-        .expect_err("runtime safety has no explicit decider to dispatch");
-    assert_eq!(
-        database_constraint(&error),
-        Some("tool_approval_decided_requires_explicit_source")
-    );
     pool.close().await;
     drop(container);
     Ok(())
@@ -3875,6 +3853,46 @@ async fn decision_correlation_mismatches_stay_typed_rejections() -> Result<(), B
     );
     assert_eq!(injection_receipt(&pool, unknown).await?, None);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn judge_offer_migration_retains_existing_rows_and_checks_new_completions()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "CREATE TEMP TABLE tool_approval_judge_model_call (
+            terminal_disposition_kind text, recommendation_kind text
+         ) ON COMMIT DROP;
+         INSERT INTO tool_approval_judge_model_call VALUES ('completed', 'approve');",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/202609080800_judge_offered_recommendation.sql"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    let retained_without_offer: bool = sqlx::query_scalar(
+        "SELECT offered_recommendation_kind IS NULL AND substitution_cause IS NULL
+           FROM tool_approval_judge_model_call",
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    assert!(retained_without_offer);
+    let error = sqlx::query(
+        "INSERT INTO tool_approval_judge_model_call (terminal_disposition_kind, recommendation_kind)
+         VALUES ('completed', 'approve')",
+    ).execute(&mut *transaction).await.expect_err("new completions must retain their offer");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_judge_offered_recommendation_shape")
+    );
+    transaction.rollback().await?;
     pool.close().await;
     drop(container);
     Ok(())

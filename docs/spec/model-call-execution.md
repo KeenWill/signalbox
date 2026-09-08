@@ -81,6 +81,10 @@ Only a successful estimate whose input plus full output reservation is at most
 transaction; otherwise the turn compacts. An estimate that returns no validated
 count falls through to ordinary uncounted activation.
 
+For a failed count with matching correlation, the bridge emits one warning with
+the safe failure evidence and session, turn, and model-call correlation;
+mismatched correlation remains an error.
+
 Anthropic ordinary calls enable provider-default server-side compaction only
 when the exact effective provider target's configured capabilities explicitly
 set `provider_compaction = true`; a missing or false capability disables it.
@@ -204,7 +208,8 @@ is left to startup recovery, because the identities are pinned by then and an
 identical retry would fail the same way. The output ceiling and the context
 window are operator-declared per catalog selection and never inferred from
 provider or model names. The daemon reserves the full configured output ceiling
-before each continuation even for an adapter that can only render the ceiling as
+before each continuation whose producing call reported input usage and used the
+same effective target, even for an adapter that can only render the ceiling as
 advisory context, so such a deployment keeps its intended reply budget rather
 than the model's larger capability ceiling.
 
