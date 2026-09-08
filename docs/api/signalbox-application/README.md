@@ -6,6 +6,7 @@
 | --- | ---: | ---: | ---: | --- |
 | workspace | 1 | 1 | 0 | [workspace](workspace.md) |
 | scheduler_slot | 0 | 0 | 1 | [scheduler_slot](scheduler_slot.md) |
+| program_session | 0 | 0 | 0 | [program_session](program_session.md) |
 | approval_judge | 7 | 1 | 0 | [approval_judge](approval_judge.md) |
 | attention | 16 | 1 | 6 | [attention](attention.md) |
 | blob_derivation | 6 | 3 | 0 | [blob_derivation](blob_derivation.md) |
@@ -21,7 +22,7 @@
 | repo_watch | 29 | 1 | 3 | [repo_watch](repo_watch.md) |
 | review_orchestration | 35 | 2 | 0 | [review_orchestration](review_orchestration.md) |
 | review_workflow | 7 | 2 | 0 | [review_workflow](review_workflow.md) |
-| scheduler | 13 | 7 | 0 | [scheduler](scheduler.md) |
+| scheduler | 13 | 7 | 1 | [scheduler](scheduler.md) |
 | search | 19 | 2 | 5 | [search](search.md) |
 | session_delegation | 0 | 1 | 0 | [session_delegation](session_delegation.md) |
 | session_live | 8 | 1 | 1 | [session_live](session_live.md) |

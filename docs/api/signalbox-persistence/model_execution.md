@@ -52,6 +52,7 @@ impl model_execution::ProspectiveModelCall {
 
 ```rust
 pub enum ProspectiveModelInput<'a> {
+    Rendered(&'a map::BTreeMap<signalbox_domain::SemanticTranscriptEntryRef, u64>),
     Committed(signalbox_domain::ContextFrontierId),
     Preview {
         projected_members: &'a [signalbox_domain::SemanticTranscriptEntryRef],
@@ -264,6 +265,7 @@ impl model_execution::PostgresModelCallRepository {
         targets: signalbox_domain::ModelTargetCatalog,
         credential_reference: signalbox_application::ModelCallCredentialReference,
     ) -> Self;
+    pub fn with_runner_recovery(self, runner: runner_protocol::RunnerProtocolStore) -> Self;
     pub fn with_session_credentials(
         self,
         credential_families: ModelCredentialFamilyCatalog,

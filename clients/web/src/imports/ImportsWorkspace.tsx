@@ -90,6 +90,14 @@ export function ImportsWorkspace({
   const app = useAppSelector(selectApp)
   const queryScope = scenario ? 'scenario' : 'production'
   useEffect(() => {
+    if (!scenario) return
+    const previousTitle = document.title
+    document.title = 'Signalbox Scenario Studio — Imports'
+    return () => {
+      document.title = previousTitle
+    }
+  }, [scenario])
+  useEffect(() => {
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])

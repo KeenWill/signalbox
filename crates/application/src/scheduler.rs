@@ -5,6 +5,9 @@
 //! keeps both hint sources behind one application port and drives the
 //! existing authoritative eligibility pass.
 
+mod admission;
+pub use admission::with_released_scheduler_admission;
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
@@ -539,9 +542,13 @@ impl EligibilityNudgeReceiver {
 
 impl InProcessEligibilityNudge {
     /// Waits for channel capacity instead of dropping a full-buffer hint.
+    /// Coalesces only with a hint already queued in the channel.
     pub async fn nudge_waiting_for_capacity(&self, session: SessionId) -> EligibilityNudgeOutcome {
         let outcome = self.nudge_session(session);
-        if outcome != EligibilityNudgeOutcome::DroppedAtCapacity {
+        if !matches!(
+            outcome,
+            EligibilityNudgeOutcome::DroppedAtCapacity | EligibilityNudgeOutcome::Coalesced
+        ) {
             return outcome;
         }
         let EligibilityNudgeSender::Bounded(sender) = &self.sender else {
@@ -549,7 +556,10 @@ impl InProcessEligibilityNudge {
         };
         {
             let mut pending = self.pending_hints();
-            if pending.contains_key(&session) {
+            if pending
+                .get(&session)
+                .is_some_and(|hint| hint.queued_channel_tokens > 0)
+            {
                 return EligibilityNudgeOutcome::Coalesced;
             }
             pending.insert(
@@ -567,6 +577,12 @@ impl InProcessEligibilityNudge {
             return EligibilityNudgeOutcome::WorkSourceClosed;
         };
         let mut pending = self.pending_hints();
+        if pending
+            .get(&session)
+            .is_some_and(|hint| hint.queued_channel_tokens > 0)
+        {
+            return EligibilityNudgeOutcome::Coalesced;
+        }
         pending.insert(
             session,
             PendingEligibilityHint {
@@ -1030,13 +1046,15 @@ where
         let slots = crate::scheduler_slot::SchedulerSlots::new(self.max_in_flight_passes);
         let mut slot_changes = slots.changes();
         let mut passes = JoinSet::new();
+        let mut admission = admission::Admission::default();
+        let (admission_sender, mut admission_changes) = mpsc::unbounded_channel();
         let mut task_sessions = HashMap::new();
         let mut in_flight_sessions = HashSet::new();
         let mut pending_sessions = VecDeque::new();
         let mut pending_hints = HashSet::new();
         let mut pending_reruns = HashSet::new();
         let (shutdown_drain, shutdown_drain_receiver) = watch::channel(false);
-        observe_occupancy(&self.occupancy_observer, &task_sessions);
+        observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
 
         'scheduler: loop {
             if slots.can_reserve()
@@ -1050,8 +1068,16 @@ where
                 select! {
                     biased;
 
-                    () = &mut shutdown => break,
+                    () = &mut shutdown => {
+                        pending_hints.insert(session);
+                        pending_sessions.push_front(session);
+                        break;
+                    }
                     () = ready(()) => {
+                        if admission.resume(session) {
+                            observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
+                            continue;
+                        }
                         let Some(slot) = slots.reserve() else {
                             pending_hints.insert(session);
                             pending_sessions.push_front(session);
@@ -1072,8 +1098,10 @@ where
                                 counts_toward_occupancy,
                                 self.occupancy_bound,
                                 shutdown_drain_receiver.clone(),
+                                admission_sender.clone(),
                                 &mut task_sessions,
                                 &self.occupancy_observer,
+                                &admission,
                             );
                         } else {
                             pending_reruns.insert(session);
@@ -1096,7 +1124,14 @@ where
                         biased;
 
                         () = &mut shutdown => break 'scheduler,
-                        _ = slot_changes.changed() => { observe_occupancy(&self.occupancy_observer, &task_sessions); },
+                        _ = slot_changes.changed() => { observe_occupancy(&self.occupancy_observer, &task_sessions, &admission); },
+                        Some(change) = admission_changes.recv() => {
+                            admission.apply(change, &task_sessions, &mut pending_sessions, &mut pending_hints);
+                            observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
+                            if has_admissible_hint(&pending_hints, slots.active(), self.max_in_flight_passes) {
+                                break None;
+                            }
+                        }
                         completed = passes.join_next_with_id(),
                             if !task_sessions.is_empty() =>
                         {
@@ -1104,6 +1139,7 @@ where
                                 && apply_pass_completion::<Pass>(
                                     completed,
                                     PassCompletionState {
+                                        admission: &mut admission,
                                         task_sessions: &mut task_sessions,
                                         in_flight_sessions: &mut in_flight_sessions,
                                         pending_hints: &mut pending_hints,
@@ -1130,7 +1166,14 @@ where
                         biased;
 
                         () = &mut shutdown => break 'scheduler,
-                        _ = slot_changes.changed() => { observe_occupancy(&self.occupancy_observer, &task_sessions); break None; },
+                        _ = slot_changes.changed() => { observe_occupancy(&self.occupancy_observer, &task_sessions, &admission); break None; },
+                        Some(change) = admission_changes.recv() => {
+                            admission.apply(change, &task_sessions, &mut pending_sessions, &mut pending_hints);
+                            observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
+                            if has_admissible_hint(&pending_hints, slots.active(), self.max_in_flight_passes) {
+                                break None;
+                            }
+                        }
                         completed = passes.join_next_with_id(),
                             if !task_sessions.is_empty() =>
                         {
@@ -1138,6 +1181,7 @@ where
                                 && apply_pass_completion::<Pass>(
                                     completed,
                                     PassCompletionState {
+                                        admission: &mut admission,
                                         task_sessions: &mut task_sessions,
                                         in_flight_sessions: &mut in_flight_sessions,
                                         pending_hints: &mut pending_hints,
@@ -1172,13 +1216,29 @@ where
         }
 
         shutdown_drain.send_replace(true);
-        while let Some(completed) = passes.join_next_with_id().await {
-            observe_pass_completion::<Pass>(
-                completed,
-                &mut task_sessions,
-                &mut in_flight_sessions,
-                &self.occupancy_observer,
-            );
+        while !task_sessions.is_empty() {
+            while admission.occupied(&task_sessions) < self.max_in_flight_passes {
+                let Some(session) = pop_pending_hint(&mut pending_sessions, &mut pending_hints)
+                else {
+                    break;
+                };
+                admission.resume(session);
+                observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
+            }
+            select! {
+                _ = slot_changes.changed() => {
+                    observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
+                }
+                Some(change) = admission_changes.recv() => {
+                    admission.apply(change, &task_sessions, &mut pending_sessions, &mut pending_hints);
+                    observe_occupancy(&self.occupancy_observer, &task_sessions, &admission);
+                }
+                Some(completed) = passes.join_next_with_id() => {
+                    let task = match &completed { Ok((task, _)) => *task, Err(error) => error.id() };
+                    admission.retire(task, &task_sessions, &mut pending_hints, &mut pending_sessions);
+                    observe_pass_completion::<Pass>(completed, &mut task_sessions, &mut in_flight_sessions, &self.occupancy_observer, &admission);
+                }
+            }
         }
         SchedulerLoopExit::Shutdown
     }
@@ -1260,6 +1320,7 @@ where
 
 /// Scheduler-visible queues retired by one completed pass.
 struct PassCompletionState<'a> {
+    admission: &'a mut admission::Admission,
     task_sessions: &'a mut HashMap<Id, InFlightPass>,
     in_flight_sessions: &'a mut HashSet<SessionId>,
     pending_hints: &'a mut HashSet<SessionId>,
@@ -1280,6 +1341,16 @@ where
     Pass: EligibilityPass,
     Pass::Error: ClassifyOperatorFailure,
 {
+    let task = match &completed {
+        Ok((task, _)) => *task,
+        Err(error) => error.id(),
+    };
+    state.admission.retire(
+        task,
+        state.task_sessions,
+        state.pending_hints,
+        state.pending_sessions,
+    );
     let Some(CompletedPass {
         session,
         rerun_allowed,
@@ -1288,6 +1359,7 @@ where
         state.task_sessions,
         state.in_flight_sessions,
         observer,
+        state.admission,
     )
     else {
         return false;
@@ -1316,8 +1388,10 @@ fn spawn_pass<Pass>(
     counts_toward_occupancy: bool,
     bound: SchedulerPassOccupancyBound,
     shutdown_drain: watch::Receiver<bool>,
+    admission_sender: mpsc::UnboundedSender<admission::Change>,
     task_sessions: &mut HashMap<Id, InFlightPass>,
     observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
+    admission: &admission::Admission,
 ) where
     Pass: EligibilityPass + Send,
     Pass::Error: Send + 'static,
@@ -1331,7 +1405,10 @@ fn spawn_pass<Pass>(
     let task = passes.spawn(
         crate::scheduler_slot::scope_reserved(
             slot.clone(),
-            bounded_pass(execution, session, bound, shutdown_drain, expiry_handler),
+            admission::scope(
+                admission_sender,
+                bounded_pass(execution, session, bound, shutdown_drain, expiry_handler),
+            ),
         )
         .instrument(span),
     );
@@ -1344,7 +1421,7 @@ fn spawn_pass<Pass>(
             counts_toward_occupancy,
         },
     );
-    observe_occupancy(observer, task_sessions);
+    observe_occupancy(observer, task_sessions, admission);
 }
 
 /// Bounds one admitted pass's occupancy, invoking the handoff once it expires.
@@ -1391,18 +1468,28 @@ where
 fn observe_occupancy(
     observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
     passes: &HashMap<Id, InFlightPass>,
+    admission: &admission::Admission,
 ) {
     let Some(observer) = observer else {
         return;
     };
     let oldest = passes
-        .values()
-        .filter(|pass| pass.counts_toward_occupancy && pass.slot.is_occupied())
+        .iter()
+        .filter(|(task, pass)| {
+            pass.counts_toward_occupancy
+                && pass.slot.is_occupied()
+                && !admission.is_released(**task)
+        })
+        .map(|(_, pass)| pass)
         .min_by_key(|pass| pass.started_at)
         .map(|pass| SchedulerOldestInFlightPass::new(pass.session, pass.started_at));
     let occupancy = passes
-        .values()
-        .filter(|pass| pass.counts_toward_occupancy && pass.slot.is_occupied())
+        .iter()
+        .filter(|(task, pass)| {
+            pass.counts_toward_occupancy
+                && pass.slot.is_occupied()
+                && !admission.is_released(**task)
+        })
         .count();
     observer.observe(occupancy, oldest);
 }
@@ -1431,6 +1518,7 @@ fn observe_pass_completion<Pass>(
     task_sessions: &mut HashMap<Id, InFlightPass>,
     in_flight_sessions: &mut HashSet<SessionId>,
     observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
+    admission: &admission::Admission,
 ) -> Option<CompletedPass>
 where
     Pass: EligibilityPass,
@@ -1449,7 +1537,7 @@ where
     };
     let session = in_flight.session;
     in_flight_sessions.remove(&session);
-    observe_occupancy(observer, task_sessions);
+    observe_occupancy(observer, task_sessions, admission);
 
     match completed {
         Ok((_, PassTaskOutcome::Completed(Ok(())))) => {}
@@ -1984,34 +2072,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn equal_nudges_coalesce_while_waiting_for_capacity() {
-        const OCCUPIED_SESSION: u128 = 330;
-        const WAITING_SESSION: u128 = 340;
-        let occupied = session(OCCUPIED_SESSION);
-        let waiting = session(WAITING_SESSION);
+    async fn capacity_waiters_coalesce_only_after_a_hint_is_queued() {
+        let occupied = session(330);
+        let also_occupied = session(331);
+        let waiting = session(340);
         let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
             FakeSweep::returning([Ok(vec![])]),
             None,
-            Some(NonZeroUsize::new(1).expect("the test capacity is nonzero")),
+            NonZeroUsize::new(2),
         );
         assert_eq!(nudge.nudge(occupied), EligibilityNudgeOutcome::Enqueued);
-        let reservation = nudge.nudge_waiting_for_capacity(waiting);
-        tokio::pin!(reservation);
+        assert_eq!(
+            nudge.nudge(also_occupied),
+            EligibilityNudgeOutcome::Enqueued
+        );
+        let first = nudge.nudge_waiting_for_capacity(waiting);
+        let second = nudge.nudge_waiting_for_capacity(waiting);
+        tokio::pin!(first, second);
         std::future::poll_fn(|cx| {
-            assert!(reservation.as_mut().poll(cx).is_pending());
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
 
-        assert_eq!(nudge.nudge(waiting), EligibilityNudgeOutcome::Coalesced);
-        assert_eq!(
-            nudge.nudge_waiting_for_capacity(waiting).await,
-            EligibilityNudgeOutcome::Coalesced
-        );
         assert_eq!(source.next().await, Ok(occupied));
-        assert_eq!(reservation.await, EligibilityNudgeOutcome::Enqueued);
+        assert_eq!(first.await, EligibilityNudgeOutcome::Enqueued);
+        assert_eq!(source.next().await, Ok(also_occupied));
+        assert_eq!(second.await, EligibilityNudgeOutcome::Coalesced);
         assert_eq!(source.next().await, Ok(waiting));
         assert!(timeout(Duration::ZERO, source.next()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_one_capacity_wait_does_not_release_another() {
+        let occupied = session(330);
+        let waiting = session(340);
+        let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
+            FakeSweep::returning([Ok(vec![])]),
+            None,
+            NonZeroUsize::new(1),
+        );
+        assert_eq!(nudge.nudge(occupied), EligibilityNudgeOutcome::Enqueued);
+        let mut first = Box::pin(nudge.nudge_waiting_for_capacity(waiting));
+        let second = nudge.nudge_waiting_for_capacity(waiting);
+        tokio::pin!(second);
+        std::future::poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(first);
+        std::future::poll_fn(|cx| {
+            assert!(second.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        assert_eq!(source.next().await, Ok(occupied));
+        assert_eq!(second.await, EligibilityNudgeOutcome::Enqueued);
+        assert_eq!(source.next().await, Ok(waiting));
     }
 
     #[tokio::test]
@@ -2790,6 +2911,157 @@ mod tests {
             .expect("recorded identities are not poisoned");
         assert_eq!(identities.len(), 2);
         assert_ne!(identities[0], identities[1]);
+    }
+
+    #[derive(Clone)]
+    struct ReleasingPass {
+        first: SessionId,
+        first_starts: Arc<AtomicUsize>,
+        resumed: Arc<AtomicUsize>,
+        release_io: Arc<Notify>,
+        io_finished: Arc<Notify>,
+        second_started: Arc<Notify>,
+        second_verified: Arc<Notify>,
+        finish_second: Arc<Notify>,
+    }
+
+    impl EligibilityPass for ReleasingPass {
+        type Error = FakeSweepError;
+
+        fn run(
+            &mut self,
+            session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let state = self.clone();
+            async move {
+                if session == state.first {
+                    state.first_starts.fetch_add(1, Ordering::SeqCst);
+                    super::with_released_scheduler_admission(async {
+                        state.release_io.notified().await;
+                        state.io_finished.notify_one();
+                    })
+                    .await;
+                    state.resumed.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    state.second_started.notify_one();
+                    state.io_finished.notified().await;
+                    assert_eq!(state.resumed.load(Ordering::SeqCst), 0);
+                    state.second_verified.notify_one();
+                    state.finish_second.notified().await;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn released_pass_reacquires_without_duplicate_session_during_shutdown() {
+        let state = ReleasingPass {
+            first: session(0x1285),
+            first_starts: Arc::new(AtomicUsize::new(0)),
+            resumed: Arc::new(AtomicUsize::new(0)),
+            release_io: Arc::new(Notify::new()),
+            io_finished: Arc::new(Notify::new()),
+            second_started: Arc::new(Notify::new()),
+            second_verified: Arc::new(Notify::new()),
+            finish_second: Arc::new(Notify::new()),
+        };
+        let (shutdown, stopping) = oneshot::channel();
+        let mut scheduler = SchedulerLoop::with_max_in_flight(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(state.first), Ok(state.first), Ok(session(0x1286))]),
+            },
+            state.clone(),
+            NonZeroUsize::new(1).expect("one admission slot"),
+        );
+        let runtime = tokio::spawn(async move {
+            scheduler
+                .run_until(async {
+                    let _ = stopping.await;
+                })
+                .await
+        });
+        timeout(Duration::from_secs(1), async {
+            state.second_started.notified().await;
+            shutdown.send(()).expect("scheduler awaits shutdown");
+            state.release_io.notify_one();
+            state.second_verified.notified().await;
+            state.finish_second.notify_one();
+            assert_eq!(
+                runtime.await.expect("scheduler completes"),
+                SchedulerLoopExit::Shutdown
+            );
+        })
+        .await
+        .expect("released passes drain through reacquisition");
+        assert_eq!(state.first_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(state.resumed.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Default)]
+    struct RecordingAdmissionObserver {
+        values: Mutex<Vec<usize>>,
+        released: std::sync::atomic::AtomicBool,
+    }
+
+    impl super::SchedulerOccupancyObserver for RecordingAdmissionObserver {
+        fn observe(&self, occupancy: usize, oldest: Option<super::SchedulerOldestInFlightPass>) {
+            let mut values = self.values.lock().expect("occupancy recording");
+            if occupancy == 0 && values.contains(&1) {
+                self.released.store(true, Ordering::SeqCst);
+            }
+            assert_eq!(oldest.is_some(), occupancy != 0);
+            values.push(occupancy);
+        }
+    }
+
+    #[derive(Clone)]
+    struct ImmediatelyReleasingPass;
+
+    impl EligibilityPass for ImmediatelyReleasingPass {
+        type Error = FakeSweepError;
+
+        fn run(
+            &mut self,
+            _: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            super::with_released_scheduler_admission(ready(Ok(())))
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_popping_reacquisition_restores_admission_and_occupancy() {
+        let observer = Arc::new(RecordingAdmissionObserver::default());
+        let mut scheduler = SchedulerLoop::with_max_in_flight(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(session(0x1287))]),
+            },
+            ImmediatelyReleasingPass,
+            NonZeroUsize::new(1).expect("one slot"),
+        )
+        .with_occupancy_observer(observer.clone());
+        let mut released_polls = 0;
+        let shutdown = std::future::poll_fn(|_| {
+            if observer.released.load(Ordering::SeqCst) {
+                released_polls += 1;
+                // First poll precedes receipt of Resume; the next occurs after
+                // that queued session is popped for admission.
+                if released_polls == 2 {
+                    return std::task::Poll::Ready(());
+                }
+            }
+            std::task::Poll::Pending
+        });
+        assert_eq!(
+            timeout(Duration::from_secs(1), scheduler.run_until(shutdown))
+                .await
+                .expect("shutdown must drain the popped reacquisition"),
+            SchedulerLoopExit::Shutdown,
+        );
+        assert_eq!(released_polls, 2);
+        let mut values = observer.values.lock().expect("recorded occupancy").clone();
+        values.dedup();
+        assert_eq!(values, [0, 1, 0, 1, 0]);
     }
 
     #[derive(Clone, Debug)]

@@ -2,6 +2,12 @@
 
 # model_execution
 
+## MAX_RENDERED_ATTACHMENT_STUB_BYTES
+
+```rust
+pub const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize;
+```
+
 ## ModelCallCredentialReference
 
 ```rust
@@ -172,6 +178,7 @@ pub enum ModelToolResultContent {
 
 ```rust
 pub enum ModelCallExecutionOutcome {
+    WaitFailed(boxed::Box<signalbox_domain::FailedModelCallTurn>),
     NoWork,
     RetryBackoff(time::Duration),
     PoolExhausted(boxed::Box<CredentialPoolExhaustedOutcome>),
@@ -276,6 +283,8 @@ where
 
 ```rust
 pub enum PrepareModelCallOutcome {
+    WaitFailed(boxed::Box<signalbox_domain::FailedModelCallTurn>),
+    CredentialWait(signalbox_domain::CredentialAvailabilityWait),
     NoWork,
     RetryBackoff(time::Duration),
     PoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
@@ -563,6 +572,7 @@ pub trait ModelCallInputTokenCounter {
 
 ```rust
 pub enum ModelCallObservationCommitOutcome {
+    CredentialWait(signalbox_domain::CredentialAvailabilityWait),
     Terminal(boxed::Box<signalbox_domain::ModelCallTerminalOutcome>),
     AvailabilitySuccessor(boxed::Box<AvailabilitySuccessorOutcome>),
     PoolExhausted(CredentialPoolExhaustedOutcome),

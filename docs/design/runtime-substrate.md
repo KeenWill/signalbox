@@ -46,8 +46,8 @@ In ambient delivery the Codex adapter's child environment stays cleared, with
 env_key grammar admits only `OPENAI_API_KEY`, and composition keeps rejecting
 Codex file delivery as undelivered until the delivery exists.
 
-The exact-value redactor and the CLI shape redactor stay separate layers, and
-the CLI adapters keep a seam where exact values can be seeded before spawn.
+The CLI adapters keep a seam where exact credential values can be seeded before
+spawn.
 
 ## Acceptance criteria
 

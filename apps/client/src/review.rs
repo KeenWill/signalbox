@@ -1,4 +1,5 @@
 use super::*;
+use signalbox_process_protocol::MAX_REVIEW_PRODUCED_FINDINGS;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +57,11 @@ pub(crate) fn validate_review_finding_count(
     count: usize,
     limits: Option<ClientDeploymentLimits>,
 ) -> Result<(), ClientError> {
+    if count > MAX_REVIEW_PRODUCED_FINDINGS {
+        return Err(ClientError::Input(
+            "review findings exceed the structural per-pass count limit",
+        ));
+    }
     let limits = limits.ok_or(ClientError::Protocol("deployment limits were not read"))?;
     if limits
         .max_review_findings_per_run
@@ -847,12 +853,9 @@ pub(crate) async fn review(
                         count = count.checked_add(1).ok_or(ClientError::Protocol(
                             "review finding list count overflowed",
                         ))?;
-                        if deployment_limits
-                            .and_then(|limits| limits.max_review_findings_per_run)
-                            .is_some_and(|maximum| count > maximum)
-                        {
+                        if count > MAX_REVIEW_PRODUCED_FINDINGS as u64 {
                             return Err(ClientError::Protocol(
-                                "review finding list exceeded its admitted bound",
+                                "review finding list exceeded its structural count limit",
                             ));
                         }
                         spool.write_all(&encode_server_line(&frame)?)?;

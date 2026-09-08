@@ -200,6 +200,24 @@ impl<'a> Output<'a> {
                  call={model_call_id} entry={completion_entry_id} \
                  frontier={terminal_frontier_id}"
             ),
+            SessionEvent::TurnCredentialPoolExhausted {
+                turn_id,
+                terminal_frontier_id,
+                terminal_attempt_id,
+                failure_entry_id,
+                pool_policy_id,
+                policy_members,
+                members,
+            } => {
+                write!(
+                    self.stdout,
+                    "event={cursor} session={session_id} turn_credential_pool_exhausted turn={turn_id} frontier={terminal_frontier_id} attempt={terminal_attempt_id} entry={failure_entry_id} pool_policy={pool_policy_id} policy_members="
+                )?;
+                self.json_value(policy_members)?;
+                write!(self.stdout, " members=")?;
+                self.json_value(members)?;
+                writeln!(self.stdout)
+            }
             SessionEvent::TurnFailed {
                 turn_id,
                 failure_entry_id,
@@ -383,7 +401,11 @@ impl<'a> Output<'a> {
     }
 
     pub(super) fn user_content_parts_json(&mut self, parts: &[UserInputPart]) -> io::Result<()> {
-        let serialized = serde_json::to_string(parts)?;
+        self.json_value(parts)
+    }
+
+    pub(super) fn json_value<T: serde::Serialize + ?Sized>(&mut self, value: &T) -> io::Result<()> {
+        let serialized = serde_json::to_string(value)?;
         if self.raw {
             return self.stdout.write_all(serialized.as_bytes());
         }
