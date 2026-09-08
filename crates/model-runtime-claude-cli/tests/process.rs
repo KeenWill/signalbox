@@ -64,6 +64,36 @@ impl CredentialAccess for SyntheticCredentialAccess {
     }
 }
 
+#[test]
+fn cancellation_finishes_preparation_while_support_io_is_queued() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("test runtime builds");
+    let (release, hold) = std::sync::mpsc::channel();
+    let blocker = executor.spawn_blocking(move || hold.recv());
+    let temporary = tempfile::tempdir().expect("test directory exists");
+    let adapter = runtime(temporary.path(), &fake_cli());
+    let outcome = executor.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            adapter.prepare(
+                operation("normal_completion", OperationShape::Text),
+                CancellationSignal::already_cancelled(),
+            ),
+        )
+        .await
+    });
+    release.send(()).expect("release blocking worker");
+    executor
+        .block_on(blocker)
+        .expect("worker joins")
+        .expect("worker released");
+    assert!(matches!(outcome, Ok(PreparationOutcome::Cancelled { .. })));
+    assert_eq!(spawn_count(temporary.path()), 0);
+}
+
 #[tokio::test]
 async fn normal_completion_requires_typed_terminal_result() {
     let result = execute_scenario("normal_completion", OperationShape::Text).await;

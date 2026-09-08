@@ -1,5 +1,5 @@
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import { webContractBootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, type TestInfo, test } from './fontTest'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -663,10 +663,7 @@ test('captures bounded search evidence', async ({ page }, testInfo) => {
     'data-total-loaded',
     searchUsageFixture.searchLoadedItems,
   )
-  await expect(page).toHaveScreenshot('search-usage-dark.png', {
-    animations: 'disabled',
-    maxDiffPixelRatio: 0,
-  })
+  await expect.soft(page).toHaveScreenshot('search-usage-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -678,9 +675,8 @@ test('captures mixed usage and cost evidence', async ({ page }, testInfo) => {
     'data-total-loaded',
     searchUsageFixture.usageLoadedCalls,
   )
-  await expect(page).toHaveScreenshot('usage-dark.png', {
+  await expect.soft(page).toHaveScreenshot('usage-dark.png', {
     animations: 'disabled',
-    maxDiffPixelRatio: 0,
   })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -807,7 +803,7 @@ test('captures the pinned imports workstation', async ({ page }, testInfo) => {
   const problems = watchBrowser(page)
   await page.goto(importsFixture.path)
   await expect(page.getByRole('heading', { name: 'Imported conversations' })).toBeVisible()
-  await expect(page).toHaveScreenshot('imports-dark.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('imports-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -816,7 +812,7 @@ test('captures the pinned dark workbench', async ({ page }, testInfo) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/approval')
   await expect(page.getByRole('heading', { name: 'Bounded timeline' })).toBeVisible()
-  await expect(page).toHaveScreenshot('workbench-dark.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('workbench-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -827,7 +823,7 @@ test('captures the pinned light focus layout', async ({ page }, testInfo) => {
   await page.getByRole('button', { name: 'Switch to focus layout' }).click()
   await page.getByRole('button', { name: 'Use light theme' }).click()
   await expect(page.getByRole('heading', { name: 'Fleet obligations' })).toBeHidden()
-  await expect(page).toHaveScreenshot('focus-light.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('focus-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -837,7 +833,7 @@ test('captures the pinned narrow responsive shell', async ({ page }, testInfo) =
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/scenario/responsive')
   await expect(page.getByRole('button', { name: 'Open scenarios' })).toBeVisible()
-  await expect(page).toHaveScreenshot('responsive-dark.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('responsive-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

@@ -157,8 +157,9 @@ does not recognize fails closed.
 Version admission is the one centralized wire gate: an unknown version produces
 `unsupported_version` and the server closes the connection. The server may close
 a connection after any error, and a client never reinterprets an unknown message
-as a known one. An oversized outbound frame terminates only its connection;
-every other encoding failure is fatal runtime evidence.
+as a known one. Outbound encoding failures close and log only the affected
+connection. Recoverable listener accept errors retry with a bounded delay;
+permanent listener errors remain fatal.
 
 A connection processes one request at a time, and a follow request consumes its
 connection until it closes. Inbound admission is bounded globally by an
@@ -482,7 +483,12 @@ Workspace operator commands are `register_workspace`, `mint_git_remote`, and
 corresponding immutable workspace, mint, or withdrawal identity. Registration
 resolves the supplied root once in the daemon filesystem before constructing the
 canonical payload. The client exposes them as `workspace register`,
-`workspace mint-remote`, and `workspace withdraw-remote`.
+`workspace mint-remote`, and `workspace withdraw-remote`. Registration retains
+the original request path at storage version 2 for settled replay without
+filesystem access. Version 1 registrations without that field replay by their
+stored canonical root; version 2 requires it. Workspace and remote
+state-constraint rejections return `invalid_request`; stored corruption returns
+`internal`.
 
 Credential-exclusion administration is one `list_credential_exclusions` read
 carrying `page_size` and `after`, and one `clear_credential_exclusion` mutation
