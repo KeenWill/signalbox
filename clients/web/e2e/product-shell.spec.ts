@@ -161,8 +161,6 @@ const watchBrowser = (page: Page) => {
 const platformModifier = (page: Page) =>
   page.evaluate(() => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control'))
 
-const expectedContractStatus = 'Connected'
-
 test('applies saved visual preferences before the first rendered frame', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem(
@@ -202,9 +200,7 @@ test('applies saved visual preferences before the first rendered frame', async (
     .toBe('light:comfortable')
 })
 
-test('opens the product at Attention with generated-contract transport status', async ({
-  page,
-}) => {
+test('opens the product at Attention after bootstrap admission', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/')
@@ -212,7 +208,7 @@ test('opens the product at Attention with generated-contract transport status', 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page).toHaveTitle('Attention · Signalbox')
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
-  await expect(page.getByText(expectedContractStatus)).toBeVisible()
+  await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',
@@ -316,7 +312,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
   await page.getByRole('button', { name: 'Retry connection' }).click()
 
   await expect(page.getByText('Timeline reads available')).toBeVisible()
-  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
+  await expect(page.locator('.product-connection')).toHaveCount(0)
   expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
   expect(
@@ -921,8 +917,8 @@ test('retries an initial bootstrap failure', async ({ page }) => {
   // shell classifies it as an unavailable bootstrap rather than an unreachable transport.
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry connection' }).click()
-  await expect(page.getByText(expectedContractStatus)).toBeVisible()
-  await expect(page.getByRole('status')).toBeFocused()
+  await expect(page.locator('.product-connection')).toHaveCount(0)
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems.pageErrors).toEqual([])
   expect(problems.consoleErrors.filter((message) => message !== expectedFailureMessage)).toEqual([])
 })
@@ -1108,7 +1104,7 @@ test('retries a transient Attention bootstrap failure in place', async ({ page }
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry Attention' }).click()
 
-  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
+  await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: '0 sessions' })).toBeVisible()
   expect(admission.attempts).toBe(2)
 })
@@ -1224,7 +1220,7 @@ test('mounts Imports after the daemon contract recovers', async ({ page }) => {
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry connection' }).click()
 
-  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
+  await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
   expect(admission.attempts).toBe(2)
   expect(problems.pageErrors).toEqual([])
@@ -1596,8 +1592,8 @@ test('retries a transient bootstrap failure without reloading', async ({ page })
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
   scenario.recover()
   await page.getByRole('button', { name: 'Retry connection' }).click()
-  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
-  await expect(page.getByRole('status')).toBeFocused()
+  await expect(page.locator('.product-connection')).toHaveCount(0)
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems.pageErrors).toEqual([])
   expect(
     problems.consoleErrors.every((message) =>

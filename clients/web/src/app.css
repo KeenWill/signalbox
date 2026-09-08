@@ -269,9 +269,6 @@ kbd {
   background: var(--warning);
   content: "";
 }
-.contract-state.ready::before {
-  background: var(--success);
-}
 .contract-state.failed::before {
   background: var(--danger);
 }

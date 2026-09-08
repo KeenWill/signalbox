@@ -363,7 +363,7 @@ test('preserves an intentional blur during a pending bootstrap retry', async ({ 
   await page.getByText('Signalbox', { exact: true }).click()
   await expect(page.locator('body')).toBeFocused()
   response.resolve()
-  await expect(page.getByText('Connected', { exact: true })).toBeVisible()
+  await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.locator('body')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

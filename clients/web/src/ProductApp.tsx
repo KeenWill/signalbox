@@ -429,7 +429,6 @@ export function ProductApp({
   const navigationOpenerRef = useRef<HTMLElement | null>(null)
   const artifactButtonRef = useRef<HTMLButtonElement>(null)
   const artifactDigestRef = useRef<HTMLInputElement>(null)
-  const bootstrapStatusRef = useRef<HTMLSpanElement>(null)
   const sessionState = useMemo(() => readProductSessionState({ ...search }), [search])
   const catalogSessionOpenedHere = useLocation({
     select: (location) => location.state.catalogSessionOpenedHere === true,
@@ -878,59 +877,54 @@ export function ProductApp({
         <header className="product-header">
           <h1>{title}</h1>
           <div className="product-header-actions">
-            <div className="product-connection">
-              {surface === 'settings' ? null : (
+            {surface !== 'settings' && !bootstrap.isSuccess && (
+              <div className="product-connection">
                 <span
-                  ref={bootstrapStatusRef}
-                  className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+                  className={`contract-state ${bootstrap.isError ? 'failed' : ''}`}
                   role="status"
                   aria-live="polite"
                   aria-atomic="true"
                   tabIndex={-1}
                 >
-                  {bootstrap.isSuccess
-                    ? 'Connected'
-                    : bootstrap.isError
-                      ? bootstrapFailure
-                      : 'Connecting…'}
+                  {bootstrap.isError ? bootstrapFailure : 'Connecting…'}
                 </span>
-              )}
-              {surface !== 'settings' && bootstrap.isError && (
-                <button
-                  type="button"
-                  className="bootstrap-retry"
-                  onClick={(event) => {
-                    const opener = event.currentTarget
-                    let restoreFocus = document.activeElement === opener
-                    const recordBlur = () => {
-                      queueMicrotask(() => {
-                        if (opener.isConnected) restoreFocus = false
-                      })
-                    }
-                    const recordPointerMove = () => {
-                      restoreFocus = false
-                    }
-                    opener.addEventListener('blur', recordBlur)
-                    document.addEventListener('pointerdown', recordPointerMove)
-                    void bootstrap.refetch().then((result) => {
-                      opener.removeEventListener('blur', recordBlur)
-                      document.removeEventListener('pointerdown', recordPointerMove)
-                      if (result.isSuccess && restoreFocus) {
-                        requestAnimationFrame(() => {
-                          if (
-                            document.activeElement === opener ||
-                            (!opener.isConnected && document.activeElement === document.body)
-                          )
-                            bootstrapStatusRef.current?.focus()
+                {bootstrap.isError && (
+                  <button
+                    type="button"
+                    className="bootstrap-retry"
+                    onClick={(event) => {
+                      const opener = event.currentTarget
+                      let restoreFocus = document.activeElement === opener
+                      const recordBlur = () => {
+                        queueMicrotask(() => {
+                          if (opener.isConnected) restoreFocus = false
                         })
                       }
-                    })
-                  }}
-                >
-                  Retry connection
-                </button>
-              )}
-            </div>
+                      const recordPointerMove = () => {
+                        restoreFocus = false
+                      }
+                      opener.addEventListener('blur', recordBlur)
+                      document.addEventListener('pointerdown', recordPointerMove)
+                      void bootstrap.refetch().then((result) => {
+                        opener.removeEventListener('blur', recordBlur)
+                        document.removeEventListener('pointerdown', recordPointerMove)
+                        if (result.isSuccess && restoreFocus) {
+                          requestAnimationFrame(() => {
+                            if (
+                              document.activeElement === opener ||
+                              (!opener.isConnected && document.activeElement === document.body)
+                            )
+                              mainRef.current?.focus()
+                          })
+                        }
+                      })
+                    }}
+                  >
+                    Retry connection
+                  </button>
+                )}
+              </div>
+            )}
             <ProductToolbar
               artifactAvailable={artifactAvailable}
               artifactButtonRef={artifactButtonRef}
