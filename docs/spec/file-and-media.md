@@ -72,6 +72,12 @@ model-supplied media type or reader identity. Why: no classification from an
 earlier call is trusted. A registered streaming-text reader is selected through
 streaming validation even for declared `text/plain`. JSON container-entry
 ceilings are enforced while parsing, before constructing an excessive tree.
+Image metadata views use the canonical metadata from that inspection; absent
+image fields fail without a second decode.
+
+Validation and read requests carry effective `maximum_image_axis` and
+`maximum_decoded_image_pixels` ceilings. Image decoding clamps both to the
+compiled maxima.
 
 The raw processor output types carry strings and JSON text rather than checked
 registry values, and the registry reparses and cross-checks every claim against

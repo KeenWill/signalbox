@@ -1091,7 +1091,7 @@ fn validate_reader(
         || validation.range_count() == 0
         || validation.range_count() > crate::MAX_VALIDATION_RANGES
     {
-        return Err(FileMediaRegistryConstructionError::ViewBounds);
+        return Err(FileMediaRegistryConstructionError::ValidationBounds);
     }
     for view in reader.views() {
         validate_view(view.access(), view.bounds(), ceilings)?;
@@ -1321,6 +1321,8 @@ pub enum FileMediaRegistryConstructionError {
     DuplicateReaderMember,
     /// Probe bounds were zero, contradictory, or excessive.
     ProbeBounds,
+    /// Reader validation source-byte or range bounds were zero or excessive.
+    ValidationBounds,
     /// View bounds were absent, contradictory, or excessive.
     ViewBounds,
     /// A provider container-entry bound was zero or excessive.
@@ -1340,6 +1342,7 @@ impl fmt::Display for FileMediaRegistryConstructionError {
             Self::DuplicateMediaTypeClaim => "file media type has several registered readers",
             Self::DuplicateReaderMember => "file media reader member is duplicated",
             Self::ProbeBounds => "file media probe bounds are invalid",
+            Self::ValidationBounds => "file media reader validation bounds are invalid",
             Self::ViewBounds => "file media view bounds are invalid",
             Self::ContainerBounds => "file media container bounds are invalid",
             Self::TextFallback => "file media text fallback is invalid",

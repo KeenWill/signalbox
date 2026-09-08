@@ -13,11 +13,7 @@ use std::{
 };
 
 use bstr::BStr;
-use futures_util::StreamExt;
-use reqwest::{
-    Method, Response, StatusCode, Url,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, LINK, USER_AGENT},
-};
+use reqwest::{Method, Response, StatusCode, Url};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_application::{
@@ -29,9 +25,10 @@ use signalbox_domain::{
     NormalizedToolArguments, ToolAttemptDispatchCorrelation, ToolEffectClass,
     ToolExecutionErrorDetail, ToolPermissionDefault,
 };
-use signalbox_egress_transport::{
-    PublicDestinationClientError, WebFetchTransportFailure, has_more_response_bytes,
-    public_destination_client,
+use signalbox_github_transport::{
+    API_ORIGIN as GITHUB_API_ORIGIN, GRAPHQL_URL, PublicDestinationClientError, REST_BASE_URL,
+    ResponseExtent, StatusClass, authenticated_request, authorization, classify_status,
+    has_next_page, public_destination_client, status_is_definitive,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
@@ -60,11 +57,6 @@ pub const GITHUB_TOOL_NAMES: [&str; 4] = [
     PULL_REQUEST_REVIEW_THREADS_NAME,
 ];
 
-const REST_BASE_URL: &str = "https://api.github.com/";
-const GRAPHQL_URL: &str = "https://api.github.com/graphql";
-const GITHUB_API_ORIGIN: &str = "https://api.github.com";
-const API_VERSION: &str = "2026-03-10";
-const USER_AGENT_VALUE: &str = "signalbox";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const PAGE_SIZE: usize = 100;
 const MAX_FILE_PAGES: u16 = 30;
@@ -125,11 +117,7 @@ impl GitHubEgressPolicy {
     }
 
     fn admits(&self, url: &Url) -> bool {
-        url.scheme() == "https"
-            && url.host_str() == Some("api.github.com")
-            && url.port_or_known_default() == Some(443)
-            && url.username().is_empty()
-            && url.password().is_none()
+        signalbox_github_transport::admits_api_origin(url)
     }
 }
 
@@ -1716,10 +1704,6 @@ fn result_kind_mismatch(kind: ToolKind) -> GitHubExecutorError {
     }
 }
 
-const fn status_is_definitive(status: u16) -> bool {
-    status < 500
-}
-
 fn classify_error_body_failure(
     status: StatusCode,
     failure: GitHubTransportFailure,
@@ -1828,12 +1812,6 @@ fn longest_trailing_prefix(text: &str, secret: &str) -> usize {
         .unwrap_or(0)
 }
 
-#[derive(Clone, Copy)]
-enum ResponseExtent {
-    Complete,
-    Truncated,
-}
-
 fn sanitize_error_body(
     bytes: &[u8],
     source: ResponseExtent,
@@ -1920,7 +1898,6 @@ pub struct GitHubApiTransport {
 impl GitHubApiTransport {
     /// Constructs the fixed production transport.
     pub fn try_new() -> Result<Self, GitHubApiTransportConstructionError> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(Self {
             timeout: DEFAULT_TIMEOUT,
             rest_base: Url::parse(REST_BASE_URL)
@@ -2065,7 +2042,7 @@ impl GitHubApiTransport {
                     remaining_timeout(deadline)?,
                 )
                 .await?;
-            let has_next = response_has_next_page(&response);
+            let has_next = has_next_page(response.headers());
             let value = self
                 .success_json(response, StatusCode::OK, credential)
                 .await?;
@@ -2176,29 +2153,17 @@ impl GitHubApiTransport {
         }
         let scrubber = CredentialScrubber::try_new(credential)
             .ok_or(GitHubTransportFailure::InvalidCredential)?;
-        let mut authentication = Vec::with_capacity(7 + credential.expose_bytes().len());
-        authentication.extend_from_slice(b"Bearer ");
-        authentication.extend_from_slice(credential.expose_bytes());
-        let mut authentication = HeaderValue::from_bytes(&authentication)
+        let authentication = authorization(credential.expose_bytes())
             .map_err(|_| GitHubTransportFailure::InvalidCredential)?;
-        authentication.set_sensitive(true);
         let client = public_destination_client(&url, Some(timeout))
             .await
             .map_err(classify_destination_failure)?;
-        let mut request = client
-            .request(method, url)
-            .header(AUTHORIZATION, authentication)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", API_VERSION)
-            .header(USER_AGENT, USER_AGENT_VALUE);
-        if let Some(body) = body {
-            request = request.header(CONTENT_TYPE, "application/json").body(body);
-        }
+        let request = authenticated_request(&client, method, url, authentication, body);
         let response = request
             .send()
             .await
             .map_err(|error| classify_send_failure(error.is_connect()))?;
-        if response.status().is_success() {
+        if classify_status(response.status().as_u16()) == StatusClass::Success {
             return Ok(response);
         }
         let status = response.status();
@@ -2365,40 +2330,9 @@ async fn read_bounded(
     response: Response,
     limit: usize,
 ) -> Result<(Vec<u8>, ResponseExtent), GitHubTransportFailure> {
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| GitHubTransportFailure::DispatchUnknown)?;
-        let remaining = limit.saturating_sub(body.len());
-        if chunk.len() > remaining {
-            body.extend_from_slice(&chunk[..remaining]);
-            return Ok((body, ResponseExtent::Truncated));
-        }
-        body.extend_from_slice(&chunk);
-        if body.len() == limit {
-            let has_more = has_more_response_bytes(&mut stream)
-                .await
-                .map_err(classify_more_bytes_failure)?;
-            let extent = match has_more {
-                true => ResponseExtent::Truncated,
-                false => ResponseExtent::Complete,
-            };
-            return Ok((body, extent));
-        }
-    }
-    Ok((body, ResponseExtent::Complete))
-}
-
-const fn classify_more_bytes_failure(_failure: WebFetchTransportFailure) -> GitHubTransportFailure {
-    GitHubTransportFailure::DispatchUnknown
-}
-
-fn response_has_next_page(response: &Response) -> bool {
-    response
-        .headers()
-        .get(LINK)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|link| link.contains("rel=\"next\"")))
+    signalbox_github_transport::read_bounded(response.bytes_stream(), limit)
+        .await
+        .map_err(|_| GitHubTransportFailure::DispatchUnknown)
 }
 
 fn remaining_timeout(deadline: Instant) -> Result<Duration, GitHubTransportFailure> {

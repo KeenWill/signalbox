@@ -67,6 +67,12 @@ The core dependency chain is `apps/signalboxd` → `crates/application` →
 
 ### Dev instance
 
+The Linux `devenv smoke` workflow evaluates the committed lock on relevant pull
+requests, main pushes, and a weekly schedule. It exercises the generated client
+wrapper and config-materialization script with disposable fixtures; it starts no
+database or daemon. Run the same check with
+`devenv shell -- python3 scripts/test_devenv_scripts.py`.
+
 `devenv up` starts a dev instance: a PostgreSQL cluster on loopback and one
 `signalboxd` built from the working tree. The cluster asks for port 54341 and
 devenv allocates upward from there if it is taken; `echo $PGPORT` inside
