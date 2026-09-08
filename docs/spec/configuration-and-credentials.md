@@ -500,6 +500,11 @@ loopback `Host` authority; another authority receives a 403
 browser DTO. Application errors are a separate error kind and are never inferred
 from HTTP status alone.
 
+Blob descriptor, content, and download routes reject
+`Sec-Fetch-Site: cross-site` with a 403 `cross_site_blob_request_rejected`
+before storage access. This rejection precedes the loopback authority check.
+Other or absent fetch-site values pass this gate.
+
 Browser mutation routes use POST, require `application/json`, and when `Origin`
 is supplied require its host and effective port to equal the request `Host`
 authority. A `Host` without an explicit port has effective port 80 because the
