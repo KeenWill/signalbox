@@ -3005,6 +3005,53 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testOverrideConsumptionEventRetiresArmedMarker() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.event(try ProcessProjectionFixture.overrideConsumptionEvent()))
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testOverrideConsumptionSnapshotRetiresArmedMarker() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertTrue(viewModel.armedToolDenials.contains(invocationID.rawValue))
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithConsumedOverride()))
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
+  func testOverrideReceiptAfterConsumptionDoesNotRestoreArmedMarker() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingToolDecisionProcessService()
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial()))
+    let invocationID = SignalboxToolInvocationID(rawValue: ProcessProjectionFixture.proposedToolRequest)
+    await viewModel.overrideToolDenial(invocationID)
+    viewModel.apply(.event(try ProcessProjectionFixture.overrideConsumptionEvent()))
+    await viewModel.overrideToolDenial(invocationID)
+    XCTAssertFalse(viewModel.armedToolDenials.contains(invocationID.rawValue))
+  }
+
+  @MainActor
   func testAmbiguousToolDecisionRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -8115,6 +8162,39 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithConsumedOverride() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithProposedTool(
+      turnEvidence: [], usageEvidence: [],
+      resultEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(closedToolID)",
+            "tool_name":"\(proposedToolName)",
+            "arguments":"{}",
+            "approval":{
+              "decision":{"type":"approve"},
+              "decider":{
+                "type":"user_override",
+                "command_id":"\(ProcessSubmissionFixture.commandID)",
+                "overridden_tool_request_id":"\(proposedToolRequest)"
+              },
+              "rationale":null
+            }
+          }
+        }
+        """
+      ]
+    )
+  }
+
   static func snapshotWithDelegateDenial() throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithProposedTool(
       approvalMember:
@@ -12444,6 +12524,25 @@ extension ProcessProjectionFixture {
       }
       """,
       cursor: cursor
+    )
+  }
+
+  static func overrideConsumptionEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_approval_decided",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "tool_request_id":"\(closedToolID)",
+        "decision":{"type":"approve"},
+        "decider":{
+          "type":"user_override",
+          "command_id":"\(ProcessSubmissionFixture.commandID)",
+          "overridden_tool_request_id":"\(proposedToolRequest)"
+        },
+        "rationale":null
+      }
+      """
     )
   }
 

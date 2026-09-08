@@ -1614,6 +1614,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
       unresolvedToolOverride = nil
       armedToolDenials.insert(invocationID.rawValue)
+      retireConsumedToolOverrides()
       errorMessage = nil
     } catch {
       guard serviceGeneration == generation else {
@@ -1846,6 +1847,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         toolApprovalDecisionsByRequestID = retainedToolApprovalDecisions(
           projection.toolApprovalDecisionsByRequestID
         )
+        retireConsumedToolOverrides()
         refreshTimeline()
         pendingInputs = projection.pendingInputs
         acceptedInputsAwaitingTranscript.removeAll {
@@ -1874,6 +1876,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           retainedToolApprovalDecisions(projection.toolApprovalDecisionsByRequestID),
           uniquingKeysWith: { _, latest in latest }
         )
+        retireConsumedToolOverrides()
         refreshTimeline()
         let snapshotTerminalTurnIDs = terminalTurnIDs(in: snapshot)
         let snapshotActiveTurnID = activeTurnID(in: snapshot)
@@ -2197,6 +2200,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         decider: decider,
         rationale: rationale
       )
+      retireConsumedToolOverrides()
       refreshTimeline()
     case .turnCompleted(let turnID, _, _, _):
       applyTerminalTurn(
@@ -2300,6 +2304,14 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     unrecognizedLiveTimelineUTF8Bytes += retainedBytes
     timelinePresentationOrder.append(.unrecognized(cursor.rawValue))
     refreshTimeline()
+  }
+
+  private func retireConsumedToolOverrides() {
+    for approval in toolApprovalDecisionsByRequestID.values {
+      if case .userOverride(_, let deniedRequestID) = approval.decider {
+        armedToolDenials.remove(deniedRequestID.rawValue)
+      }
+    }
   }
 
   private func retainedToolApprovalDecisions(
