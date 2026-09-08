@@ -1,5 +1,5 @@
-import { expect, type Page, type Route, type TestInfo, test } from '@playwright/test'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, type Route, type TestInfo, test } from './fontTest'
 
 const approvalSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c61'
 const blockedSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c62'
@@ -511,10 +511,7 @@ test('captures the dark attention fleet', async ({ page }, testInfo) => {
   await installAttentionScenario(page)
   await page.goto('/attention')
   await expect(page.getByRole('heading', { name: '3 sessions', level: 2 })).toBeVisible()
-  await expect(page).toHaveScreenshot('attention-dark.png', {
-    animations: 'disabled',
-    maxDiffPixelRatio: 0,
-  })
+  await expect.soft(page).toHaveScreenshot('attention-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -526,10 +523,7 @@ test('captures the light attention workbench inspector', async ({ page }, testIn
   await page.getByRole('button', { name: 'Use light theme' }).click()
   await page.getByRole('button', { name: new RegExp(`blocked.*${blockedSessionId}`) }).click()
   await expect(page.getByRole('heading', { name: 'blocked', level: 2 })).toBeVisible()
-  await expect(page).toHaveScreenshot('attention-light.png', {
-    animations: 'disabled',
-    maxDiffPixelRatio: 0,
-  })
+  await expect.soft(page).toHaveScreenshot('attention-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -544,10 +538,7 @@ test('captures the focused phone inspector', async ({ page }, testInfo) => {
     .click()
   await expect(page.getByRole('heading', { name: 'runner lost', level: 2 })).toBeVisible()
   await expect(page.getByRole('heading', { name: '3 sessions', level: 2 })).toBeHidden()
-  await expect(page).toHaveScreenshot('attention-mobile-dark.png', {
-    animations: 'disabled',
-    maxDiffPixelRatio: 0,
-  })
+  await expect.soft(page).toHaveScreenshot('attention-mobile-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

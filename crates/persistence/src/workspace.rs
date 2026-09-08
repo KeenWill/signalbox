@@ -27,6 +27,9 @@ pub enum WorkspaceError {
     /// Commit failed without establishing whether the fact was stored.
     #[error("workspace commit outcome is ambiguous: {field_0}")]
     CommitAmbiguous(#[source] sqlx::Error),
+    /// The request violates a workspace or remote state constraint.
+    #[error("workspace request rejected")]
+    Rejected,
     /// Stored values cannot reconstruct the recorded request.
     #[error("invalid workspace record: {field_0}")]
     Corruption(&'static str),
@@ -34,7 +37,19 @@ pub enum WorkspaceError {
 
 impl From<sqlx::Error> for WorkspaceError {
     fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
+        match error
+            .as_database_error()
+            .and_then(|error| error.constraint())
+        {
+            Some(
+                "workspace_root_path_key"
+                | "configured_git_remote_mint_workspace_fk"
+                | "configured_git_remote_live_pk"
+                | "configured_git_remote_withdrawal_mint_fk"
+                | "configured_git_remote_withdrawal_mint_key",
+            ) => Self::Rejected,
+            _ => Self::Database(error),
+        }
     }
 }
 
@@ -50,10 +65,73 @@ impl WorkspaceRepository {
         Self { pool }
     }
 
+    /// Recovers an original registration request without resolving its path again.
+    pub async fn registration_replay(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+        requested_root: &str,
+    ) -> Result<Option<WorkspaceOutcome>, WorkspaceError> {
+        let mut connection = self.pool.acquire().await?;
+        match command_registry::inspect(&mut connection, command_id)
+            .await
+            .map_err(registry_error)?
+        {
+            None => return Ok(None),
+            Some(CommandKind::RegisterWorkspace) => {}
+            Some(_) => return Ok(Some(WorkspaceOutcome::ConflictingReuse)),
+        }
+        let Some(row) = sqlx::query(
+            "SELECT root_path, storage_version, registration_request_root FROM workspace WHERE command_id = $1",
+        )
+        .bind(command_id.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let original = registration_request_root(&row)?;
+        if original != requested_root {
+            return Ok(None);
+        }
+        let root = WorkspaceRootPath::try_new(row.try_get("root_path")?)
+            .map_err(|_| WorkspaceError::Corruption("workspace root"))?;
+        let command = WorkspaceCommand::new(command_id, WorkspaceOperation::Register { root });
+        replay(&mut connection, &command)
+            .await?
+            .map(Some)
+            .ok_or(WorkspaceError::Corruption("registration registry claim"))
+    }
+
+    /// Retains the original request spelling with a newly resolved registration.
+    pub async fn register(
+        &self,
+        command_id: signalbox_domain::DurableCommandId,
+        requested_root: &str,
+        root: WorkspaceRootPath,
+        ids: &mut impl WorkspaceIdentityGenerator,
+    ) -> Result<WorkspaceOutcome, WorkspaceError> {
+        self.handle_with_registration_request(
+            WorkspaceCommand::new(command_id, WorkspaceOperation::Register { root }),
+            Some(requested_root),
+            ids,
+        )
+        .await
+    }
+
     /// Records one operator command, or returns its exact recorded result.
     pub async fn handle(
         &self,
         command: WorkspaceCommand,
+        ids: &mut impl WorkspaceIdentityGenerator,
+    ) -> Result<WorkspaceOutcome, WorkspaceError> {
+        self.handle_with_registration_request(command, None, ids)
+            .await
+    }
+
+    async fn handle_with_registration_request(
+        &self,
+        command: WorkspaceCommand,
+        registration_request_root: Option<&str>,
         ids: &mut impl WorkspaceIdentityGenerator,
     ) -> Result<WorkspaceOutcome, WorkspaceError> {
         let mut tx = self.pool.begin().await?;
@@ -61,8 +139,13 @@ impl WorkspaceRepository {
             return Ok(outcome);
         }
         let kind = kind(command.operation());
-        let claimed = sqlx::query("INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind) VALUES ($1, $2, 1, transaction_timestamp(), 'operator') ON CONFLICT DO NOTHING")
-            .bind(command.command_id().into_uuid()).bind(crate::mapping::durable_command_kind_to_str(kind))
+        let storage_version: i16 = if kind == CommandKind::RegisterWorkspace {
+            2
+        } else {
+            1
+        };
+        let claimed = sqlx::query("INSERT INTO durable_command (command_id, command_kind, storage_version, claimed_at, issuer_kind) VALUES ($1, $2, $3, transaction_timestamp(), 'operator') ON CONFLICT DO NOTHING")
+            .bind(command.command_id().into_uuid()).bind(crate::mapping::durable_command_kind_to_str(kind)).bind(storage_version)
             .execute(&mut *tx).await?.rows_affected() == 1;
         if !claimed {
             return replay(&mut tx, &command)
@@ -76,8 +159,8 @@ impl WorkspaceRepository {
                     root.clone(),
                     WorkspaceOrigin::OperatorRegistered,
                 );
-                sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 1)")
-                    .bind(record.id().into_uuid()).bind(record.root().as_str()).bind(command.command_id().into_uuid()).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO workspace (workspace_id, root_path, origin, command_id, command_kind, storage_version, registration_request_root) VALUES ($1, $2, 'operator_registered', $3, 'register_workspace', 2, $4)")
+                    .bind(record.id().into_uuid()).bind(record.root().as_str()).bind(command.command_id().into_uuid()).bind(registration_request_root.unwrap_or(root.as_str())).execute(&mut *tx).await?;
                 WorkspaceCommandResult::Registered(record.id())
             }
             WorkspaceOperation::MintRemote {
@@ -106,7 +189,7 @@ impl WorkspaceRepository {
             if crate::commit_failure_is_ambiguous(&error) {
                 WorkspaceError::CommitAmbiguous(error)
             } else {
-                WorkspaceError::Database(error)
+                WorkspaceError::from(error)
             }
         })?;
         Ok(WorkspaceOutcome::Applied(result))
@@ -127,25 +210,7 @@ async fn replay(
 ) -> Result<Option<WorkspaceOutcome>, WorkspaceError> {
     let Some(stored_kind) = command_registry::inspect(connection, command.command_id())
         .await
-        .map_err(|error| match error {
-            command_registry::RegistryInspectionError::Database(error) => {
-                WorkspaceError::Database(error)
-            }
-            command_registry::RegistryInspectionError::Corruption(error) => {
-                WorkspaceError::Corruption(match error {
-                    command_registry::RegistryCorruption::UnsupportedKind(_) => "registry kind",
-                    command_registry::RegistryCorruption::UnsupportedVersion(_) => {
-                        "registry version"
-                    }
-                    command_registry::RegistryCorruption::MissingTypedRecord(_) => {
-                        "registry typed record"
-                    }
-                    command_registry::RegistryCorruption::ConflictingTypedRecords => {
-                        "registry record conflict"
-                    }
-                })
-            }
-        })?
+        .map_err(registry_error)?
     else {
         return Ok(None);
     };
@@ -156,10 +221,11 @@ async fn replay(
     let (operation, result) = match command.operation() {
         WorkspaceOperation::Register { .. } => {
             let row =
-                sqlx::query("SELECT workspace_id, root_path FROM workspace WHERE command_id = $1")
+                sqlx::query("SELECT workspace_id, root_path, storage_version, registration_request_root FROM workspace WHERE command_id = $1")
                     .bind(id)
                     .fetch_one(&mut *connection)
                     .await?;
+            registration_request_root(&row)?;
             let root = WorkspaceRootPath::try_new(row.try_get::<String, _>("root_path")?)
                 .map_err(|_| WorkspaceError::Corruption("workspace root"))?;
             (
@@ -203,4 +269,37 @@ async fn replay(
             WorkspaceOutcome::ConflictingReuse
         },
     ))
+}
+
+fn registration_request_root(row: &sqlx::postgres::PgRow) -> Result<String, WorkspaceError> {
+    let original: Option<String> = row.try_get("registration_request_root")?;
+    match (row.try_get::<i16, _>("storage_version")?, original) {
+        (1, None) => Ok(row.try_get("root_path")?),
+        (2, Some(original)) => Ok(original),
+        (1, Some(_)) => Err(WorkspaceError::Corruption(
+            "registration request root version",
+        )),
+        (2, None) => Err(WorkspaceError::Corruption("registration request root")),
+        _ => Err(WorkspaceError::Corruption("registration storage version")),
+    }
+}
+
+fn registry_error(error: command_registry::RegistryInspectionError) -> WorkspaceError {
+    match error {
+        command_registry::RegistryInspectionError::Database(error) => {
+            WorkspaceError::Database(error)
+        }
+        command_registry::RegistryInspectionError::Corruption(error) => {
+            WorkspaceError::Corruption(match error {
+                command_registry::RegistryCorruption::UnsupportedKind(_) => "registry kind",
+                command_registry::RegistryCorruption::UnsupportedVersion(_) => "registry version",
+                command_registry::RegistryCorruption::MissingTypedRecord(_) => {
+                    "registry typed record"
+                }
+                command_registry::RegistryCorruption::ConflictingTypedRecords => {
+                    "registry record conflict"
+                }
+            })
+        }
+    }
 }

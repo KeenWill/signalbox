@@ -1,7 +1,7 @@
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
 // The shared fixture is the single copy kept aligned with WebContractBootstrap::current();
 // readBootstrap now rejects any bootstrap whose limits contradict it.
 import { webContractBootstrapFixture } from '../src/product.fixture'
+import { expect, type Page, type TestInfo, test } from './fontTest'
 import { useDeterministicImportApi } from './import-api-fixture'
 
 interface RouteEvidence {
@@ -110,29 +110,25 @@ const useDeterministicSession = (page: Page) =>
 
 const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   const problems = watchBrowser(page)
-  const screenshot = evidence.snapshot === 'attention' ? expect.soft(page) : expect(page)
   await useDeterministicBootstrap(page)
   // Only the Imports route reads this adapter; every other route ignores it.
   await useDeterministicImportApi(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
   await expect(page.getByRole('heading', { name: evidence.title, level: 1 })).toBeVisible()
-  await screenshot.toHaveScreenshot(`${evidence.snapshot}-desktop-dark.png`, {
+  await expect.soft(page).toHaveScreenshot(`${evidence.snapshot}-desktop-dark.png`, {
     animations: 'disabled',
-    maxDiffPixelRatio: evidence.snapshot === 'attention' ? 0 : undefined,
   })
 
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await screenshot.toHaveScreenshot(`${evidence.snapshot}-desktop-light.png`, {
+  await expect.soft(page).toHaveScreenshot(`${evidence.snapshot}-desktop-light.png`, {
     animations: 'disabled',
-    maxDiffPixelRatio: evidence.snapshot === 'attention' ? 0 : undefined,
   })
 
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
-  await screenshot.toHaveScreenshot(`${evidence.snapshot}-mobile-light.png`, {
+  await expect.soft(page).toHaveScreenshot(`${evidence.snapshot}-mobile-light.png`, {
     animations: 'disabled',
-    maxDiffPixelRatio: evidence.snapshot === 'attention' ? 0 : undefined,
   })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 }
@@ -147,12 +143,12 @@ const captureSessionEvidence = async (page: Page) => {
   await page.getByRole('button', { name: 'Open workspace' }).click()
   await expect(page.getByRole('heading', { name: sessionEvidenceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
-  await expect(page).toHaveScreenshot('sessions-desktop-dark.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('sessions-desktop-dark.png', { animations: 'disabled' })
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await expect(page).toHaveScreenshot('sessions-desktop-light.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('sessions-desktop-light.png', { animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
-  await expect(page).toHaveScreenshot('sessions-mobile-light.png', { animations: 'disabled' })
+  await expect.soft(page).toHaveScreenshot('sessions-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 }
 

@@ -73,6 +73,8 @@ pub(crate) struct DeniedApprovalJudgeProjection {
 pub(crate) struct EscalatedApprovalJudgeProjection {
     pub(crate) judge_state: String,
     pub(crate) recommendation: String,
+    pub(crate) offered_recommendation: String,
+    pub(crate) substitution_cause: Option<String>,
     pub(crate) decision_exists: bool,
     pub(crate) active_phase: String,
     pub(crate) approval_tool_request_id: Uuid,
@@ -184,7 +186,8 @@ pub(crate) async fn insert_completed_judge(
     sqlx::query(
         "UPDATE tool_approval_judge_model_call
             SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
-                recommendation_kind = $1, rationale = $2,
+                recommendation_kind = $1, offered_recommendation_kind = $1,
+                rationale = $2,
                 input_tokens = $3,
                 usage_provenance_kind = COALESCE($4, usage_provenance_kind)
           WHERE model_call_id = $5",
