@@ -499,8 +499,8 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
   await expect(page.getByRole('form', { name: 'Message composer' })).toBeVisible()
-  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
-  await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
+  const timeline = page.getByRole('grid', { name: 'Session timeline' })
+  await expect(page.getByRole('row', { name: /41 input accepted/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
@@ -516,12 +516,12 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await latest.focus()
   await page.keyboard.press('j')
   await expect(timeline).toBeFocused()
-  await expect(page.getByRole('option', { name: /42 turn activated/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /42 turn activated/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
 
-  const completed = page.getByRole('option', { name: /43 turn completed/ })
+  const completed = page.getByRole('row', { name: /43 turn completed/ })
   await completed.click()
   await expect(timeline).toBeFocused()
   await expect(completed).toHaveAttribute('aria-controls', 'session-timeline-detail-43')
@@ -537,7 +537,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(inspector.getByText('turn completed', { exact: true })).toBeVisible()
   await expect(inspector.getByText('78', { exact: true })).toBeVisible()
 
-  const accepted = page.getByRole('option', { name: /41 input accepted/ })
+  const accepted = page.getByRole('row', { name: /41 input accepted/ })
   await accepted.getByText('input accepted', { exact: true }).click()
   await expect(page.locator('#session-timeline-detail-41')).toBeVisible()
   await expect(page.getByRole('region', { name: 'User input', exact: true })).toBeVisible()
@@ -547,7 +547,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   const first = page.getByRole('button', { name: /First/ })
   await first.click()
   await expect(first).toBeFocused()
-  await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /41 input accepted/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
@@ -590,14 +590,14 @@ test('keeps palette selection commands focused on the Session timeline', async (
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  const timeline = page.getByRole('grid', { name: 'Session timeline' })
   await expect(timeline).toBeVisible()
 
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await page.getByRole('button', { name: /Select next timeline item/ }).click()
 
   await expect(timeline).toBeFocused()
-  await expect(page.getByRole('option', { name: /42 turn activated/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /42 turn activated/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
@@ -614,7 +614,7 @@ test('preserves the saved row when reopening the current Session fails', async (
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  await page.getByRole('option', { name: /43 turn completed/ }).click()
+  await page.getByRole('row', { name: /43 turn completed/ }).click()
 
   failTimeline = true
   await sessionId.press('Enter')
@@ -652,7 +652,7 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  await page.getByRole('option', { name: /43 turn completed/ }).click()
+  await page.getByRole('row', { name: /43 turn completed/ }).click()
 
   await sessionId.fill(otherSessionId)
   await sessionId.press('Enter')
@@ -691,7 +691,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeVisible()
 
   failTimeline = true
   await page.getByRole('button', { name: /Latest/ }).click()
@@ -699,7 +699,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   await expect(page.getByRole('alert')).toContainText(
     'The daemon could not provide this bounded session window',
   )
-  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toHaveCount(0)
+  await expect(page.getByRole('grid', { name: 'Session timeline' })).toHaveCount(0)
   await expect(page.getByLabel('Inspector').getByText(sessionWorkspaceFixture.id)).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
   expect(
@@ -724,7 +724,7 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
-  await expect(page.getByRole('option', { name: /43 turn completed/ })).toBeVisible()
+  await expect(page.getByRole('row', { name: /43 turn completed/ })).toBeVisible()
 
   contradictRetainedEvent = true
   await page.getByRole('button', { name: /Latest/ }).click()

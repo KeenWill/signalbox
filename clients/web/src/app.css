@@ -2928,11 +2928,11 @@ kbd {
   background: var(--border);
   list-style: none;
 }
-.session-timeline [role="option"] {
+.session-timeline [role="row"] {
   background: var(--surface-2);
   box-shadow: inset 2px 0 transparent;
 }
-.session-timeline [role="option"].selected {
+.session-timeline [role="row"].selected {
   background: var(--accent-muted);
   box-shadow: inset 2px 0 var(--accent);
 }

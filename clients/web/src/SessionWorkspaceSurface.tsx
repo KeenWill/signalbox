@@ -635,6 +635,7 @@ export function SessionWorkspaceSurface({
                 limits={transcriptLimits}
               />
             )}
+          {/* biome-ignore lint/a11y/useSemanticElements: The bounded timeline uses a scrollable ARIA grid. */}
           <div
             className={`session-timeline presentation-${app.detail}`}
             aria-label="Session timeline"
@@ -644,7 +645,7 @@ export function SessionWorkspaceSurface({
                 : undefined
             }
             ref={timelineRef}
-            role="listbox"
+            role="grid"
             tabIndex={0}
             onKeyDown={handleTimelineKeyDown}
           >
@@ -652,13 +653,15 @@ export function SessionWorkspaceSurface({
               const id = item.address.event_sequence
               const isExpanded = expanded.has(id)
               return (
+                // biome-ignore lint/a11y/useSemanticElements: Expanded timeline rows use the scrollable grid layout.
                 <div
                   id={`session-timeline-option-${id}`}
                   key={id}
-                  role="option"
+                  role="row"
                   aria-controls={`session-timeline-detail-${id}`}
                   aria-describedby={`session-timeline-disclosure-${id}`}
                   aria-selected={selected === id}
+                  aria-expanded={isExpanded}
                   tabIndex={-1}
                   ref={(node) => {
                     if (node) rowRefs.current.set(id, node)
@@ -685,34 +688,37 @@ export function SessionWorkspaceSurface({
                     timelineRef.current?.focus()
                   }}
                 >
-                  <span id={`session-timeline-disclosure-${id}`} className="sr-only">
-                    {isExpanded ? 'Expanded' : 'Collapsed'}
-                  </span>
-                  <div className="session-item-summary">
-                    {isExpanded ? (
-                      <ChevronDown aria-hidden="true" />
-                    ) : (
-                      <ChevronRight aria-hidden="true" />
-                    )}
-                    <span className="session-address">{id}</span>
-                    <strong>{item.kind.replaceAll('_', ' ')}</strong>
-                    <small>{item.projected_structured_bytes} B</small>
-                  </div>
-                  {isExpanded && sessionId !== null && (
-                    <div id={`session-timeline-detail-${id}`} className="session-item-detail">
-                      {transcriptAvailable ? (
-                        <SessionItemDetail
-                          key={`${sessionId}:${id}`}
-                          sessionId={sessionId}
-                          item={item}
-                          limits={transcriptLimits}
-                          onComplete={() => timelineRef.current?.focus()}
-                        />
+                  {/* biome-ignore lint/a11y/useSemanticElements: Detail content uses the scrollable grid layout. */}
+                  <div role="gridcell" tabIndex={-1}>
+                    <span id={`session-timeline-disclosure-${id}`} className="sr-only">
+                      {isExpanded ? 'Expanded' : 'Collapsed'}
+                    </span>
+                    <div className="session-item-summary">
+                      {isExpanded ? (
+                        <ChevronDown aria-hidden="true" />
                       ) : (
-                        <p>Timeline detail is unavailable.</p>
+                        <ChevronRight aria-hidden="true" />
                       )}
+                      <span className="session-address">{id}</span>
+                      <strong>{item.kind.replaceAll('_', ' ')}</strong>
+                      <small>{item.projected_structured_bytes} B</small>
                     </div>
-                  )}
+                    {isExpanded && sessionId !== null && (
+                      <div id={`session-timeline-detail-${id}`} className="session-item-detail">
+                        {transcriptAvailable ? (
+                          <SessionItemDetail
+                            key={`${sessionId}:${id}`}
+                            sessionId={sessionId}
+                            item={item}
+                            limits={transcriptLimits}
+                            onComplete={() => timelineRef.current?.focus()}
+                          />
+                        ) : (
+                          <p>Timeline detail is unavailable.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )
             })}

@@ -143,7 +143,7 @@ const variants: Array<[WebSessionTimelineDetail['kind'], WebSessionTimelineDetai
     {
       type: 'goal_event',
       session_id: detailSessionId,
-      event: { type: 'session_closed', generation: '1', outcome: 'achieved_declared' },
+      event: { type: 'session_closed', generation: '1', outcome: 'stopped' },
     },
   ],
   [

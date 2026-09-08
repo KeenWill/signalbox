@@ -125,8 +125,7 @@ async function openDetails(page: Page, mismatch = false, override = false) {
   return reads
 }
 
-const toolRow = (page: Page) =>
-  page.getByRole('option').filter({ hasText: 'tool batch transition' })
+const toolRow = (page: Page) => page.getByRole('row').filter({ hasText: 'tool batch transition' })
 
 test('opens tool arguments and follows the typed result continuation', async ({ page }) => {
   const reads = await openDetails(page)
@@ -134,15 +133,18 @@ test('opens tool arguments and follows the typed result continuation', async ({ 
   await expect(page.getByRole('region', { name: 'Tool arguments' })).toContainText(
     'release status --json',
   )
+  const timeline = page.getByRole('grid', { name: 'Session timeline' })
+  expect(await timeline.ariaSnapshot()).toContain('button "Load next detail chunk"')
   await page.getByRole('button', { name: 'Load next detail chunk', exact: true }).press('Enter')
   await expect(page.getByRole('region', { name: 'Tool result' })).toContainText('"checks":"passed"')
   expect(reads.at(-1)?.searchParams.get('cursor_field')).toBe('tool_result')
   expect(reads.at(-1)?.searchParams.get('cursor_member')).toBe('0')
   await expect(page.getByRole('region', { name: 'Tool arguments' })).toHaveCount(0)
   await expect(toolRow(page)).toContainText('Tool result')
+  expect(await timeline.ariaSnapshot()).toContain('button "Return to event"')
   await expect(page.getByRole('button', { name: 'Return to event' })).toBeFocused()
   await page.keyboard.press('Enter')
-  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeFocused()
+  await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeFocused()
 })
 
 test('fails closed when detail belongs to a different event kind', async ({ page }) => {
@@ -154,18 +156,18 @@ test('fails closed when detail belongs to a different event kind', async ({ page
 
 test('opens approval and provider detail independently with the keyboard', async ({ page }) => {
   await openDetails(page)
-  await page.getByRole('option').filter({ hasText: 'tool approval decided' }).press('Enter')
+  await page.getByRole('row').filter({ hasText: 'tool approval decided' }).press('Enter')
   await expect(page.getByRole('region', { name: 'Approval rationale' })).toContainText(
     'operator decision',
   )
-  await page.getByRole('option').filter({ hasText: 'model call transition' }).press('Enter')
+  await page.getByRole('row').filter({ hasText: 'model call transition' }).press('Enter')
   await expect(page.getByRole('region', { name: 'Model response' })).toContainText('checks passed')
   await expect(page.getByRole('region', { name: 'Approval rationale' })).toBeVisible()
 })
 
 test('correlates an override approval with the denied request', async ({ page }) => {
   await openDetails(page, false, true)
-  await page.getByRole('option').filter({ hasText: 'tool approval decided' }).press('Enter')
+  await page.getByRole('row').filter({ hasText: 'tool approval decided' }).press('Enter')
   const detail = page.getByRole('article', {
     name: 'tool approval decided detail',
   })
@@ -182,7 +184,7 @@ test('captures sessions detail evidence', async ({ page, browserName }) => {
   await page.getByRole('button', { name: 'Load next detail chunk', exact: true }).click()
   await expect(page.getByRole('region', { name: 'Tool result' })).toBeVisible()
   await expect.soft(page).toHaveScreenshot('sessions-detail-desktop-dark.png')
-  await page.getByRole('option').filter({ hasText: 'tool approval decided' }).click()
+  await page.getByRole('row').filter({ hasText: 'tool approval decided' }).click()
   await page.getByRole('region', { name: 'Approval rationale' }).scrollIntoViewIfNeeded()
   await expect(page.getByRole('region', { name: 'Approval rationale' })).toBeVisible()
   await page.getByRole('button', { name: 'Use light theme' }).click()
