@@ -175,7 +175,8 @@ pub(crate) async fn require_recorded_batch(
             related_turn_origin,
             non_accepted_predecessor,
             existing_interrupt,
-        )?;
+        )
+        .await?;
         if recorded.insert(command_id, reconstructed).is_some() {
             return Err(
                 SubmitInputCorruption::Inconsistent("duplicate batched command row").into(),

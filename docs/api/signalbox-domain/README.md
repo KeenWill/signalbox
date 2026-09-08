@@ -4,6 +4,7 @@
 
 | Module | Types | Traits | Functions | Declarations |
 | --- | ---: | ---: | ---: | --- |
+| program_session | 2 | 1 | 0 | [program_session](program_session.md) |
 | accepted_input | 5 | 0 | 0 | [accepted_input](accepted_input.md) |
 | actor | 2 | 0 | 0 | [actor](actor.md) |
 | applied_interrupt | 2 | 0 | 0 | [applied_interrupt](applied_interrupt.md) |

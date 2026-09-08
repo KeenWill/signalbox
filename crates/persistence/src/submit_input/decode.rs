@@ -454,7 +454,7 @@ pub(super) fn decode_origin_runtime_state(
     }
 }
 
-pub(super) fn decode_complete(
+pub(super) async fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
     related_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
@@ -483,7 +483,8 @@ pub(super) fn decode_complete(
         row.try_get("actor_program_run_id")?,
         row.try_get("verified_actor_program_run_id")?,
         typed_version,
-    )?;
+    )
+    .await?;
     let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
     let session = session_id_from_uuid(required(&row, "command_session_id")?);
     let content = decode_content(required(&row, "command_content_parts")?, "command content")?;
@@ -504,14 +505,8 @@ pub(super) fn decode_complete(
         Actor::Program { run } => {
             SubmitInput::new_program(command_id, session, content, delivery, run)
         }
-        Actor::Model { turn } => {
-            SubmitInput::from_recorded_model(command_id, session, content, delivery, turn)
-        }
-        Actor::Tool { request } => {
-            SubmitInput::from_recorded_tool(command_id, session, content, delivery, request)
-        }
-        Actor::Recovery => {
-            SubmitInput::from_recorded_recovery(command_id, session, content, delivery)
+        Actor::Model { .. } | Actor::Tool { .. } | Actor::Recovery => {
+            SubmitInput::new(command_id, session, content, delivery)
         }
         Actor::Core => match delivery {
             DeliveryRequest::StartWhenNoActiveTurn { configuration } => {
@@ -673,7 +668,7 @@ pub(super) fn decode_complete(
     };
 
     input
-        .reconstitute()
+        .reconstitute_recorded()
         .map_err(|error| SubmitInputCorruption::Domain(error.failure()).into())
 }
 

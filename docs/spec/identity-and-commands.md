@@ -57,12 +57,13 @@ session exists, and neither fact substitutes for the other.
 
 The program host's session capability verifies the retained run and fixes the
 submit-input actor; the reference confers no authority. Program input derives no
-authenticated principal and records `program` issuer provenance; it cannot
-settle a committed core closure. Submit-input writes version 4 and reads
-versions 3 and 4, preserving each row's stored actor kind. The `program`
-spelling carries only its run reference and is corruption in version 3. Actor
-identity participates in replay equality and hashing. Create-session carries no
-actor.
+authenticated principal and records `program` issuer provenance. Model, tool,
+and program input cannot settle a committed core closure. Model, tool, and
+recovery input records admit only replay of an existing command. Submit-input
+writes version 4 and reads versions 3 and 4, preserving each row's stored actor
+kind. The `program` spelling carries only its run reference and is corruption in
+version 3. Actor identity participates in replay equality and hashing.
+Create-session carries no actor.
 
 ## Design decisions
 

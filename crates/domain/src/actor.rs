@@ -38,6 +38,11 @@ pub enum Actor {
 /// use signalbox_domain::{ProgramActor, ProgramRunId};
 /// fn forge(run: ProgramRunId) { let _ = ProgramActor { run }; }
 /// ```
+///
+/// ```compile_fail
+/// use signalbox_domain::{ProgramActor, ProgramRunId};
+/// fn forge(run: ProgramRunId) { let _ = ProgramActor::from_recorded_run(run); }
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ProgramActor {
     run: ProgramRunId,
@@ -45,7 +50,7 @@ pub struct ProgramActor {
 
 impl ProgramActor {
     /// Reconstitutes attribution after the storage reader verifies the retained run reference.
-    pub const fn from_recorded_run(run: ProgramRunId) -> Self {
+    pub(crate) const fn from_recorded_run(run: ProgramRunId) -> Self {
         Self { run }
     }
 

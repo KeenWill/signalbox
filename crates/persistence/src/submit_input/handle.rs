@@ -114,6 +114,18 @@ where
         None => {}
     }
 
+    if matches!(
+        command.actor(),
+        signalbox_domain::Actor::Model { .. }
+            | signalbox_domain::Actor::Tool { .. }
+            | signalbox_domain::Actor::Recovery
+    ) {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "recorded actor has no fresh admission path",
+        )
+        .into());
+    }
+
     let issuer = principal
         .map(crate::command_registry::issuer_columns)
         .unwrap_or(("program", None));

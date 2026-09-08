@@ -22,7 +22,6 @@ pub enum Actor {
 pub struct ProgramActor {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ProgramActor {
-    pub const fn from_recorded_run(run: ProgramRunId) -> Self;
     pub const fn run(self) -> ProgramRunId;
 }
 ```

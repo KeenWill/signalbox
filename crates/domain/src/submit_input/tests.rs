@@ -4070,3 +4070,50 @@ fn program_submit_replay_compares_the_issuing_run_and_excludes_command_identity(
     assert_ne!(hash(&program(1, capability)), hash(&user));
     assert_ne!(hash(&program(1, capability)), hash(&program(1, other)));
 }
+
+#[test]
+fn stored_non_core_agency_requires_a_consistent_receipt_and_cannot_stamp_core() {
+    let command = start_command(1, "recorded input", 1);
+    for stored_actor in [
+        Actor::Model { turn: turn_id(2) },
+        Actor::Tool {
+            request: tool_request_id(3),
+        },
+        Actor::Recovery,
+    ] {
+        let receipt = SubmitInputReconstitutionInput::rejected_session_not_found(
+            SubmitInputRejectedSessionNotFoundReconstitutionInput {
+                command: command.clone(),
+                stored_actor,
+                result_session: command.session(),
+            },
+        )
+        .reconstitute_recorded()
+        .expect("matching recorded facts reconstruct");
+        assert_eq!(receipt.command().actor(), stored_actor);
+        assert!(
+            SubmitInputReconstitutionInput::rejected_session_not_found(
+                SubmitInputRejectedSessionNotFoundReconstitutionInput {
+                    command: command.clone(),
+                    stored_actor,
+                    result_session: session_id(99)
+                }
+            )
+            .reconstitute_recorded()
+            .is_err()
+        );
+    }
+    assert_eq!(
+        SubmitInputReconstitutionInput::rejected_session_not_found(
+            SubmitInputRejectedSessionNotFoundReconstitutionInput {
+                command: command.clone(),
+                stored_actor: Actor::Core,
+                result_session: command.session()
+            }
+        )
+        .reconstitute_recorded()
+        .expect_err("stored spelling cannot stamp core")
+        .failure(),
+        SubmitInputReconstitutionFailure::StoredActorMismatch
+    );
+}

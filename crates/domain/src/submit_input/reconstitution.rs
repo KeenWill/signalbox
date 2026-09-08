@@ -560,6 +560,22 @@ impl SubmitInputReconstitutionInput {
         &self.command
     }
 
+    /// Reconstructs stored non-core agency through complete receipt validation.
+    /// Core and program attribution must already be fixed by their construction paths.
+    pub fn reconstitute_recorded(
+        mut self,
+    ) -> Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError> {
+        if self.command.actor == Actor::User
+            && matches!(
+                self.stored_actor,
+                Actor::Model { .. } | Actor::Tool { .. } | Actor::Recovery
+            )
+        {
+            self.command.actor = self.stored_actor;
+        }
+        self.reconstitute()
+    }
+
     /// Reconstructs the complete recorded handling without authorizing an
     /// effect or claiming that a transaction committed.
     pub fn reconstitute(self) -> Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError> {

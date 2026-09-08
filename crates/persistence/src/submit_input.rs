@@ -672,7 +672,7 @@ fn require_all_absent(
     }
 }
 
-fn decode_actor(
+async fn decode_actor(
     kind: String,
     turn: Option<Uuid>,
     tool_request: Option<Uuid>,
@@ -690,10 +690,15 @@ fn decode_actor(
             version,
         ) {
             ("program", None, None, Some(run), Some(verified), 4) if run == verified => {
-                Ok(Actor::Program {
-                    run: signalbox_domain::ProgramActor::from_recorded_run(
-                        signalbox_domain::ProgramRunId::from_uuid(run),
-                    ),
+                let run = signalbox_domain::ProgramRunId::from_uuid(run);
+                signalbox_domain::program_session::ProgramSessionHost::new(
+                    StoredProgramRunReference { run },
+                )
+                .session_capability(run)
+                .await?
+                .map(|capability| capability.actor())
+                .ok_or_else(|| {
+                    SubmitInputCorruption::Inconsistent("program actor reference").into()
                 })
             }
             _ => Err(
@@ -1103,5 +1108,18 @@ fn map_registry_error(error: RegistryInspectionError) -> SubmitInputRepositoryEr
         RegistryInspectionError::Corruption(RegistryCorruption::ConflictingTypedRecords) => {
             SubmitInputCorruption::Inconsistent("typed command family").into()
         }
+    }
+}
+
+// Created only after the typed row's run equals its joined retained journal anchor.
+struct StoredProgramRunReference {
+    run: signalbox_domain::ProgramRunId,
+}
+
+impl signalbox_domain::program_session::ProgramRunVerifier for StoredProgramRunReference {
+    type Error = SubmitInputRepositoryError;
+
+    async fn verify_run(&self, run: signalbox_domain::ProgramRunId) -> Result<bool, Self::Error> {
+        Ok(self.run == run)
     }
 }

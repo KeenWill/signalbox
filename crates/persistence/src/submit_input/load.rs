@@ -286,6 +286,7 @@ pub(super) async fn load_from_connection(
         related.non_accepted_predecessor,
         existing_interrupt,
     )
+    .await
     .map(Some)
 }
 
@@ -316,7 +317,8 @@ pub(super) async fn load_existing_interrupt(
         predecessor.origin,
         predecessor.non_accepted_predecessor,
         None,
-    )?;
+    )
+    .await?;
     let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) = receipt.result()
     else {
         return Err(
@@ -1016,7 +1018,7 @@ pub(crate) async fn load_turn_origin_graph(
                     .ok_or(SubmitInputCorruption::Missing("turn origin predecessor"))
             })
             .transpose()?;
-        let receipt = decode_complete(row, command_id, dependency.clone(), None, None)?;
+        let receipt = decode_complete(row, command_id, dependency.clone(), None, None).await?;
         let reconstructed = match link.kind {
             StoredTurnOriginKind::Direct { .. } => {
                 let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
@@ -1106,7 +1108,8 @@ pub(crate) async fn load_turn_origin_graph(
                             Some(source_origin.clone()),
                             None,
                             None,
-                        )?;
+                        )
+                        .await?;
                         let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
                             interrupt_origin,
                         )) = interrupt_receipt.result()
@@ -1157,7 +1160,8 @@ pub(crate) async fn load_turn_origin_graph(
                                 Some(source_origin.clone()),
                                 None,
                                 None,
-                            )?;
+                            )
+                            .await?;
                             let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
                                 interrupt_origin,
                             )) = interrupt_receipt.result()

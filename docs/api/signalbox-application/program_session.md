@@ -5,40 +5,17 @@
 ## ProgramRunVerifier
 
 ```rust
-pub trait ProgramRunVerifier {
-    type Error;
-    fn verify_run(
-        &self,
-        run: signalbox_domain::ProgramRunId,
-    ) -> impl future::Future<
-        Output = result::Result<bool, <Self as program_session::ProgramRunVerifier>::Error>,
-    > + marker::Send;
-}
-```
-
-## ProgramSessionHost
-
-```rust
-pub struct ProgramSessionHost<Verifier> {/* private */}
-impl<Verifier: program_session::ProgramRunVerifier> program_session::ProgramSessionHost<Verifier> {
-    pub const fn new(verifier: Verifier) -> Self;
-    pub async fn session_capability(
-        &self,
-        run: signalbox_domain::ProgramRunId,
-    ) -> result::Result<
-        option::Option<program_session::ProgramSessionCapability>,
-        <Verifier as program_session::ProgramRunVerifier>::Error,
-    >;
-}
+pub use signalbox_domain::program_session::ProgramRunVerifier;
 ```
 
 ## ProgramSessionCapability
 
 ```rust
-pub struct ProgramSessionCapability {/* private */}
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl program_session::ProgramSessionCapability {
-    pub const fn reference(self) -> signalbox_domain::ProgramActor;
-    pub const fn actor(self) -> signalbox_domain::Actor;
-}
+pub use signalbox_domain::program_session::ProgramSessionCapability;
+```
+
+## ProgramSessionHost
+
+```rust
+pub use signalbox_domain::program_session::ProgramSessionHost;
 ```

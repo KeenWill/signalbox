@@ -24,6 +24,8 @@ mod model_call;
 mod model_execution;
 mod model_settings;
 mod program_journal;
+/// Host-verified program session attribution.
+pub mod program_session;
 mod provider_evidence;
 mod queue_order;
 mod rate_limit;

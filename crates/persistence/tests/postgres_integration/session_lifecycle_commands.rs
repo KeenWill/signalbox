@@ -1642,7 +1642,13 @@ async fn a_park_closure_settles_its_turn_and_preserves_failure_evidence()
         interrupt.session(),
         interrupt.content().clone(),
         interrupt.delivery(),
-        signalbox_domain::ProgramActor::from_recorded_run(program_run),
+        signalbox_persistence::program_journal::ProgramSessionHost::new(
+            signalbox_persistence::program_journal::ProgramJournalRepository::new(pool.clone()),
+        )
+        .session_capability(program_run)
+        .await?
+        .expect("run is retained")
+        .reference(),
     );
     let program_error = SubmitInputRepository::new(pool.clone())
         .handle(
@@ -1658,6 +1664,40 @@ async fn a_park_closure_settles_its_turn_and_preserves_failure_evidence()
             "session has a pending terminal handoff"
         ))
     ));
+    for stored_actor in [
+        signalbox_domain::Actor::Model { turn: parked.turn },
+        signalbox_domain::Actor::Tool {
+            request: signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(0x11fe_c231)),
+        },
+        signalbox_domain::Actor::Recovery,
+    ] {
+        let reconstructed =
+            signalbox_domain::SubmitInputReconstitutionInput::rejected_session_not_found(
+                signalbox_domain::SubmitInputRejectedSessionNotFoundReconstitutionInput {
+                    command: interrupt.clone(),
+                    stored_actor,
+                    result_session: session,
+                },
+            )
+            .reconstitute_recorded()
+            .expect("recorded fixture receipt is consistent")
+            .command()
+            .clone();
+        let error = SubmitInputRepository::new(pool.clone())
+            .handle(
+                reconstructed,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x11fe_c221)),
+                Some(successor),
+            )
+            .await
+            .expect_err("recorded provenance has no fresh admission path");
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+                "recorded actor has no fresh admission path"
+            ))
+        ));
+    }
     let interrupted = SubmitInputRepository::new(pool.clone())
         .handle_with_candidates_alias_resolver_as(
             interrupt,
