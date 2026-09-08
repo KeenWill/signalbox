@@ -430,6 +430,10 @@ pub fn parse_json_without_duplicate_members(
             maximum_container_entries: crate::MAX_OBSERVED_CONTAINER_ENTRIES,
         },
     )
+    .map_err(|error| match error {
+        JsonParseError::Invalid(error) => error,
+        JsonParseError::ContainerEntryLimit => serde_json::Error::custom(error),
+    })
 }
 
 /// Caller-labeled ceilings for structured JSON parsing.
@@ -441,22 +445,59 @@ pub struct JsonParseLimits {
     pub maximum_container_entries: u64,
 }
 
+/// Structured parsing failure, with container exhaustion distinct from invalid JSON.
+#[derive(Debug)]
+pub enum JsonParseError {
+    /// A container exceeds the caller's entry ceiling before its next value is built.
+    ContainerEntryLimit,
+    /// JSON syntax, duplicate members, depth, or node count is invalid.
+    Invalid(serde_json::Error),
+}
+
+impl fmt::Display for JsonParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ContainerEntryLimit => {
+                formatter.write_str("JSON container entries exceed the effective ceiling")
+            }
+            Self::Invalid(error) => fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for JsonParseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::ContainerEntryLimit => None,
+            Self::Invalid(error) => Some(error),
+        }
+    }
+}
+
 /// Parses structured JSON with caller-labeled node and container-entry ceilings.
 pub fn parse_json_without_duplicate_members_bounded(
     value: &str,
     limits: JsonParseLimits,
-) -> Result<serde_json::Value, serde_json::Error> {
-    let raw = serde_json::from_str::<Box<RawValue>>(value)?;
+) -> Result<serde_json::Value, JsonParseError> {
+    let raw = serde_json::from_str::<Box<RawValue>>(value).map_err(JsonParseError::Invalid)?;
     let mut budget = JsonParseBudget {
         remaining_nodes: limits.maximum_nodes,
         maximum_container_entries: limits.maximum_container_entries,
+        container_entry_limit_exceeded: false,
     };
-    parse_raw_json(raw.get(), 0, &mut budget)
+    parse_raw_json(raw.get(), 0, &mut budget).map_err(|error| {
+        if budget.container_entry_limit_exceeded {
+            JsonParseError::ContainerEntryLimit
+        } else {
+            JsonParseError::Invalid(error)
+        }
+    })
 }
 
 struct JsonParseBudget {
     remaining_nodes: u64,
     maximum_container_entries: u64,
+    container_entry_limit_exceeded: bool,
 }
 
 impl JsonParseBudget {
@@ -467,8 +508,13 @@ impl JsonParseBudget {
         Ok(())
     }
 
-    fn admits_container_entries(&self, entries: u64) -> bool {
-        entries <= self.maximum_container_entries
+    fn admits_container_entries(&mut self, entries: u64) -> bool {
+        if entries > self.maximum_container_entries {
+            self.container_entry_limit_exceeded = true;
+            false
+        } else {
+            true
+        }
     }
 }
 
@@ -757,6 +803,27 @@ mod tests {
         );
 
         assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn entry_limit_stops_before_constructing_the_next_nested_value() {
+        let input = r#"{"first":0,"second":{"duplicate":1,"duplicate":2}}"#;
+        let limited = parse_json_without_duplicate_members_bounded(
+            input,
+            JsonParseLimits {
+                maximum_nodes: 10,
+                maximum_container_entries: 1,
+            },
+        );
+        assert!(matches!(limited, Err(JsonParseError::ContainerEntryLimit)));
+        let admitted = parse_json_without_duplicate_members_bounded(
+            input,
+            JsonParseLimits {
+                maximum_nodes: 10,
+                maximum_container_entries: 2,
+            },
+        );
+        assert!(matches!(admitted, Err(JsonParseError::Invalid(_))));
     }
 
     #[test]
