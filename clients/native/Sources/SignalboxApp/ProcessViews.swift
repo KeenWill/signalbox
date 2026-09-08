@@ -469,15 +469,38 @@ struct ProcessSessionCreationSheet: View {
         if isLoading {
           ProgressView("Reading model aliases")
         } else {
-          Picker("Model alias", selection: $selectedAliasID) {
-            ForEach(aliases) { alias in
-              Text(
-                "\(alias.aliasID.rawValue) → \(alias.selectionID.rawValue.prefix(8))"
-              )
-              .tag(Optional(alias.aliasID))
+          VStack(alignment: .leading, spacing: 8) {
+            Text("Model alias")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+            Menu {
+              Picker("Model alias", selection: $selectedAliasID) {
+                ForEach(aliases) { alias in
+                  Text("\(alias.aliasID.rawValue) → \(alias.selectionID.rawValue.prefix(8))")
+                    .tag(Optional(alias.aliasID))
+                }
+              }
+            } label: {
+              VStack(alignment: .leading, spacing: 4) {
+                Text(selectedAliasID?.rawValue ?? "Choose model alias")
+                  .multilineTextAlignment(.leading)
+                  .fixedSize(horizontal: false, vertical: true)
+                if let alias = aliases.first(where: { $0.aliasID == selectedAliasID }) {
+                  Text("Selection \(alias.selectionID.rawValue.prefix(8))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+              }
+              .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .accessibilityLabel("Model alias")
+            .accessibilityValue(
+              aliases.first(where: { $0.aliasID == selectedAliasID }).map { alias in
+                "\(alias.aliasID.rawValue), selection \(alias.selectionID.rawValue)"
+              } ?? "None selected"
+            )
+            .accessibilityIdentifier("model-alias-picker")
           }
-          .accessibilityIdentifier("model-alias-picker")
           TextField("Optional system prompt", text: $systemPrompt, axis: .vertical)
             .lineLimit(3...10)
             .accessibilityIdentifier("system-prompt-field")
@@ -512,7 +535,10 @@ struct ProcessSessionCreationSheet: View {
         await loadAliases()
       }
     }
-    .frame(minWidth: 520, minHeight: 320)
+    .frame(minHeight: 320)
+    #if os(macOS)
+    .frame(minWidth: 520)
+    #endif
     .interactiveDismissDisabled(isCreating)
   }
 
@@ -1392,7 +1418,10 @@ private struct ProcessImportedContinuationSheet: View {
         selectedAliasID = viewModel.aliases.first?.aliasID
       }
     }
-    .frame(minWidth: 520, minHeight: 320)
+    .frame(minHeight: 320)
+    #if os(macOS)
+    .frame(minWidth: 520)
+    #endif
     .interactiveDismissDisabled(viewModel.isContinuing)
   }
 
