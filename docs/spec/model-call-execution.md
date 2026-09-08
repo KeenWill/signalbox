@@ -81,6 +81,10 @@ Only a successful estimate whose input plus full output reservation is at most
 transaction; otherwise the turn compacts. An estimate that returns no validated
 count falls through to ordinary uncounted activation.
 
+For a failed count with matching correlation, the bridge emits one warning with
+the safe failure evidence and session, turn, and model-call correlation;
+mismatched correlation remains an error.
+
 Anthropic ordinary calls enable provider-default server-side compaction only
 when the exact effective provider target's configured capabilities explicitly
 set `provider_compaction = true`; a missing or false capability disables it.
