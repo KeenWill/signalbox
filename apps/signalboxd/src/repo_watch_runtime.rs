@@ -448,7 +448,7 @@ impl RepositoryWatchRuntime {
         }
     }
 
-    /// Supervises configured workers and retains only idle control while disabled.
+    /// Supervises configured workers and checkout cleanup while disabled.
     pub async fn run(
         self,
         mut shutdown: watch::Receiver<bool>,
@@ -460,10 +460,7 @@ impl RepositoryWatchRuntime {
             }
             let (active, changed) = {
                 let state = self.state.lock().await;
-                (
-                    !state.paused && state.configuration.as_ref().is_some_and(|c| c.enabled()),
-                    state.changed.clone(),
-                )
+                (!state.paused, state.changed.clone())
             };
             if !active {
                 tokio::select! {
@@ -513,14 +510,8 @@ impl RuntimeState {
     }
 
     fn start_commands(&mut self, runtime: RepositoryWatchRuntime) {
-        if self
-            .configuration
-            .as_ref()
-            .is_some_and(|configuration| configuration.enabled())
-        {
-            let (shutdown, receiver) = watch::channel(false);
-            self.commands = Some((shutdown, tokio::spawn(runtime.run_commands(receiver))));
-        }
+        let (shutdown, receiver) = watch::channel(false);
+        self.commands = Some((shutdown, tokio::spawn(runtime.run_commands(receiver))));
     }
 
     fn health(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
