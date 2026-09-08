@@ -17,6 +17,7 @@ pub enum WorkspaceOutcome {
 ```rust
 pub enum WorkspaceError {
     Database(error::Error),
+    CommitAmbiguous(error::Error),
     Corruption(&'static str),
 }
 // derives: fmt::Debug

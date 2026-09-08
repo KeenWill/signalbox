@@ -24,6 +24,9 @@ pub enum WorkspaceError {
     /// A database operation failed.
     #[error("workspace database failure: {field_0}")]
     Database(#[source] sqlx::Error),
+    /// Commit failed without establishing whether the fact was stored.
+    #[error("workspace commit outcome is ambiguous: {field_0}")]
+    CommitAmbiguous(#[source] sqlx::Error),
     /// Stored values cannot reconstruct the recorded request.
     #[error("invalid workspace record: {field_0}")]
     Corruption(&'static str),
@@ -99,7 +102,13 @@ impl WorkspaceRepository {
                 WorkspaceCommandResult::Withdrawn(withdrawal)
             }
         };
-        tx.commit().await?;
+        tx.commit().await.map_err(|error| {
+            if crate::commit_failure_is_ambiguous(&error) {
+                WorkspaceError::CommitAmbiguous(error)
+            } else {
+                WorkspaceError::Database(error)
+            }
+        })?;
         Ok(WorkspaceOutcome::Applied(result))
     }
 }
