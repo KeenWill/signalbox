@@ -301,7 +301,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// The names no test on this class defines.
     /// The test a golden's file name belongs to, or `nil` if it names none.
     ///
-    /// A golden is written as `<test>.<canvas>[.<appearance>].png`, so the first
+    /// A golden is written as `<test>.<canvas>[-<appearance>].png`, so the first
     /// dot-separated component is the method that recorded it. The `test`
     /// prefix is required because a directory holds other files —
     /// `MANIFEST.sha256` next door is one — and a name that cannot be a test
@@ -312,7 +312,13 @@ final class LiveScreenSnapshotTests: XCTestCase {
         guard components.count >= 3 else { return nil }
         let name = String(components[0])
         guard name.hasPrefix("test") else { return nil }
-        return (name, String(components[1]))
+        let variant = String(components[1])
+        let canvas = SnapshotCanvas.allCases.first { canvas in
+            variant == canvas.rawValue || SnapshotAppearance.allCases.contains { appearance in
+                variant == "\(canvas.rawValue)-\(appearance.rawValue)"
+            }
+        }
+        return (name, canvas?.rawValue ?? variant)
     }
 
     /// The test a golden belongs to, discarding its canvas.
@@ -646,7 +652,7 @@ final class LiveScreenSnapshotTests: XCTestCase {
             "sheet"
         )
         XCTAssertEqual(
-            Self.goldenIdentity(ofFileNamed: "testSessionList.iphone-portrait.dark-large-text.png")?.canvas,
+            Self.goldenIdentity(ofFileNamed: "testSessionList.iphone-portrait-dark-large-text.png")?.canvas,
             "iphone-portrait"
         )
         XCTAssertNil(Self.goldenIdentity(ofFileNamed: "MANIFEST.sha256"))
@@ -899,6 +905,18 @@ final class LiveScreenSnapshotTests: XCTestCase {
         )
     }
 
+    func testReferenceLookupFindsTheCommittedLightSnapshot() {
+        let reference = liveScreenSnapshotReference(
+            file: #filePath, testName: "testSessionList()", name: "iphone-portrait"
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: reference.path))
+        let variant = liveScreenSnapshotReference(
+            file: #filePath, testName: "testSessionList()", name: "iphone-portrait-dark-large-text"
+        )
+        XCTAssertEqual(variant.lastPathComponent, "testSessionList.iphone-portrait-dark-large-text.png")
+        XCTAssertEqual(variant.deletingLastPathComponent(), reference.deletingLastPathComponent())
+    }
+
     func testTransportGateWithoutAConfiguredSocket() async {
         await assertScenarioSnapshot(.setup, canvas: .iPhonePortrait)
         await assertScenarioSnapshot(.setup, canvas: .iPhoneLandscape)
@@ -918,34 +936,14 @@ final class LiveScreenSnapshotTests: XCTestCase {
     /// the scenario names it, and the presenting controller is inside the
     /// canvas window, so this renderer does capture it.
     ///
-    /// Every canvas, including the portrait phone one that records the form
-    /// clipped — because that clipping is the application's and not the
-    /// canvas's. `ProcessSessionCreationSheet` declares `minWidth: 520`, and a
-    /// sheet presented on a horizontally compact phone gets that phone's width:
-    /// 390 points here, 402 on the `iPhone 17 Pro` this suite pins, and no
-    /// shipping iPhone reaches 520 in portrait. So the golden reading "cel" and
-    /// "Cr" where its buttons are, and "w Session" where its title is, is what
-    /// a portrait phone shows, and a reference for it is worth having twice
-    /// over: it is the only record of that presentation, and it is what will
-    /// change the day the declared minimum is reconciled with the devices the
-    /// sheet is presented on.
+    /// The iOS form has a 320-point minimum height and no minimum width; its
+    /// title, buttons, and model identity must fit the portrait phone canvas.
+    /// The 520-point minimum width applies only on macOS. The standalone
+    /// `SnapshotCanvas.sheet` also exercises the content at 540 points wide.
     ///
-    /// It was skipped until the review wave on debaa425 argued the opposite —
-    /// that the canvas was cutting into a presentation a device would not cut.
-    /// The arithmetic is what settles it: 390 and 402 are both far below 520,
-    /// so the canvas is reproducing the clip rather than causing it. What
-    /// `SnapshotCanvas.sheet` gives, at 540 points, is the content at the width
-    /// it asks for, which no phone canvas can be; that is a second question and
-    /// `testSessionCreationSheetContent` is where it is asked.
-    ///
-    /// The landscape phone canvas is not skipped, and the reason it once was
-    /// did not survive being looked at. It is 844 points wide, so nothing
-    /// clips; it is vertically compact, so the sheet presents full-screen the
-    /// way an iPhone in landscape presents one, and the golden shows the whole
-    /// form legible with the list fully covered. That is a presentation neither
-    /// iPad canvas records — those get the centred form sheet over a dimmed
-    /// list — so skipping it was dropping the only reference for a shape the
-    /// application ships.
+    /// The landscape phone canvas is vertically compact, so the sheet presents
+    /// full-screen. The iPad canvases exercise a centred form sheet over the
+    /// dimmed list.
     ///
     /// It also answers a question about this renderer worth writing down. The
     /// suite runs in one portrait scene and never rotates it, so a fair worry

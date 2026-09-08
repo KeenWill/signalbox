@@ -238,18 +238,18 @@ jobs:
       # difference to the failing test, so the result bundle is where a diff
       # lives. Exported unfiltered rather than with `--only-failures`: the three
       # images hang off an activity rather than off the failure itself, and that
-      # filter drops them, leaving an artifact of nothing but issue text. A run
-      # that took no failing snapshot has no attachments to export anyway.
-      # manifest.json maps each exported file to its name.
+      # filter drops them, leaving an artifact of nothing but issue text.
+      # Successful runs also attach renderings for missing appearance references
+      # and their coverage-gap notes. manifest.json maps each file to its name.
       - name: Export the native snapshot diffs
-        if: ${{ always() && steps.snapshots.outcome == 'failure' }}
+        if: ${{ always() && (steps.snapshots.outcome == 'success' || steps.snapshots.outcome == 'failure') }}
         continue-on-error: true
         run: |
           xcrun xcresulttool export attachments \
             --path "$RUNNER_TEMP/native-snapshots/SignalboxNative-Snapshots.xcresult" \
             --output-path "$RUNNER_TEMP/native-snapshot-diffs"
       - name: Upload the native snapshot diffs
-        if: ${{ always() && steps.snapshots.outcome == 'failure' }}
+        if: ${{ always() && (steps.snapshots.outcome == 'success' || steps.snapshots.outcome == 'failure') }}
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

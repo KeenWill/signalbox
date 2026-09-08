@@ -34,9 +34,7 @@ enum SnapshotCanvas: String, CaseIterable {
     case iPhoneLandscape = "iphone-landscape"
     case iPadPortrait = "ipad-portrait"
     case iPadLandscape = "ipad-landscape"
-    /// A sheet is not a screen: its content declares its own minimum size, and
-    /// rendering it on a phone-width canvas would record it clipped to a width
-    /// no presentation gives it.
+    /// Standalone sheet content, separate from a presented phone or iPad sheet.
     case sheet
 
     var size: CGSize {
@@ -244,9 +242,9 @@ extension SnapshotCanvas {
     /// what a vertically compact presentation does, and is not what the
     /// portrait scene would give it. Presentation geometry follows the canvas
     /// and these overrides; the scene's orientation does not reach it. The
-    /// portrait canvas of that same test is the control: it records the form
-    /// clipped at 390 points, so the two differ by the canvas rather than by
-    /// the scene they share.
+    /// portrait canvas of that same test exercises a 390-point-wide sheet.
+    /// The iOS form has a 320-point minimum height and no minimum width;
+    /// its content must fit the portrait canvas without horizontal clipping.
     ///
     /// What stays outside that measurement is anything reading the scene
     /// directly. Nothing in the application does — `interfaceOrientation` and
@@ -528,8 +526,24 @@ func assertLiveScreenSnapshot(
         XCTFail(unsupported, file: file, line: line)
         return
     }
+    let recordMode = liveScreenSnapshotRecordMode()
     for appearance in SnapshotAppearance.allCases {
+        let name = appearance == .light ? canvas.rawValue : "\(canvas.rawValue)-\(appearance.rawValue)"
+        let reference = liveScreenSnapshotReference(file: file, testName: testName, name: name)
         let rendering = await LiveScreenRenderer.render(view, canvas: canvas, appearance: appearance, file: file, line: line)
+        if appearance != .light && recordMode == .never && !FileManager.default.fileExists(atPath: reference.path) {
+            XCTContext.runActivity(named: "Snapshot coverage gap: \(reference.lastPathComponent)") { activity in
+                let gap = XCTAttachment(string: "Missing appearance reference: \(reference.lastPathComponent). Comparison skipped.")
+                gap.name = "Missing appearance reference"
+                gap.lifetime = .keepAlways
+                activity.add(gap)
+                let candidate = XCTAttachment(image: rendering)
+                candidate.name = reference.lastPathComponent
+                candidate.lifetime = .keepAlways
+                activity.add(candidate)
+            }
+            continue
+        }
         // The record mode is passed per assertion rather than installed around the
         // suite: `withSnapshotTesting` carries it in a task local, and XCTest runs
         // an async test body in a task that does not inherit one.
@@ -540,14 +554,27 @@ func assertLiveScreenSnapshot(
                 perceptualPrecision: 0.98,
                 scale: canvas.displayScale
             ),
-            named: appearance == .light ? canvas.rawValue : "\(canvas.rawValue).\(appearance.rawValue)",
-            record: liveScreenSnapshotRecordMode(),
+            named: name,
+            record: recordMode,
             fileID: fileID,
             file: file,
             testName: testName,
             line: line
         )
     }
+}
+
+/// The named PNG path used by SnapshotTesting, including its path sanitization.
+func liveScreenSnapshotReference(file: StaticString, testName: String, name: String) -> URL {
+    func sanitized(_ value: String) -> String {
+        value.replacingOccurrences(of: "\\W+", with: "-", options: .regularExpression)
+            .replacingOccurrences(of: "^-|-$", with: "", options: .regularExpression)
+    }
+    let source = URL(fileURLWithPath: "\(file)")
+    return source.deletingLastPathComponent()
+        .appendingPathComponent("__Snapshots__")
+        .appendingPathComponent(source.deletingPathExtension().lastPathComponent)
+        .appendingPathComponent("\(sanitized(testName)).\(sanitized(name)).png")
 }
 
 /// The one appearance input these goldens depend on that no canvas can pin.
@@ -589,9 +616,9 @@ func liveScreenSnapshotUnsupportedState(reduceTransparency: Bool) -> String? {
 
 /// The record mode the suite runs under.
 ///
-/// `never` by default so a missing golden fails instead of being written and
-/// silently passing on a retry. `SIGNALBOX_NATIVE_SNAPSHOT_RECORD` takes the
-/// library's own vocabulary — `all`, `missing`, `failed`, `never` — rather
+/// `never` by default so verification cannot rewrite references. Missing light
+/// references fail; missing appearance variants attach a recorded coverage gap.
+/// `SIGNALBOX_NATIVE_SNAPSHOT_RECORD` takes the library's own vocabulary — `all`, `missing`, `failed`, `never` — rather
 /// than a second one that would have to be kept in step with it.
 func liveScreenSnapshotRecordMode() -> SnapshotTestingConfiguration.Record {
     liveScreenSnapshotRecordMode(
