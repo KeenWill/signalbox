@@ -1639,6 +1639,7 @@ async fn a_park_closure_settles_its_turn_and_preserves_failure_evidence()
         );
     let registration = registrations
         .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
             signalbox_domain::program_registration::ProgramRegistrationRequest {
                 name: "program-lifecycle-fixture".into(),
                 revision: "fixture-revision".into(),

@@ -5452,6 +5452,7 @@ async fn program_submit_records_its_run_and_conflicts_with_user_replay()
         );
     let registration = registrations
         .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
             signalbox_domain::program_registration::ProgramRegistrationRequest {
                 name: "program-submit-fixture".into(),
                 revision: "fixture-revision".into(),

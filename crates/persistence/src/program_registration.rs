@@ -24,6 +24,8 @@ pub enum ProgramRegistrationError {
         source: sqlx::Error,
         commit_ambiguous: bool,
     },
+    #[error("program registration identity or revision is already bound differently")]
+    RegistrationConflict { registration: ProgramRegistrationId },
     #[error("program run is already bound differently")]
     RunConflict { run: ProgramRunId },
     #[error("program registration corruption: {field_0}")]
@@ -56,15 +58,17 @@ impl ProgramRegistrationRepository {
     /// Registers exact source bytes and a stripped artifact at the user boundary.
     pub async fn register_user(
         &self,
+        registration: ProgramRegistrationId,
         request: ProgramRegistrationRequest,
     ) -> Result<ProgramRegistration, ProgramRegistrationError> {
-        self.insert(request.into_content()).await
+        self.insert(registration, request.into_content()).await
     }
 
     /// Resolves the registrant's grants only through its durable registration.
     pub async fn register_child(
         &self,
         registrant: ProgramRunId,
+        registration: ProgramRegistrationId,
         request: ProgramRegistrationRequest,
     ) -> Result<ProgramRegistration, ProgramRegistrationError> {
         let content = request.into_content();
@@ -75,23 +79,24 @@ impl ProgramRegistrationRepository {
         if !parent.content.grants.permits_child(&content.grants) {
             return Err(ProgramRegistrationError::GrantsDenied);
         }
-        self.insert(content).await
+        self.insert(registration, content).await
     }
 
     async fn insert(
         &self,
+        id: ProgramRegistrationId,
         content: ProgramRegistrationContent,
     ) -> Result<ProgramRegistration, ProgramRegistrationError> {
         let registration = ProgramRegistration {
-            id: ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            id,
             artifact_digest: ProgramContentDigest::of(content.artifact.as_bytes()),
             content,
         };
         let mut transaction = self.pool.begin().await?;
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO program_registration
             (registration_id, name, revision, source_digest, artifact_digest, artifact, grants)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
         )
         .bind(registration.id.into_uuid())
         .bind(&registration.content.name)
@@ -111,6 +116,21 @@ impl ProgramRegistrationRepository {
         )
         .execute(&mut *transaction)
         .await?;
+        if inserted.rows_affected() == 0 {
+            let stored =
+                sqlx::query("SELECT * FROM program_registration WHERE registration_id = $1")
+                    .bind(id.into_uuid())
+                    .fetch_optional(&mut *transaction)
+                    .await?
+                    .map(decode)
+                    .transpose()?;
+            transaction.rollback().await?;
+            return if stored.as_ref() == Some(&registration) {
+                Ok(registration)
+            } else {
+                Err(ProgramRegistrationError::RegistrationConflict { registration: id })
+            };
+        }
         transaction
             .commit()
             .await
