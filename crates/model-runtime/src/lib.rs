@@ -80,11 +80,11 @@ pub use evidence::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, ProvenUnsentEvidence,
     ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderRequestId,
-    RateLimitSnapshot, RateLimitWindow, RefusalEvidence, RefusalReason, StreamInterruption,
-    TerminalEvidence, TerminalReport, ToolCallsAtLoss, TransportFacts, UnsentCause,
-    parse_retry_after,
+    RateLimitSnapshot, RateLimitWindow, RefusalEvidence, RefusalReason,
+    ResponseEnvelopeRejectionStage, StreamInterruption, TerminalEvidence, TerminalReport,
+    ToolCallsAtLoss, TransportFacts, UnsentCause, parse_retry_after,
 };
-pub use input_count::{InputTokenCountOutcome, ModelInputTokenCounter};
+pub use input_count::{InputTokenCountFailure, InputTokenCountOutcome, ModelInputTokenCounter};
 pub use message::{
     AssistantPart, ConversationMessage, ConversationRole, MessagePart, ToolResultRecord,
 };

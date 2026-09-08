@@ -3,9 +3,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use signalbox_model_runtime::{
-    CancellationSignal, InputTokenCountOutcome, MessagePart, ModelCapabilityCatalog,
-    ModelInputTokenCounter, ModelOperation, ModelRuntime, ObservationSink, PreparationDefect,
-    PreparationOutcome, TerminalReport,
+    CancellationSignal, InputTokenCountFailure, InputTokenCountOutcome, MessagePart,
+    ModelCapabilityCatalog, ModelInputTokenCounter, ModelOperation, ModelRuntime, ObservationSink,
+    PreparationDefect, PreparationOutcome, TerminalReport,
 };
 use signalbox_model_runtime_claude_cli::{
     ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
@@ -60,6 +60,7 @@ where
         let Some(runtime) = self.anthropic.as_ref() else {
             return InputTokenCountOutcome::Failed {
                 correlation: operation.correlation,
+                failure: InputTokenCountFailure::AdapterUnavailable,
             };
         };
         runtime.count_input_tokens(operation, cancellation).await
