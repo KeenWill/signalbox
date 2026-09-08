@@ -1,6 +1,7 @@
 //! Approval judge preparation and the approval guard over user, delegate, and automatic decisions.
 
 use crate::*;
+use signalbox_persistence::approval_judge::ApprovalJudgeRepositoryError;
 
 /// A second fixture tool, distinct from `APPROVAL_TOOL_NAME`, so a mixed batch
 /// can park one request for the judge without that request resembling the
@@ -703,6 +704,8 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
         "SELECT judge.state_kind AS judge_state,
                 judge.recommendation_kind AS recommendation,
+                judge.offered_recommendation_kind AS offered_recommendation,
+                judge.substitution_cause,
                 EXISTS (
                     SELECT 1 FROM tool_approval_decision
                      WHERE request_id = judge.request_id
@@ -733,6 +736,8 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
     assert_eq!(parked.judge_state, "terminal");
     assert_eq!(parked.recommendation, "escalate_to_human");
+    assert_eq!(parked.offered_recommendation, "escalate_to_human");
+    assert_eq!(parked.substitution_cause, None);
     assert!(!parked.decision_exists);
     assert_eq!(parked.active_phase, "awaiting_tool_approval");
     assert_eq!(parked.approval_tool_request_id, request.into_uuid());
@@ -844,6 +849,22 @@ async fn assert_judge_escalation_after_goal_stop(
             approval_judge_closed_result_entry,
         )
         .await?;
+    let mismatched_offer = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Deny,
+            ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?,
+            ProviderReportedTokenUsage::unreported(),
+            approval_judge_completion_identities(seed, seed + 0xe1),
+            |_| panic!("a mismatched replay cannot mint another result"),
+        )
+        .await
+        .expect_err("withdrawn authority cannot erase the exact offered recommendation");
+    assert!(matches!(
+        mismatched_offer,
+        ApprovalJudgeRepositoryError::Corruption(_)
+    ));
+
     if headless_loss {
         assert_eq!(
             outcome,
@@ -878,6 +899,8 @@ async fn assert_judge_escalation_after_goal_stop(
     let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
         "SELECT judge.state_kind AS judge_state,
                 judge.recommendation_kind AS recommendation,
+                judge.offered_recommendation_kind AS offered_recommendation,
+                judge.substitution_cause,
                 EXISTS (
                     SELECT 1 FROM tool_approval_decision
                      WHERE request_id = judge.request_id
@@ -898,6 +921,11 @@ async fn assert_judge_escalation_after_goal_stop(
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
     assert_eq!(parked.judge_state, "terminal");
     assert_eq!(parked.recommendation, "escalate_to_human");
+    assert_eq!(parked.offered_recommendation, "approve");
+    assert_eq!(
+        parked.substitution_cause.as_deref(),
+        Some("authority_withdrawn")
+    );
     assert!(!parked.decision_exists);
     assert_eq!(parked.active_phase, "awaiting_tool_approval");
     assert_eq!(parked.approval_tool_request_id, request.into_uuid());
@@ -1129,6 +1157,8 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
     let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
         "SELECT judge.state_kind AS judge_state,
                 judge.recommendation_kind AS recommendation,
+                judge.offered_recommendation_kind AS offered_recommendation,
+                judge.substitution_cause,
                 EXISTS (
                     SELECT 1 FROM tool_approval_decision
                      WHERE request_id = judge.request_id
@@ -1150,6 +1180,11 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
     assert_eq!(parked.judge_state, "terminal");
     assert_eq!(parked.recommendation, "escalate_to_human");
+    assert_eq!(parked.offered_recommendation, "approve");
+    assert_eq!(
+        parked.substitution_cause.as_deref(),
+        Some("authority_withdrawn")
+    );
     assert!(!parked.decision_exists);
     assert_eq!(parked.active_phase, "awaiting_tool_approval");
     assert_eq!(parked.approval_tool_request_id, request.into_uuid());
