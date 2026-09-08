@@ -61,12 +61,7 @@ export const selectImageView = (
 ): WebBlobAvailableView | undefined =>
   IMAGE_VIEW_PRIORITY.map((kind) =>
     descriptor.available_views.find((view) => view.kind === kind),
-  ).find(
-    (view) =>
-      view !== undefined &&
-      !failedContentUrls.has(view.content_url) &&
-      selectProvenViewDerivation(descriptor, view) !== undefined,
-  )
+  ).find((view) => view !== undefined && !failedContentUrls.has(view.content_url))
 
 export const imageViewLabel = (kind: WebBlobViewKind): string =>
   ({

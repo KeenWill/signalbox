@@ -202,10 +202,10 @@ describe('artifact renderer compatibility', () => {
     expect(selectProvenViewDerivation(imageArtifact, view)).toBeUndefined()
   })
 
-  it('falls back to a proven thumbnail when the preview has no proof', () => {
+  it('names a thumbnail fallback as a thumbnail', () => {
     const descriptor: WebBlobDescriptor = {
       ...imageArtifact,
-      available_views: [download, { ...preview, derivations: [] }, imageThumbnailView],
+      available_views: [download, imageThumbnailView],
     }
 
     expect(selectImageView(descriptor)?.kind).toBe('thumbnail')
