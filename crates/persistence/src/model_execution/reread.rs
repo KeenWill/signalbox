@@ -134,78 +134,58 @@ async fn tool_round_terminal_closure_matches(
         return Ok(false);
     }
     let call = observation.call().into_uuid();
-    let matches = stored_parts
-        .into_iter()
-        .zip(response.parts())
-        .all(|(stored, expected)| {
-            let payload_kind = stored.try_get::<String, _>("payload_kind").ok();
-            let assistant_text = stored
-                .try_get::<Option<String>, _>("assistant_text_value")
-                .ok()
-                .flatten();
-            let producing_call = stored
-                .try_get::<Option<Uuid>, _>("producing_model_call_id")
-                .ok()
-                .flatten();
-            let request = stored
-                .try_get::<Option<Uuid>, _>("assistant_tool_request_id")
-                .ok()
-                .flatten();
-            let tool_name = stored
-                .try_get::<Option<String>, _>("tool_name")
-                .ok()
-                .flatten();
-            let arguments_kind = stored
-                .try_get::<Option<String>, _>("arguments_kind")
-                .ok()
-                .flatten();
-            let arguments_text = stored
-                .try_get::<Option<String>, _>("arguments_text")
-                .ok()
-                .flatten();
-            match expected {
-                AssistantResponsePart::Text(expected) => {
-                    payload_kind.as_deref() == Some("assistant_text")
-                        && assistant_text.as_deref() == Some(expected.as_str())
-                        && producing_call == Some(call)
-                        && request.is_none()
-                        && tool_name.is_none()
-                        && arguments_kind.is_none()
-                        && arguments_text.is_none()
-                }
-                AssistantResponsePart::ProviderCompaction(expected) => {
-                    payload_kind.as_deref() == Some("provider_compaction")
-                        && assistant_text.as_deref() == Some(expected.as_json())
-                        && producing_call == Some(call)
-                        && request.is_none()
-                        && tool_name.is_none()
-                        && arguments_kind.is_none()
-                        && arguments_text.is_none()
-                }
-                AssistantResponsePart::ProviderReasoning(expected) => {
-                    payload_kind.as_deref() == Some("provider_reasoning")
-                        && assistant_text.as_deref() == Some(expected.as_json())
-                        && producing_call == Some(call)
-                        && request.is_none()
-                        && tool_name.is_none()
-                        && arguments_kind.is_none()
-                        && arguments_text.is_none()
-                }
-                AssistantResponsePart::ToolCall(expected) => {
-                    let expected_kind = match expected.arguments().kind() {
-                        signalbox_domain::ToolArgumentsKind::Json => "json",
-                        signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
-                    };
-                    payload_kind.as_deref() == Some("assistant_tool_use")
-                        && assistant_text.is_none()
-                        && producing_call == Some(call)
-                        && request.is_some()
-                        && tool_name.as_deref() == Some(expected.name().as_str())
-                        && arguments_kind.as_deref() == Some(expected_kind)
-                        && arguments_text.as_deref() == Some(expected.arguments().as_str())
-                }
+    let mut matches = true;
+    for (stored, expected) in stored_parts.into_iter().zip(response.parts()) {
+        let payload_kind: String = required(&stored, "payload_kind")?;
+        let assistant_text: Option<String> = stored.try_get("assistant_text_value")?;
+        let producing_call: Option<Uuid> = stored.try_get("producing_model_call_id")?;
+        let request: Option<Uuid> = stored.try_get("assistant_tool_request_id")?;
+        let tool_name: Option<String> = stored.try_get("tool_name")?;
+        let arguments_kind: Option<String> = stored.try_get("arguments_kind")?;
+        let arguments_text: Option<String> = stored.try_get("arguments_text")?;
+        matches &= match expected {
+            AssistantResponsePart::Text(expected) => {
+                payload_kind == "assistant_text"
+                    && assistant_text.as_deref() == Some(expected.as_str())
+                    && producing_call == Some(call)
+                    && request.is_none()
+                    && tool_name.is_none()
+                    && arguments_kind.is_none()
+                    && arguments_text.is_none()
             }
-        });
+            AssistantResponsePart::ProviderCompaction(expected) => {
+                payload_kind == "provider_compaction"
+                    && assistant_text.as_deref() == Some(expected.as_json())
+                    && producing_call == Some(call)
+                    && request.is_none()
+                    && tool_name.is_none()
+                    && arguments_kind.is_none()
+                    && arguments_text.is_none()
+            }
+            AssistantResponsePart::ProviderReasoning(expected) => {
+                payload_kind == "provider_reasoning"
+                    && assistant_text.as_deref() == Some(expected.as_json())
+                    && producing_call == Some(call)
+                    && request.is_none()
+                    && tool_name.is_none()
+                    && arguments_kind.is_none()
+                    && arguments_text.is_none()
+            }
+            AssistantResponsePart::ToolCall(expected) => {
+                let expected_kind = match expected.arguments().kind() {
+                    signalbox_domain::ToolArgumentsKind::Json => "json",
+                    signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
+                };
+                payload_kind == "assistant_tool_use"
+                    && assistant_text.is_none()
+                    && producing_call == Some(call)
+                    && request.is_some()
+                    && tool_name.as_deref() == Some(expected.name().as_str())
+                    && arguments_kind.as_deref() == Some(expected_kind)
+                    && arguments_text.as_deref() == Some(expected.arguments().as_str())
+            }
+        };
+    }
     Ok(matches)
 }
 
