@@ -118,6 +118,7 @@ async function openDetails(
           ...selected,
           body: {
             ...selected.body,
+            decision: 'approve',
             actor: {
               type: 'user_override',
               command_id: '00000000-0000-0000-0000-000000000123',

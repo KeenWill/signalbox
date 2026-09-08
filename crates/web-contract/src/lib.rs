@@ -3742,6 +3742,9 @@ function assertTimelineDetailPage(value) {{
         if (item.kind !== "tool_approval_decided") {{
           fail(`${{path}}.kind`, "tool_approval_decided for a tool_approval_decision body");
         }}
+        if (item.body.actor.type === "user_override" && item.body.decision !== "approve") {{
+          fail(`${{path}}.body.decision`, "approve for a user override");
+        }}
         if (item.body.approval_judge_escalated && !["user", "user_override"].includes(item.body.actor.type)) {{
           fail(
             `${{path}}.body.actor`,
@@ -3852,6 +3855,12 @@ function assertTimelineDetailPage(value) {{
           );
         }}
         if (
+          item.body.detail.type === "session_message" &&
+          item.body.detail.sender_session_id === item.body.detail.recipient_session_id
+        ) {{
+          fail(`${{path}}.body.detail.sender_session_id`, "a session other than the recipient");
+        }}
+        if (
           (item.body.detail.type === "child_spawned" ||
             item.body.detail.type === "child_waiting" ||
             item.body.detail.type === "child_result") &&
@@ -3904,6 +3913,7 @@ function assertTimelineDetailPage(value) {{
           const parentCommandValid =
             (detail.provenance.type === "parent_turn_command" ||
               detail.provenance.type === "parent_goal_command" || detail.provenance.type === "parent_lifecycle_command") &&
+            detail.provenance.session_id === value.session_id &&
             (detail.reason === "parent_stopped_with_descendants" ||
               detail.reason === "parent_cancelled_with_descendants") &&
             (detail.outcome === "child_stopped" ||

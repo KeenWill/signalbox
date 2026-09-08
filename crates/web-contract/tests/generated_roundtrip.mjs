@@ -3135,6 +3135,9 @@ test("override approval retains the command and overridden denial", () => {
   };
   page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.decision = "deny";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /approve for a user override/);
+  page.items[0].body.decision = "approve";
   delete page.items[0].body.actor.denied_request_id;
   assert.throws(() => decodeWebSessionTimelineDetailPage(page));
 });
@@ -3268,4 +3271,43 @@ test("creation details retain typed causes and require their originating identit
   }
   delete page.items[0].body.cause;
   assert.throws(() => decodeWebSessionTimelineDetailPage(page));
+});
+
+test("child results bind parent-command provenance to the enclosing session", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "delegation_update";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  const child = "00000000-0000-0000-0000-000000000992";
+  const unrelated = "00000000-0000-0000-0000-000000000993";
+  for (const provenance of [
+    { type: "parent_turn_command", session_id: page.session_id, turn_id: page.session_id, command_id: page.session_id },
+    { type: "parent_goal_command", session_id: page.session_id, goal_generation: "1", command_id: page.session_id },
+    { type: "parent_lifecycle_command", session_id: page.session_id, command_id: page.session_id },
+  ]) {
+    page.items[0].body = { type: "delegation", detail: {
+      type: "child_result", relationship_id: page.session_id, child_session_id: child,
+      outcome: "child_cancelled", reason: "parent_cancelled_with_descendants",
+      provenance, content: null,
+    } };
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+    for (const session of [child, unrelated]) {
+      provenance.session_id = session;
+      assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a durable delegation outcome shape/);
+    }
+  }
+});
+
+test("delegation messages require distinct sender and recipient sessions", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "delegation_update";
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  page.items[0].body = { type: "delegation", detail: {
+    type: "session_message", relationship_id: page.session_id, message_id: page.session_id,
+    sender_session_id: "00000000-0000-0000-0000-000000000992",
+    recipient_session_id: page.session_id, message_ordinal: "1", delivery_sequence: "1",
+    content: { text: "", offset_bytes: "0", total_bytes: "0", continuation: null },
+  } };
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  page.items[0].body.detail.sender_session_id = page.session_id;
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a session other than the recipient/);
 });
