@@ -35,19 +35,25 @@ const SessionTitle = ({ summary }: { summary: SessionSummary }) => (
 
 export function SessionCatalogSurface({
   returnSessionId,
+  lifecycleFilter,
+  pageOrder,
+  onLifecycleFilterChange,
+  onPageOrderChange,
   state,
   onStateChange,
   onTimelineIds,
 }: {
   returnSessionId?: string
+  lifecycleFilter: string
+  pageOrder: string
+  onLifecycleFilterChange: (value: string) => void
+  onPageOrderChange: (value: string) => void
   state: ProductSessionState
   onTimelineIds: (ids: readonly string[]) => void
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close' | 'replace') => void
 }) {
   const dispatch = useAppDispatch()
   const keyboardSelection = useAppSelector((root) => root.app.selectedTimeline)
-  const [lifecycleFilter, setLifecycleFilter] = useState('all')
-  const [pageOrder, setPageOrder] = useState('activity')
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const errorHeading = useRef<HTMLHeadingElement>(null)
@@ -242,7 +248,7 @@ export function SessionCatalogSurface({
               State{' '}
               <select
                 value={lifecycleFilter}
-                onChange={(event) => setLifecycleFilter(event.target.value)}
+                onChange={(event) => onLifecycleFilterChange(event.target.value)}
               >
                 <option value="all">All states</option>
                 {[
@@ -263,7 +269,7 @@ export function SessionCatalogSurface({
             </label>
             <label>
               Page order{' '}
-              <select value={pageOrder} onChange={(event) => setPageOrder(event.target.value)}>
+              <select value={pageOrder} onChange={(event) => onPageOrderChange(event.target.value)}>
                 <option value="activity">Catalog order</option>
                 <option value="failure">Last failure</option>
               </select>

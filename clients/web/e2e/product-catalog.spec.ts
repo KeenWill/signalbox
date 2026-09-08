@@ -253,6 +253,34 @@ test('returns browser Back focus to the row that opened a workspace', async ({
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+for (const returnMethod of ['Escape', 'Back'] as const) {
+  test(`retains catalog state and page order on ${returnMethod}`, async ({ page }) => {
+    const problems = watchBrowser(page)
+    await useCatalogFixture(page)
+    await page.goto('/sessions')
+    const lifecycle = page.getByRole('combobox', { name: /^State/ })
+    const order = page.getByRole('combobox', { name: /^Page order/ })
+    await lifecycle.selectOption('active')
+    await order.selectOption('failure')
+    const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
+    await expect(
+      page.getByRole('button', { name: firstPage.summaries[1].title_summary }),
+    ).toHaveCount(0)
+    await session.click()
+    await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+    if (returnMethod === 'Escape')
+      await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
+    else await page.goBack()
+    await expect(lifecycle).toHaveValue('active')
+    await expect(order).toHaveValue('failure')
+    await expect(session).toBeFocused()
+    await expect(
+      page.getByRole('button', { name: firstPage.summaries[1].title_summary }),
+    ).toHaveCount(0)
+    expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+  })
+}
+
 test('shows unavailable timelines after opening a catalog row', async ({ page }, testInfo) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
