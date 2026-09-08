@@ -342,6 +342,9 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::RunnerAbandonmentReceipt { .. }
         | ServerMessage::RunnerPromotionReceipt { .. }
         | ServerMessage::OauthCredentialAuthorization { .. }
+        | ServerMessage::WorkspaceRegistered { .. }
+        | ServerMessage::GitRemoteMinted { .. }
+        | ServerMessage::GitRemoteWithdrawn { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}

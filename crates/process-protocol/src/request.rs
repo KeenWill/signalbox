@@ -38,6 +38,20 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientRequest {
+    /// Register a directory resolved by the daemon operator boundary.
+    RegisterWorkspace { command_id: CommandId, root: String },
+    /// Mint an HTTPS Git remote for a registered workspace.
+    MintGitRemote {
+        command_id: CommandId,
+        workspace_id: CanonicalUuid,
+        name: String,
+        url: String,
+    },
+    /// Withdraw exactly one Git remote mint.
+    WithdrawGitRemote {
+        command_id: CommandId,
+        mint_id: CanonicalUuid,
+    },
     /// Cancel a retained program run through its journal.
     CancelProgramRun {
         command_id: CommandId,
@@ -781,6 +795,9 @@ impl ClientRequest {
             | Self::ReadDeploymentLimits {}
             | Self::ListSessions {}
             | Self::ReadOperatorStatus {}
+            | Self::RegisterWorkspace { .. }
+            | Self::MintGitRemote { .. }
+            | Self::WithdrawGitRemote { .. }
             | Self::ReloadConfiguration { .. }
             | Self::UpdateSessionPlacement { .. }
             | Self::ReadGoal { .. }
