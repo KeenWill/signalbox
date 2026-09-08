@@ -1,8 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
 
-// Tunable effective ceiling: absorb cross-host text rasterization drift (observed at 2.2%) while
-// preserving sensitivity to geometry and content regressions.
-const CROSS_HOST_TEXT_RASTERIZATION_TOLERANCE = 0.035
 // Tunable effective ceiling: two CI retries expose persistent browser failures without allowing
 // flakes to consume unbounded matrix time or pass after repeated attempts.
 const CI_BROWSER_RETRY_CEILING = 2
@@ -15,7 +12,7 @@ export default defineConfig({
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : 'list',
   expect: {
     toHaveScreenshot: {
-      maxDiffPixelRatio: CROSS_HOST_TEXT_RASTERIZATION_TOLERANCE,
+      maxDiffPixelRatio: 0,
     },
   },
   use: {

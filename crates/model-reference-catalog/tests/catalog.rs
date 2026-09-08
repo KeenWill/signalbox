@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, process::Command};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_model_reference_catalog::{
-    ActualBillingKind, BUNDLED_CATALOG_JSON, Catalog, CommercialChannel, MappingQuality,
-    PriceResolution, Provider, RateDimension, ReferenceResolution, bundled_catalog,
+    ActualBillingKind, BUNDLED_CATALOG_JSON, Catalog, CommercialChannel, DatePrecision,
+    MappingQuality, PriceResolution, Provider, RateDimension, ReferenceResolution, bundled_catalog,
     render_projections,
 };
 
@@ -168,6 +168,67 @@ fn exact_api_snapshots_keep_their_recorded_rate_sets() {
     assert_eq!(
         api_model_rate_set_ids(&catalog, "gpt-4o-2024-08-06", "2024-10-01"),
         Some(vec![String::from("oai-gpt4o-0806-caching")])
+    );
+}
+
+#[test]
+fn turbo_alias_pricing_starts_at_general_availability() {
+    let catalog = bundled_catalog().unwrap();
+    for date in ["2023-11-06", "2024-04-08"] {
+        assert_eq!(
+            catalog
+                .resolve(
+                    Provider::Openai,
+                    "gpt-4-turbo",
+                    date,
+                    CommercialChannel::Api
+                )
+                .unwrap(),
+            ReferenceResolution::Unknown,
+            "{date}"
+        );
+    }
+    assert_eq!(
+        api_model_rate_set_ids(&catalog, "gpt-4-turbo", "2024-04-09"),
+        Some(vec![String::from("oai-gpt4-turbo-launch")])
+    );
+}
+
+#[test]
+fn rolling_gpt4o_keeps_unrecovered_cutover_prices_unknown() {
+    let catalog = bundled_catalog().unwrap();
+    for date in [
+        "2024-05-13",
+        "2024-05-14",
+        "2024-08-05",
+        "2024-08-06",
+        "2024-09-30",
+    ] {
+        let resolution = catalog
+            .resolve(Provider::Openai, "gpt-4o", date, CommercialChannel::Api)
+            .unwrap();
+        assert_eq!(
+            resolution.price(),
+            Some(&PriceResolution::Unknown),
+            "{date}"
+        );
+    }
+    let observed = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-4o",
+            "2024-10-01",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let rates = observed.price().unwrap().resolved_rate_sets().unwrap();
+    assert_eq!(rates[0].id, "oai-gpt4o-alias-0806-caching");
+    assert_eq!(rates[0].window.precision, DatePrecision::ObservationWindow);
+    assert_eq!(rates[0].window.effective_from, None);
+    assert_eq!(rates[0].window.effective_until, None);
+    assert_eq!(
+        api_model_rate_set_ids(&catalog, "gpt-4o-2024-05-13", "2024-10-01"),
+        Some(vec![String::from("oai-gpt4o-launch")])
     );
 }
 
@@ -647,12 +708,19 @@ fn missing_price_is_unknown_not_zero() {
 #[test]
 fn query_after_the_evidence_horizon_is_unknown() {
     let catalog = bundled_catalog().unwrap();
+    let next_day = catalog
+        .verified_through(Provider::Openai)
+        .parse::<jiff::civil::Date>()
+        .unwrap()
+        .checked_add(jiff::Span::new().days(1))
+        .unwrap()
+        .to_string();
 
     let resolution = catalog
         .resolve(
             Provider::Openai,
             "gpt-5.6-sol",
-            "2026-09-04",
+            &next_day,
             CommercialChannel::Api,
         )
         .unwrap();

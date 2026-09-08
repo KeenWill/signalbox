@@ -16,8 +16,8 @@ use signalbox_application::{
 use signalbox_domain::{
     DurableCommandId, ReviewConfidence, ReviewExternalLinkId, ReviewFinding,
     ReviewFindingExternalLinkRef, ReviewFindingId, ReviewFindingRef, ReviewKey, ReviewPassEvidence,
-    ReviewPassId, ReviewPassRef, ReviewPolicy, ReviewPolicyVersion, ReviewRunEvidence, ReviewRunId,
-    ReviewRunRef, ReviewTargetId, ReviewText,
+    ReviewPassId, ReviewPassRef, ReviewPassState, ReviewPolicy, ReviewPolicyVersion,
+    ReviewRunEvidence, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId, ReviewText,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -1399,16 +1399,6 @@ impl PostgresReviewOrchestrationStore {
         Ok(ReviewConcernClaim::new(concern, template, outcome))
     }
 
-    async fn pass_ref(
-        &self,
-        pass: Option<ReviewPassId>,
-    ) -> Result<ReviewPassRef, ReviewOrchestrationStoreError> {
-        let mut transaction = begin_repeatable_read(&self.pool).await?;
-        let loaded = self.pass_ref_on_connection(&mut transaction, pass).await?;
-        transaction.commit().await?;
-        Ok(loaded)
-    }
-
     async fn pass_ref_on_connection(
         &self,
         connection: &mut PgConnection,
@@ -1493,10 +1483,41 @@ impl PostgresReviewOrchestrationStore {
                 ReviewConcernOutcome::Cancelled { pass } => *pass,
                 ReviewConcernOutcome::Succeeded(_) => None,
             };
-            if let Some(expected) = expected
-                && self.pass_ref(Some(expected.pass())).await? != expected
-            {
-                return Err(corruption("concern claim pass ancestry is not canonical"));
+            if let Some(expected) = expected {
+                let (pass, run) = self.load_evidence(expected.pass()).await?;
+                if pass.reference() != expected || run.reference() != expected.run() {
+                    return Err(corruption("concern claim pass ancestry is not canonical"));
+                }
+                let matches_terminal_state = match claim.outcome() {
+                    ReviewConcernOutcome::Failed { .. } => {
+                        matches!(pass.state(), ReviewPassState::Failed { .. })
+                            && run.state()
+                                == (ReviewRunState::Failed {
+                                    failed_pass: expected,
+                                })
+                    }
+                    ReviewConcernOutcome::Blocked { .. } => {
+                        matches!(pass.state(), ReviewPassState::Blocked { .. })
+                            && run.state()
+                                == (ReviewRunState::Blocked {
+                                    blocking_pass: expected,
+                                })
+                    }
+                    ReviewConcernOutcome::Cancelled { .. } => {
+                        matches!(pass.state(), ReviewPassState::Cancelled { .. })
+                            && run.state()
+                                == (ReviewRunState::Cancelled {
+                                    last_pass: Some(expected),
+                                })
+                    }
+                    ReviewConcernOutcome::Superseded { .. } => true,
+                    ReviewConcernOutcome::Succeeded(_) => false,
+                };
+                if !matches_terminal_state {
+                    return Err(corruption(
+                        "concern claim differs from canonical terminal evidence",
+                    ));
+                }
             }
         }
         Ok(())

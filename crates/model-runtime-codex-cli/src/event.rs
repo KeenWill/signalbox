@@ -20,7 +20,7 @@ use crate::app_server::{
     frame::{AgentMessage, TurnError, TurnStatus, UsageBreakdown},
 };
 use crate::translate::{ToolRequirement, TranslatedOperation};
-use crate::wire::{EnvelopeOutcome, ModelEnvelope};
+use crate::wire::{EnvelopeOutcome, EnvelopeToolCall, ModelEnvelope};
 
 fn reject_duplicate_json_members(line: &str) -> Result<(), DecodeFailure> {
     let duplicate = provider_json_has_duplicate_members(line)
@@ -632,7 +632,7 @@ impl<C: Clone> EventDecoder<C> {
             // receive string-carried arguments: string content is invisible to
             // the line-level and agent-message-level checks, and the shared
             // typed decoders admit only serde_json's recursion boundary.
-            validate_tool_argument_nesting(&call.arguments, &call.name)?;
+            validate_tool_argument_nesting(call)?;
             // The id consults the same held lookbehind the arguments do —
             // including the same-envelope final text — so an id extending a
             // credential marker gets a safe surrogate instead of leaking.
@@ -796,14 +796,11 @@ fn report_response_envelope_rejection(stage: &'static str) {
 /// Syntax and shape are deliberately not judged here: malformed and non-object
 /// text is authoritative proposal material the typed decoders classify. Failure
 /// detail names only the redacted tool name, never the argument text itself.
-fn validate_tool_argument_nesting(
-    arguments: &str,
-    tool_name: &str,
-) -> Result<(), ResponseEnvelopeFailure> {
-    validate_provider_json_nesting(arguments.as_bytes()).map_err(|error| {
+fn validate_tool_argument_nesting(call: &EnvelopeToolCall) -> Result<(), ResponseEnvelopeFailure> {
+    validate_provider_json_nesting(call.arguments.as_bytes()).map_err(|error| {
         ResponseEnvelopeFailure::new(
             "tool_arguments_nesting",
-            format!("tool `{}` arguments: {error}", redact_text(tool_name)),
+            format!("tool `{}` arguments: {error}", redact_text(&call.name)),
         )
     })
 }

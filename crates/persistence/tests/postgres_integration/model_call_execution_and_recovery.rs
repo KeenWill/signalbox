@@ -433,48 +433,135 @@ async fn expire_availability_backoff(
     Ok(())
 }
 
+async fn end_final_state_test_attempt(
+    connection: &mut sqlx::PgConnection,
+    turn: TurnId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+fn assert_missing_live_attempt(error: &sqlx::Error) {
+    let database = error
+        .as_database_error()
+        .expect("final-state constraint error");
+    assert_eq!(database.code().as_deref(), Some("23514"));
+    assert!(
+        database
+            .message()
+            .contains("requires its exact live attempt")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn deferred_final_state_validation_claims_are_typed_and_transaction_local()
+async fn direct_final_state_validation_rechecks_after_an_intervening_write()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let seed = 0x7730_u128;
-    let (_session, turn, _repository) = active_credential_pool_fixture(
+    let (_, turn, _) = active_credential_pool_fixture(
         &pool,
-        seed,
-        "claim-pool",
-        &["claim-member"],
+        0x7730,
+        "recheck-pool",
+        &["recheck-member"],
         CredentialPoolRuntimeAction::SwitchNow,
         CredentialPoolRuntimeAction::Quarantine,
     )
     .await?;
-
     let mut transaction = pool.begin().await?;
     sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
         .bind(turn.into_uuid())
         .execute(&mut *transaction)
         .await?;
-    let duplicate_turn_claim: bool =
-        sqlx::query_scalar("SELECT claim_deferred_final_state_validation('turn_lifecycle', $1)")
-            .bind(turn.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-    let distinct_kind_claim: bool =
-        sqlx::query_scalar("SELECT claim_deferred_final_state_validation('model_call', $1)")
-            .bind(turn.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-    assert!(!duplicate_turn_claim);
-    assert!(distinct_kind_claim);
+    end_final_state_test_attempt(&mut transaction, turn).await?;
+    let error = sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
+        .bind(turn.into_uuid())
+        .execute(&mut *transaction)
+        .await
+        .expect_err("the earlier assertion cannot authorize a later malformed state");
+    assert_missing_live_attempt(&error);
     transaction.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
 
-    let renewed_turn_claim: bool =
-        sqlx::query_scalar("SELECT claim_deferred_final_state_validation('turn_lifecycle', $1)")
-            .bind(turn.into_uuid())
-            .fetch_one(&pool)
-            .await?;
-    assert!(renewed_turn_claim);
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn deferred_final_state_validation_rechecks_after_an_immediate_drain()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_, turn, _) = active_credential_pool_fixture(
+        &pool,
+        0x7740,
+        "drain-pool",
+        &["drain-member"],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("UPDATE turn_attempt SET state_kind = state_kind WHERE turn_id = $1")
+        .bind(turn.into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+        .execute(&mut *transaction)
+        .await?;
+    end_final_state_test_attempt(&mut transaction, turn).await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("commit must check mutations made after the earlier drain");
+    assert_missing_live_attempt(&error);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn final_state_validation_rechecks_after_commit_on_the_same_connection()
+-> Result<(), Box<dyn Error>> {
+    use sqlx::Acquire as _;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_, turn, _) = active_credential_pool_fixture(
+        &pool,
+        0x7750,
+        "commit-pool",
+        &["commit-member"],
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    )
+    .await?;
+    let mut connection = pool.acquire().await?;
+    let mut transaction = connection.begin().await?;
+    sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
+        .bind(turn.into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    let mut transaction = connection.begin().await?;
+    end_final_state_test_attempt(&mut transaction, turn).await?;
+    let error = sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
+        .bind(turn.into_uuid())
+        .execute(&mut *transaction)
+        .await
+        .expect_err("a successful commit cannot suppress validation on the same connection");
+    assert_missing_live_attempt(&error);
+    transaction.rollback().await?;
+    drop(connection);
     pool.close().await;
     drop(container);
     Ok(())
@@ -2936,9 +3023,10 @@ pub(crate) async fn park_restart_ambiguity(
         PostgresStartupScanRepository::new(pool.clone()),
     );
     let outcome = scan.execute().await?;
-    assert_eq!(
-        outcome.awaiting_recovery_decision_sessions(),
-        &[parked.session]
+    assert!(
+        outcome
+            .awaiting_recovery_decision_sessions()
+            .contains(&parked.session)
     );
     Ok(parked)
 }
@@ -4915,5 +5003,55 @@ async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
 
     restarted_pool.close().await;
     drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn exhausted_page_settles_attempt_outside_abandoned_page() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    let spent = park_restart_ambiguity(&pool, 0xdc00).await?;
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
+        Some(2),
+        Some(Duration::from_secs(120)),
+        Some(Duration::from_secs(120)),
+    );
+    let first = repository.claim_due().await?;
+    repository
+        .record_failure(
+            first.claimed()[0],
+            AutomaticReconciliationFailureKind::Infrastructure,
+        )
+        .await?;
+    sqlx::query("UPDATE automatic_reconciliation SET next_attempt_at = statement_timestamp() WHERE turn_id = $1")
+        .bind(spent.turn.into_uuid()).execute(&pool).await?;
+    let final_attempt = repository.claim_due().await?.claimed()[0];
+    let retryable = park_restart_ambiguity(&pool, 0xe000).await?;
+    let earlier_attempt = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let page = repository.claim_due().await?;
+            if let Some(attempt) = page.claimed().first() {
+                break Ok::<_, Box<dyn Error>>(*attempt);
+            }
+        }
+    })
+    .await??;
+    sqlx::query(
+        "UPDATE automatic_reconciliation
+            SET next_attempt_at = statement_timestamp() - CASE WHEN turn_id = $1 THEN interval '2 seconds' ELSE interval '1 second' END",
+    ).bind(retryable.turn.into_uuid()).execute(&pool).await?;
+
+    let batch = repository.claim_due().await?;
+    let settled: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM automatic_reconciliation_attempt
+          WHERE ((turn_id = $1 AND attempt_ordinal = $2) OR (turn_id = $3 AND attempt_ordinal = $4))
+            AND outcome_kind = 'infrastructure_failure' AND finished_at IS NOT NULL ORDER BY turn_id",
+    ).bind(spent.turn.into_uuid()).bind(i32::try_from(final_attempt.attempt().get())?)
+        .bind(retryable.turn.into_uuid()).bind(i32::try_from(earlier_attempt.attempt().get())?)
+        .fetch_all(&pool).await?;
+    assert_eq!(batch.exhausted()[0].turn(), spent.turn);
+    assert_eq!(settled.len(), 2);
+    assert!(settled.contains(&spent.turn.into_uuid()));
+    assert!(settled.contains(&retryable.turn.into_uuid()));
     Ok(())
 }
