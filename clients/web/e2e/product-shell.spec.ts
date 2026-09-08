@@ -1353,6 +1353,30 @@ test('locks product navigation while an ambiguous continuation command is retain
   expect(problems.consoleErrors.every((error) => error === expectedResourceError)).toBe(true)
 })
 
+test('releases product navigation after a corrupt continuation rejection', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.route('**/api/imports/*/continuations', (route) =>
+    route.fulfill({
+      status: 500,
+      json: {
+        error: { kind: 'application', code: 'continuation_corrupt', message: 'Corrupt evidence.' },
+      },
+    }),
+  )
+  await page.goto(importsProductFixture.path)
+  await page
+    .getByRole('textbox', { name: 'Initial model selection UUID' })
+    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('alert')).toHaveText(
+    'The continuation request was rejected and cannot be retried unchanged.',
+  )
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toHaveCount(0)
+  await page.getByRole('link', { name: /Settings/ }).click()
+  await expect(page).toHaveURL(/\/settings$/)
+})
+
 test('runs advertised product navigation sequences', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
