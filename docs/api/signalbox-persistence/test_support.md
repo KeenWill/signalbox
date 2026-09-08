@@ -86,3 +86,14 @@ pub async fn goal_resumption_input(
     event: signalbox_domain::GoalEventOrdinal,
 ) -> result::Result<signalbox_domain::UserContent, goal::GoalRepositoryError>;
 ```
+
+## seed_historical_repository_checkout
+
+```rust
+#[cfg(feature = "test-support")]
+pub async fn seed_historical_repository_checkout(
+    pool: &sqlx_postgres::PgPool,
+    command: signalbox_domain::DurableCommandId,
+    head: &signalbox_domain::CommitSha,
+) -> result::Result<(), error::Error>;
+```

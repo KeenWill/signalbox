@@ -1283,40 +1283,11 @@ async fn removal_migration_settles_existing_checkouts_without_inventing_location
         .execute(&core)
         .await?;
     let module = module_pool(&url).await?;
-    let command = Uuid::now_v7();
-    let head = "a".repeat(40);
-    // The rule, event and command identities only need to satisfy the parent schema.
-    sqlx::query(
-        "WITH event AS (
-             INSERT INTO gh_event
-                 (event_id, content_identity, repository, event_kind, target_kind,
-                  pull_request_number, normalized_payload, recorded_at,
-                  frontier_generation, event_ordinal, producer, repository_event_ordinal)
-             VALUES (gen_random_uuid(), decode(repeat('00', 32), 'hex'),
-                     'checkout/project', 'pull_request_opened', 'pull_request',
-                     1, ''::bytea, now(), 1, 1, 'poll', 1)
-             RETURNING event_id
-         ), rule AS (
-             INSERT INTO rule_revision
-                 (repository, rule_id, revision, content_digest, activated_at,
-                  activated_after_event_ordinal)
-             VALUES ('checkout/project', 'checkout', 1,
-                     decode(repeat('00', 32), 'hex'), now(), 0)
-             RETURNING repository, rule_id, revision
-         )
-         INSERT INTO dispatch_ledger
-             (dispatch_ref, action_ordinal, command_id, repository, rule_id,
-              rule_revision, event_id, command_kind, command_payload,
-              created_session_id, status, issued_at, settled_at,
-              checkout_path, checkout_head_sha)
-         SELECT $1, 1, $1, rule.repository, rule.rule_id, rule.revision,
-                event.event_id, 'create_session', ''::bytea, gen_random_uuid(),
-                'applied', now(), now(), '.', $2
-         FROM event CROSS JOIN rule",
+    let command = DurableCommandId::from_uuid(Uuid::now_v7());
+    let head = CommitSha::try_new("a".repeat(40))?;
+    signalbox_persistence::test_support::seed_historical_repository_checkout(
+        &module, command, &head,
     )
-    .bind(command)
-    .bind(&head)
-    .execute(&module)
     .await?;
 
     migrate(&core).await?;
@@ -1325,10 +1296,19 @@ async fn removal_migration_settles_existing_checkouts_without_inventing_location
                 checkout_workspace_root IS NULL, checkout_session_id IS NULL
          FROM dispatch_ledger WHERE command_id = $1",
     )
-    .bind(command)
+    .bind(command.into_uuid())
     .fetch_one(&module)
     .await?;
-    assert_eq!(checkout, (String::from("."), head, true, true, true));
+    assert_eq!(
+        checkout,
+        (
+            String::from("."),
+            head.as_str().to_owned(),
+            true,
+            true,
+            true
+        )
+    );
     assert!(
         RepoWatchStore::new(module.clone())
             .checkout_removal_candidates()
