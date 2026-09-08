@@ -101,6 +101,8 @@ const entryAt = (conversation: string, position: number): WebImportedEntry => {
 }
 
 export class ScenarioImportApi implements ImportApi {
+  constructor(private readonly ambiguousFirst = false) {}
+
   private logicalTotal = SCENARIO_IMPORT_TOTAL
   private nextSessionIdentity = 9_000_000
   private readonly continuationSessions = new Map<string, string>()
@@ -205,6 +207,7 @@ export class ScenarioImportApi implements ImportApi {
       sessionId = fixtureUuid(this.nextSessionIdentity)
       this.nextSessionIdentity += 1
       this.continuationSessions.set(request.command_id, sessionId)
+      if (this.ambiguousFirst) throw new TypeError('Continuation response was interrupted')
     }
     return {
       command_id: request.command_id,

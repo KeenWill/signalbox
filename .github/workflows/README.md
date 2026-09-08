@@ -45,21 +45,23 @@ runs-on: ${{ github.event_name == 'pull_request'
   reopening or re-running a bot pull request would otherwise mask the bot and
   route its code to self-hosted hardware.
 
-`scripts/postgres_integration_suites.py` checks that PostgreSQL jobs consume the
-manifest matrix, use the Docker pool, and remain binding on `validate`.
+`scripts/postgres_integration_suites.py` generates the PostgreSQL matrix and
+executes each partition with manifest-derived Bazel arguments. Its workflow
+checks read the matrix binding, Docker pool, and `validate` dependency as YAML
+fields; they do not interpret shell commands.
 
 ## Jobs pinned to a self-hosted pool
 
 The smoke and eval workflows hard-code their pool instead of carrying the
-expression, each with its own (weaker) gate. The provider smokes merge-gate the
-pull requests they apply to — each `required` aggregate is a binding check —
-while the tool-eval and tool-smoke jobs are report-only:
+expression, each with its own gate. The provider smokes merge-gate the pull
+requests they apply to — each `required` aggregate is a binding check — while
+the tool-eval and tool-smoke jobs are report-only:
 
-| Jobs                                                                                                           | Pool                             | Gate on proposed code                                                                                                                                                                                |
-| -------------------------------------------------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `anthropic-smoke.yml`, `claude-smoke.yml`, `codex-smoke.yml`, `openai-smoke.yml` — `gate`, `smoke`, `required` | `signalbox`                      | `smoke` skips fork pull requests (same-repo check only), so bot-authored same-repo pull requests still run here; `gate` checks out the head for path inspection without executing it                 |
-| `tool-evals.yml` — `eligibility`, and the git/workspace/web `eval` families                                    | `signalbox` / `signalbox-docker` | `eval` skips fork pull requests; it skips Dependabot only by `github.actor`, so a human rerunning or reopening a bot pull request masks the bot — the author-not-actor warning above applies (#1461) |
-| `tool-smokes.yml` — `live-smokes`, `web-smoke`                                                                 | `signalbox`                      | none today: a fork pull request touching its paths executes there (#1461 tracks closing this)                                                                                                        |
+| Jobs                                                                                                           | Pool                             | Gate on proposed code                                                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `anthropic-smoke.yml`, `claude-smoke.yml`, `codex-smoke.yml`, `openai-smoke.yml` — `gate`, `smoke`, `required` | `signalbox`                      | `smoke` skips fork pull requests (same-repo check only), so bot-authored same-repo pull requests still run here; `gate` checks out the head for path inspection without executing it |
+| `tool-evals.yml` — `eligibility`, and the git/workspace/web `eval` families                                    | `signalbox` / `signalbox-docker` | `eval` requires same-repository pull requests whose author is neither Dependabot nor Renovate; eligibility applies the same author check                                             |
+| `tool-smokes.yml` — `live-smokes`, `web-smoke`                                                                 | `signalbox`                      | Both jobs require same-repository pull requests whose author is neither Dependabot nor Renovate; `web-smoke` is additionally disabled                                                |
 
 ## Jobs pinned to GitHub-hosted runners
 
@@ -67,13 +69,14 @@ The runner image has no `sudo` (pods run with `no-new-privileges`), no Nix, no
 `gh` CLI, or host-provided Playwright system dependencies. Jobs needing host
 facilities stay hosted for now, although this may change over time.
 
-| Job                                               | Why                                                   |
-| ------------------------------------------------- | ----------------------------------------------------- |
-| `bazel.yml` `bazel-host-integration`              | privileged cgroup delegation via `sudo`               |
-| `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`             |
-| `devenv-lock.yml` `relock`                        | Nix                                                   |
-| `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix) |
-| `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                 |
+| Job                                               | Why                                                           |
+| ------------------------------------------------- | ------------------------------------------------------------- |
+| `bazel.yml` `bazel-host-integration`              | privileged cgroup delegation via `sudo`                       |
+| `tool-evals.yml` exec family                      | `sudo` fixture installs into `/usr/local`                     |
+| `devenv-smoke.yml` `linux`                        | Nix; committed-lock evaluation and disposable script fixtures |
+| `devenv-lock.yml` `relock`                        | Nix                                                           |
+| `devenv-lock.yml` `propose`                       | `gh` CLI and the write token (the job never runs Nix)         |
+| `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                         |
 
 The `bazel-postgres` job uses the canonical routing expression with
 `signalbox-docker`, or `ubuntu-latest` for fork and named bot pull requests.
