@@ -150,6 +150,7 @@ pub(super) fn decode_prepared_usage_limit(
 }
 
 pub(super) struct SelectedRuntimePoolCredential {
+    pub(super) wait: Option<super::credential_wait::WaitSnapshot>,
     pub(super) reference: Option<ModelCallCredentialReference>,
     pub(super) policy: Option<CredentialPoolRuntimePolicy>,
     /// Uncommitted `switch_next_turn` rows this selection would satisfy.
@@ -238,10 +239,10 @@ pub(super) async fn load_availability_successor_backoff(
 
 /// Every member one pool currently excludes, with the rows a call would satisfy.
 pub(super) struct DurablePoolExclusions {
-    observed_at: sqlx::types::time::OffsetDateTime,
+    pub(super) observed_at: sqlx::types::time::OffsetDateTime,
     pub(super) excluded: HashSet<String>,
     pending_consumed_actions: Vec<i64>,
-    headroom: HashMap<String, Option<i64>>,
+    pub(super) headroom: HashMap<String, Option<i64>>,
 }
 
 use super::{credential_pool_evidence, credential_pool_records};
@@ -497,7 +498,8 @@ pub(super) async fn select_runtime_pool_credential(
                            successor.predecessor_model_call_id
                 ) AS rotated
            FROM credential_pool_availability_successor AS successor
-          WHERE successor.successor_turn_attempt_id = $1",
+          WHERE successor.successor_turn_attempt_id = $1
+          UNION ALL SELECT waiting.predecessor_model_call_id, true FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1 AND waiting.predecessor_model_call_id IS NOT NULL",
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)
@@ -542,24 +544,29 @@ pub(super) async fn select_runtime_pool_credential(
             (Some(policy), Some(reference), rotated)
         }
         None => (
-            policies.get(&serving_evidence.effective_target).cloned(),
+            credential_pool_records::session_policy(
+                connection,
+                session,
+                serving_evidence.effective_target,
+                policies,
+            )
+            .await?,
             None,
             false,
         ),
     };
     let Some(policy) = policy else {
         return Ok(SelectedRuntimePoolCredential {
+            wait: None,
             reference: Some(default_reference),
             policy: None,
             pending_consumed_actions: Vec::new(),
         });
     };
-    let DurablePoolExclusions {
-        observed_at,
-        excluded,
-        pending_consumed_actions: next_turn_actions,
-        headroom,
-    } = load_durable_pool_exclusions(connection, session, turn, &policy).await?;
+    let durable = load_durable_pool_exclusions(connection, session, turn, &policy).await?;
+    let observed_at = durable.observed_at;
+    let excluded = &durable.excluded;
+    let headroom = &durable.headroom;
     let sticky_reference = match predecessor_reference {
         // An availability successor continues its predecessor's chain, so the
         // chain position rather than session stickiness governs it.
@@ -620,7 +627,24 @@ pub(super) async fn select_runtime_pool_credential(
                 })
         })
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
+    let wait = if selected.is_none() && !(predecessor_reference.is_some() && !predecessor_rotated) {
+        super::credential_wait::exhaustion_snapshot(
+            connection,
+            session,
+            turn,
+            &policy,
+            serving_evidence.effective_target,
+            &durable,
+        )
+        .await?
+    } else {
+        None
+    };
+    let releasing_wait: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM credential_availability_wait WHERE wait_attempt_id = $1 AND consumed_by_attempt_id IS NULL) OR EXISTS (SELECT 1 FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1 AND waiting.predecessor_model_call_id IS NOT NULL)")
+        .bind(attempt.into_uuid()).fetch_one(&mut *connection).await?;
     if selected.is_none()
+        && wait.is_none()
+        && !releasing_wait
         && policy
             .members()
             .iter()
@@ -638,11 +662,12 @@ pub(super) async fn select_runtime_pool_credential(
         .await?;
     }
     let pending_consumed_actions = if selected.is_some() {
-        next_turn_actions
+        durable.pending_consumed_actions
     } else {
         Vec::new()
     };
     Ok(SelectedRuntimePoolCredential {
+        wait,
         reference: selected,
         policy: Some(policy),
         pending_consumed_actions,

@@ -1328,7 +1328,8 @@ async fn insert_prepared_accepted_activation(
         | ActiveTurnPhase::AwaitingApproval { .. }
         | ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared initial active phase",
             ));
@@ -1540,7 +1541,8 @@ async fn insert_prepared_delegated_activation(
         | ActiveTurnPhase::AwaitingApproval { .. }
         | ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared delegated initial phase",
             ));

@@ -13,6 +13,7 @@ mod blob;
 mod configuration;
 mod context_compaction;
 mod context_frontier;
+mod credential_availability;
 mod delivery_request;
 mod fatal_mismatch;
 mod git_remote;
@@ -81,6 +82,7 @@ pub use context_frontier::{
     ContextFrontier, ContextFrontierId, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
 };
+pub use credential_availability::{CredentialAvailabilityWait, CredentialAvailabilityWaitCause};
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use git_remote::{
     ConfiguredGitRemoteRecord, GitRemoteName, GitRemoteTextError, GitRemoteUrl,

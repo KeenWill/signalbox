@@ -211,7 +211,7 @@ pub(super) async fn require_live_execution_with_targets(
              SELECT 1
                FROM credential_pool_availability_successor
               WHERE successor_turn_attempt_id = $1
-         )",
+         ) OR EXISTS (SELECT 1 FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1 AND waiting.predecessor_model_call_id IS NOT NULL)",
     )
     .bind(current_attempt.id().into_uuid())
     .fetch_one(&mut *connection)
@@ -225,7 +225,7 @@ pub(super) async fn require_live_execution_with_targets(
         }
         None => None,
     };
-    let successor_snapshot = if availability_successor && call_snapshot.is_none() {
+    let successor_snapshot = if call_snapshot.is_none() {
         load_availability_predecessor_snapshot(
             connection,
             requested_session,
@@ -1069,7 +1069,8 @@ async fn load_availability_predecessor_snapshot(
            FROM credential_pool_availability_successor AS successor
            JOIN model_call AS predecessor
              ON predecessor.model_call_id = successor.predecessor_model_call_id
-          WHERE successor.successor_turn_attempt_id = $1",
+          WHERE successor.successor_turn_attempt_id = $1
+          UNION ALL SELECT waiting.frontier_id FROM credential_availability_wait_release release JOIN credential_availability_wait waiting USING (wait_attempt_id) WHERE release.turn_attempt_id = $1",
     )
     .bind(attempt.into_uuid())
     .fetch_optional(&mut *connection)

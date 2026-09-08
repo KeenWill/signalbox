@@ -2398,6 +2398,7 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
                     | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::AttachmentUnavailable
+                    | ModelCallExecutionOutcome::WaitFailed(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
@@ -3135,6 +3136,7 @@ where
                     ModelCallExecutionOutcome::Checkpointed(_)
                     | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
+                    | ModelCallExecutionOutcome::WaitFailed(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
@@ -3338,6 +3340,7 @@ impl PostgresScriptedModelExecution {
                     | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::AttachmentUnavailable
+                    | ModelCallExecutionOutcome::WaitFailed(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)

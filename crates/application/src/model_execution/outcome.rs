@@ -7,6 +7,8 @@ use super::{
 /// Completed stage of one service invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCallExecutionOutcome {
+    /// A released credential wait terminalized through a fresh call-free attempt.
+    WaitFailed(Box<FailedModelCallTurn>),
     /// The scheduling hint no longer identifies runnable work.
     NoWork,
     /// Durable retry backoff remains before the successor may be prepared.

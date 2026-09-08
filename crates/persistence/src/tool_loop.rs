@@ -3595,7 +3595,8 @@ async fn persist_batch_decision(
         }
         ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(ToolLoopRepositoryError::InvalidTransition(
                 "approval command cannot enter recovery",
             ));

@@ -1410,6 +1410,15 @@ async fn quarantined_retry_with_an_eligible_fallback_keeps_the_generic_failure()
         CredentialPoolRuntimeAction::Quarantine,
     )
     .await?;
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4)));
+    let repository = repository.with_credential_pools(HashMap::from([(
+        target,
+        credential_wait::park_policy(
+            "retry-race-pool",
+            &["retry-member", "unauthorized-fallback"],
+        ),
+    )]));
     let mut repository = repository.with_same_credential_attempt_bound(
         std::num::NonZeroUsize::new(2).expect("fixture bound is non-zero"),
     );
@@ -4944,3 +4953,6 @@ async fn restart_mid_recovery_neither_loses_nor_double_applies_the_attempt()
     drop(container);
     Ok(())
 }
+
+#[path = "credential_wait.rs"]
+mod credential_wait;

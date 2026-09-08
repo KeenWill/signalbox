@@ -526,6 +526,17 @@ async fn load_delegated_parked_attachment_frontier(
                     "delegated model recovery snapshot invalid",
                 ))?
         }
+        ActiveTurnPhaseStorageKind::AwaitingCredentialAvailability => {
+            let wait =
+                crate::model_execution::credential_wait::load_phase(connection, session, turn)
+                    .await?;
+            load_call_snapshot(connection, session, wait.frontier())
+                .await?
+                .reconstitute()
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "credential wait frontier",
+                ))?
+        }
         ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery => {
             load_runner_recovery_source_snapshot(connection, session, turn)
                 .await

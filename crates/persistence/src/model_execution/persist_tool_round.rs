@@ -185,7 +185,8 @@ pub(super) async fn persist_tool_round(
         }
         ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(
                 ModelCallCorruption::Inconsistent("fresh tool round recovery phase").into(),
             );
@@ -277,14 +278,15 @@ pub(super) async fn persist_availability_successor(
     sqlx::query(
         "INSERT INTO credential_pool_availability_successor
             (predecessor_model_call_id, successor_turn_attempt_id, cause_kind,
-             retry_backoff_milliseconds, retry_not_before)
+             retry_backoff_milliseconds, retry_not_before, non_acceptance_proven)
          VALUES ($1, $2, $3, $4,
-                 transaction_timestamp() + ($4 * interval '1 millisecond'))",
+                 transaction_timestamp() + ($4 * interval '1 millisecond'), $5)",
     )
     .bind(successor.predecessor_call().id().into_uuid())
     .bind(successor.successor_attempt().id().into_uuid())
     .bind(encode_provider_failure_cause(cause))
     .bind(backoff_milliseconds)
+    .bind(successor.non_acceptance_proven())
     .execute(&mut *connection)
     .await?;
     let rows = sqlx::query(

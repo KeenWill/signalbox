@@ -597,7 +597,8 @@ where
         Some(signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. })
         | Some(signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. })
         | Some(signalbox_domain::ActiveTurnPhase::AwaitingChild { .. })
-        | Some(signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }) => {
+        | Some(signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. })
+        | Some(signalbox_domain::ActiveTurnPhase::AwaitingCredentialAvailability { .. }) => {
             return Ok(TransactionDecision::Rollback(
                 StartupScanSessionOutcome::NoActiveTurn,
             ));

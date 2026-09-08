@@ -1110,7 +1110,8 @@ async fn persist_successor_phase(
         }
         ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | ActiveTurnPhase::AwaitingRunnerRecovery { .. } => {
+        | ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+        | ActiveTurnPhase::AwaitingCredentialAvailability { .. } => {
             return Err(ApprovalJudgeCorruption::Inconsistent("delegate entered recovery").into());
         }
     }

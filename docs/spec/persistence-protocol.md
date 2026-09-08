@@ -589,6 +589,13 @@ from the tool-loop continuation origin, and stores its predecessor call,
 qualifying cause, and non-acceptance evidence atomically. What these rows mean
 is owned by [credential-availability](credential-availability.md).
 
+Credential admission freezes the session's policy revision before its first call
+or wait. A credential wait records that revision, every member's exclusion
+evidence, the latest frontier and optional deadline. Its released successor
+names the consumed wait and retains any predecessor call and non-acceptance
+proof. Release commits the successor's prepared call or terminal disposition
+with wait consumption; re-parking replaces evidence and deadline in place.
+
 Runner replacement and abandonment commit the placement move, terminal command
 result, and one runner-state-transition event per affected session atomically.
 Pinned replacement also appends its reference-only placement entry and checked

@@ -358,6 +358,22 @@ pub struct ModelCallExecution {
 }
 
 impl ModelCallExecution {
+    /// Borrows the exact frontier that a call-free admission consumes or retains.
+    pub const fn admission_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.current_snapshot
+    }
+    /// Ends a call-free admission attempt while retaining its transcript and turn slot.
+    pub fn yield_to_credential_availability(
+        &self,
+    ) -> Result<EndedTurnAttempt, ModelCallClosureError> {
+        if self.current_call.is_some() || !self.attempt_accepts_prepared_call() {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        self.current_attempt
+            .clone()
+            .end_without_stop(UnstoppedAttemptDisposition::YieldedToDurableWait)
+            .map_err(|_| ModelCallClosureError::CallStateMismatch)
+    }
     /// Borrows the checked active-turn facts that establish ownership.
     pub const fn active_turn(&self) -> &ActivatedTurn {
         &self.active_turn
@@ -993,6 +1009,7 @@ impl ModelCallExecution {
             .end_without_stop(UnstoppedAttemptDisposition::KnownFailure)
             .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
         Ok(AvailabilitySuccessorModelCallTurn {
+            non_acceptance_proven: observation.non_acceptance_proven(),
             session: self.session,
             turn: self.turn,
             predecessor_call: ended_call,
