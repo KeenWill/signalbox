@@ -239,7 +239,7 @@ const decodeResponse = async <Value>(
   if (contentLength !== null) {
     const declaredLength = Number(contentLength)
     if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
-      await response.body?.cancel()
+      await response.body?.cancel().catch(() => undefined)
       throw new ImportResponseTooLargeError()
     }
   }
@@ -300,12 +300,13 @@ export class HttpImportApi implements ImportApi {
   // The validation lifetime still applies: once it expires, the ordinary path revalidates.
   static withAdmittedBootstrap(
     _bootstrap: WebContractBootstrap,
+    validatedAt: number,
     bootstrapValidation = validateWebContractBootstrap,
     now = Date.now,
   ): HttpImportApi {
     const api = new HttpImportApi(bootstrapValidation, now)
     api.bootstrapValidationPromise = Promise.resolve()
-    api.bootstrapValidatedAt = now()
+    api.bootstrapValidatedAt = validatedAt
     return api
   }
 

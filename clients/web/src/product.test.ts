@@ -238,8 +238,8 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
-  it('cancels a bootstrap response beyond the declared JSON byte bound', async () => {
-    const cancel = vi.fn()
+  it('preserves the bootstrap size error when body cancellation fails', async () => {
+    const cancel = vi.fn().mockRejectedValue(new Error('cancellation failed'))
     vi.stubGlobal(
       'fetch',
       vi.fn(
