@@ -138,7 +138,9 @@ An absent configured bound leaves a deadline unbounded. An owned session in a
 deadline-bearing state with no deadline row is a violation.
 
 A park takes effect at the next scheduler admission. Work already in flight
-completes; any further pass waits for resume. A stop ends the active turn.
+completes; any further pass waits for resume. A stop ends the active turn. A
+park defers an armed automatic goal-resume attempt without spending it; the
+attempt rereads the goal and lifecycle before retrying.
 
 Verified achievement is recorded only when the declared finish check passes.
 

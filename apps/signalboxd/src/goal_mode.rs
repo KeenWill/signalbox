@@ -1016,9 +1016,9 @@ impl PostgresGoalPassDisposition {
                 tracing::info!(
                     session = %session.into_uuid(),
                     event_ordinal = blocked.get(),
-                    "automatic goal resumption abandoned a goal that moved on"
+                    "automatic goal resumption deferred until the goal and lifecycle are reread"
                 );
-                ResumeAttempt::Settled
+                ResumeAttempt::OwnershipDeferred
             }
             Ok(GoalCommandHandlingOutcome::TargetBusy {
                 session: blocking_session,
@@ -1167,7 +1167,7 @@ fn commit_is_ambiguous(error: &PostgresGoalPassDispositionError) -> bool {
 enum ResumeAttempt {
     /// The attempt resumed, was refused, or found nothing left to answer.
     Settled,
-    /// Another live target session deferred the attempt without spending a retry.
+    /// Lifecycle or target ownership deferred the attempt without spending a retry.
     OwnershipDeferred,
     /// Infrastructure prevented any answer, so the bounded retry is still owed.
     InfrastructureUnsettled,
@@ -1542,6 +1542,15 @@ fn continuation_disposition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signalbox_persistence::{
+        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+        disposable_test_container_labels, local_test_connection_options, migrate,
+    };
+    use testcontainers_modules::{
+        postgres::Postgres as TestPostgres,
+        testcontainers::{self, ImageExt, runners::AsyncRunner},
+    };
+
     use std::num::NonZeroU64;
 
     use signalbox_application::InProcessEligibilityWorkSource;
@@ -2661,5 +2670,186 @@ context_window_tokens = 200000
             error.operator_failure_cause_code(),
             "goal_disposition_database"
         );
+    }
+
+    const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+    const DATABASE_NAME: &str = "signalbox_goal_park";
+    const PARKED_GOAL_STATEMENT: &str = "Continue after the park clears";
+    const DATABASE_USER: &str = "signalbox";
+    const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+    async fn migrated_postgres()
+    -> Result<(testcontainers::ContainerAsync<TestPostgres>, PgPool), Box<dyn Error>> {
+        let container = TestPostgres::default()
+            .with_db_name(DATABASE_NAME)
+            .with_user(DATABASE_USER)
+            .with_password(DATABASE_PASSWORD)
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs(None))
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
+            .start()
+            .await?;
+        let host = container.get_host().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let database_url =
+            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(local_test_connection_options(&database_url)?)
+            .await?;
+        migrate(&pool).await?;
+        Ok((container, pool))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_module_park_preserves_the_automatic_resume_attempt() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let models = crate::configuration::checked_in_example_configuration()?;
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let creation = signalbox_domain::CreateSession::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            signalbox_domain::SessionCreationProvenance::module_dispatched(
+                signalbox_domain::ModuleDispatch::RepositoryWatch {
+                    dispatch: signalbox_domain::RepoWatchDispatchId::from_uuid(Uuid::now_v7()),
+                },
+            ),
+            signalbox_domain::SessionConfigurationDefaults::new(
+                signalbox_domain::ModelSelectionRequest::Direct(
+                    signalbox_domain::DirectModelSelection::from_uuid(Uuid::now_v7()),
+                ),
+            ),
+        )
+        .prepare(session)
+        .expect("the module session fixture is preparable");
+        signalbox_persistence::create_session::CreateSessionRepository::new(
+            pool.clone(),
+            models.session_credential_pin(),
+        )
+        .handle(creation)
+        .await?;
+        let failed_turn = TurnId::from_uuid(Uuid::now_v7());
+        let repository = GoalRepository::new(pool.clone());
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::now_v7()),
+                    session,
+                    GoalUserAction::Attach(GoalStatement::try_new(
+                        PARKED_GOAL_STATEMENT.to_owned(),
+                    )?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::now_v7()),
+                    failed_turn,
+                )),
+                |_| None,
+            )
+            .await?;
+        // Install the execution-failure boundary without running a model provider.
+        sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "UPDATE turn_lifecycle
+                SET state_kind = 'terminal', start_lineage_kind = 'first_in_session',
+                    immediate_predecessor_turn_id = NULL, starting_frontier_id = $2,
+                    terminal_frontier_id = $3, terminal_disposition_kind = 'failed',
+                    terminal_cause_kind = 'unclassified_failure'
+              WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await?;
+        sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO goal_event
+                (session_id, event_ordinal, generation, event_kind,
+                 blocked_reason, need, scheduler_turn_id)
+             VALUES ($1, 2, 1, 'blocked', 'execution_failure', 'retry the failed turn', $2)",
+        )
+        .bind(session.into_uuid())
+        .bind(failed_turn.into_uuid())
+        .execute(&pool)
+        .await?;
+        let lifecycle =
+            signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(pool.clone());
+        lifecycle
+            .park(
+                session,
+                signalbox_domain::SessionParkCause::ModulePark,
+                signalbox_domain::SessionParkResponder::Module {
+                    module: signalbox_domain::DispatchingModule::RepositoryWatch,
+                },
+                None,
+                signalbox_domain::LifecycleActor::Module {
+                    module: signalbox_domain::DispatchingModule::RepositoryWatch,
+                },
+            )
+            .await?;
+        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+            signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
+        );
+        let runtime =
+            PostgresGoalPassDisposition::new(pool.clone(), models, nudge, example_numeric_bounds());
+        let blocked = repository
+            .load_goal(session)
+            .await?
+            .expect("fixture goal exists")
+            .events()
+            .last()
+            .expect("fixture block exists")
+            .ordinal();
+        assert_eq!(
+            runtime.attempt_automatic_resume(session, blocked).await,
+            ResumeAttempt::OwnershipDeferred
+        );
+        assert_eq!(
+            runtime.attempt_automatic_resume(session, blocked).await,
+            ResumeAttempt::OwnershipDeferred
+        );
+        assert!(
+            lifecycle
+                .load(session)
+                .await?
+                .expect("fixture lifecycle exists")
+                .state()
+                .is_parked()
+        );
+        let commands: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+                .bind(automatic_resume_command(session, blocked).into_uuid())
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(commands, 0);
+        // A module release restores the projection while retaining the blocked goal.
+        sqlx::query(
+            "UPDATE session_lifecycle SET state_kind = 'blocked',
+                blocked_reason = 'execution_failure', blocked_cycle = 1,
+                parked_cause = NULL, parked_responder = NULL, parked_since = NULL
+             WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .execute(&pool)
+        .await?;
+        assert_eq!(
+            runtime.attempt_automatic_resume(session, blocked).await,
+            ResumeAttempt::Settled
+        );
+        assert!(matches!(
+            repository
+                .load_goal(session)
+                .await?
+                .expect("fixture goal exists")
+                .current()
+                .state(),
+            signalbox_domain::GoalState::Pursuing
+        ));
+        Ok(())
     }
 }
