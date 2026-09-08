@@ -289,7 +289,10 @@ A committed, client-visible transition becomes an event only through the outbox
 append on the same connection, inside the same transaction. No separate step
 publishes after the commit. Delivery is ordered and at-least-once, and consumers
 deduplicate by cursor. A runner transition event is validated against the
-placement revision it names, never against the session's current placement.
+placement revision it names, never against the session's current placement. Each
+nonterminal session state change appends a session-state-changed event from the
+lifecycle row in the same transaction; terminal transitions append the separate
+session-terminal event.
 
 Schemas whose names begin with `mod_` contain only derived or module-local
 state, which may be pruned. The transactional outbox is the sole immutable-fact
@@ -644,8 +647,6 @@ retaining registration and history.
 - Instruction admitted-set storage and its locks:
   [persistence-protocol design](../design/persistence-protocol.md).
 - Credential-pool state, capacity reservations, and availability-wait storage:
-  [persistence-protocol design](../design/persistence-protocol.md).
-- A producer for the session-state-changed outbox event:
   [persistence-protocol design](../design/persistence-protocol.md).
 - OAuth refresh member-availability wakeups:
   [persistence-protocol design](../design/persistence-protocol.md).
