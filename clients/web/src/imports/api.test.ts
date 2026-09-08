@@ -121,6 +121,7 @@ describe('HttpImportApi correlation', () => {
     )
     const api = HttpImportApi.withAdmittedBootstrap(
       admittedBootstrap,
+      now,
       bootstrapValidation,
       () => now,
     )
@@ -150,7 +151,7 @@ describe('HttpImportApi correlation', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(admittedBootstrap)))
       .mockResolvedValueOnce(catalogResponse())
     vi.stubGlobal('fetch', fetch)
-    const api = HttpImportApi.withAdmittedBootstrap(admittedBootstrap, undefined, () => now)
+    const api = HttpImportApi.withAdmittedBootstrap(admittedBootstrap, now, undefined, () => now)
 
     await api.list({ limit: 1 })
     now += 30_000
@@ -158,6 +159,23 @@ describe('HttpImportApi correlation', () => {
 
     expect(fetch).toHaveBeenCalledTimes(3)
     expect(fetch.mock.calls[1]?.[0]).toBe('/api/bootstrap')
+  })
+
+  it('revalidates an expired cached product admission before the first read', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const rejected = new TypeError('incompatible contract')
+    const revalidate = vi.fn<() => Promise<void>>().mockRejectedValue(rejected)
+    const api = HttpImportApi.withAdmittedBootstrap(
+      admittedBootstrap,
+      1_000,
+      revalidate,
+      () => 31_000,
+    )
+
+    await expect(api.list({ limit: 1 })).rejects.toBe(rejected)
+    expect(revalidate).toHaveBeenCalledOnce()
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('rejects a declared oversized catalog response before parsing it', async () => {

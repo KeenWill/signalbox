@@ -1,8 +1,13 @@
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { Provider } from 'react-redux'
 import { describe, expect, it } from 'vitest'
+import { ArtifactRenderer } from '../features/artifacts/ArtifactRenderer'
 import type { WebImportedEntry } from '../generated/web-contract.mjs'
+import { store } from '../state'
 import { projectImportedEntryArtifact } from './ImportedArtifactView'
 
-const attestedText = 'Attested source evidence.'
+const attestedText = 'A😀B'
 
 const importedText: WebImportedEntry = {
   frontier: {
@@ -26,7 +31,7 @@ describe('imported artifact projection', () => {
       displayName: 'Imported entry 8',
       kind: 'text',
       content: attestedText,
-      characterCount: [...attestedText].length,
+      characterCount: 3,
       sourceComplete: true,
     })
   })
@@ -42,6 +47,35 @@ describe('imported artifact projection', () => {
       content: attestedText,
       sourceComplete: false,
     })
+  })
+
+  it('renders a truncated imported prefix without claiming complete content', () => {
+    const artifact = projectImportedEntryArtifact({
+      ...importedText,
+      text: { kind: 'attested', leading_text: attestedText, completeness: 'truncated' },
+    })
+    const markup = renderToStaticMarkup(
+      createElement(
+        Provider,
+        // biome-ignore lint/correctness/noChildrenProp: ProviderProps requires children even with a child argument.
+        { store, children: null },
+        createElement(ArtifactRenderer, {
+          artifact,
+          commandContext: {
+            dispatch: store.dispatch,
+            getState: store.getState,
+            timelineIds: [],
+            artifactPreviewIds: [],
+            artifactOriginalIds: [],
+            focusTimeline: () => undefined,
+          },
+        }),
+      ),
+    )
+    expect(markup).toContain(
+      'Server-truncated source prefix shown; additional source content is not loaded.',
+    )
+    expect(markup).not.toContain('Complete bounded content shown')
   })
 
   it('keeps an imported document committed-unimplemented without a blob descriptor', () => {

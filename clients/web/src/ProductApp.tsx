@@ -656,8 +656,10 @@ export function ProductApp({
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.
   const productImportApi = useMemo(
     () =>
-      bootstrap.data === undefined ? null : HttpImportApi.withAdmittedBootstrap(bootstrap.data),
-    [bootstrap.data],
+      bootstrap.data === undefined
+        ? null
+        : HttpImportApi.withAdmittedBootstrap(bootstrap.data, bootstrap.dataUpdatedAt),
+    [bootstrap.data, bootstrap.dataUpdatedAt],
   )
   const context = useMemo<ProductCommandContext>(() => {
     // `productCommandRegistry` already carries the `imports.*` family behind `available()` gates;
