@@ -228,6 +228,9 @@ The publication result must cover the surviving inventory exactly; any failed,
 blocked, or cancelled member yields an incomplete publication outcome, never a
 complete one.
 
+The daemon sorts review-command findings by identity. Durable-command equality
+follows the [process protocol](process-protocol.md).
+
 Every review mutation carries a user-global command identity under the claim
 protocol
 [identity, commands, and telemetry correlation](identity-and-commands.md)

@@ -2,7 +2,8 @@
 
 :root {
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    var(--signalbox-font-sans, Inter), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
   color: var(--text);
   background: var(--canvas);
   font-synthesis: none;
@@ -118,7 +119,7 @@ kbd {
   background: var(--surface-3);
   color: var(--text-muted);
   font:
-    600 0.68rem / 1 ui-monospace,
+    600 0.68rem / 1 var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     Menlo,
     monospace;
@@ -239,7 +240,7 @@ kbd {
 .contract-state {
   color: var(--text-muted);
   font:
-    0.6rem ui-monospace,
+    0.6rem var(--signalbox-font-mono, ui-monospace),
     monospace;
   white-space: nowrap;
 }
@@ -319,7 +320,7 @@ kbd {
   border-radius: 999px;
   color: var(--warning);
   font:
-    600 0.58rem / 1 ui-monospace,
+    600 0.58rem / 1 var(--signalbox-font-mono, ui-monospace),
     monospace;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -366,7 +367,7 @@ kbd {
   padding: 0 0.3rem;
   color: var(--text-muted);
   font:
-    600 0.59rem / 1 ui-monospace,
+    600 0.59rem / 1 var(--signalbox-font-mono, ui-monospace),
     monospace;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -412,7 +413,7 @@ kbd {
 }
 .pane-preferences output {
   color: var(--text-muted);
-  font-family: ui-monospace, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), monospace;
 }
 .pane-preferences input {
   grid-column: 1 / -1;
@@ -596,7 +597,7 @@ kbd {
 .search-result-footer {
   color: var(--text-muted);
   font:
-    0.59rem ui-monospace,
+    0.59rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 .search-result-meta span {
@@ -633,7 +634,7 @@ kbd {
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
-  font-family: ui-monospace, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), monospace;
   text-align: right;
 }
 .artifact-inspector {
@@ -682,7 +683,7 @@ kbd {
   background: var(--canvas);
   color: var(--text);
   font:
-    0.62rem ui-monospace,
+    0.62rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 .artifact-inspector form button,
@@ -953,7 +954,7 @@ kbd {
 }
 .attention-judge strong {
   font:
-    0.68rem ui-monospace,
+    0.68rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 
@@ -1244,7 +1245,7 @@ kbd {
 .import-select small {
   color: var(--text-muted);
   font:
-    0.56rem ui-monospace,
+    0.56rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 .import-inspector {
@@ -1281,7 +1282,7 @@ kbd {
   min-width: 0;
   margin: 0;
   overflow: hidden;
-  font-family: ui-monospace, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1296,7 +1297,7 @@ kbd {
 }
 .continuation-form .continuation-result {
   color: var(--success);
-  font-family: ui-monospace, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), monospace;
 }
 .import-window {
   display: grid;
@@ -1324,7 +1325,7 @@ kbd {
   background: var(--surface-2);
   cursor: default;
 }
-.import-entry-row:hover {
+.import-entry-row:not([aria-disabled="true"]):hover {
   background: var(--surface-3);
 }
 .import-entry-row[aria-selected="true"] {
@@ -1334,7 +1335,7 @@ kbd {
 .import-position {
   color: var(--text-muted);
   font:
-    0.61rem ui-monospace,
+    0.61rem var(--signalbox-font-mono, ui-monospace),
     monospace;
   text-align: center;
 }
@@ -1352,7 +1353,7 @@ kbd {
 .import-entry-row p {
   overflow: hidden;
   font:
-    0.64rem ui-monospace,
+    0.64rem var(--signalbox-font-mono, ui-monospace),
     monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1388,7 +1389,7 @@ kbd {
 .import-artifact-view > header small {
   color: var(--text-muted);
   font:
-    0.57rem ui-monospace,
+    0.57rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 .import-artifact-view .artifact-row {
@@ -1657,7 +1658,7 @@ kbd {
   border-radius: 4px;
   color: var(--accent);
   font:
-    700 0.66rem ui-monospace,
+    700 0.66rem var(--signalbox-font-mono, ui-monospace),
     monospace;
 }
 .brand strong {
@@ -1819,7 +1820,7 @@ kbd {
 .window-count {
   color: var(--text-muted);
   font:
-    0.62rem ui-monospace,
+    0.62rem var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
 }
@@ -1860,7 +1861,7 @@ kbd {
   border-right: 1px solid var(--border);
   color: var(--text-muted);
   font:
-    0.58rem ui-monospace,
+    0.58rem var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
 }
@@ -1889,7 +1890,7 @@ kbd {
   overflow: hidden;
   color: var(--text-muted);
   font:
-    0.68rem / 1.4 ui-monospace,
+    0.68rem / 1.4 var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
   text-overflow: ellipsis;
@@ -1908,7 +1909,7 @@ kbd {
   padding: 0.72rem 0.45rem 0 0;
   color: var(--text-muted);
   font:
-    0.58rem ui-monospace,
+    0.58rem var(--signalbox-font-mono, ui-monospace),
     monospace;
   text-align: right;
 }
@@ -1959,7 +1960,7 @@ kbd {
   background: var(--surface-3);
 }
 .table-row > div:first-child {
-  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), SFMono-Regular, monospace;
 }
 .status {
   display: inline-flex;
@@ -2051,7 +2052,7 @@ kbd {
   color: var(--text);
   background: var(--canvas);
   font:
-    0.68rem ui-monospace,
+    0.68rem var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
 }
@@ -2078,7 +2079,7 @@ kbd {
   border-bottom: 1px solid var(--border);
   color: var(--text-muted);
   font:
-    0.58rem ui-monospace,
+    0.58rem var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
   white-space: nowrap;
@@ -2118,7 +2119,7 @@ kbd {
   overflow: hidden;
   color: var(--text-muted);
   font:
-    0.58rem ui-monospace,
+    0.58rem var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
   text-overflow: ellipsis;
@@ -2138,7 +2139,7 @@ kbd {
 .result-copy > span {
   overflow: hidden;
   font:
-    0.67rem ui-monospace,
+    0.67rem var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
   text-overflow: ellipsis;
@@ -2193,7 +2194,7 @@ kbd {
   overflow: hidden;
   color: var(--text-muted);
   font:
-    0.57rem ui-monospace,
+    0.57rem var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
   text-overflow: ellipsis;
@@ -2252,7 +2253,7 @@ kbd {
 .diagnostics dd {
   margin: 0;
   font:
-    0.61rem ui-monospace,
+    0.61rem var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
   text-align: right;
@@ -2267,7 +2268,7 @@ kbd {
   padding: 0.22rem 0;
   color: var(--text-muted);
   font:
-    0.58rem ui-monospace,
+    0.58rem var(--signalbox-font-mono, ui-monospace),
     SFMono-Regular,
     monospace;
   text-overflow: ellipsis;
@@ -2819,7 +2820,7 @@ kbd {
   border-radius: 3px;
   background: var(--surface-2);
   color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), SFMono-Regular, Menlo, monospace;
   font-size: 0.75rem;
 }
 .session-open-form button,
@@ -2870,7 +2871,7 @@ kbd {
 .session-workspace-header h2 {
   margin: 3px 0;
   overflow-wrap: anywhere;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), SFMono-Regular, Menlo, monospace;
   font-size: 0.82rem;
 }
 .session-workspace-header p {
@@ -2901,7 +2902,7 @@ kbd {
 .session-item-detail dd {
   margin: 2px 0 0;
   overflow-wrap: anywhere;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), SFMono-Regular, Menlo, monospace;
   font-size: 0.68rem;
   font-weight: 700;
 }
@@ -2922,7 +2923,7 @@ kbd {
 }
 .session-window-controls > span {
   margin-left: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), SFMono-Regular, Menlo, monospace;
   font-size: 0.62rem;
 }
 .session-timeline {
@@ -2961,7 +2962,7 @@ kbd {
 .session-address,
 .session-item-summary small {
   color: var(--text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--signalbox-font-mono, ui-monospace), SFMono-Regular, Menlo, monospace;
   font-size: 0.62rem;
 }
 .session-item-summary strong {

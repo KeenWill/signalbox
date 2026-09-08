@@ -679,6 +679,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
             completed();
         }
+        "tool_call_reserved_key" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-reserved-key","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                json_escape(fixtures::RESERVED_KEY_TOOL_ARGUMENTS)
+            ));
+            completed();
+        }
         "tool_call" => {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-1","name":"{}","arguments":"{}"}}]}}"#,

@@ -17,6 +17,7 @@ import {
   imageDownloadView,
   imageOriginalView,
   imagePreviewView,
+  imageThumbnailView,
   isSingleFrameJpegBytes,
   jpegDescriptor,
   jpegOriginalView,
@@ -202,10 +203,9 @@ describe('artifact renderer compatibility', () => {
   })
 
   it('names a thumbnail fallback as a thumbnail', () => {
-    const thumbnail = { ...preview, kind: 'thumbnail' as const }
     const descriptor: WebBlobDescriptor = {
       ...imageArtifact,
-      available_views: [download, thumbnail],
+      available_views: [download, imageThumbnailView],
     }
 
     expect(selectImageView(descriptor)?.kind).toBe('thumbnail')

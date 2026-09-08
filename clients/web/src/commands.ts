@@ -10,6 +10,7 @@ export interface CommandContext {
   artifactPreviewIds: readonly string[]
   artifactOriginalIds: readonly string[]
   artifactSelectionTarget?: string
+  removeAttachment?: () => void
   paneSize?: number
   submitSessionInput?: () => void
   sessionId?: string
@@ -75,6 +76,15 @@ const setTheme = (theme: ThemeMode) => (context: CommandContext) =>
   context.dispatch(actions.themeSet(theme))
 const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
+  {
+    id: 'artifact.attachment.remove',
+    title: 'Remove composer attachment',
+    description: 'Remove the attachment targeted by the invoking control.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => context.removeAttachment !== undefined,
+    run: (context) => context.removeAttachment?.(),
+  },
   {
     id: 'artifact.select',
     title: 'Select artifact',

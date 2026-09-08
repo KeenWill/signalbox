@@ -6,6 +6,21 @@ import { actions, selectApp, store } from './state'
 describe('command registry', () => {
   afterEach(() => vi.unstubAllGlobals())
 
+  it('removes a composer attachment only in a context that supplies removal', () => {
+    const removeAttachment = vi.fn()
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+    }
+    expect(commandById('artifact.attachment.remove').available(context)).toBe(false)
+    invokeCommand('artifact.attachment.remove', { ...context, removeAttachment })
+    expect(removeAttachment).toHaveBeenCalledOnce()
+  })
+
   it('registers every advertised product navigation sequence', () => {
     expect(globalHotkeySequenceBindings).toEqual(
       expect.arrayContaining([
