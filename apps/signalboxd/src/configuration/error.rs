@@ -181,12 +181,6 @@ pub enum HubModelConfigurationError {
     },
     /// One provider-native model spelling was routed to different adapters.
     ConflictingProviderModelRoute,
-    /// One adapter's model families resolved to more than one credential
-    /// profile, which this build's single runtime per adapter cannot serve.
-    ConflictingAdapterCredentialProfiles {
-        /// Build-provided adapter whose families disagreed.
-        adapter: ModelAdapter,
-    },
     /// A Codex mapping exists without its required process configuration.
     MissingCodexCliConfiguration,
     /// Codex paths were malformed, relative, or named no existing directory.
@@ -411,9 +405,6 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::ConflictingProviderModelRoute => {
                 "model configuration routes one provider model to conflicting adapters"
-            }
-            Self::ConflictingAdapterCredentialProfiles { .. } => {
-                "model configuration routes one adapter through conflicting credential profiles"
             }
             Self::MissingCodexCliConfiguration => {
                 "model configuration maps Codex CLI without Codex CLI settings"
