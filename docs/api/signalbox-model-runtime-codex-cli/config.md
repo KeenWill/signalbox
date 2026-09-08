@@ -19,7 +19,10 @@ pub struct CodexCliConfig {
     pub event_limit: usize,
     pub stderr_limit: usize,
 }
-// derives: fmt::Debug, clone::Clone
+// derives: clone::Clone
+impl fmt::Debug for CodexCliConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
 impl CodexCliConfig {
     pub fn new(
         executable: impl convert::Into<path::PathBuf>,

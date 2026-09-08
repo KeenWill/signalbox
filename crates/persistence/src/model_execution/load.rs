@@ -201,9 +201,33 @@ pub(super) async fn load_origin_contents(
 pub(super) async fn load_attachment_blob_facts(
     connection: &mut PgConnection,
     origin_contents: &[ModelCallOriginContent],
+    frontier_entries: &[SemanticTranscriptEntry],
+    pending_steering: &[PendingSteeringInput],
 ) -> Result<Vec<AttachmentBlobFact>, ModelCallRepositoryError> {
+    let projected =
+        signalbox_domain::ContextFrontierProjection::from_complete_entries(frontier_entries)
+            .map_err(|_| ModelCallCorruption::Inconsistent("attachment frontier projection"))?
+            .ordered_entries()
+            .collect::<BTreeSet<_>>();
+    let referenced_origins = frontier_entries
+        .iter()
+        .filter(|entry| projected.contains(&entry.reference()))
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+                Some(*accepted_input)
+            }
+            _ => None,
+        })
+        .chain(
+            pending_steering
+                .iter()
+                .map(PendingSteeringInput::accepted_input),
+        )
+        .collect::<BTreeSet<_>>();
     let digests = origin_contents
         .iter()
+        .filter(|origin| referenced_origins.contains(&origin.accepted_input()))
         .flat_map(|origin| origin.content().parts())
         .filter_map(|part| match part {
             signalbox_domain::UserContentPart::Attachment { digest, .. } => Some(*digest),

@@ -8,6 +8,7 @@ pub const REFUSAL_TEXT: &str = "request refused";
 pub const TOOL_NAME: &str = "lookup";
 pub const OTHER_TOOL_NAME: &str = "timezone";
 pub const TOOL_ARGUMENTS: &str = r#"{ "city" : "Oslo", "limit": 3 }"#;
+pub const RESERVED_KEY_TOOL_ARGUMENTS: &str = r#"{"$serde_json::private::Number":"1"}"#;
 pub const MALFORMED_TOOL_ARGUMENTS: &str = "not an argument object";
 pub const NON_OBJECT_TOOL_ARGUMENTS: &str = "7";
 pub const STRUCTURED_ACCEPTED: bool = true;

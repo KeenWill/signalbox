@@ -58,7 +58,7 @@ DECLARE
     function record;
     definition text;
 BEGIN
-    FOR function IN SELECT oid FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+    FOR function IN SELECT oid FROM pg_proc WHERE pronamespace = current_schema()::regnamespace
         AND prokind = 'f' AND prosrc LIKE '%''tool_closed_by_turn_end''%'
     LOOP
         definition := pg_get_functiondef(function.oid);
