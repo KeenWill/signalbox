@@ -13,6 +13,10 @@ async fn utf8_text_detects_validates_and_reads_exact_bytes() -> Result<(), Box<d
     let source = MemorySource::new(bytes);
 
     let inspection = support::inspect(&source, "text/plain").await?;
+    assert!(
+        matches!(&inspection, signalbox_file_media_runtime::FileInspection::Validated(file)
+        if file.validation() == signalbox_file_media_runtime::ValidationEvidence::StreamingTextValidation)
+    );
     support::assert_validated_media(inspection, "text/plain");
     let result = support::read(
         &source,
@@ -28,11 +32,11 @@ async fn utf8_text_detects_validates_and_reads_exact_bytes() -> Result<(), Box<d
 }
 
 #[tokio::test]
-async fn utf8_text_rejects_a_truncated_scalar_as_typed_malformed() -> Result<(), Box<dyn Error>> {
+async fn truncated_utf8_text_remains_unknown() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::truncated_utf8());
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_malformed_reason(inspection, "invalid_utf8");
+    support::assert_unknown(inspection);
     Ok(())
 }
 
@@ -42,16 +46,16 @@ async fn complete_source_json_probe_does_not_drop_invalid_utf8_suffix() -> Resul
     let source = MemorySource::new(vec![b'{', b'}', 0xc3]);
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_malformed_reason(inspection, "invalid_utf8");
+    support::assert_unknown(inspection);
     Ok(())
 }
 
 #[tokio::test]
-async fn utf8_text_rejects_oversized_input_with_registered_reason() -> Result<(), Box<dyn Error>> {
+async fn oversized_streaming_text_remains_unknown() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::oversized(b'a'));
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_malformed_reason(inspection, "source_too_large");
+    support::assert_unknown(inspection);
     Ok(())
 }
 
@@ -815,12 +819,7 @@ async fn csv_probe_ignores_a_partial_trailing_record() -> Result<(), Box<dyn Err
 #[tokio::test]
 async fn truncated_csv_probe_with_later_prose_resumes_text_fallback() -> Result<(), Box<dyn Error>>
 {
-    let mut bytes = b"name,value\nalpha,1\n".to_vec();
-    while bytes.len() < 4_096 {
-        bytes.extend_from_slice(b"beta,2\n");
-    }
-    bytes.extend_from_slice(b"plain prose\n");
-    let source = MemorySource::new(bytes);
+    let source = MemorySource::new(fixtures::csv_truncated_probe_with_trailing_prose());
 
     let inspection = support::inspect(&source, "text/plain").await?;
     support::assert_validated_media(inspection, "text/plain");
@@ -965,5 +964,14 @@ async fn registry_sanitizer_rejects_nul_bearing_decoder_output() -> Result<(), B
     )
     .await;
     support::assert_processor_failed(result);
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_declared_text_is_unknown_after_streaming_validation() -> Result<(), Box<dyn Error>>
+{
+    let source = MemorySource::new(fixtures::truncated_utf8());
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_unknown(inspection);
     Ok(())
 }

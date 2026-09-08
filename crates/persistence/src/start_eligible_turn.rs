@@ -665,6 +665,9 @@ async fn prepare_preview(
     requested_session: SessionId,
     identities: AcceptedInputTurnActivationIdentities,
 ) -> Result<Option<PreparedTurnActivation>, StartEligibleTurnRepositoryError> {
+    if session_runner_is_lost(connection, requested_session).await? {
+        return Ok(None);
+    }
     let session = match load_session_from_connection(connection, requested_session).await {
         Ok(Some(session)) => session,
         Ok(None) => return Ok(None),
@@ -1001,6 +1004,14 @@ async fn prepare_delegated_wake_preview(
     })
 }
 
+async fn session_runner_is_lost(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, StartEligibleTurnRepositoryError> {
+    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM runner_current_session_placement AS head JOIN runner_session_placement_record AS record USING (session_id, event_ordinal) WHERE head.session_id = $1 AND record.state_kind IN ('runner_lost', 'runner_lost_before_pin'))")
+        .bind(session.into_uuid()).fetch_one(&mut *connection).await?)
+}
+
 /// Whether the locked session is suspended in place.
 /// A held start gate keeps queued input from activating until `release_start`,
 /// including across a module park and resume.
@@ -1073,6 +1084,7 @@ async fn handle_in_transaction(
     // that lock rather than racing it.
     if session_refuses_new_work(connection, requested_session).await?
         || session_start_gate_is_held(connection, requested_session).await?
+        || session_runner_is_lost(connection, requested_session).await?
     {
         return Ok(TransactionDecision::Rollback(
             StartEligibleTurnOutcome::NoEligibleTurn,

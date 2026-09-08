@@ -617,7 +617,7 @@ fn absent_reference_publication_preserves_a_post_publish_replacement() {
         )
         .expect_err("post-publish replacement rejects publication");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read_to_string(reference_path).expect("actor replacement reference reads"),
         format!("{actor_target}\n")
@@ -727,7 +727,7 @@ fn exchanged_reference_publication_preserves_a_post_publish_replacement() {
         )
         .expect_err("post-publish replacement rejects publication");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read_to_string(reference_path).expect("actor replacement reference reads"),
         format!("{actor_target}\n")
@@ -1044,7 +1044,7 @@ fn reference_publication_preserves_a_directory_replacing_the_cleanup_path() {
         })
         .expect_err("cleanup-path directory rejects reference cleanup");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read_to_string(reference_path).expect("prepared live reference reads"),
         format!("{}\n", git2::Oid::ZERO_SHA1)
@@ -1077,7 +1077,7 @@ fn reference_publication_preserves_a_file_replacing_the_cleanup_path() {
         })
         .expect_err("cleanup-path file replacement rejects reference cleanup");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read_to_string(reference_path).expect("prepared live reference reads"),
         format!("{}\n", git2::Oid::ZERO_SHA1)
@@ -1117,7 +1117,7 @@ fn reference_publication_preserves_new_bytes_that_race_cleanup() {
         })
         .expect_err("racing publication rewrite rejects cleanup");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read_to_string(reference_path).expect("racing reference reads"),
         actor_target
@@ -1512,7 +1512,7 @@ fn absent_reference_rollback_preserves_a_replacement_after_validation() {
         )
         .expect_err("post-validation absent replacement rejects rollback");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read(reference_path).expect("actor publication replacement reads"),
         actor_replacement
@@ -1557,7 +1557,7 @@ fn exchange_rollback_preserves_a_displaced_replacement_after_validation() {
         )
         .expect_err("post-validation displaced replacement rejects rollback");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read_to_string(reference_path).expect("prepared live reference reads"),
         format!("{}\n", git2::Oid::ZERO_SHA1)
@@ -1625,7 +1625,7 @@ fn absent_reference_final_verification_preserves_a_racing_replacement() {
         })
         .expect_err("late absent-reference replacement rejects publication");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
         fs::read_to_string(reference_path).expect("actor reference replacement reads"),
         actor_target

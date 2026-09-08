@@ -2,7 +2,7 @@ use super::continuation::ToolContinuationHeadroomEvidence;
 use super::persist_disposition::{
     EndedCallEvidence, encode_token_usage, encode_tool_approval, encode_tool_decision_source,
     insert_snapshot, persist_ended_attempt, persist_ended_call_with_provider_failure_cause,
-    persist_ended_call_with_retained_usage, persist_tool_round_authority,
+    persist_ended_call_with_retained_usage, persist_tool_round_entries, persist_tool_round_record,
 };
 use super::persist_terminal::persist_failed_with_delegated_child_result;
 use super::prepared::map_tool_evidence_error;
@@ -30,6 +30,24 @@ pub(super) async fn persist_tool_round(
     retained_input_tokens: Option<u64>,
     retained_output_tokens: Option<u64>,
 ) -> Result<(), ModelCallRepositoryError> {
+    persist_tool_round_observation(
+        connection,
+        round,
+        usage,
+        retained_input_tokens,
+        retained_output_tokens,
+    )
+    .await?;
+    persist_observed_tool_round(connection, round, round.yielded_snapshot()).await
+}
+
+pub(super) async fn persist_tool_round_observation(
+    connection: &mut PgConnection,
+    round: &ToolRoundModelCallTurn,
+    usage: ProviderReportedTokenUsage,
+    retained_input_tokens: Option<u64>,
+    retained_output_tokens: Option<u64>,
+) -> Result<(), ModelCallRepositoryError> {
     persist_ended_call_with_retained_usage(
         connection,
         round.session(),
@@ -41,13 +59,22 @@ pub(super) async fn persist_tool_round(
     )
     .await?;
     persist_ended_attempt(connection, round.session(), round.turn(), round.attempt()).await?;
-    persist_tool_round_authority(
+    persist_tool_round_entries(connection, round.assistant_entries(), round.requests()).await?;
+    insert_snapshot(connection, round.yielded_snapshot()).await
+}
+
+pub(super) async fn persist_observed_tool_round(
+    connection: &mut PgConnection,
+    round: &ToolRoundModelCallTurn,
+    boundary: &signalbox_domain::ResolvedContextFrontierSnapshot,
+) -> Result<(), ModelCallRepositoryError> {
+    persist_tool_round_record(
         connection,
         round.session(),
         round.turn(),
         round.call().id(),
         "continuing",
-        round.yielded_snapshot().frontier().snapshot(),
+        boundary.frontier().snapshot(),
         round.assistant_entries(),
         round.requests(),
     )
@@ -106,8 +133,6 @@ pub(super) async fn persist_tool_round(
             .await?;
         }
     }
-    insert_snapshot(connection, round.yielded_snapshot()).await?;
-
     match round.next_phase() {
         ActiveTurnPhase::AwaitingApproval { request } => {
             let rows = sqlx::query(
@@ -201,7 +226,7 @@ pub(super) async fn persist_tool_round(
             session: round.session(),
             turn: round.turn(),
             producing_call: round.call().id(),
-            state: ToolBatchOutboxState::Proposed(round.yielded_snapshot().frontier().snapshot()),
+            state: ToolBatchOutboxState::Proposed(boundary.frontier().snapshot()),
         },
     )
     .await?;
@@ -398,8 +423,8 @@ pub(super) async fn persist_tool_continuation_headroom_exhaustion(
              usage_input_includes_cache_tokens, usage_input_tokens,
              usage_output_tokens, usage_cache_creation_input_tokens,
              usage_cache_read_input_tokens, projected_result_content_bytes,
-             max_output_tokens, context_window_tokens)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+             max_output_tokens, context_window_tokens, pending_steering_content_bytes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(required.failed().attempt().id().into_uuid())
     .bind(required.producing_call().into_uuid())
@@ -413,6 +438,7 @@ pub(super) async fn persist_tool_continuation_headroom_exhaustion(
     .bind(Decimal::from(evidence.projected_result_content_bytes))
     .bind(Decimal::from(evidence.limit.max_output_tokens()))
     .bind(Decimal::from(evidence.limit.context_window_tokens()))
+    .bind(Decimal::from(evidence.pending_steering_content_bytes))
     .execute(&mut *connection)
     .await?;
     Ok(())

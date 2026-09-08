@@ -1,4 +1,4 @@
-ALTER TABLE credential_exclusion DROP CONSTRAINT credential_exclusion_oauth_generation_check,
+ALTER TABLE credential_exclusion DROP CONSTRAINT credential_exclusion_check,
     ADD CONSTRAINT credential_exclusion_oauth_generation_check CHECK (
         oauth_generation IS NULL OR (oauth_generation > 0 AND origin IN ('codex_home', 'oauth_refresh')));
 
@@ -92,10 +92,7 @@ BEGIN
       WHERE x.credential_reference = NEW.profile AND x.reset_at > NEW.observed_at;
     SELECT snapshot.windows INTO NEW.capacity_windows
       FROM credential_rate_limit_snapshot snapshot
-      WHERE snapshot.credential_reference = NEW.profile
-        AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(snapshot.windows) capacity_window
-            WHERE capacity_window->>'resets_at' IS NULL
-               OR (capacity_window->>'resets_at')::numeric <= extract(epoch FROM NEW.observed_at) * 1000000000);
+      WHERE snapshot.credential_reference = NEW.profile;
     RETURN NEW;
 END;
 $$;
@@ -134,11 +131,11 @@ WITH context AS (
       FROM jsonb_array_elements(COALESCE(e.capacity_windows, '[]'::jsonb)) capacity_window
 ), capacity AS (
     SELECT min(remaining) AS observed,
-           max(floor(reset_nanos / 1000000)::bigint) FILTER (WHERE remaining <= context.reserve) AS reset_ms
+           max(floor(reset_nanos / 1000000)::bigint) AS reset_ms
       FROM windows CROSS JOIN context
-      WHERE NOT EXISTS (SELECT 1 FROM windows invalid
-          WHERE invalid.reset_nanos IS NULL OR invalid.reset_nanos <= extract(epoch FROM e.observed_at) * 1000000000)
-      HAVING min(remaining) <= max(context.reserve)
+      WHERE remaining <= context.reserve
+        AND reset_nanos > extract(epoch FROM e.observed_at) * 1000000000
+      HAVING count(*) > 0
 ), candidates AS (
     SELECT 0 AS rank, 0 AS source_order, x.record_generation, NULL::bigint AS action_id,
            NULL::uuid AS correlation, NULL::bigint AS reset_ms,
