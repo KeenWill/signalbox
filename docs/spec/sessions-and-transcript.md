@@ -99,7 +99,8 @@ projection and follow stream for one session, a timeline of durable events with
 typed detail, and lexical search. Its request and response shapes live in
 `crates/web-contract`. `POST /api/sessions/{session_id}/input` submits browser
 text with a user-global command ID through the operator submit-input path,
-starting only when no turn is active. A 204 response acknowledges durable
+starting only when no turn is active. The browser keeps the message composer
+visible below the scrolling session history. A 204 response acknowledges durable
 acceptance; typed errors report rejection, and an unconfirmed outcome is retried
 with the same command ID and text. Browser drafts are limited to 65,536 UTF-16
 code units before serialization; the serialized request must fit the JSON byte

@@ -180,6 +180,8 @@ async function sessionApi(page: Page, busy = false, selectedSessionId = sessionI
 async function openSession(page: Page) {
   await page.goto(`/sessions?workspace=true&session=${sessionId}`)
   await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport()
 }
 
 test('reads durable transcript growth and sends a message by keyboard', async ({ page }) => {
@@ -189,17 +191,13 @@ test('reads durable transcript growth and sends a message by keyboard', async ({
   await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
   expect(api.state.historyReads).toEqual(['latest', 'after'])
   expect(api.state.textReads).toEqual(['41', '44'])
-  await page
-    .getByRole('textbox', { name: 'Message to session' })
-    .fill('Continue with the next step.')
+  await page.getByRole('textbox', { name: 'Message' }).fill('Continue with the next step.')
   await page.getByRole('button', { name: 'Send message', exact: true }).focus()
   await page.keyboard.press('Enter')
-  await expect(
-    page.getByRole('status').filter({ hasText: 'Message accepted by the daemon.' }),
-  ).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Message sent' })).toBeVisible()
   expect(api.state.submissions).toHaveLength(1)
   expect(api.state.submissions[0]?.message).toBe('Continue with the next step.')
-  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue('')
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('')
 })
 
 test('follows new active work after restoring an inactive session position', async ({ page }) => {
@@ -232,15 +230,10 @@ test('retries an unconfirmed acceptance with the same command and text', async (
     return attempts.length === 1 ? route.abort() : route.fulfill({ status: 204 })
   })
   await openSession(page)
-  await page.getByRole('textbox', { name: 'Message to session' }).fill('Preserve this message.')
+  await page.getByRole('textbox', { name: 'Message' }).fill('Preserve this message.')
   await page.getByRole('button', { name: 'Send message', exact: true }).click()
-  await expect(
-    page.getByText('Acceptance is unconfirmed. Retry sends the same command and message.'),
-  ).toBeVisible()
-  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveAttribute(
-    'readonly',
-    '',
-  )
+  await expect(page.getByText('Delivery unconfirmed')).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveAttribute('readonly', '')
   await expect(page.getByRole('button', { name: 'Discard retained command' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toHaveCount(0)
   await page
@@ -248,20 +241,15 @@ test('retries an unconfirmed acceptance with the same command and text', async (
     .click()
   await expect(page.getByRole('form', { name: 'Message composer' })).toHaveCount(0)
   await page.goBack()
-  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue(
-    'Preserve this message.',
-  )
-  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveAttribute(
-    'readonly',
-    '',
-  )
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('Preserve this message.')
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveAttribute('readonly', '')
   await page.route(`**/api/sessions/${sessionId}/timeline?**`, (route) =>
     route.fulfill({ status: 503, body: 'Timeline temporarily unavailable' }),
   )
   api.grow()
   await expect(page.getByText('Live updates unavailable.')).toBeVisible()
   await page.getByRole('button', { name: 'Retry message' }).click()
-  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  await expect(page.getByText('Message sent')).toBeVisible()
   expect(attempts).toHaveLength(2)
   expect(attempts[1]).toEqual(attempts[0])
   api.grow()
@@ -285,9 +273,7 @@ test('retains a command whose response is lost while its composer is unmounted',
     return route.fulfill({ status: 204 })
   })
   await openSession(page)
-  await page
-    .getByRole('textbox', { name: 'Message to session' })
-    .fill('Keep the in-flight identity.')
+  await page.getByRole('textbox', { name: 'Message' }).fill('Keep the in-flight identity.')
   await page.getByRole('button', { name: 'Send message', exact: true }).click()
   await expect.poll(() => attempts.length).toBe(1)
   await page
@@ -296,11 +282,11 @@ test('retains a command whose response is lost while its composer is unmounted',
   await expect(page.getByRole('form', { name: 'Message composer' })).toHaveCount(0)
   loseResponse()
   await page.goBack()
-  await expect(page.getByRole('textbox', { name: 'Message to session' })).toHaveValue(
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue(
     'Keep the in-flight identity.',
   )
   await page.getByRole('button', { name: 'Retry message' }).click()
-  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  await expect(page.getByText('Message sent')).toBeVisible()
   expect(attempts).toHaveLength(2)
   expect(attempts[1]).toEqual(attempts[0])
   api.grow()
@@ -321,20 +307,20 @@ test('reports the daemon rejection reason and keeps the draft editable', async (
     }),
   )
   await openSession(page)
-  await page.getByRole('textbox', { name: 'Message to session' }).fill('Keep the rejected draft.')
+  await page.getByRole('textbox', { name: 'Message' }).fill('Keep the rejected draft.')
   await page.getByRole('button', { name: 'Send message', exact: true }).click()
   await expect(
     page.getByText('Rejected: input cannot start a turn while another turn is active'),
   ).toBeVisible()
-  await expect(page.getByRole('textbox', { name: 'Message to session' })).toBeEditable()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toBeEditable()
   api.grow()
 })
 
 test('shows when an active turn prevents starting another turn', async ({ page }) => {
   const api = await sessionApi(page, true)
   await openSession(page)
-  await expect(page.getByText('Input unavailable: running')).toBeVisible()
-  await page.getByRole('textbox', { name: 'Message to session' }).fill('A draft for later.')
+  await expect(page.getByText('Session running')).toBeVisible()
+  await page.getByRole('textbox', { name: 'Message' }).fill('A draft for later.')
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
   expect(api.state.submissions).toHaveLength(0)
   api.grow()
@@ -352,9 +338,7 @@ for (const viewport of [
     api.grow()
     await expect(page.getByText(assistantMessage, { exact: true })).toBeVisible()
     await expect(page.getByText('Live updates unavailable.')).toBeVisible()
-    await page
-      .getByRole('textbox', { name: 'Message to session' })
-      .fill('Continue with the next step.')
+    await page.getByRole('textbox', { name: 'Message' }).fill('Continue with the next step.')
     await expect.soft(page).toHaveScreenshot(`session-read-send-${viewport.name}.png`, {
       fullPage: true,
     })
@@ -378,7 +362,7 @@ test('keeps header-only history when transcript detail is not advertised', async
   await page.goto(`/sessions?workspace=true&session=${sessionId}`)
   await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Transcript text' })).toHaveCount(0)
-  await expect(page.getByRole('textbox', { name: 'Message to session' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message' })).toBeVisible()
   api.grow()
   await expect(page.getByRole('option')).toHaveCount(3)
   expect(detailRequests).toEqual([])
@@ -408,20 +392,14 @@ test('refuses new session input at the retained-command limit while allowing exa
   }
   for (const id of ids.slice(0, 4)) {
     await open(id)
-    await page.getByRole('textbox', { name: 'Message to session' }).fill('Retain this command.')
+    await page.getByRole('textbox', { name: 'Message' }).fill('Retain this command.')
     await page.getByRole('button', { name: 'Send message', exact: true }).click()
-    await expect(
-      page.getByText('Acceptance is unconfirmed. Retry sends the same command and message.'),
-    ).toBeVisible()
+    await expect(page.getByText('Delivery unconfirmed')).toBeVisible()
   }
   const last = ids[4]
   await open(last)
-  await page.getByRole('textbox', { name: 'Message to session' }).fill('Wait for capacity.')
-  await expect(
-    page.getByText(
-      'Pending-message limit reached. Retry a retained message before sending to another session.',
-    ),
-  ).toBeVisible()
+  await page.getByRole('textbox', { name: 'Message' }).fill('Wait for capacity.')
+  await expect(page.getByText('Pending-message limit reached')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
   expect(attempts).toHaveLength(4)
   await page.route(`**/api/sessions/${sessionId}/input`, (route) => {
@@ -430,12 +408,10 @@ test('refuses new session input at the retained-command limit while allowing exa
   })
   await open(sessionId)
   await page.getByRole('button', { name: 'Retry message' }).click()
-  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  await expect(page.getByText('Message sent')).toBeVisible()
   expect(attempts[4]).toEqual(attempts[0])
   await open(last)
-  await page
-    .getByRole('textbox', { name: 'Message to session' })
-    .fill('Capacity is available again.')
+  await page.getByRole('textbox', { name: 'Message' }).fill('Capacity is available again.')
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeEnabled()
   for (const api of apis) api.grow()
 })
@@ -457,17 +433,15 @@ test('times out an unanswered send and retries its retained identity', async ({ 
     return route.fulfill({ status: 204 })
   })
   await openSession(page)
-  const draft = page.getByRole('textbox', { name: 'Message to session' })
+  const draft = page.getByRole('textbox', { name: 'Message' })
   await expect(draft).toHaveAttribute('maxlength', '65536')
   await draft.fill('Keep the deadline identity.')
   await page.getByRole('button', { name: 'Send message', exact: true }).click()
   await expect.poll(() => attempts.length).toBe(1)
   await page.clock.fastForward(30_001)
-  await expect(
-    page.getByText('Acceptance is unconfirmed. Retry sends the same command and message.'),
-  ).toBeVisible()
+  await expect(page.getByText('Delivery unconfirmed')).toBeVisible()
   await page.getByRole('button', { name: 'Retry message' }).click()
-  await expect(page.getByText('Message accepted by the daemon.')).toBeVisible()
+  await expect(page.getByText('Message sent')).toBeVisible()
   expect(attempts[1]).toEqual(attempts[0])
   release()
   api.grow()
@@ -553,6 +527,8 @@ test('resets text pagination when only the window observation changes', async ({
   api.advanceObservation()
   await expect(page.getByText('Live updates unavailable.')).toBeVisible()
   await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
+  await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport()
   await expect(page.getByRole('button', { name: 'First text page' })).toHaveCount(0)
   expect(cursors.slice(2).length).toBeGreaterThan(0)
   expect(cursors.slice(2).every((cursor) => cursor === null)).toBe(true)
@@ -709,6 +685,8 @@ for (const growth of [false, true]) {
         .filter({ hasText: /^44$/ }),
     ).toBeVisible()
     await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
+    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
+    await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport()
     await expect(page.getByRole('button', { name: 'Next text page', exact: true })).toBeVisible()
     if (growth) expect(api.state.historyReads).toContain('after')
     expect(textReads).toBe(1)

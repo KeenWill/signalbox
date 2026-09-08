@@ -2988,18 +2988,6 @@ kbd {
   background: var(--surface-1);
 }
 
-.session-composer > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.session-composer h3 {
-  margin: 2px 0 0;
-  font-size: 0.74rem;
-}
-
 @media (max-width: 760px) {
   .session-open-form,
   .session-workspace-header {
@@ -3025,10 +3013,6 @@ kbd {
   .session-item-detail {
     grid-template-columns: 1fr;
     padding-left: calc(10px + 16px + 8px + 20ch + 8px);
-  }
-  .session-composer > header {
-    align-items: flex-start;
-    flex-direction: column;
   }
 }
 
@@ -3082,7 +3066,6 @@ kbd {
   cursor: default;
 }
 .session-composer label,
-.session-composer header span,
 .session-composer-actions,
 .session-live-status {
   font-size: 0.72rem;
@@ -3146,4 +3129,33 @@ kbd {
 .provider-drafts p {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.session-workspace-surface:has(> .session-composer) {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+.session-workspace-surface:has(> .session-composer) > .session-workspace {
+  overflow: auto;
+}
+.session-composer-actions {
+  justify-content: flex-end;
+}
+.session-composer-actions > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  order: 1;
+  padding: 0.5rem 0.8rem;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--canvas);
+  font-weight: 600;
+}
+.session-composer-actions > button svg {
+  width: 1rem;
+  height: 1rem;
+}
+.session-composer label {
+  font-weight: 600;
 }
