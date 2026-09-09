@@ -20,8 +20,9 @@ Compiled Rust programs and checked effect adapters live in
 `apps/signalboxd/src/workflows/repo_watch/`. `ObserveRepository` accepts one
 poll/webhook observation unit; `EvaluateRule` evaluates one retained event for
 one checked rule revision; `ReactToLifecycle` applies one retained lifecycle
-unit; `CleanupCheckout` invokes `repo.cleanupCheckout` for one retained removal
-candidate. Runs are finite, with immutable input and journaled results;
+unit; `SubmitPending` invokes `repo.submitPending` for retained pending
+commands; `CleanupCheckout` invokes `repo.cleanupCheckout` for one retained
+removal candidate. Runs are finite, with immutable input and journaled results;
 subsequent work resumes from module cursors and receipts, including after a
 native run ends `ContractRetired` under the host's executable-pinning contract.
 
@@ -81,13 +82,21 @@ single owner. The launcher survives removal of the superseded orchestration; the
 host executes and resumes runs but supplies no successor scheduler
 (`docs/design/workflows.md:96`).
 
-The retained module also launches `CleanupCheckout` at startup and through a
-periodic cleanup sweep using the existing worker cadence
-(`apps/signalboxd/src/repo_watch_runtime.rs:542`). It selects retained removal
-candidates through the scavenger's eligibility and ownership checks
+The retained module also launches `SubmitPending` and `CleanupCheckout` at
+startup and through a periodic recovery sweep using the existing worker cadence
+(`apps/signalboxd/src/repo_watch_runtime.rs:542`). Submission selects retained
+`dispatch_ledger` rows with pending status or pending submission follow-ups in
+the module's recovery order (`crates/modules/repo-watch-v2/src/lib.rs:2214`).
+These rows launch submission even when `repo.commitEvaluation` was delivered,
+its receipt released and its event cursor advanced before an upgrade retired the
+run without requesting `repo.submitPending`. Recovery uses the retained command
+identities and exact bytes without requiring another event, an unadopted receipt
+or an active rule. Cleanup selects retained removal candidates through the
+scavenger's eligibility and ownership checks
 (`apps/signalboxd/src/repo_watch_dispatch.rs:87`), independently of repository
 or lifecycle facts and even when repository watch is disabled or unconfigured.
-Pending removals remain eligible on later sweeps until cleanup settles.
+Pending commands and removals remain eligible on later sweeps until settled,
+under the single pending-command executor.
 
 The authenticated webhook listener persists deliveries and retains its
 primary/shadow meaning; polling credentials remain repository-scoped daemon
@@ -175,9 +184,13 @@ cursor and checkout interruption.
 
 Recovery acceptance interrupts a committed effect before journal delivery,
 retires its run on upgrade, and verifies successor adoption without repeating
-the effect or blocking the next observation. Cleanup acceptance leaves a pending
-removal with no repository or lifecycle fact, then verifies startup and periodic
-launches with repository watch disabled or unconfigured.
+the effect or blocking the next observation. Submission acceptance retires a run
+after delivery of `repo.commitEvaluation` and receipt release but before the
+`repo.submitPending` request, then verifies that startup and periodic sweeps
+recover its pending ledger commands without a new event or receipt, preserving
+command identities, exact bytes and single execution. Cleanup acceptance leaves
+a pending removal with no repository or lifecycle fact, then verifies startup
+and periodic launches with repository watch disabled or unconfigured.
 
 Reload stops and joins the previous engine before starting its replacement from
 retained cursors, receipts and accepted webhook/event backlog. It preserves the
