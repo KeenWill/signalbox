@@ -5342,6 +5342,7 @@ fn composed_execution_tools_keep_their_declared_permission_defaults() {
 /// A workspace identity a recorded binding pinned. Every member only needs
 /// to be some value a real `stat` could report.
 const FIXTURE_BOUND_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdentity {
+    common_administration: None,
     root: ComposedRootIdentity {
         device: 0x10,
         inode: 0x20,
@@ -5354,6 +5355,7 @@ const FIXTURE_BOUND_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdent
 
 /// A workspace sharing neither directory with [`FIXTURE_BOUND_IDENTITY`].
 const FIXTURE_OTHER_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdentity {
+    common_administration: None,
     root: ComposedRootIdentity {
         device: 0x10,
         inode: 0x30,
@@ -5368,6 +5370,7 @@ const FIXTURE_OTHER_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdent
 /// administers, which is what two bind mounts over one repository produce.
 const FIXTURE_SHARED_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
     ComposedWorkspaceIdentity {
+        common_administration: None,
         root: ComposedRootIdentity {
             device: 0x10,
             inode: 0x40,
@@ -5380,6 +5383,7 @@ const FIXTURE_SHARED_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
 /// repository reached through a bind mount produces.
 const FIXTURE_WORKTREE_OVER_BOUND_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
     ComposedWorkspaceIdentity {
+        common_administration: None,
         root: FIXTURE_BOUND_IDENTITY
             .administration
             .expect("fixture has Git administration"),
@@ -5393,6 +5397,7 @@ const FIXTURE_WORKTREE_OVER_BOUND_ADMINISTRATION_IDENTITY: ComposedWorkspaceIden
 /// as its worktree root, the other way a nested repository collides.
 const FIXTURE_ADMINISTRATION_OVER_BOUND_WORKTREE_IDENTITY: ComposedWorkspaceIdentity =
     ComposedWorkspaceIdentity {
+        common_administration: None,
         root: ComposedRootIdentity {
             device: 0x10,
             inode: 0x60,
@@ -5403,6 +5408,7 @@ const FIXTURE_ADMINISTRATION_OVER_BOUND_WORKTREE_IDENTITY: ComposedWorkspaceIden
 /// The pair the configured pathname names after its `.git` was renamed and
 /// recreated, which leaves its worktree root alone.
 const FIXTURE_CONFIGURED_STANDING_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdentity {
+    common_administration: None,
     root: FIXTURE_BOUND_IDENTITY.root,
     administration: Some(ComposedRootIdentity {
         device: 0x10,
@@ -5414,6 +5420,7 @@ const FIXTURE_CONFIGURED_STANDING_IDENTITY: ComposedWorkspaceIdentity = Composed
 /// pathname names now, sharing nothing with the pair it pinned at startup.
 const FIXTURE_SHARES_CONFIGURED_STANDING_IDENTITY: ComposedWorkspaceIdentity =
     ComposedWorkspaceIdentity {
+        common_administration: None,
         root: ComposedRootIdentity {
             device: 0x10,
             inode: 0x80,
@@ -6372,6 +6379,7 @@ fn a_parent_beside_the_configured_root_is_admitted() {
 #[test]
 fn a_composition_standing_on_its_own_parent_is_refused() {
     let composed = ComposedWorkspaceIdentity {
+        common_administration: None,
         root: FIXTURE_PARENT_IDENTITY,
         administration: Some(ComposedRootIdentity {
             device: 0x10,
@@ -6391,6 +6399,7 @@ fn a_composition_standing_on_its_own_parent_is_refused() {
 #[test]
 fn a_composition_administering_its_own_parent_is_refused() {
     let composed = ComposedWorkspaceIdentity {
+        common_administration: None,
         root: ComposedRootIdentity {
             device: 0x10,
             inode: 0xa1,
@@ -6832,4 +6841,77 @@ fn mapped_composition_registers_git_push_with_a_push_credential() {
     let push = ToolName::try_new(signalbox_tools_git::GIT_PUSH_CONFIGURED_NAME.to_owned())
         .expect("push tool name");
     assert!(catalog.definition(&push).is_some());
+}
+
+#[test]
+fn linked_worktrees_sharing_common_administration_cannot_bind_separate_sessions() {
+    let fixture = tempfile::tempdir().expect("linked identity fixture");
+    let main = fixture.path().join("main");
+    let first = fixture.path().join("first");
+    let second = fixture.path().join("second");
+    let repository = git2::Repository::init(&main).expect("main repository");
+    let tree_id = repository
+        .treebuilder(None)
+        .expect("empty tree builder")
+        .write()
+        .expect("empty tree");
+    let tree = repository.find_tree(tree_id).expect("tree");
+    let author = git2::Signature::now("Identity fixture", "identity@example.test").expect("author");
+    repository
+        .commit(
+            Some("HEAD"),
+            &author,
+            &author,
+            "Initial fixture",
+            &tree,
+            &[],
+        )
+        .expect("initial commit");
+    repository
+        .worktree("first", &first, None)
+        .expect("first linked worktree");
+    repository
+        .worktree("second", &second, None)
+        .expect("second linked worktree");
+    let first_identity = ComposedWorkspaceIdentity::capture(&first).expect("first identity");
+    let second_identity = ComposedWorkspaceIdentity::capture(&second).expect("second identity");
+    assert_ne!(first_identity.root, second_identity.root);
+    assert_ne!(
+        first_identity.administration,
+        second_identity.administration
+    );
+    assert_eq!(
+        first_identity.common_administration,
+        second_identity.common_administration
+    );
+    let pinned = signalbox_tools_git::LocalGitTools::try_new(
+        LocalWorkspaceFileSystem,
+        &first,
+        git_identity(),
+    )
+    .expect("linked tools")
+    .pinned_directories();
+    assert_eq!(
+        ComposedWorkspaceIdentity::from_pinned(pinned),
+        first_identity
+    );
+    let first_session = session(FIRST_SESSION_IDENTITY);
+    let second_session = session(SECOND_SESSION_IDENTITY);
+    let bindings = BTreeMap::from([(
+        first_session,
+        RecordedSessionBinding::DerivedRoot {
+            identity: first_identity,
+            parent: FIXTURE_PARENT_IDENTITY,
+        },
+    )]);
+    assert!(another_session_bound(
+        &bindings,
+        second_session,
+        second_identity
+    ));
+    assert!(!another_session_bound(
+        &bindings,
+        first_session,
+        first_identity
+    ));
 }

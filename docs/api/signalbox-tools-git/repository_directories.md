@@ -2,10 +2,23 @@
 
 # repository_directories
 
+## RepositoryAdministrationDirectories
+
+```rust
+pub struct RepositoryAdministrationDirectories {
+    pub worktree: fs::File,
+    pub common: fs::File,
+}
+// derives: fmt::Debug
+```
+
 ## open_repository_administration
 
 ```rust
 pub fn open_repository_administration(
     root: &path::Path,
-) -> result::Result<option::Option<fs::File>, LocalGitToolsConstructionError>;
+) -> result::Result<
+    option::Option<RepositoryAdministrationDirectories>,
+    LocalGitToolsConstructionError,
+>;
 ```

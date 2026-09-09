@@ -96,6 +96,13 @@ py_test(
     deps = [":postgres_integration_suites"],
 )
 
+py_test(
+    name = "test_generate_git_scale",
+    size = "small",
+    srcs = ["test_generate_git_scale.py"],
+    data = ["//:tooling/generate-git-scale.py"],
+)
+
 test_suite(
     name = "checker_tests",
     visibility = ["//visibility:public"],

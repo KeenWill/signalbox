@@ -615,11 +615,12 @@ misprovisioned and fails closed. Which root a session bound is recorded on its
 first workspace-root-bound tool invocation and does not change for the process's
 lifetime; the first record written wins, so two concurrent first requests
 converge on one root. Isolation is checked against directory identities rather
-than pathnames: a composed root sharing either its worktree or its `.git`
-directory with the configured root or with another bound session is refused.
-Failure to compose or bind a derived root closes that tool request as a known
-failure whose sanitized detail names the closed reason, and it never falls back
-to another root.
+than pathnames: a composed root sharing its worktree, worktree administration,
+or common administration directory with the configured root or with another
+bound session is refused. Linked worktrees sharing common references and objects
+cannot bind separate session serialization domains. Failure to compose or bind a
+derived root closes that tool request as a known failure whose sanitized detail
+names the closed reason, and it never falls back to another root.
 
 The secret reaches the provider through the profile's delivery, never through a
 process environment variable of the daemon. Two families of one adapter may

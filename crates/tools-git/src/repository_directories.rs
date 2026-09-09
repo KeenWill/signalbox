@@ -145,14 +145,23 @@ fn rejected<T>(_: T) -> LocalGitFailure {
     LocalGitFailure::Repository
 }
 
-/// Opens the configured root's worktree administration directory.
+/// Descriptor-pinned administration directories used by a configured repository.
+#[derive(Debug)]
+pub struct RepositoryAdministrationDirectories {
+    /// Directory containing this worktree's HEAD and index.
+    pub worktree: File,
+    /// Directory containing shared references and objects.
+    pub common: File,
+}
+
+/// Opens the configured root's worktree and common administration directories.
 ///
 /// Returns `None` when the root has no `.git` entry. A present entry must be a
 /// directory or a regular `gitdir:` marker; linked-worktree `commondir` markers
 /// are resolved and the descriptor bindings are checked before returning.
 pub fn open_repository_administration(
     root: &Path,
-) -> Result<Option<File>, crate::LocalGitToolsConstructionError> {
+) -> Result<Option<RepositoryAdministrationDirectories>, crate::LocalGitToolsConstructionError> {
     use crate::LocalGitToolsConstructionError as Error;
     let root = File::from(
         rustix::fs::open(
@@ -169,5 +178,8 @@ pub fn open_repository_administration(
     }
     let directories = AdministrationDirectories::open(&root).map_err(|_| Error::Repository)?;
     validate_binding(&root, directories.binding).map_err(|_| Error::Repository)?;
-    Ok(Some(directories.worktree))
+    Ok(Some(RepositoryAdministrationDirectories {
+        worktree: directories.worktree,
+        common: directories.common,
+    }))
 }
