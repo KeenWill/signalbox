@@ -12,4 +12,6 @@ $$;
 
 CREATE TRIGGER program_journal_wait_notification
     AFTER INSERT ON program_run_journal_entry
-    FOR EACH ROW EXECUTE FUNCTION notify_program_journal_waiters();
+    FOR EACH ROW
+    WHEN (NEW.frame_direction = 'delivery' AND NEW.frame_kind = 'answer')
+    EXECUTE FUNCTION notify_program_journal_waiters();

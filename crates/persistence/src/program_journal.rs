@@ -132,14 +132,20 @@ impl ProgramJournalRepository {
         crate::program_registration::ProgramRegistrationRepository::new(self.pool.clone())
     }
 
-    /// Listens for committed journal changes; notifications carry no authoritative state.
-    pub async fn listen(&self) -> Result<ProgramJournalWake, ProgramJournalRepositoryError> {
+    /// Listens for committed answers from the requested source runs; notifications are hints.
+    pub async fn listen(
+        &self,
+        runs: &[ProgramRunId],
+    ) -> Result<ProgramJournalWake, ProgramJournalRepositoryError> {
         let listener_pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy_with(self.pool.connect_options().as_ref().clone());
         let mut listener = sqlx::postgres::PgListener::connect_with(&listener_pool).await?;
         listener.listen("signalbox_program_journal").await?;
-        Ok(ProgramJournalWake(listener))
+        Ok(ProgramJournalWake {
+            listener,
+            runs: runs.to_vec(),
+        })
     }
 
     /// Reads the next retained answer strictly after the source position.
@@ -1164,12 +1170,23 @@ impl signalbox_application::program_session::ProgramRunVerifier for ProgramJourn
 }
 
 /// A disposable notification listener; callers must catch up after listening and every wake.
-pub struct ProgramJournalWake(sqlx::postgres::PgListener);
+pub struct ProgramJournalWake {
+    listener: sqlx::postgres::PgListener,
+    runs: Vec<ProgramRunId>,
+}
 
 impl ProgramJournalWake {
     pub async fn changed(&mut self) -> Result<(), ProgramJournalRepositoryError> {
+        while let Some(notification) = self.listener.try_recv().await? {
+            if notification
+                .payload()
+                .parse::<uuid::Uuid>()
+                .is_ok_and(|run| self.runs.contains(&ProgramRunId::from_uuid(run)))
+            {
+                return Ok(());
+            }
+        }
         // A reconnect also requires catch-up because notifications may have been lost.
-        self.0.try_recv().await?;
         Ok(())
     }
 }

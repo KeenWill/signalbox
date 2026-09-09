@@ -271,7 +271,7 @@ impl signalbox_workflow_runtime::primitives::PrimitiveEvents for CommitDuringSub
             .map_err(|error| LiveDeliveryFailure::new(error.to_string()))
     }
 
-    async fn listen(&mut self) -> Result<Self::Wake, LiveDeliveryFailure> {
+    async fn listen(&mut self, runs: &[ProgramRunId]) -> Result<Self::Wake, LiveDeliveryFailure> {
         self.journal
             .append_delivery(
                 self.source,
@@ -283,7 +283,7 @@ impl signalbox_workflow_runtime::primitives::PrimitiveEvents for CommitDuringSub
             .await
             .map_err(|error| LiveDeliveryFailure::new(error.to_string()))?;
         self.journal
-            .listen()
+            .listen(runs)
             .await
             .map_err(|error| LiveDeliveryFailure::new(error.to_string()))
     }
@@ -354,12 +354,14 @@ return source;
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn committed_source_answer_wakes_a_listener_for_catch_up() -> Result<(), Box<dyn Error>> {
+async fn journal_wake_observes_only_answers_from_watched_runs() -> Result<(), Box<dyn Error>> {
     const NOTIFICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    const QUIET_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
     let (_database, pool) = migrated_postgres().await?;
     let journal = ProgramJournalRepository::new(pool.clone());
     let source = run_id();
     journal.create_stream(source).await?;
+    let mut listener = journal.listen(&[source]).await?;
     let request = journal
         .append_request(
             source,
@@ -372,7 +374,29 @@ async fn committed_source_answer_wakes_a_listener_for_catch_up() -> Result<(), B
         after: 0,
     };
     assert_eq!(journal.next_event(wait).await?, None);
-    let mut listener = journal.listen().await?;
+    let unrelated = distinct_run_id(1);
+    journal.create_stream(unrelated).await?;
+    let unrelated_request = journal
+        .append_request(
+            unrelated,
+            None,
+            RequestKind::Now(InlineFramePayload::default()),
+        )
+        .await?;
+    journal
+        .append_delivery(
+            unrelated,
+            DeliveryKind::Answer {
+                resolves: unrelated_request.ordinal(),
+                payload: payload(b"unrelated answer"),
+            },
+        )
+        .await?;
+    assert!(
+        tokio::time::timeout(QUIET_PERIOD, listener.changed())
+            .await
+            .is_err()
+    );
     journal
         .append_delivery(
             source,
@@ -423,7 +447,7 @@ async fn journal_listener_leaves_the_single_query_connection_available()
         .connect_with(signalbox_persistence::local_test_connection_options(&url)?)
         .await?;
     let journal = ProgramJournalRepository::new(pool.clone());
-    let listener = journal.listen().await?;
+    let listener = journal.listen(&[run_id()]).await?;
     tokio::time::timeout(QUERY_TIMEOUT, sqlx::query("SELECT 1").execute(&pool)).await??;
     drop(listener);
     pool.close().await;

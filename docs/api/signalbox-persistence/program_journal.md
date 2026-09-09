@@ -66,6 +66,7 @@ impl program_journal::ProgramJournalRepository {
     pub fn registrations(&self) -> program_registration::ProgramRegistrationRepository;
     pub async fn listen(
         &self,
+        runs: &[signalbox_domain::ProgramRunId],
     ) -> result::Result<
         program_journal::ProgramJournalWake,
         program_journal::ProgramJournalRepositoryError,
@@ -206,7 +207,7 @@ impl error::Error for program_journal::ProgramSessionCapabilityError {
 ## ProgramJournalWake
 
 ```rust
-pub struct ProgramJournalWake(/* private */);
+pub struct ProgramJournalWake {/* private */}
 impl program_journal::ProgramJournalWake {
     pub async fn changed(
         &mut self,

@@ -45,6 +45,7 @@ pub trait PrimitiveEvents {
     >;
     fn listen(
         &mut self,
+        runs: &[signalbox_domain::ProgramRunId],
     ) -> impl future::Future<
         Output = result::Result<<Self as primitives::PrimitiveEvents>::Wake, LiveDeliveryFailure>,
     >;
@@ -62,6 +63,7 @@ impl primitives::PrimitiveEvents
     >;
     async fn listen(
         &mut self,
+        runs: &[signalbox_domain::ProgramRunId],
     ) -> result::Result<<Self as primitives::PrimitiveEvents>::Wake, LiveDeliveryFailure>;
 }
 ```

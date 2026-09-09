@@ -2,9 +2,9 @@
 
 use crate::{LiveDeliveryFailure, LiveDeliverySource};
 use signalbox_domain::program_primitives::{
-    AwaitProgramEvent, ProgramEvent, RandomValue, SleepUntil, UnixMillis,
+    AwaitProgramEvent, ProgramEvent, ProgramEventSource, RandomValue, SleepUntil, UnixMillis,
 };
-use signalbox_domain::{DeliveryKind, RejectReason, RequestFrame, RequestKind};
+use signalbox_domain::{DeliveryKind, ProgramRunId, RejectReason, RequestFrame, RequestKind};
 use signalbox_persistence::program_journal::{ProgramJournalRepository, ProgramJournalWake};
 use std::{
     future::Future,
@@ -45,7 +45,10 @@ pub trait PrimitiveEvents {
         &mut self,
         wait: AwaitProgramEvent,
     ) -> impl Future<Output = Result<Option<ProgramEvent>, LiveDeliveryFailure>>;
-    fn listen(&mut self) -> impl Future<Output = Result<Self::Wake, LiveDeliveryFailure>>;
+    fn listen(
+        &mut self,
+        runs: &[ProgramRunId],
+    ) -> impl Future<Output = Result<Self::Wake, LiveDeliveryFailure>>;
 }
 
 /// A notification never substitutes for reading retained source state.
@@ -63,8 +66,8 @@ impl PrimitiveEvents for ProgramJournalRepository {
             .await
             .map_err(failure)
     }
-    async fn listen(&mut self) -> Result<Self::Wake, LiveDeliveryFailure> {
-        ProgramJournalRepository::listen(self)
+    async fn listen(&mut self, runs: &[ProgramRunId]) -> Result<Self::Wake, LiveDeliveryFailure> {
+        ProgramJournalRepository::listen(self, runs)
             .await
             .map_err(failure)
     }
@@ -163,13 +166,22 @@ impl<C: PrimitiveClock, E: PrimitiveEvents> LiveDeliverySource for DurablePrimit
             if let Some(delivery) = self.ready(outstanding).await? {
                 return Ok(delivery);
             }
-            let mut wake = if outstanding
+            let sources: Vec<_> = outstanding
                 .iter()
-                .any(|frame| matches!(frame.kind(), RequestKind::AwaitEvent(_)))
-            {
-                Some(self.journal.listen().await.map_err(failure)?)
-            } else {
+                .filter_map(|frame| match frame.kind() {
+                    RequestKind::AwaitEvent(payload) => {
+                        AwaitProgramEvent::decode(payload).map(|wait| {
+                            let ProgramEventSource::ProgramAnswers(run) = wait.source;
+                            run
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mut wake = if sources.is_empty() {
                 None
+            } else {
+                Some(self.journal.listen(&sources).await.map_err(failure)?)
             };
             loop {
                 // Event LISTEN precedes catch-up, covering commits during subscription.
@@ -235,7 +247,7 @@ mod tests {
             panic!("sleep must not query events")
         }
 
-        async fn listen(&mut self) -> Result<Self::Wake, LiveDeliveryFailure> {
+        async fn listen(&mut self, _: &[ProgramRunId]) -> Result<Self::Wake, LiveDeliveryFailure> {
             panic!("sleep must not open a listener")
         }
     }

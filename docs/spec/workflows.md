@@ -119,9 +119,9 @@ without opening journal listeners.
 journal position (`after`, zero for the beginning). It receives the next
 retained `Answer` delivery's exact payload bytes and position. The outstanding
 request's run and ordinal identify each wait. Source reads occur before
-listening, after subscription and after every wake; PostgreSQL notifications are
-hints. The SDK's typed `primitives` wrappers preserve full-width values as
-decimal strings.
+listening, after subscription and after every wake; PostgreSQL answer
+notifications are hints filtered to the requested source runs. The SDK's typed
+`primitives` wrappers preserve full-width values as decimal strings.
 
 ## Daemon runner
 
