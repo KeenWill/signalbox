@@ -1065,7 +1065,7 @@ fn real_git_sha256_pack_index_resolves_each_fixture_object() {
     let executor = fixture.executor();
     let source = crate::push_objects::ObjectSource::open(
         &executor.repository_authority,
-        std::time::Instant::now() + std::time::Duration::from_secs(60),
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
     )
     .expect("source opens");
     for oid in expected {

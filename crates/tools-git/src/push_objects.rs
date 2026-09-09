@@ -49,7 +49,7 @@ impl PushObjectSnapshot {
     ) -> Result<Self, LocalGitFailure> {
         let repository = authority.open_repository_shell()?;
         let database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
-        let mut source = ObjectSource::open(authority, deadline)?;
+        let mut source = ObjectSource::open(authority, Some(deadline))?;
         let mut excluded = BTreeSet::new();
         let mut boundaries = BTreeSet::new();
         if let Some(fence) = fence {
@@ -154,7 +154,7 @@ fn capture_fence_ancestors(
 ) -> Result<(BTreeSet<Oid>, ObjectSource), LocalGitFailure> {
     let graph = authority.open_repository_shell()?;
     let database = graph.odb().map_err(|_| LocalGitFailure::Operation)?;
-    let mut source = ObjectSource::open(authority, deadline)?;
+    let mut source = ObjectSource::open(authority, Some(deadline))?;
     let mut pending = vec![fence];
     let mut ancestors = BTreeSet::new();
     while let Some(oid) = pending.pop() {
@@ -244,7 +244,7 @@ pub(super) struct ObjectSource {
     format: ObjectFormat,
     max_object_bytes: Option<usize>,
     pub(super) directory: tempfile::TempDir,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 fn rejected<T>(_: T) -> LocalGitFailure {
@@ -278,7 +278,7 @@ fn open_child(root: &File, path: &Path) -> Result<File, LocalGitFailure> {
 impl ObjectSource {
     pub(super) fn open(
         authority: &PinnedRepository,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Self, LocalGitFailure> {
         authority.validate_object_layout()?;
         let objects = File::from(
@@ -380,7 +380,11 @@ impl ObjectSource {
 
     // Stop timed-out blocking work between bounded reads and decodes.
     fn check_deadline(&self) -> Result<(), LocalGitFailure> {
-        if Instant::now() >= self.deadline {
+        self.check_deadline_at(Instant::now())
+    }
+
+    pub(super) fn check_deadline_at(&self, now: Instant) -> Result<(), LocalGitFailure> {
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
             return Err(LocalGitFailure::Repository);
         }
         Ok(())
