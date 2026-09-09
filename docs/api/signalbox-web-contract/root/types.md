@@ -622,6 +622,7 @@ pub struct WebSessionTimelineDescriptor {
 
 ```rust
 pub enum WebSessionTimelineEventKind {
+    AutomaticReconciliationExhausted,
     SessionCreated,
     SessionStateChanged,
     SessionTerminal,

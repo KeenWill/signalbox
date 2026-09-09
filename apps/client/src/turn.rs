@@ -947,7 +947,8 @@ pub(crate) fn terminal_event_state(
         {
             Some(TurnTerminal::ReconciliationRequired)
         }
-        SessionEvent::SessionCreated {}
+        SessionEvent::AutomaticReconciliationExhausted { .. }
+        | SessionEvent::SessionCreated {}
         | SessionEvent::SessionModelSettingsChanged { .. }
         | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::InputAccepted { .. }

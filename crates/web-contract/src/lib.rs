@@ -926,6 +926,8 @@ pub struct WebSessionTimelineDescriptor {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSessionTimelineEventKind {
+    /// Automatic reconciliation requires an operator decision.
+    AutomaticReconciliationExhausted,
     SessionCreated,
     SessionStateChanged,
     SessionTerminal,
@@ -4147,7 +4149,7 @@ function assertTimelineDetailPage(value) {{
         }}
         break;
       case "event_fact":
-        if (item.body.kind !== item.kind || !["goal_turn_retired"].includes(item.kind)) {{
+        if (item.body.kind !== item.kind || !["goal_turn_retired", "automatic_reconciliation_exhausted"].includes(item.kind)) {{
           fail(`${{path}}.body.kind`, "the matching header-only event kind");
         }}
         break;

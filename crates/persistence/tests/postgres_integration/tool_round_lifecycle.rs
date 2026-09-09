@@ -5424,3 +5424,78 @@ async fn assert_headroom_case(pool: &PgPool, case: HeadroomCase) -> Result<(), B
     );
     Ok(())
 }
+
+/// Exhaustion preserves the exact tool identity through the outbox decoder.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn automatic_tool_reconciliation_exhaustion_publishes_the_operation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = Uuid::now_v7().as_u128();
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || issuing_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    assert_ambiguous_tool_recovery(
+        PostgresStartupScanRepository::new(pool.clone())
+            .recover(
+                fixture.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 27)),
+                ),
+                &mut recovery_ids,
+            )
+            .await?,
+    );
+
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
+        Some(0),
+        None,
+        None,
+    );
+    let batch = repository.claim_due().await?;
+    assert_eq!(batch.exhausted().len(), 1);
+    assert_eq!(
+        batch.exhausted()[0].operation(),
+        AutomaticReconciliationOperation::ToolAttempt(tool_attempt)
+    );
+    let sequence: Decimal = sqlx::query_scalar("SELECT event_sequence FROM automatic_reconciliation_exhausted_outbox_event WHERE turn_id = $1")
+        .bind(fixture.turn.into_uuid()).fetch_one(&pool).await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
+    OutboxDispatcher::new(pool.clone())
+        .dispatch_next(|event| {
+            assert_eq!(
+                event.kind(),
+                &DispatchedOutboxEventKind::AutomaticReconciliationExhausted(batch.exhausted()[0])
+            );
+            OutboxDeliveryDecision::Delivered
+        })
+        .await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

@@ -2,10 +2,25 @@
 
 # event
 
+## ReconciliationOperationKind
+
+```rust
+pub enum ReconciliationOperationKind {
+    ModelCall,
+    ToolAttempt,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## SessionEvent
 
 ```rust
 pub enum SessionEvent {
+    AutomaticReconciliationExhausted {
+        turn_id: CanonicalUuid,
+        operation_kind: ReconciliationOperationKind,
+        operation_id: CanonicalUuid,
+    },
     SessionCreated {},
     SessionModelSettingsChanged {
         command_id: CommandId,

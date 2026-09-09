@@ -37,7 +37,7 @@ const compatibleKinds = {
   reconciliation: ['turn_reconciliation_required'],
   runner: ['runner_state_transition'],
   delegation: ['delegation_update', 'delegation_wake'],
-  event_fact: ['goal_turn_retired'],
+  event_fact: ['goal_turn_retired', 'automatic_reconciliation_exhausted'],
 } as const satisfies Record<DetailBody['type'], readonly DetailItem['kind'][]>
 
 export const isCompatibleDetailBody = (kind: DetailItem['kind'], body: DetailBody): boolean => {

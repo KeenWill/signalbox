@@ -9,7 +9,7 @@
 | credential_exclusions | 2 | 0 | 0 | [credential_exclusions](credential_exclusions.md) |
 | delegation | 11 | 0 | 0 | [delegation](delegation.md) |
 | error | 4 | 0 | 0 | [error](error.md) |
-| event | 1 | 0 | 0 | [event](event.md) |
+| event | 2 | 0 | 0 | [event](event.md) |
 | frame | 2 | 0 | 4 | [frame](frame.md) |
 | goal | 16 | 0 | 0 | [goal](goal.md) |
 | operator_status | 5 | 0 | 0 | [operator_status](operator_status.md) |

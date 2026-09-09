@@ -468,6 +468,9 @@ pub enum ProcessMonitorReceiveError {
 
 fn monitor_event_kind(event: &DispatchedOutboxEventKind) -> SessionTimelineEventKind {
     match event {
+        DispatchedOutboxEventKind::AutomaticReconciliationExhausted(_) => {
+            SessionTimelineEventKind::AutomaticReconciliationExhausted
+        }
         DispatchedOutboxEventKind::CredentialPoolExhausted(_) => {
             SessionTimelineEventKind::TurnFailed
         }
@@ -603,7 +606,8 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         DispatchedOutboxEventKind::ModelCallTransition { state, .. } => {
             observe_model_call_metrics(metrics, *state);
         }
-        DispatchedOutboxEventKind::CredentialPoolExhausted(_)
+        DispatchedOutboxEventKind::AutomaticReconciliationExhausted(_)
+        | DispatchedOutboxEventKind::CredentialPoolExhausted(_)
         | DispatchedOutboxEventKind::SessionCreated(_)
         | DispatchedOutboxEventKind::SessionStateChanged(_)
         | DispatchedOutboxEventKind::SessionTerminal(_)

@@ -264,7 +264,9 @@ recorded deadline lets the next daemon classify it as an infrastructure failure.
 A concurrent operator decision or other authoritative transition wins by
 ordinary row locking and records the automatic attempt as superseded. When the
 configured attempt budget is spent, the recovery row becomes exhausted, the wait
-remains unchanged, and the process transcript sets operator action required.
+remains unchanged, the process transcript sets operator action required, and an
+`automatic_reconciliation_exhausted` followed-session event names the turn and
+operation.
 
 Startup acquires the single-daemon guard, fences the prior pool incarnation once
 the fence migration has run, runs the remaining migrations, marks prior-process
@@ -283,19 +285,19 @@ for the scheduler to retry. A turn holding an unstopped in-flight call ends the
 call ambiguous and the attempt lost, and stays active in the model-call recovery
 wait with no failure entry or frontier; the transaction appends the call's
 terminal transition event and no turn event, and the scan reports the session as
-awaiting a recovery decision. A stop-requested attempt with a
-cancellation-requested call ends both and terminalizes reconciliation-required
-with that call as its exact ambiguity set. A turn already parked in the
-model-call recovery wait is not reclassified; the transaction rolls back and
-reports the session as awaiting a recovery decision. Approval and
-credential-availability waits remain parked unchanged, including delegated
-turns. A running tool attempt follows its stored effect class: prepared or
-effect-free work closes known-failed and fails the turn, and in-flight
-external-effect work closes ambiguous and parks. A running tool batch whose
-requests are all resolved with no current tool attempt is returned as resumable
-work for a scheduler pass. In the two failing branches only, one failure entry
-is appended, preceded in the tool branch by one correlated result entry per
-request in proposal order. Identity collisions are retried with fresh
+awaiting a recovery decision and counts the newly parked turn as recovered. A
+stop-requested attempt with a cancellation-requested call ends both and
+terminalizes reconciliation-required with that call as its exact ambiguity set.
+A turn already parked in the model-call recovery wait is not reclassified; the
+transaction rolls back and reports the session as awaiting a recovery decision.
+Approval and credential-availability waits remain parked unchanged, including
+delegated turns. A running tool attempt follows its stored effect class:
+prepared or effect-free work closes known-failed and fails the turn, and
+in-flight external-effect work closes ambiguous and parks. A running tool batch
+whose requests are all resolved with no current tool attempt is returned as
+resumable work for a scheduler pass. In the two failing branches only, one
+failure entry is appended, preceded in the tool branch by one correlated result
+entry per request in proposal order. Identity collisions are retried with fresh
 candidates; infrastructure failures and fail-closed corruption stop startup
 visibly. The scan is idempotent: a rerun inventories only work still active, and
 a stale observation rolls back.

@@ -114,6 +114,7 @@ impl TimelineWindowLimits {
 
 ```rust
 pub enum SessionTimelineEventKind {
+    AutomaticReconciliationExhausted,
     SessionCreated,
     SessionStateChanged,
     SessionTerminal,

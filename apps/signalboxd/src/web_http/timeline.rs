@@ -1578,6 +1578,9 @@ fn body_continuation_dto(continuation: TimelineBodyContinuation) -> WebTimelineB
 
 pub(super) fn event_kind_dto(kind: SessionTimelineEventKind) -> WebSessionTimelineEventKind {
     match kind {
+        SessionTimelineEventKind::AutomaticReconciliationExhausted => {
+            WebSessionTimelineEventKind::AutomaticReconciliationExhausted
+        }
         SessionTimelineEventKind::SessionCreated => WebSessionTimelineEventKind::SessionCreated,
         SessionTimelineEventKind::SessionStateChanged => {
             WebSessionTimelineEventKind::SessionStateChanged

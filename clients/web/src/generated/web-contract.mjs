@@ -3348,33 +3348,42 @@ const schemas = {
       },
       "WebSessionTimelineEventKind": {
         "description": "Closed durable event categories in the browser timeline foundation.",
-        "enum": [
-          "session_created",
-          "session_state_changed",
-          "session_terminal",
-          "goal_changed",
-          "command_settled",
-          "injection_settled",
-          "session_ownership_changed",
-          "session_model_settings_changed",
-          "turn_model_settings_resolved",
-          "input_accepted",
-          "goal_turn_retired",
-          "turn_activated",
-          "turn_failed",
-          "model_call_transition",
-          "tool_batch_transition",
-          "tool_approval_decided",
-          "context_compacted",
-          "turn_completed",
-          "turn_refused",
-          "turn_cancelled",
-          "turn_reconciliation_required",
-          "runner_state_transition",
-          "delegation_update",
-          "delegation_wake"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "session_created",
+              "session_state_changed",
+              "session_terminal",
+              "goal_changed",
+              "command_settled",
+              "injection_settled",
+              "session_ownership_changed",
+              "session_model_settings_changed",
+              "turn_model_settings_resolved",
+              "input_accepted",
+              "goal_turn_retired",
+              "turn_activated",
+              "turn_failed",
+              "model_call_transition",
+              "tool_batch_transition",
+              "tool_approval_decided",
+              "context_compacted",
+              "turn_completed",
+              "turn_refused",
+              "turn_cancelled",
+              "turn_reconciliation_required",
+              "runner_state_transition",
+              "delegation_update",
+              "delegation_wake"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "automatic_reconciliation_exhausted",
+            "description": "Automatic reconciliation requires an operator decision.",
+            "type": "string"
+          }
+        ]
       },
       "WebTimelineAddress": {
         "additionalProperties": false,
@@ -4491,33 +4500,42 @@ const schemas = {
       },
       "WebSessionTimelineEventKind": {
         "description": "Closed durable event categories in the browser timeline foundation.",
-        "enum": [
-          "session_created",
-          "session_state_changed",
-          "session_terminal",
-          "goal_changed",
-          "command_settled",
-          "injection_settled",
-          "session_ownership_changed",
-          "session_model_settings_changed",
-          "turn_model_settings_resolved",
-          "input_accepted",
-          "goal_turn_retired",
-          "turn_activated",
-          "turn_failed",
-          "model_call_transition",
-          "tool_batch_transition",
-          "tool_approval_decided",
-          "context_compacted",
-          "turn_completed",
-          "turn_refused",
-          "turn_cancelled",
-          "turn_reconciliation_required",
-          "runner_state_transition",
-          "delegation_update",
-          "delegation_wake"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "session_created",
+              "session_state_changed",
+              "session_terminal",
+              "goal_changed",
+              "command_settled",
+              "injection_settled",
+              "session_ownership_changed",
+              "session_model_settings_changed",
+              "turn_model_settings_resolved",
+              "input_accepted",
+              "goal_turn_retired",
+              "turn_activated",
+              "turn_failed",
+              "model_call_transition",
+              "tool_batch_transition",
+              "tool_approval_decided",
+              "context_compacted",
+              "turn_completed",
+              "turn_refused",
+              "turn_cancelled",
+              "turn_reconciliation_required",
+              "runner_state_transition",
+              "delegation_update",
+              "delegation_wake"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "automatic_reconciliation_exhausted",
+            "description": "Automatic reconciliation requires an operator decision.",
+            "type": "string"
+          }
+        ]
       },
       "WebTimelineAddress": {
         "additionalProperties": false,
@@ -6548,33 +6566,42 @@ const schemas = {
       },
       "WebSessionTimelineEventKind": {
         "description": "Closed durable event categories in the browser timeline foundation.",
-        "enum": [
-          "session_created",
-          "session_state_changed",
-          "session_terminal",
-          "goal_changed",
-          "command_settled",
-          "injection_settled",
-          "session_ownership_changed",
-          "session_model_settings_changed",
-          "turn_model_settings_resolved",
-          "input_accepted",
-          "goal_turn_retired",
-          "turn_activated",
-          "turn_failed",
-          "model_call_transition",
-          "tool_batch_transition",
-          "tool_approval_decided",
-          "context_compacted",
-          "turn_completed",
-          "turn_refused",
-          "turn_cancelled",
-          "turn_reconciliation_required",
-          "runner_state_transition",
-          "delegation_update",
-          "delegation_wake"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "session_created",
+              "session_state_changed",
+              "session_terminal",
+              "goal_changed",
+              "command_settled",
+              "injection_settled",
+              "session_ownership_changed",
+              "session_model_settings_changed",
+              "turn_model_settings_resolved",
+              "input_accepted",
+              "goal_turn_retired",
+              "turn_activated",
+              "turn_failed",
+              "model_call_transition",
+              "tool_batch_transition",
+              "tool_approval_decided",
+              "context_compacted",
+              "turn_completed",
+              "turn_refused",
+              "turn_cancelled",
+              "turn_reconciliation_required",
+              "runner_state_transition",
+              "delegation_update",
+              "delegation_wake"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "automatic_reconciliation_exhausted",
+            "description": "Automatic reconciliation requires an operator decision.",
+            "type": "string"
+          }
+        ]
       },
       "WebSessionTimelineItem": {
         "additionalProperties": false,
@@ -8311,7 +8338,7 @@ function assertTimelineDetailPage(value) {
         }
         break;
       case "event_fact":
-        if (item.body.kind !== item.kind || !["goal_turn_retired"].includes(item.kind)) {
+        if (item.body.kind !== item.kind || !["goal_turn_retired", "automatic_reconciliation_exhausted"].includes(item.kind)) {
           fail(`${path}.body.kind`, "the matching header-only event kind");
         }
         break;
