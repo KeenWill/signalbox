@@ -355,16 +355,17 @@ pub(super) async fn handle_cancel_program_run<Writer: AsyncWrite + Unpin>(
         command_id: DurableCommandId::from_uuid(command_id.into_uuid()),
         run_id: ProgramRunId::from_uuid(run_id.into_uuid()),
     };
-    let outcome = match store::cancel(&services.pool, command).await {
-        Ok(Result::Recorded(Outcome::Applied)) => {
-            if let Some(workflows) = &services.workflows {
-                workflows.cancelled(ProgramRunId::from_uuid(run_id.into_uuid()));
-            }
-            WireOutcome::Applied {
-                terminal_state: ProgramRunCancelledState::Cancelled,
-                result: (),
-            }
-        }
+    let mut result = store::cancel(&services.pool, command.clone()).await;
+    if let Some(workflows) = &services.workflows {
+        result = workflows
+            .complete_cancellation(&services.pool, command, result)
+            .await;
+    }
+    let outcome = match result {
+        Ok(Result::Recorded(Outcome::Applied)) => WireOutcome::Applied {
+            terminal_state: ProgramRunCancelledState::Cancelled,
+            result: (),
+        },
         Ok(Result::Recorded(Outcome::NotFound)) => WireOutcome::NotFound {},
         Ok(Result::Recorded(Outcome::AlreadyTerminal(state))) => {
             WireOutcome::AlreadyTerminal(match state {

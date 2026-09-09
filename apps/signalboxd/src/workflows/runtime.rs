@@ -13,7 +13,7 @@ use signalbox_domain::{
     RejectReason, RequestFrame, RequestKind,
 };
 use signalbox_persistence::{
-    program_journal::ProgramJournalRepository,
+    program_journal::{ProgramJournalRepository, ProgramJournalRepositoryError},
     program_registration::{ProgramRegistrationError, ProgramRegistrationRepository},
 };
 use signalbox_workflow_runtime::{
@@ -21,10 +21,12 @@ use signalbox_workflow_runtime::{
     WorkflowHostError, WorkflowHostProtocolError,
     effects::{EffectExecutor, EffectInvocation, EffectRecovery},
     native::NativeProgramError,
-    primitives::{DurablePrimitives, PrimitiveClock, SystemPrimitiveClock},
+    primitives::{
+        DurablePrimitives, PrimitiveClock, PrimitiveEvents, PrimitiveWake, SystemPrimitiveClock,
+    },
 };
 use sqlx::PgPool;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::WorkflowService;
 #[cfg(target_os = "linux")]
@@ -34,6 +36,8 @@ use super::{CLOCK_ENTRY, CLOCK_REVISION, compiled_catalog};
 pub enum WorkflowRuntimeError {
     #[error("workflow registration: {field_0}")]
     Registration(#[source] ProgramRegistrationError),
+    #[error("workflow journal: {field_0}")]
+    Journal(#[source] ProgramJournalRepositoryError),
     #[error("workflow runtime: {field_0}")]
     Runtime(#[source] std::io::Error),
     #[error("workflow catalog: {field_0}")]
@@ -63,6 +67,7 @@ impl WorkflowRuntimeError {
     pub fn cause_code(&self) -> &'static str {
         match self {
             Self::Registration(_) => "workflow_registration_failed",
+            Self::Journal(_) => "workflow_journal_failed",
             Self::Runtime(_) => "workflow_runtime_failed",
             Self::Catalog(_) => "workflow_catalog_failed",
             Self::NativeUnavailable => "workflow_native_unavailable",
@@ -137,9 +142,8 @@ impl WorkflowRuntime {
 
     /// Owns non-Send isolate/root futures on one local executor and joins it on shutdown.
     pub async fn run(self, shutdown: impl Future<Output = ()>) -> Result<(), WorkflowRuntimeError> {
-        let journal = self.journal.clone();
-        self.run_with_primitives(shutdown, move || DaemonPrimitives {
-            durable: DurablePrimitives::new(journal.clone(), SystemPrimitiveClock),
+        self.run_with_primitives(shutdown, |events| DaemonPrimitives {
+            durable: DurablePrimitives::new(events, SystemPrimitiveClock),
         })
         .await
     }
@@ -147,7 +151,7 @@ impl WorkflowRuntime {
     async fn run_with_primitives<P: LiveDeliverySource + 'static>(
         self,
         shutdown: impl Future<Output = ()>,
-        primitives: impl Fn() -> P + Send + 'static,
+        primitives: impl Fn(RuntimeEvents) -> P + Send + 'static,
     ) -> Result<(), WorkflowRuntimeError> {
         let (stop, stopped) = oneshot::channel();
         let stop = StopWorkflow {
@@ -178,9 +182,19 @@ impl WorkflowRuntime {
     async fn drive<P: LiveDeliverySource + 'static>(
         mut self,
         stopped: oneshot::Receiver<()>,
-        primitives: impl Fn() -> P,
+        primitives: impl Fn(RuntimeEvents) -> P,
     ) -> Result<(), WorkflowRuntimeError> {
         let execution = async {
+            let mut listener = self
+                .journal
+                .listen_all()
+                .await
+                .map_err(WorkflowRuntimeError::Journal)?;
+            let (changed, wake) = watch::channel(());
+            let events = RuntimeEvents {
+                journal: self.journal.clone(),
+                wake,
+            };
             let mut active = BTreeMap::new();
             let mut attempts = FuturesUnordered::new();
             for run in self.registrations.unfinished_runs().await? {
@@ -190,19 +204,23 @@ impl WorkflowRuntime {
                     self.host.clone(),
                     self.journal.clone(),
                     run,
-                    primitives(),
+                    primitives(events.clone()),
                     cancelled,
                 ));
             }
             loop {
                 tokio::select! {
+                    result = listener.changed() => {
+                        result.map_err(WorkflowRuntimeError::Journal)?;
+                        changed.send_replace(());
+                    }
                     Some(wake) = self.wake.recv() => {
                         match wake {
                             WorkflowWake::Start(run) => {
                                 if let std::collections::btree_map::Entry::Vacant(entry) = active.entry(run) {
                                     let (cancel, cancelled) = oneshot::channel();
                                     entry.insert(Some(cancel));
-                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(), cancelled));
+                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(events.clone()), cancelled));
                                 }
                             }
                             WorkflowWake::Cancel(run) => {
@@ -383,8 +401,41 @@ async fn record_program_failure(
     Ok(())
 }
 
+#[derive(Clone)]
+struct RuntimeEvents {
+    journal: ProgramJournalRepository,
+    wake: watch::Receiver<()>,
+}
+
+impl PrimitiveEvents for RuntimeEvents {
+    type Wake = SharedJournalWake;
+
+    async fn next_event(
+        &mut self,
+        wait: signalbox_domain::program_primitives::AwaitProgramEvent,
+    ) -> Result<Option<signalbox_domain::program_primitives::ProgramEvent>, LiveDeliveryFailure>
+    {
+        PrimitiveEvents::next_event(&mut self.journal, wait).await
+    }
+
+    async fn listen(&mut self, _: &[ProgramRunId]) -> Result<Self::Wake, LiveDeliveryFailure> {
+        Ok(SharedJournalWake(self.wake.clone()))
+    }
+}
+
+struct SharedJournalWake(watch::Receiver<()>);
+
+impl PrimitiveWake for SharedJournalWake {
+    async fn changed(&mut self) -> Result<(), LiveDeliveryFailure> {
+        self.0
+            .changed()
+            .await
+            .map_err(|error| LiveDeliveryFailure::new(error.to_string()))
+    }
+}
+
 struct DaemonPrimitives {
-    durable: DurablePrimitives,
+    durable: DurablePrimitives<SystemPrimitiveClock, RuntimeEvents>,
 }
 impl LiveDeliverySource for DaemonPrimitives {
     fn suspend_on_wait(&self, outstanding: &[RequestFrame]) -> bool {
@@ -639,6 +690,81 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread")]
         #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_concurrent_event_waits_share_one_listener_connection()
+        -> Result<(), Box<dyn Error>> {
+            // A population of concurrent waits, independent of PostgreSQL's connection limit.
+            const CONCURRENT_WAITS: usize = 32;
+            let (_database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+            let journal = ProgramJournalRepository::new(pool.clone());
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let (waiting, mut waited) = mpsc::unbounded_channel();
+            let (stop, stopped) = oneshot::channel();
+            let task = tokio::spawn(runner.run_with_primitives(
+                async {
+                    let _ = stopped.await;
+                },
+                move |events| ObservedWait {
+                    primitives: DaemonPrimitives {
+                        durable: DurablePrimitives::new(events, SystemPrimitiveClock),
+                    },
+                    waiting: waiting.clone(),
+                },
+            ));
+            let mut runs = Vec::new();
+            for _ in 0..CONCURRENT_WAITS {
+                let source = ProgramRunId::from_uuid(Uuid::now_v7());
+                journal.create_stream(source).await?;
+                let registration = service.register_javascript(
+                    ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                    javascript_request(format!(
+                        "import {{ primitives }} from '@signalbox/program-sdk/v1'; await primitives.awaitEvent({{ source: {{ kind: 'program_answers', run: '{}' }}, after: '0' }});",
+                        source.into_uuid()), ProgramGrants::new([ProgramCapability::Subscribe])),
+                ).await?;
+                let run = ProgramRunId::from_uuid(Uuid::now_v7());
+                service.start(run, registration.id, &[]).await?;
+                tokio::time::timeout(TEST_TIMEOUT, waited.recv())
+                    .await?
+                    .unwrap();
+                runs.push((run, source));
+            }
+            let listeners: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND query LIKE 'LISTEN %'",
+            ).fetch_one(&pool).await?;
+            assert_eq!(
+                listeners, 1,
+                "all waiting runs share one PostgreSQL listener"
+            );
+            for (run, source) in runs {
+                let suspended = journal.load(run).await?.unwrap();
+                assert_eq!(suspended.entries().len(), 1);
+                let request = journal
+                    .append_request(
+                        source,
+                        None,
+                        RequestKind::Now(InlineFramePayload::default()),
+                    )
+                    .await?;
+                journal
+                    .append_delivery(
+                        source,
+                        DeliveryKind::Answer {
+                            resolves: request.ordinal(),
+                            payload: InlineFramePayload::new(b"source event".as_slice()),
+                        },
+                    )
+                    .await?;
+                assert_eq!(result(&journal, run).await, InlineFramePayload::default());
+                assert_eq!(journal.load(run).await?.unwrap().entries().len(), 4);
+            }
+            stop.send(()).unwrap();
+            task.await??;
+            pool.close().await;
+            Ok(())
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
         async fn workflows_suspended_event_wait_restarts_from_retained_delivery()
         -> Result<(), Box<dyn Error>> {
             let (_database, pool, _) =
@@ -658,17 +784,13 @@ mod tests {
             service.start(run, registration.id, &[]).await?;
             let (waiting, mut waited) = mpsc::unbounded_channel();
             let (stop, stopped) = oneshot::channel();
-            let delivery_journal = journal.clone();
             let task = tokio::spawn(runner.run_with_primitives(
                 async {
                     let _ = stopped.await;
                 },
-                move || ObservedWait {
+                move |events| ObservedWait {
                     primitives: DaemonPrimitives {
-                        durable: DurablePrimitives::new(
-                            delivery_journal.clone(),
-                            SystemPrimitiveClock,
-                        ),
+                        durable: DurablePrimitives::new(events, SystemPrimitiveClock),
                     },
                     waiting: waiting.clone(),
                 },
@@ -738,6 +860,32 @@ mod tests {
         #[ignore = "requires ephemeral PostgreSQL"]
         async fn workflows_cancellation_drops_a_blocked_delivery_before_wake()
         -> Result<(), Box<dyn Error>> {
+            assert_cancellation_drops_blocked_delivery(CancellationCommit::Confirmed).await
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_ambiguous_committed_cancellation_interrupts_a_blocked_delivery()
+        -> Result<(), Box<dyn Error>> {
+            assert_cancellation_drops_blocked_delivery(CancellationCommit::ReplyLost).await
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_ambiguous_rolled_back_cancellation_retries_the_same_command()
+        -> Result<(), Box<dyn Error>> {
+            assert_cancellation_drops_blocked_delivery(CancellationCommit::RolledBack).await
+        }
+
+        enum CancellationCommit {
+            Confirmed,
+            ReplyLost,
+            RolledBack,
+        }
+
+        async fn assert_cancellation_drops_blocked_delivery(
+            commit: CancellationCommit,
+        ) -> Result<(), Box<dyn Error>> {
             use signalbox_domain::DurableCommandId;
             use signalbox_persistence::program_cancellation::{self, CancelProgramRun};
             let (_database, pool, _) =
@@ -755,7 +903,7 @@ mod tests {
                 async {
                     let _ = stopped.await;
                 },
-                move || SelectedClock {
+                move |_| SelectedClock {
                     selected: selected.clone(),
                     finished: finished.clone(),
                 },
@@ -765,15 +913,40 @@ mod tests {
             let release = tokio::time::timeout(TEST_TIMEOUT, selection.recv())
                 .await?
                 .unwrap();
-            program_cancellation::cancel(
-                &pool,
-                CancelProgramRun {
-                    command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
-                    run_id: run,
-                },
-            )
-            .await?;
-            service.cancelled(run);
+            let command = CancelProgramRun {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                run_id: run,
+            };
+            let attempt = match commit {
+                CancellationCommit::Confirmed => {
+                    program_cancellation::cancel(&pool, command.clone()).await
+                }
+                CancellationCommit::ReplyLost | CancellationCommit::RolledBack => {
+                    if matches!(commit, CancellationCommit::ReplyLost) {
+                        program_cancellation::cancel(&pool, command.clone()).await?;
+                    }
+                    Err(
+                        program_cancellation::ProgramCancellationError::CommitAmbiguous(
+                            sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+                        ),
+                    )
+                }
+            };
+            assert_eq!(
+                service
+                    .complete_cancellation(&pool, command.clone(), attempt)
+                    .await?,
+                program_cancellation::ProgramCancellationResult::Recorded(
+                    program_cancellation::ProgramCancellationOutcome::Applied,
+                ),
+            );
+            assert_eq!(
+                program_cancellation::cancel(&pool, command).await?,
+                program_cancellation::ProgramCancellationResult::Recorded(
+                    program_cancellation::ProgramCancellationOutcome::Applied,
+                ),
+                "reconciliation preserves the command's receipt",
+            );
             tokio::time::timeout(TEST_TIMEOUT, completion.recv())
                 .await?
                 .unwrap();
@@ -1317,7 +1490,7 @@ mod tests {
                 async {
                     let _ = stopped.await;
                 },
-                move || SelectedClock {
+                move |_| SelectedClock {
                     selected: selected.clone(),
                     finished: finished.clone(),
                 },
@@ -1395,13 +1568,13 @@ mod tests {
             ).await?;
             let (selected, mut selection) = mpsc::unbounded_channel();
             let (finished, _completion) = mpsc::unbounded_channel();
-            let task =
-                tokio::spawn(runner.run_with_primitives(std::future::pending(), move || {
-                    SelectedClock {
-                        selected: selected.clone(),
-                        finished: finished.clone(),
-                    }
-                }));
+            let task = tokio::spawn(runner.run_with_primitives(
+                std::future::pending(),
+                move |_| SelectedClock {
+                    selected: selected.clone(),
+                    finished: finished.clone(),
+                },
+            ));
             let run = ProgramRunId::from_uuid(Uuid::now_v7());
             service.start(run, registration.id, &[]).await?;
             let release = tokio::time::timeout(TEST_TIMEOUT, selection.recv())
@@ -1555,7 +1728,7 @@ mod tests {
                 async {
                     let _ = stopped.await;
                 },
-                move || PausedClock {
+                move |_| PausedClock {
                     reached: reached.clone(),
                 },
             ));

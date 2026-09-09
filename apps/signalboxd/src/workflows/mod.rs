@@ -12,7 +12,13 @@ use signalbox_domain::{
         ProgramRegistrationRequest,
     },
 };
-use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+use signalbox_persistence::{
+    program_cancellation::{
+        self, CancelProgramRun, ProgramCancellationError, ProgramCancellationOutcome,
+        ProgramCancellationResult,
+    },
+    program_registration::ProgramRegistrationRepository,
+};
 #[cfg(target_os = "linux")]
 use signalbox_workflow_runtime::native::{NativeCatalog, NativeProgram, WorkflowContext};
 use signalbox_workflow_runtime::native::{NativeProgramError, NativeValue};
@@ -34,6 +40,33 @@ pub struct WorkflowService {
 }
 
 impl WorkflowService {
+    pub(crate) async fn complete_cancellation(
+        &self,
+        pool: &sqlx::PgPool,
+        command: CancelProgramRun,
+        result: Result<ProgramCancellationResult, ProgramCancellationError>,
+    ) -> Result<ProgramCancellationResult, ProgramCancellationError> {
+        let result = match result {
+            Err(error @ ProgramCancellationError::CommitAmbiguous(_)) => {
+                // Reusing the command waits for its competing transaction and adopts its receipt.
+                // A failed reconciliation cannot disprove the original commit.
+                program_cancellation::cancel(pool, command.clone())
+                    .await
+                    .map_err(|_| error)
+            }
+            result => result,
+        };
+        if matches!(
+            result,
+            Ok(ProgramCancellationResult::Recorded(
+                ProgramCancellationOutcome::Applied
+            ))
+        ) {
+            self.cancelled(command.run_id);
+        }
+        result
+    }
+
     /// Wakes a blocked attempt after its durable cancellation has committed.
     pub fn cancelled(&self, run: ProgramRunId) {
         let _ = self.wake.send(runtime::WorkflowWake::Cancel(run));
@@ -147,5 +180,44 @@ impl NativeProgram for ClockProgram {
             input,
             time: ClockInput::decode(answer.as_bytes())?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_cancellation_reconciliation_preserves_ambiguity_without_a_wake() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        pool.close().await;
+        let (wake, mut received) = mpsc::unbounded_channel();
+        let service = WorkflowService {
+            registrations: ProgramRegistrationRepository::new(pool.clone()),
+            wake,
+            clock_executable: None,
+        };
+        let command = CancelProgramRun {
+            command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            run_id: ProgramRunId::from_uuid(uuid::Uuid::now_v7()),
+        };
+        let result = service
+            .complete_cancellation(
+                &pool,
+                command,
+                Err(ProgramCancellationError::CommitAmbiguous(sqlx::Error::Io(
+                    std::io::ErrorKind::ConnectionReset.into(),
+                ))),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProgramCancellationError::CommitAmbiguous(_))
+        ));
+        assert!(matches!(
+            received.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 }
