@@ -183,20 +183,22 @@ their named pull requests in `webhook_pull_wake` and wake the repository task.
 Each queued pull request is fetched and admitted independently against the
 committed baseline; the command worker evaluates its events without waiting for
 a poll. For an unseen PR, the final snapshot also derives its labels, reviews,
-threads, and completed checks independently of the observation source. A drain
-with any failed targeted read reports a partial outcome. Successful admission
-clears only the consumed delivery; a newer delivery remains pending. Failed
-observations retain their failure and attempt count. After three failed
-attempts, that row is skipped until a new delivery resets it. Other queued PRs
-continue; periodic polls reconcile repository-wide state independently. Startup
-wakes resume eligible pending rows. Shadow hooks acknowledge without queuing or
-waking. The runtime's `reload_configuration` reconciles rule revisions and
-replaces listener settings inside the reload. Enabled rule templates must
-resolve before composition or reload. Stale or conflicting rule revisions fail
-reload without replacing the running configuration. Same-address changes swap
-the path and hook map atomically; address changes bind a replacement before
-retiring the running listener, and a bind failure preserves the running
-settings. In-flight deliveries retry against the replacement configuration.
+threads, and completed checks independently of the observation source. Durable
+facts at the comparison generation distinguish reopened PRs from unseen PRs;
+reopening does not synthesize their existing snapshot facts. A drain with any
+failed targeted read reports a partial outcome. Successful admission clears only
+the consumed delivery; a newer delivery remains pending. Failed observations
+retain their failure and attempt count. After three failed attempts, that row is
+skipped until a new delivery resets it. Other queued PRs continue; periodic
+polls reconcile repository-wide state independently. Startup wakes resume
+eligible pending rows. Shadow hooks acknowledge without queuing or waking. The
+runtime's `reload_configuration` reconciles rule revisions and replaces listener
+settings inside the reload. Enabled rule templates must resolve before
+composition or reload. Stale or conflicting rule revisions fail reload without
+replacing the running configuration. Same-address changes swap the path and hook
+map atomically; address changes bind a replacement before retiring the running
+listener, and a bind failure preserves the running settings. In-flight
+deliveries retry against the replacement configuration.
 
 Lifecycle reactions accept `session_terminal`, `goal_changed`, and retained
 `pull_request_closed` or `pull_request_merged` facts and emit only

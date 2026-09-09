@@ -166,7 +166,9 @@ impl RepoWatchStore {
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|_| StoreError::InvalidComparisonBaseline)?;
-        let initial_facts = initial_facts_baseline(baseline, &observed.observation)?;
+        let initial_facts =
+            initial_facts_baseline(self, &observed.repository, baseline, &observed.observation)
+                .await?;
         occurrences.extend(
             derive_repo_watch_events_with_merged_baselines(
                 &observed.repository,
@@ -388,7 +390,9 @@ pub(crate) async fn queue_webhook_pulls(
 }
 
 // Compare only unseen PR facts against empty collections without committing a synthetic state.
-fn initial_facts_baseline(
+async fn initial_facts_baseline(
+    store: &RepoWatchStore,
+    repository: &RepositorySlug,
     baseline: &IngestBaseline,
     current: &RepoWatchObservation,
 ) -> Result<RepoWatchObservation, StoreError> {
@@ -396,22 +400,45 @@ fn initial_facts_baseline(
         PullRequestEventContext, PullRequestEventContextInput, RepoWatchPullRequestState,
         RepoWatchPullRequestStateInput,
     };
+    // Facts committed after this baseline belong to a retry, not its comparison history.
+    let observed_numbers: Vec<Decimal> = sqlx::query_scalar(
+        "SELECT number FROM unnest($3::numeric[]) AS candidate(number)
+         WHERE EXISTS (SELECT 1 FROM gh_event WHERE repository=$1
+             AND pull_request_number=candidate.number AND frontier_generation <= $2)",
+    )
+    .bind(repository.as_str())
+    .bind(Decimal::from(baseline.generation))
+    .bind(
+        current
+            .state()
+            .pull_requests()
+            .iter()
+            .map(|pull| Decimal::from(pull.context().number().get()))
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let observed_numbers = observed_numbers
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     let pull_requests = current
         .state()
         .pull_requests()
         .iter()
         .map(|pull| {
             let context = pull.context();
-            let known = baseline.observation.as_ref().is_some_and(|prior| {
-                prior
-                    .state()
-                    .pull_requests()
+            let known = observed_numbers.contains(&Decimal::from(context.number().get()))
+                || baseline.observation.as_ref().is_some_and(|prior| {
+                    prior
+                        .state()
+                        .pull_requests()
+                        .iter()
+                        .any(|prior| prior.context().number() == context.number())
+                })
+                || baseline
+                    .merged_baselines
                     .iter()
-                    .any(|prior| prior.context().number() == context.number())
-            }) || baseline
-                .merged_baselines
-                .iter()
-                .any(|prior| prior.state.number() == context.number());
+                    .any(|prior| prior.state.number() == context.number());
             if known {
                 return Ok(pull.clone());
             }
