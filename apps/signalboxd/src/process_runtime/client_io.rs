@@ -4,46 +4,116 @@ use std::{
     future::Future,
     io,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
+    io::{AsyncRead, AsyncWrite, Interest, ReadBuf},
+    net::{UnixStream, unix::OwnedReadHalf},
+    sync::watch,
     time::{Instant, Sleep, sleep},
 };
 
-/// Records when a read-ahead buffer receives bytes, including pipelined frames.
-pub(super) struct ArrivalReader<Reader> {
-    reader: Reader,
+/// Retains socket readiness times across request handling and buffer refills.
+pub(super) struct ArrivalReader {
+    reader: Arc<OwnedReadHalf>,
+    unread_since: watch::Sender<Option<Instant>>,
     pub(super) received_at: Instant,
 }
 
-impl<Reader> ArrivalReader<Reader> {
-    pub(super) fn new(reader: Reader) -> Self {
+impl ArrivalReader {
+    pub(super) fn new(reader: OwnedReadHalf) -> Self {
         Self {
-            reader,
+            reader: Arc::new(reader),
+            unread_since: watch::channel(None).0,
             received_at: Instant::now(),
         }
     }
 
-    pub(super) fn get_ref(&self) -> &Reader {
+    pub(super) fn get_ref(&self) -> &OwnedReadHalf {
         &self.reader
+    }
+
+    /// Poll alongside all connection work, including admission and request handling.
+    pub(super) fn watch_readiness(&self) -> impl Future<Output = io::Result<()>> + use<> {
+        let reader = self.reader.clone();
+        let unread_since = self.unread_since.clone();
+        let mut changes = unread_since.subscribe();
+        async move {
+            loop {
+                if changes.borrow_and_update().is_some() {
+                    // Do not spin on level readiness while these bytes remain unread.
+                    let _ = changes.changed().await;
+                    continue;
+                }
+                let socket = reader.as_ref().as_ref();
+                let available = socket
+                    .async_io(Interest::READABLE, || peek_input(socket))
+                    .await?;
+                if available == 0 {
+                    // A write-half close does not end a follow stream or pending receipt.
+                    return std::future::pending().await;
+                }
+                unread_since.send_if_modified(|since| {
+                    if since.is_some() {
+                        false
+                    } else {
+                        *since = Some(Instant::now());
+                        true
+                    }
+                });
+            }
+        }
     }
 }
 
-impl<Reader: AsyncRead + Unpin> AsyncRead for ArrivalReader<Reader> {
+fn peek_input(socket: &UnixStream) -> io::Result<usize> {
+    use rustix::net::{RecvFlags, recv};
+    recv(
+        socket,
+        &mut [0_u8; 1],
+        RecvFlags::PEEK | RecvFlags::DONTWAIT,
+    )
+    .map(|(read, _)| read)
+    .map_err(Into::into)
+}
+
+impl AsyncRead for ArrivalReader {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let filled = buffer.filled().len();
-        let result = Pin::new(&mut this.reader).poll_read(cx, buffer);
-        if matches!(result, Poll::Ready(Ok(()))) && buffer.filled().len() > filled {
-            this.received_at = Instant::now();
+        if buffer.remaining() == 0 {
+            return Poll::Ready(Ok(()));
         }
-        result
+        let socket = this.reader.as_ref().as_ref();
+        loop {
+            std::task::ready!(socket.poll_read_ready(cx))?;
+            let received_at = (*this.unread_since.borrow()).unwrap_or_else(Instant::now);
+            match this.reader.try_read_buf(buffer) {
+                Ok(0) => return Poll::Ready(Ok(())),
+                Ok(_) => {
+                    this.received_at = received_at;
+                    // Keep the timestamp across short reads until the kernel buffer drains.
+                    let remaining = socket.try_io(Interest::READABLE, || peek_input(socket));
+                    if matches!(remaining, Ok(0))
+                        || matches!(remaining, Err(ref error) if error.kind() == io::ErrorKind::WouldBlock)
+                    {
+                        this.unread_since.send_replace(None);
+                    } else {
+                        this.unread_since.send_replace(Some(received_at));
+                    }
+                    return Poll::Ready(Ok(()));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    this.unread_since.send_replace(None);
+                }
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
     }
 }
 
@@ -113,6 +183,31 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
     use tokio::time::timeout;
+
+    #[tokio::test(start_paused = true)]
+    async fn socket_arrival_survives_short_reads_until_the_receive_buffer_drains() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (server, _writer) = server.into_split();
+        let mut reader = ArrivalReader::new(server);
+        let readiness = reader.watch_readiness();
+        tokio::select! {
+            biased;
+            result = readiness => panic!("readiness watcher ended: {result:?}"),
+            () = async {
+                client.write_all(b"ab").await.unwrap();
+                assert_eq!(reader.read_u8().await.unwrap(), b'a');
+                let first_arrival = reader.received_at;
+                sleep(Duration::from_secs(2)).await;
+                assert_eq!(reader.read_u8().await.unwrap(), b'b');
+                assert_eq!(reader.received_at, first_arrival);
+
+                sleep(Duration::from_secs(60)).await;
+                client.write_all(b"c").await.unwrap();
+                assert_eq!(reader.read_u8().await.unwrap(), b'c');
+                assert_eq!(reader.received_at, Instant::now());
+            } => {}
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn stalled_reader_expires_the_write_progress_deadline() {

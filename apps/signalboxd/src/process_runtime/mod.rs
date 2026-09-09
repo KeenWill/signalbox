@@ -236,7 +236,7 @@ use tokio::{
         AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
         BufReader, Interest,
     },
-    net::{UnixStream, unix::OwnedReadHalf},
+    net::UnixStream,
     sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch},
     task::{JoinError, JoinSet},
     time::{Instant, sleep, sleep_until},
@@ -366,7 +366,7 @@ pub use runtime::{
 use runtime::{nudge_eligible_outbox_wake, observe_outbox_metrics_once};
 mod client_io;
 
-type ClientReader = BufReader<client_io::ArrivalReader<OwnedReadHalf>>;
+type ClientReader = BufReader<client_io::ArrivalReader>;
 mod connection;
 pub use connection::shared_snapshot_reader_budget;
 use connection::*;
