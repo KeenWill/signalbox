@@ -840,6 +840,8 @@ pub enum ToolExecutionServiceOutcome {
     ContinuationPoolExhausted(Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
     /// Tool results committed while the active turn waits for compaction.
     ContinuationContextCompactionRequired(TurnId),
+    /// Automatic compaction failure closed the active continuation.
+    ContinuationContextCompactionFailed(Box<FailedModelCallTurn>),
 }
 
 const fn is_fatal_executor_failure_class(failure: OperatorFailureClass) -> bool {
@@ -1884,6 +1886,12 @@ where
                     return Ok(ToolExecutionServiceOutcome::ContinuationPoolExhausted(
                         exhausted,
                     ));
+                }
+                Ok(PrepareToolContinuationOutcome::ContextCompactionFailed(failed)) => {
+                    report_tool_turn_terminalization(&failed, "continuation_compaction_failed");
+                    return Ok(
+                        ToolExecutionServiceOutcome::ContinuationContextCompactionFailed(failed),
+                    );
                 }
                 Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(required)) => {
                     return Ok(

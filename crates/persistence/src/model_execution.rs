@@ -701,6 +701,7 @@ async fn terminalize_lifecycle(
     let rows = sqlx::query(
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal',
+                compaction_frontier_id = NULL,
                 terminal_frontier_id = $1,
                 active_phase_kind = NULL,
                 current_attempt_id = NULL,

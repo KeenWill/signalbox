@@ -41,7 +41,7 @@ use signalbox_model_runtime::{
 use signalbox_persistence::goal::GoalRecoveryProgress;
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    goal::{GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository},
+    goal::{GoalCommandHandlingOutcome, GoalRepository},
     goal_turn::GoalTurnCandidates,
     model_execution::PostgresModelCallRepository,
     process_read::{ProcessReadRepository, ProcessTranscriptEntry},
@@ -921,8 +921,8 @@ async fn s_goal_reconciled_compaction_failure_arms_automatic_resumption()
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x2701)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x2702)),
             ),
-            TurnTerminalCause::ContextCompactionWall,
-            Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit),
+            TurnTerminalCause::ContextCompactionFailed,
+            None,
         )
         .await?;
 
@@ -934,7 +934,7 @@ async fn s_goal_reconciled_compaction_failure_arms_automatic_resumption()
         goal_repository
             .execution_failure_recovery_cause(session, attached_turn.turn())
             .await?,
-        Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
+        None
     );
 
     let (nudge, _work_source) =

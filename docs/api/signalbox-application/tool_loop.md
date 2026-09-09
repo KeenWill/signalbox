@@ -420,6 +420,7 @@ pub enum ToolExecutionServiceOutcome {
     ContinuationTargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),
     ContinuationPoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
     ContinuationContextCompactionRequired(signalbox_domain::TurnId),
+    ContinuationContextCompactionFailed(boxed::Box<signalbox_domain::FailedModelCallTurn>),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

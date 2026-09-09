@@ -66,17 +66,22 @@ by the configured output reservation in bytes; headroom measures the admitted
 text separately from billed provider output. Automatic compaction targets the
 first safe boundary at or beyond half the rendered bytes, falls back to the
 latest fitting safe boundary, and includes the first indivisible exchange when
-none fits. Before activating a queued turn, the guard repeats compaction until
-its continuation fits. When only a summary remains, its replacement is bounded
-to half its bytes. A failed provider compaction closes the queued turn without
-preparing an ordinary call.
+none fits. A prefix summary absorbs the next complete exchange when one remains.
+Before activating a queued turn, the guard repeats compaction until its
+continuation fits. When only a summary remains, its replacement is bounded to
+half its bytes. If the one-byte summary still leaves insufficient headroom, the
+queued turn closes without another compaction call. A failed provider compaction
+closes the queued turn without preparing an ordinary call.
 
 A tool-result continuation exceeding reserved headroom commits its results and a
 compaction checkpoint while retaining the active turn. The daemon summarizes the
 checkpoint through its last safe boundary, then prepares the continuation from
-the results and appended summary. The checkpoint survives restarts, and tool
-results are reused without execution. This applies to every session kind and
-preserves the same turn and goal lineage.
+the results and appended summary after rechecking headroom including pending
+steering. Checkpoints schedule a follow-up eligibility pass and survive
+restarts; tool results are reused without execution. Successful compaction
+preserves the same turn and goal lineage for every session kind. A failed or
+refused automatic compaction closes the active checkpoint, as does a one-byte
+summary that still lacks continuation headroom.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen

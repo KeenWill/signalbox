@@ -1,6 +1,7 @@
 //! Tool-result compaction preserves active turns and their commissioned goals.
 
 use super::*;
+use signalbox_application::EligibilityWorkSource;
 use signalbox_domain::{
     CreateSession, ModuleDispatch, ProviderReportedTokenUsage, RepoWatchDispatchId,
     SessionCreationCause, SessionCreationProvenance, SessionOwnership, StartGate,
@@ -428,8 +429,14 @@ async fn read_heavy_automatic_compaction_completes_the_active_turn() -> Result<(
     }));
     let probe = summary.clone();
     let configuration = support::parse_model_configuration(&configuration_text)?;
+    let (nudge, mut work_source) = InProcessEligibilityWorkSource::with_options(
+        NoCompactionSweep,
+        None,
+        std::num::NonZeroUsize::new(1),
+    );
     let compaction =
-        continuation_compaction_with_configuration(&runtime, summary, configuration.clone())?;
+        continuation_compaction_with_configuration(&runtime, summary, configuration.clone())?
+            .with_repository_watch_continuation(nudge, InProcessToolDispatchGate::default());
     let runtime_models = configuration.runtime_model_catalog();
     let ordinary = compaction::RecordingCountedScriptedModel::following(
         [completed_script(
@@ -446,7 +453,8 @@ async fn read_heavy_automatic_compaction_completes_the_active_turn() -> Result<(
         configuration.target_catalog(),
         ModelCallCredentialReference::new("continuation-fixture"),
     )
-    .with_session_credentials(configuration.credential_family_catalog());
+    .with_session_credentials(configuration.credential_family_catalog())
+    .with_continuation_usage_limits(configuration.tool_continuation_usage_limits());
     let (catalog, executor) = signalboxd::goal_declaration_test_tools(runtime.pool.clone())?;
     let execution = signalboxd::WorkspaceInstructionPreparedExecution::new(
         PostgresProviderModelExecution::new(
@@ -486,7 +494,9 @@ async fn read_heavy_automatic_compaction_completes_the_active_turn() -> Result<(
     for hint in recovered {
         pass.run(hint).await?;
     }
-    pass.run(session).await?;
+    let hint = timeout(Duration::from_secs(5), work_source.next()).await??;
+    assert_eq!(hint, session);
+    pass.run(hint).await?;
     let (remaining, _) = PostgresEligibilitySweep::new(runtime.pool.clone())
         .find_sessions()
         .await?
@@ -618,6 +628,13 @@ async fn commissioned_compaction_completes_goal(
         ),
         signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
     );
+    let (nudge, mut work_source) = InProcessEligibilityWorkSource::with_options(
+        NoCompactionSweep,
+        None,
+        std::num::NonZeroUsize::new(1),
+    );
+    let compaction =
+        compaction.with_repository_watch_continuation(nudge, InProcessToolDispatchGate::default());
     let pass = ContextGuardedTurnPass::new(
         StartEligibleTurnRepository::new(runtime.pool.clone()),
         calls,
@@ -645,31 +662,11 @@ async fn commissioned_compaction_completes_goal(
     );
     let mut pass = signalbox_application::GoalAwareEligibilityPass::new(pass, disposition);
     tokio::spawn(pass.run(session)).await??;
-    let repository = signalbox_persistence::goal::GoalRepository::new(runtime.pool.clone());
-    let after_first = repository
-        .load_goal(session)
-        .await?
-        .expect("commissioned goal after first execution");
-    assert!(
-        matches!(
-            after_first.current().state(),
-            signalbox_domain::GoalState::Pursuing
-        ),
-        "{after_first:?}"
-    );
-    assert_eq!(
-        repository
-            .load_current_goal_turn(session, after_first.current().generation())
-            .await?
-            .expect("the active turn remains in its goal lineage"),
-        original
-    );
-    assert!(
-        probe.received_operations().is_empty(),
-        "compaction follows the result checkpoint"
-    );
-    tokio::spawn(pass.run(session)).await??;
-    tokio::spawn(pass.run(session)).await??;
+    for _ in 0..2 {
+        let hint = timeout(Duration::from_secs(5), work_source.next()).await??;
+        assert_eq!(hint, session);
+        tokio::spawn(pass.run(hint)).await??;
+    }
     assert_eq!(ordinary_probe.prepared_operations().len(), 3);
     assert_eq!(probe.received_operations().len(), 1);
     assert_eq!(
@@ -765,4 +762,210 @@ async fn interactive_compaction_preserves_its_active_turn() -> Result<(), Box<dy
             .await?;
     assert_eq!(states, vec![(turn.into_uuid(), String::from("active"))]);
     runtime.stop().await
+}
+
+struct NoCompactionSweep;
+impl EligibilitySweep for NoCompactionSweep {
+    type Error = std::convert::Infallible;
+    async fn find_sessions(&mut self) -> Result<EligibilitySweepBatch, Self::Error> {
+        std::future::pending().await
+    }
+}
+
+async fn resume_compaction_checkpoint(
+    runtime: &RunningRuntime,
+    session: SessionId,
+    turn: TurnId,
+    window: u64,
+) -> Result<signalbox_application::PrepareToolContinuationOutcome, Box<dyn Error>> {
+    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let producing: Uuid = sqlx::query_scalar(
+        "SELECT active_tool_round_call_id FROM turn_lifecycle WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    let calls = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("continuation-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog())
+    .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(3))),
+        signalbox_domain::FastMode::Disabled,
+        256,
+        window,
+    )]);
+    Ok(calls
+        .tool_loop_repository()
+        .prepare_continuation(
+            session,
+            turn,
+            ModelCallId::from_uuid(producing),
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ModelCallId::from_uuid(Uuid::now_v7()),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    TurnId::from_uuid(Uuid::now_v7()),
+                )
+            },
+        )
+        .await?)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn failed_or_refused_compaction_closes_the_active_checkpoint() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let failures = [
+        TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            kind: ProviderErrorKind::Unrecognized,
+            non_acceptance_proven: true,
+            native: NativeErrorFacts::default(),
+            usage: TokenUsage::unreported(),
+        }),
+        TerminalEvidence::Refused(signalbox_model_runtime::RefusalEvidence {
+            reason: signalbox_model_runtime::RefusalReason::Unspecified,
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: Vec::new(),
+            usage: TokenUsage::unreported(),
+            retained_input_tokens: None,
+            retained_output_tokens: None,
+        }),
+    ];
+    for failure in failures {
+        let (session, turn) =
+            exhausted_continuation(&runtime, ContinuationSession::Interactive).await?;
+        admit_compaction_steering(&runtime, session, turn, 300).await?;
+        let summary = ScriptedModel::single(Script::delivering(failure));
+        let probe = summary.clone();
+        let compaction = continuation_compaction(&runtime, summary)?;
+        assert!(compaction.compact_if_needed(session, None).await.is_err());
+        assert!(matches!(
+            resume_compaction_checkpoint(&runtime, session, turn, 200_000).await?,
+            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionFailed(_)
+        ));
+        assert_eq!(probe.received_operations().len(), 1);
+        let lifecycle: (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT state_kind, compaction_frontier_id FROM turn_lifecycle WHERE turn_id = $1",
+        )
+        .bind(turn.into_uuid())
+        .fetch_one(&runtime.pool)
+        .await?;
+        assert_eq!(lifecycle, (String::from("terminal"), None));
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'queued'",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&runtime.pool)
+        .await?;
+        assert_eq!(
+            queued, 1,
+            "pending steering becomes eligible after failure closure"
+        );
+    }
+    runtime.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn post_compaction_headroom_includes_pending_steering() -> Result<(), Box<dyn Error>> {
+    assert_post_compaction_headroom(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn irreducible_active_compaction_releases_pending_steering() -> Result<(), Box<dyn Error>> {
+    assert_post_compaction_headroom(true).await
+}
+
+async fn assert_post_compaction_headroom(irreducible: bool) -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let (session, turn) =
+        exhausted_continuation(&runtime, ContinuationSession::Interactive).await?;
+    // The first summary and steering exceed 600 bytes with the 256-byte output
+    // reservation; the replacement summary restores headroom.
+    let summary = ScriptedModel::following(
+        (if irreducible { vec![1] } else { vec![80, 40] })
+            .into_iter()
+            .map(|bytes| {
+                completed_script(
+                    "fixture-model",
+                    &"s".repeat(bytes),
+                    TokenUsage::unreported(),
+                )
+            }),
+    );
+    let probe = summary.clone();
+    let compaction = continuation_compaction(&runtime, summary)?;
+    compaction.compact_if_needed(session, None).await?;
+    admit_compaction_steering(&runtime, session, turn, if irreducible { 600 } else { 300 }).await?;
+    let outcome = resume_compaction_checkpoint(&runtime, session, turn, 600).await?;
+    if irreducible {
+        assert!(matches!(
+            outcome,
+            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionFailed(_)
+        ));
+    } else {
+        assert!(matches!(
+            outcome,
+            signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(_)
+        ));
+        compaction.compact_if_needed(session, None).await?;
+        assert!(matches!(
+            resume_compaction_checkpoint(&runtime, session, turn, 600).await?,
+            signalbox_application::PrepareToolContinuationOutcome::Checkpointed(_)
+        ));
+    }
+    assert_eq!(
+        probe.received_operations().len(),
+        if irreducible { 1 } else { 2 }
+    );
+    let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input WHERE session_id = $1 AND disposition_kind = 'pending_steering'")
+        .bind(session.into_uuid()).fetch_one(&runtime.pool).await?;
+    assert_eq!(pending, 0);
+    runtime.stop().await
+}
+
+async fn admit_compaction_steering(
+    runtime: &RunningRuntime,
+    session: SessionId,
+    turn: TurnId,
+    bytes: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            50,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id: CanonicalUuid::from_uuid(session.into_uuid()),
+                content: UserInputContent::text("p".repeat(bytes)),
+                expected_defaults_version: None,
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+                }),
+            },
+        )
+        .await?;
+    let response = response_within(&mut connection).await?;
+    assert!(!matches!(response.message(), ServerMessage::Error { .. }));
+    drop(connection);
+    Ok(())
 }

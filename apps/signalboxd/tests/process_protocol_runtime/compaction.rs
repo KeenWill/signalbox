@@ -1249,6 +1249,19 @@ async fn reported_usage_rechecks_compaction_headroom() -> Result<(), Box<dyn Err
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn failed_automatic_compaction_closes_turn_call_free() -> Result<(), Box<dyn Error>> {
+    assert_failed_automatic_compaction_closes_turn(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn irreducible_compaction_closes_the_queued_turn_without_another_billable_call()
+-> Result<(), Box<dyn Error>> {
+    assert_failed_automatic_compaction_closes_turn(true).await
+}
+
+async fn assert_failed_automatic_compaction_closes_turn(
+    no_progress: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -1294,16 +1307,22 @@ async fn failed_automatic_compaction_closes_turn_call_free() -> Result<(), Box<d
     let ordinary_runtime =
         RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [8192, 8192, 8192]);
     let ordinary_probe = ordinary_runtime.clone();
-    let summary_runtime = ScriptedModel::single(Script::delivering(
-        TerminalEvidence::ProviderError(ProviderErrorEvidence {
-            exchange: ExchangeFacts::default(),
-            reported_model: None,
-            kind: ProviderErrorKind::Unrecognized,
-            non_acceptance_proven: true,
-            native: NativeErrorFacts::default(),
-            usage: TokenUsage::unreported(),
-        }),
-    ));
+    let summary_runtime = if no_progress {
+        ScriptedModel::following(
+            (0..2).map(|_| completed_script("fixture-model", "s", TokenUsage::unreported())),
+        )
+    } else {
+        ScriptedModel::single(Script::delivering(TerminalEvidence::ProviderError(
+            ProviderErrorEvidence {
+                exchange: ExchangeFacts::default(),
+                reported_model: None,
+                kind: ProviderErrorKind::Unrecognized,
+                non_acceptance_proven: true,
+                native: NativeErrorFacts::default(),
+                usage: TokenUsage::unreported(),
+            },
+        )))
+    };
     let summary_probe = summary_runtime.clone();
     let runtime_models = guarded_configuration.runtime_model_catalog();
     let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone(), None)
@@ -1355,14 +1374,32 @@ async fn failed_automatic_compaction_closes_turn_call_free() -> Result<(), Box<d
         Vec::new(),
     ));
     let session = SessionId::from_uuid(session_id.into_uuid());
-    let turn = failed_automatic_compaction_turn(pass.run(session).await);
+    let outcome = pass.run(session).await;
+    let turn = if no_progress {
+        match outcome {
+            Err(signalboxd::ContextGuardedTurnPassError::Compaction {
+                turn,
+                cause_code: "context_compaction_no_progress",
+                ..
+            }) => turn,
+            other => panic!("expected irreducible compaction closure, got {other:?}"),
+        }
+    } else {
+        failed_automatic_compaction_turn(outcome)
+    };
     assert_eq!(*turn.as_uuid(), queued_turn.into_uuid());
     let second_attempt = pass.run(session).await;
     assert!(second_attempt.is_ok());
     assert!(!fatal_execution.is_triggered());
-    assert_eq!(ordinary_probe.counted_operations().len(), 1);
+    assert_eq!(
+        ordinary_probe.counted_operations().len(),
+        if no_progress { 3 } else { 1 }
+    );
     assert_eq!(ordinary_probe.prepared_operations().len(), 0);
-    assert_eq!(summary_probe.received_operations().len(), 1);
+    assert_eq!(
+        summary_probe.received_operations().len(),
+        if no_progress { 2 } else { 1 }
+    );
     assert_eq!(
         summary_probe.received_operations()[0]
             .credential_reference
@@ -1374,7 +1411,7 @@ async fn failed_automatic_compaction_closes_turn_call_free() -> Result<(), Box<d
             .bind(session_id.into_uuid())
             .fetch_one(&runtime.pool)
             .await?;
-    assert_eq!(compaction_count, 0);
+    assert_eq!(compaction_count, if no_progress { 2 } else { 0 });
     let automatic_command_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM compact_session_command
           WHERE session_id = $1 AND automatic_for_turn_id = $2",
@@ -1383,18 +1420,25 @@ async fn failed_automatic_compaction_closes_turn_call_free() -> Result<(), Box<d
     .bind(queued_turn.into_uuid())
     .fetch_one(&runtime.pool)
     .await?;
-    assert_eq!(automatic_command_count, 1);
+    assert_eq!(automatic_command_count, if no_progress { 2 } else { 1 });
     let compaction_call: (String, Option<String>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind
            FROM context_compaction_model_call
-          WHERE session_id = $1",
+          WHERE session_id = $1 ORDER BY model_call_id LIMIT 1",
     )
     .bind(session_id.into_uuid())
     .fetch_one(&runtime.pool)
     .await?;
     assert_eq!(
         compaction_call,
-        (String::from("terminal"), Some(String::from("known_failed")))
+        (
+            String::from("terminal"),
+            Some(String::from(if no_progress {
+                "completed"
+            } else {
+                "known_failed"
+            }))
+        )
     );
     let ordinary_call_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")

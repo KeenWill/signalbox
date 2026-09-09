@@ -6,8 +6,9 @@ use std::{error::Error, fmt, future::Future, sync::Arc};
 pub use continuation::repository_watch_continuation_test_request;
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityPass, InProcessEligibilityNudge, ModelCallInputTokenCount,
-    ModelCallInputTokenCounter, OperatorFailureClass, SchedulerPassExpiryHandler, ToolCatalog,
+    ClassifyOperatorFailure, EligibilityNudge, EligibilityPass, InProcessEligibilityNudge,
+    ModelCallInputTokenCount, ModelCallInputTokenCounter, OperatorFailureClass,
+    SchedulerPassExpiryHandler, ToolCatalog,
 };
 use signalbox_domain::{
     AcceptedInputTurnActivationIdentities, ContextFrontierId, DirectModelSelection,
@@ -47,7 +48,7 @@ const PROVIDER_COUNT_ADMISSION_PERCENT: u64 = 95;
 /// Failure while reconciling provider-reported context growth before activation.
 #[derive(Debug)]
 pub enum ReportedUsageCompactionError {
-    /// A repository-watch terminalization could not admit its bounded successor.
+    /// Compaction recovery could not read or admit eligible continuation work.
     Continuation(ContinuationCompactionError),
     /// Read-only selection of the queued turn failed.
     Activation(StartEligibleTurnRepositoryError),
@@ -203,7 +204,7 @@ impl ReportedUsageCompaction {
         self
     }
 
-    /// Enables bounded successor admission for repository-watch continuation failures.
+    /// Enables active-checkpoint nudges and repository-watch successor admission.
     pub fn with_repository_watch_continuation(
         mut self,
         nudge: InProcessEligibilityNudge,
@@ -218,6 +219,9 @@ impl ReportedUsageCompaction {
         session: SessionId,
     ) -> Result<(), ReportedUsageCompactionError> {
         if let Some(continuation) = &self.continuation {
+            if self.has_active_checkpoint(session).await? {
+                let _ = continuation.nudge.nudge(session);
+            }
             continuation
                 .enqueue(self.model_calls.pool(), &self.model_configuration, session)
                 .await
@@ -226,7 +230,23 @@ impl ReportedUsageCompaction {
         Ok(())
     }
 
-    /// Compacts bounded prefixes until the queued continuation regains reserved headroom.
+    async fn has_active_checkpoint(
+        &self,
+        session: SessionId,
+    ) -> Result<bool, ReportedUsageCompactionError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1
+                AND state_kind = 'active' AND compaction_frontier_id IS NOT NULL)",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(self.model_calls.pool())
+        .await
+        .map_err(|error| {
+            ReportedUsageCompactionError::Continuation(ContinuationCompactionError::Database(error))
+        })
+    }
+
+    /// Compacts active checkpoints and queued input that lack reserved headroom.
     pub async fn compact_if_needed(
         &self,
         session: SessionId,
@@ -249,6 +269,7 @@ impl ReportedUsageCompaction {
             ContinuationCompactionError::Database(error),
         ))?;
         if let Some((turn, selection)) = checkpoint {
+            self.enqueue_continuation(session).await?;
             let turn = TurnId::from_uuid(turn);
             compact_automatically(
                 &self.model_calls,

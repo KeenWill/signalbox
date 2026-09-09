@@ -69,6 +69,7 @@ pub(crate) async fn prepare_tool_continuation_call(
     continuation_usage_limits: &ToolContinuationUsageLimitCatalog,
     projection: &PreparedToolResultProjection,
     producing_call: ModelCallId,
+    compaction_failed: bool,
     call: ModelCallId,
     failure_identities: FailedModelCallTurnIdentities,
     steering_frontier: signalbox_domain::ContextFrontierId,
@@ -121,16 +122,23 @@ pub(crate) async fn prepare_tool_continuation_call(
         .effective()
         .fast_mode();
     let resolved_target = targets.resolve(*execution.configuration().effective().model());
-    let compacted = projection.entries().iter().any(|entry| {
-        matches!(
-            entry.payload(),
-            signalbox_domain::SemanticTranscriptEntryPayload::ContextSummary { .. }
-        )
-    });
-    if !compacted
-        && let Ok(resolved) = resolved_target
+    // Active-turn compaction replaces the whole closed exchange prefix. Measure
+    // its current summary, then reserve pending steering and output separately.
+    let compacted_input_bytes =
+        projection
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry.payload() {
+                signalbox_domain::SemanticTranscriptEntryPayload::ContextSummary {
+                    value, ..
+                } => Some(u64::try_from(value.as_str().len()).unwrap_or(u64::MAX)),
+                _ => None,
+            });
+    let headroom_exhausted = if let Ok(resolved) = resolved_target
         && let Some(limit) = continuation_usage_limits.get(&(resolved.target(), fast_mode))
-        && load_tool_continuation_headroom_evidence(
+    {
+        load_tool_continuation_headroom_evidence(
             connection,
             session,
             turn,
@@ -143,9 +151,44 @@ pub(crate) async fn prepare_tool_continuation_call(
                 .collect(),
             serving_pool_target(credential_families, resolved.target(), fast_mode),
             *limit,
+            compacted_input_bytes,
         )
         .await?
-    {
+    } else {
+        false
+    };
+    if compaction_failed || (headroom_exhausted && compacted_input_bytes == Some(1)) {
+        let reclassifications = steering_identities
+            .into_iter()
+            .map(|(_, identity)| identity)
+            .collect::<Vec<_>>();
+        let mut proposed_turns = BTreeSet::new();
+        for identity in &reclassifications {
+            record_reclassified_turn_candidate(turn, identity.turn(), &mut proposed_turns)?;
+        }
+        let failed = execution
+            .fail_automatic_context_compaction(
+                failure_identities.with_pending_steering_reclassifications(reclassifications),
+            )
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "automatic compaction failure could not close tool continuation",
+                )
+            })?;
+        persist_failed_with_delegated_child_result(
+            connection,
+            &failed,
+            TurnTerminalCause::ContextCompactionFailed,
+            ProviderReportedTokenUsage::unreported(),
+            None,
+            None,
+        )
+        .await?;
+        return Ok(PrepareToolContinuationOutcome::ContextCompactionFailed(
+            Box::new(failed),
+        ));
+    }
+    if headroom_exhausted {
         sqlx::query(
             "UPDATE turn_lifecycle SET compaction_frontier_id = $3
                       WHERE session_id = $1 AND turn_id = $2 AND state_kind = 'active'",
@@ -322,6 +365,7 @@ pub(crate) async fn prepare_tool_continuation_call(
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn load_tool_continuation_headroom_evidence(
     connection: &mut PgConnection,
     session: SessionId,
@@ -330,6 +374,7 @@ async fn load_tool_continuation_headroom_evidence(
     pending_steering: Vec<sqlx::types::Uuid>,
     current_effective_target: ResolvedProviderTarget,
     limit: ToolContinuationUsageLimit,
+    compacted_input_bytes: Option<u64>,
 ) -> Result<bool, ModelCallRepositoryError> {
     let row = sqlx::query(
         "SELECT effective_provider_model_identity_id,
@@ -454,7 +499,7 @@ async fn load_tool_continuation_headroom_evidence(
     let producing_effective_target = ResolvedProviderTarget::naming(
         ProviderModelIdentity::from_uuid(row.try_get("effective_provider_model_identity_id")?),
     );
-    if producing_effective_target != current_effective_target {
+    if compacted_input_bytes.is_none() && producing_effective_target != current_effective_target {
         return Ok(false);
     }
     let decode = |field: &'static str| -> Result<Option<u64>, ModelCallRepositoryError> {
@@ -485,6 +530,12 @@ async fn load_tool_continuation_headroom_evidence(
     let pending_steering_content_bytes = decode("pending_steering_content_bytes")?.ok_or(
         ModelCallCorruption::Missing("pending steering content byte count"),
     )?;
+    if let Some(compacted_input_bytes) = compacted_input_bytes {
+        return Ok(compacted_input_bytes
+            .saturating_add(pending_steering_content_bytes)
+            .saturating_add(limit.max_output_tokens())
+            > limit.context_window_tokens());
+    }
     let Some(input_tokens) = usage.input_tokens() else {
         return Ok(false);
     };

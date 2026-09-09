@@ -1364,38 +1364,41 @@ impl PostgresToolLoopRepository {
                     "SELECT compaction_frontier_id FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
                 ).bind(turn.into_uuid()).bind(session.into_uuid())
                     .fetch_one(&mut *transaction).await?;
-                let compacted: Option<(Uuid, Uuid)> = match checkpoint {
-                    Some(frontier) => sqlx::query_as(
-                        "SELECT result_frontier_id, summary_entry_id FROM context_compaction
+                let compacted: Option<Uuid> = match checkpoint {
+                    Some(frontier) => sqlx::query_scalar(
+                        "SELECT result_frontier_id FROM context_compaction
                           WHERE session_id = $1 AND source_frontier_id = $2",
                     ).bind(session.into_uuid()).bind(frontier)
                         .fetch_optional(&mut *transaction).await?,
                     None => None,
                 };
-                if checkpoint.is_some() && compacted.is_none() {
+                let compaction_failed = checkpoint.is_some() && sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM compact_session_command
+                      WHERE session_id = $1 AND automatic_for_turn_id = $2 AND result_kind = 'failed')",
+                ).bind(session.into_uuid()).bind(turn.into_uuid())
+                    .fetch_one(&mut *transaction).await?;
+                if checkpoint.is_some() && compacted.is_none() && !compaction_failed {
                     return Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(turn));
                 }
-                let checkpoint_snapshot = match checkpoint {
-                    Some(frontier) => Some(load_snapshot(&mut transaction, session,
-                        signalbox_domain::ContextFrontierId::from_uuid(frontier)).await?),
-                    None => None,
-                };
-                let result_entries = checkpoint_snapshot.as_ref().map_or_else(
-                    || identities.result_entries().to_vec(),
-                    |snapshot| snapshot.ordered_entries()
-                        .skip(batch.yielded_snapshot().entry_count())
-                        .take(batch.requests().len()).map(|entry| entry.entry()).collect(),
-                );
+                let mut boundaries = Vec::new();
+                let result_count = batch.yielded_snapshot().entry_count() + batch.requests().len();
                 let mut result_frontier = checkpoint.map_or(identities.result_frontier(),
                     signalbox_domain::ContextFrontierId::from_uuid);
-                let relocated_checkpoint = checkpoint_snapshot.as_ref().is_some_and(|snapshot|
-                    snapshot.entry_count() > batch.yielded_snapshot().entry_count() + batch.requests().len());
-                if relocated_checkpoint {
-                    let prefix: Uuid = sqlx::query_scalar(
-                        "SELECT prefix_context_frontier_id FROM context_frontier WHERE context_frontier_id = $1",
-                    ).bind(result_frontier.into_uuid()).fetch_one(&mut *transaction).await?;
-                    result_frontier = signalbox_domain::ContextFrontierId::from_uuid(prefix);
-                }
+                let result_entries = if checkpoint.is_some() {
+                    let mut snapshot = load_snapshot(&mut transaction, session, result_frontier).await?;
+                    while snapshot.entry_count() > result_count {
+                        boundaries.push(snapshot.clone());
+                        let prefix: Uuid = sqlx::query_scalar(
+                            "SELECT prefix_context_frontier_id FROM context_frontier WHERE context_frontier_id = $1",
+                        ).bind(result_frontier.into_uuid()).fetch_one(&mut *transaction).await?;
+                        result_frontier = signalbox_domain::ContextFrontierId::from_uuid(prefix);
+                        snapshot = load_snapshot(&mut transaction, session, result_frontier).await?;
+                    }
+                    snapshot.ordered_entries().skip(batch.yielded_snapshot().entry_count())
+                        .map(|entry| entry.entry()).collect()
+                } else {
+                    identities.result_entries().to_vec()
+                };
                 let mut child_outcomes = BTreeMap::new();
                 for request in batch.requests() {
                     if let Some(ReconstitutedToolAttempt::Ended(attempt)) =
@@ -1429,7 +1432,12 @@ impl PostgresToolLoopRepository {
                             "tool batch is not ready for continuation",
                         )
                     })?;
-                if let Some((frontier, summary)) = compacted {
+                boundaries.reverse();
+                if let Some(frontier) = compacted {
+                    boundaries.push(load_snapshot(&mut transaction, session,
+                        signalbox_domain::ContextFrontierId::from_uuid(frontier)).await?);
+                }
+                if !boundaries.is_empty() {
                     let loaded = crate::session::load_session_from_connection(&mut transaction, session)
                         .await.map_err(|error| match error {
                             crate::session::SessionRepositoryError::Database(error) => ToolLoopRepositoryError::from(error),
@@ -1437,24 +1445,14 @@ impl PostgresToolLoopRepository {
                         })?.ok_or(ToolLoopCorruption::Missing("compaction session"))?;
                     let scheduling = Box::pin(crate::submit_input::load_scheduling_projection(&mut transaction, loaded))
                         .await.map_err(crate::model_execution::map_scheduling_error).map_err(map_model_call_error)?;
-                    if relocated_checkpoint {
-                        let snapshot = checkpoint_snapshot.as_ref()
-                            .ok_or(ToolLoopCorruption::Missing("relocated checkpoint"))?;
+                    for snapshot in boundaries {
                         let reference = snapshot.ordered_entries().last()
-                            .ok_or(ToolLoopCorruption::Missing("relocation entry"))?;
+                            .ok_or(ToolLoopCorruption::Missing("checkpoint boundary entry"))?;
                         let entry = scheduling.semantic_entry(reference).cloned()
-                            .ok_or(ToolLoopCorruption::Missing("relocation entry"))?;
-                        projection = projection.with_context_boundary(entry, snapshot.clone())
-                            .map_err(|_| ToolLoopCorruption::Inconsistent("relocated checkpoint projection"))?;
+                            .ok_or(ToolLoopCorruption::Missing("checkpoint boundary entry"))?;
+                        projection = projection.with_context_boundary(entry, snapshot)
+                            .map_err(|_| ToolLoopCorruption::Inconsistent("checkpoint boundary projection"))?;
                     }
-                    let reference = signalbox_domain::SemanticTranscriptEntryRef::from_source(session,
-                        signalbox_domain::SemanticTranscriptEntryId::from_uuid(summary));
-                    let entry = scheduling.semantic_entry(reference).cloned()
-                        .ok_or(ToolLoopCorruption::Missing("compaction summary"))?;
-                    let snapshot = load_snapshot(&mut transaction, session,
-                        signalbox_domain::ContextFrontierId::from_uuid(frontier)).await?;
-                    projection = projection.with_context_boundary(entry, snapshot)
-                        .map_err(|_| ToolLoopCorruption::Inconsistent("compacted result projection"))?;
                 }
                 let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
                     "SELECT accepted_input_id FROM accepted_input
@@ -1576,6 +1574,7 @@ impl PostgresToolLoopRepository {
                     &self.continuation_usage_limits,
                     &projection,
                     producing_call,
+                    compaction_failed,
                     identities.call(),
                     identities.target_failure().clone(),
                     identities.steering_frontier(),

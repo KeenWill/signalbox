@@ -3187,6 +3187,7 @@ where
                         }
                         ToolExecutionServiceOutcome::ChildWaitParked(_)
                         | ToolExecutionServiceOutcome::AwaitingRecovery(_)
+                        | ToolExecutionServiceOutcome::ContinuationContextCompactionFailed(_)
                         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_)
                         | ToolExecutionServiceOutcome::ContinuationPoolExhausted(_)
                         | ToolExecutionServiceOutcome::ContinuationContextCompactionRequired(_) => {

@@ -391,6 +391,7 @@ pub(crate) enum AutomaticContextCompactionError {
     State,
     Integrity,
     AlreadyAttempted,
+    NoProgress,
 }
 
 impl fmt::Display for AutomaticContextCompactionError {
@@ -416,7 +417,7 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             Self::Read(ProcessReadError::Corruption(_)) | Self::Integrity => {
                 signalbox_application::OperatorFailureClass::FailClosedCorruption
             }
-            Self::Configuration | Self::State | Self::AlreadyAttempted => {
+            Self::Configuration | Self::State | Self::AlreadyAttempted | Self::NoProgress => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
             }
         }
@@ -445,6 +446,7 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             Self::State => "context_compaction_state",
             Self::Integrity => "context_compaction_integrity",
             Self::AlreadyAttempted => "context_compaction_already_attempted",
+            Self::NoProgress => "context_compaction_no_progress",
         }
     }
 }
@@ -630,6 +632,9 @@ pub(crate) async fn compact_automatically(
         let summary_byte_budget = if rendered_entries.len() == 1
             && let ProcessTranscriptEntry::ContextSummary { content, .. } = &rendered_entries[0]
         {
+            if content.len() <= 1 {
+                return Err(AutomaticContextCompactionError::NoProgress);
+            }
             u64::try_from(content.len()).unwrap_or(u64::MAX).div_ceil(2)
         } else {
             u64::from(definition.max_output_tokens())
@@ -661,6 +666,25 @@ pub(crate) async fn compact_automatically(
             .await?
         }
         .ok_or(AutomaticContextCompactionError::State)?;
+        // A prefix summary must absorb the next closed exchange when one
+        // remains; summarizing just that prefix again cannot retire the tail.
+        let requested_through_position = if matches!(
+            rendered_entries.first(),
+            Some(ProcessTranscriptEntry::ContextSummary { .. })
+        ) && preview
+            .members()
+            .first()
+            .is_some_and(|member| member.position() == requested_through_position)
+        {
+            preview
+                .members()
+                .iter()
+                .skip(1)
+                .find(|member| member.is_safe_boundary())
+                .map_or(requested_through_position, |member| member.position())
+        } else {
+            requested_through_position
+        };
         let call = ModelCallId::from_uuid(uuid::Uuid::now_v7());
         let request = PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
