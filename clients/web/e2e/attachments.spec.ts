@@ -69,7 +69,7 @@ test('keeps document bytes behind the admitted download-only affordance', async 
   await page.goto('/scenario/attachments')
 
   const preview = page.getByRole('region', { name: 'Selected attachment preview' })
-  await expect(preview.getByText('Document bytes stay unloaded')).toBeVisible()
+  await expect(preview.getByRole('link', { name: 'Download', exact: true })).toBeVisible()
   await expect(preview.getByRole('link', { name: 'Open document' })).toHaveCount(0)
   const download = preview.getByRole('link', { name: 'Download' })
   await expect(download).toHaveAttribute('download')

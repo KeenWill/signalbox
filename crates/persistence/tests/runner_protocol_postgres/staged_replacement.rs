@@ -180,18 +180,23 @@ async fn assert_staged_batch_boundary(case: StagedBoundaryCase) -> Result<(), Bo
                 .await
                 .is_err()
         );
-        tokio::time::timeout(PROGRESS_DEADLINE, async {
-            let mut transaction = continuation_pool.begin().await?;
-            sqlx::query(
-                "SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE",
-            )
-            .bind(fixture.session.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-            transaction.rollback().await
-        })
-        .await
-        .expect("waiting retains neither the only pool connection nor the scheduler lock")?;
+        tokio::select! {
+            outcome = &mut continuation => {
+                panic!("continuation waits for candidate recovery: {outcome:?}");
+            }
+            capacity = tokio::time::timeout(PROGRESS_DEADLINE, async {
+                let mut transaction = continuation_pool.begin().await?;
+                sqlx::query(
+                    "SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE",
+                )
+                .bind(fixture.session.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await?;
+                transaction.rollback().await
+            }) => {
+                capacity.expect("waiting retains neither the only pool connection nor the scheduler lock")?;
+            }
+        }
         fixture
             .store
             .transition_connection(

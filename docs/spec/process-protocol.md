@@ -84,10 +84,10 @@ database notification listener reconnecting requires all followers to resync.
 
 ## Design decisions
 
-Version 1 is edited in place until the first durable deployment, a client that
-cannot be rebuilt at will, such as an owner-operated remote daemon or installed
-app; after that, every incompatible change allocates a permanent new version
-number.
+Wire version 1 is edited in place until the first durable deployment, a client
+that cannot be rebuilt at will, such as an owner-operated remote daemon or
+installed app; after that, every incompatible change allocates a permanent new
+version number.
 
 Every frame carries the version so captured traffic and errors are
 self-describing without connection-global negotiation state. Selecting a session
@@ -125,10 +125,11 @@ provider-native model identifier, or mutable configuration operation. The
 imported-entry projection carries no tool fields, results, thinking, media,
 source-event payload, absence detail, or raw record, so the immutable aggregate
 stays the authority. No delegation event embeds or links the child transcript.
-Storage-version columns are not exposed as wire-version fields. An opaque
-provider-compaction semantic entry projects only a non-text marker carrying its
-turn and producing-call identities; its provider replay bytes never cross
-protocol output.
+Storage-version columns follow [identity and commands](identity-and-commands.md)
+and are not exposed as wire-version fields. An opaque provider-compaction
+semantic entry projects only a non-text marker carrying its turn and
+producing-call identities; its provider replay bytes never cross protocol
+output.
 
 Pool construction requires a non-cloneable capability that borrows the live
 fence session, so a copied generation value cannot construct work after the
@@ -261,11 +262,12 @@ the database transaction timestamp, not a client clock.
 
 Except for immutable credential-pool policy validation, every read that holds a
 pooled connection across more than one statement takes one snapshot-reader
-admission; the single-statement defaults read takes none. Pool-policy validation
-takes no admission so a follower can validate its snapshot while holding one.
-Every request states its admission class before dispatch, so no read verb
-reaches the pool by omission. The reader budget leaves at least two pool
-connections outside snapshot work.
+admission. Single-statement defaults and blob metadata reads take no
+snapshot-reader permit before dispatch; the blob metadata handler acquires one
+before its database read. Pool-policy validation takes no admission so a
+follower can validate its snapshot while holding one. Every request states its
+admission class before dispatch, so no read verb reaches the pool by omission.
+The reader budget leaves at least two pool connections outside snapshot work.
 
 The imported seed frontier is selected only when no persisted turn-start lineage
 exists; a queued but unstarted first native turn does not hide it.
@@ -580,9 +582,9 @@ is `applied { terminal_state: "cancelled", result: null }`, `not_found`, or
 and result the command found. An identical request bearing the same `command_id`
 replays its stored receipt even if the run's standing state later changes; the
 same identity with a different payload is conflicting reuse. Run-state semantics
-belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
-version-1 encoding, and the closed receipt algebra belong here, and a later
-incompatible shape requires a new protocol version.
+belong to [workflows.md](../spec/workflows.md); this pair, its version-1
+encoding, and the closed receipt algebra belong here, and a later incompatible
+shape requires a new protocol version.
 
 Transcript snapshot starts include nullable `repository_watch` provenance
 resolved from the retained dispatch ledger.
