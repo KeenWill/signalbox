@@ -146,13 +146,14 @@ A successor prepared after a rate-limit, overload or provider-internal failure
 waits the greater of the provider's reported delay and a local exponentially
 increasing jittered delay, each capped at five minutes
 (`MAX_AVAILABILITY_BACKOFF` in `crates/persistence/src/model_execution.rs`). A
-successor after a quota failure is immediate. Quota and authentication failures
-bypass same-credential retry and apply their pinned actions immediately. A
-same-credential retry derives local backoff from that credential's recorded
-attempt count; rotation starts the successor's backoff count at one. Wait
-release honors the parked successor's retry deadline before consuming the wait.
-An early wake stays pending, and scheduling eligibility begins only when that
-retry deadline expires.
+successor after a quota failure is immediate. Except for successful OAuth
+access-token recovery, quota and authentication failures bypass same-credential
+retry and apply their pinned actions immediately. A same-credential retry
+derives local backoff from that credential's recorded attempt count; rotation
+starts the successor's backoff count at one. Wait release honors the parked
+successor's retry deadline before consuming the wait. An early wake stays
+pending, and scheduling eligibility begins only when that retry deadline
+expires.
 
 The required `numeric_bounds.max_same_credential_attempts_per_turn` is a
 positive integer bounding recorded calls on one credential in one turn, or

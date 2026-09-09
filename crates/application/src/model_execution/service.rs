@@ -767,12 +767,8 @@ where
         loop {
             let mut identities =
                 self.next_terminal_identities(observation.observation(), &tool_approvals);
-            // Every classified pool trigger evaluates its frozen action, not
-            // only the ones that could substitute a member on this turn.
-            // `switch_next_turn`, `avoid_new_sessions`, and `quarantine`
-            // terminalize the call and persist a durable exclusion, so gating
-            // them on substitution proof silently degraded them to `stay`.
-            // Persistence still requires the proof before creating a successor.
+            // Supply successor identity candidates for classified pool triggers;
+            // persistence decides whether to admit a successor or terminalize.
             if matches!(
                 observation.provider_failure_cause(),
                 Some(
