@@ -1,6 +1,6 @@
 //! Streaming contract shared by immutable blob-store adapters.
 //!
-//! The normative specification is `docs/spec/blob-storage.md`.
+//! This crate defines the content-derived object-key layout shared by adapters.
 
 use std::{error::Error, fmt, future::Future, num::NonZeroU64, pin::Pin, sync::Arc};
 

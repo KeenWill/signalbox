@@ -150,5 +150,4 @@ The command claim and replay protocol and the attribution rule are stated on
 
 ## Planned
 
-No committed unbuilt design is recorded for goal mode; undecided items are in
-[open questions](../open-questions.md).
+None.

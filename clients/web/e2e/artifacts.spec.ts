@@ -185,9 +185,7 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
 
   const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
   await artifact.scrollIntoViewIfNeeded()
-  await expect(artifact.getByRole('status')).toContainText(
-    'No admitted inline image view could be loaded',
-  )
+  await expect(artifact.getByRole('status')).toContainText('Preview unavailable')
   await artifact.getByRole('button', { name: 'Load original' }).click()
   await expect(artifact.getByRole('button', { name: 'Retry original' })).toBeVisible()
   await expect(artifact.getByRole('status')).toContainText('Original image failed to load')
@@ -198,7 +196,7 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
     'aria-disabled',
     'true',
   )
-  await expect(artifact.getByText('No admitted inline image view could be loaded')).toHaveCount(0)
+  await expect(artifact.getByText('Preview unavailable')).toHaveCount(0)
   expectOnlyExpectedFailedResourceError(problems, failedResponsePaths, [
     thumbnailPath,
     jpegOriginalPath,
@@ -273,12 +271,12 @@ test('expands text through a bounded keyboard action', async ({ page }) => {
   await page.goto('/scenario/blobs')
 
   const artifact = page.getByRole('article', { name: 'Artifact incident-notes.txt' })
-  const expand = artifact.getByRole('button', { name: 'Expand bounded preview' })
+  const expand = artifact.getByRole('button', { name: 'Expand preview' })
   await expand.focus()
   await expect(expand).toBeFocused()
   await page.keyboard.press('Enter')
   await expect(artifact.getByRole('button', { name: 'Collapse preview' })).toBeFocused()
-  await expect(artifact.getByText('Complete bounded content shown')).toBeVisible()
+  await expect(artifact.locator('.artifact-bounded-footer > span')).toBeEmpty()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -335,7 +333,6 @@ test('keeps remote media unavailable without a bounded owning service', async ({
   const artifact = page.getByRole('article', { name: 'Artifact remote-status-diagram.png' })
   await expect(artifact.getByLabel('Remote media not loaded')).toBeVisible()
   await expect(artifact.getByText('remote media unavailable')).toBeVisible()
-  await expect(artifact.getByText('No bytes were fetched.')).toBeVisible()
   await expect(artifact.getByRole('button', { name: 'Load this remote image' })).toHaveCount(0)
   expect(requests).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
