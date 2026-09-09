@@ -156,7 +156,8 @@ and encodes its result through explicit runtime codecs. `jsonCodec` checks JSON
 values during decoding and encoding. Both pass a frozen snapshot of own data
 properties to the validator. Encoding serializes a frozen snapshot of validated
 own data properties; SDK payload intrinsics are captured before program
-evaluation. Typed `register`, `session.create`, and `session.turn` wrappers
+evaluation, and `Function.prototype.call` is immutable for native request
+dispatch. Typed `register`, `session.create`, and `session.turn` wrappers
 validate method inputs and answer records; refusals and cancellation remain
 typed deliveries. Session defaults versions are decimal strings in TypeScript
 and encode as exact JSON integers without conversion through `Number`.
