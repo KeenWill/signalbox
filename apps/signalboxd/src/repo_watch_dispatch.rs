@@ -307,6 +307,19 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
             ) {
                 return Err(RepositoryWatchCommandError::CoreCommandFailed);
             }
+        } else if !checkout.removed {
+            let release = SessionLifecycleCommand::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                SessionLifecycleOperation::ReleaseStart,
+            );
+            if !matches!(
+                self.core.submit_lifecycle(release).await?,
+                CommandSubmission::Accepted
+            ) {
+                return Err(RepositoryWatchCommandError::CoreCommandFailed);
+            }
+            let _ = self.core.eligibility_nudge.nudge(session);
         }
         Ok(result)
     }
