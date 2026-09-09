@@ -1014,7 +1014,7 @@ pub(crate) async fn reserve_frontier_write_identities(
            FROM unnest($1::uuid[]) AS identity ORDER BY lock_key",
     ).bind(&identities).fetch_all(&mut *connection).await?;
     for key in keys {
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        sqlx::query(crate::lock_inventory::MODEL_FRONTIER_WRITE_IDENTITY)
             .bind(key)
             .execute(&mut *connection)
             .await?;

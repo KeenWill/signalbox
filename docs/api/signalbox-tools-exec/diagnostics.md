@@ -66,6 +66,7 @@ impl<Runner: ProcessRunner> CargoDiagnosticsTool<Runner> {
         workspace_root: impl convert::AsRef<path::Path>,
         cargo_registry: impl convert::AsRef<path::Path>,
     ) -> result::Result<Self, CargoDiagnosticsToolConstructionError>;
+    pub fn with_sandbox_configuration(self, configuration: SandboxConfiguration) -> Self;
     pub fn into_parts(
         self,
     ) -> (

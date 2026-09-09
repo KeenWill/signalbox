@@ -120,6 +120,7 @@ public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
+  public let modelSettings: SignalboxModelSettingsOverlay
   public let modelSelection: SignalboxModelSelection
 
   public init(
@@ -127,13 +128,15 @@ public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
     sessionID: SignalboxCanonicalUUID,
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
-    modelSelection: SignalboxModelSelection
+    modelSelection: SignalboxModelSelection,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) {
     self.commandID = commandID
     self.sessionID = sessionID
     self.content = content
     self.expectedDefaultsVersion = expectedDefaultsVersion
     self.modelSelection = modelSelection
+    self.modelSettings = modelSettings
   }
 
   fileprivate var request: SignalboxProcessClientRequest {
@@ -141,7 +144,8 @@ public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
       commandID: commandID,
       sessionID: sessionID,
       content: content,
-      expectedDefaultsVersion: expectedDefaultsVersion
+      expectedDefaultsVersion: expectedDefaultsVersion,
+      modelSettings: modelSettings
     )
   }
 }
@@ -258,6 +262,7 @@ public struct SignalboxPreparedTurnReconciliation: Equatable, Sendable {
   public let activeTurnID: SignalboxCanonicalUUID
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
+  public let modelSettings: SignalboxModelSettingsOverlay
   public let modelSelection: SignalboxModelSelection
 
   public init(
@@ -266,7 +271,8 @@ public struct SignalboxPreparedTurnReconciliation: Equatable, Sendable {
     activeTurnID: SignalboxCanonicalUUID,
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
-    modelSelection: SignalboxModelSelection
+    modelSelection: SignalboxModelSelection,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) {
     self.commandID = commandID
     self.sessionID = sessionID
@@ -274,6 +280,7 @@ public struct SignalboxPreparedTurnReconciliation: Equatable, Sendable {
     self.content = content
     self.expectedDefaultsVersion = expectedDefaultsVersion
     self.modelSelection = modelSelection
+    self.modelSettings = modelSettings
   }
 
   fileprivate var request: SignalboxProcessClientRequest {
@@ -282,7 +289,8 @@ public struct SignalboxPreparedTurnReconciliation: Equatable, Sendable {
       sessionID: sessionID,
       expectedActiveTurnID: activeTurnID,
       content: content,
-      expectedDefaultsVersion: expectedDefaultsVersion
+      expectedDefaultsVersion: expectedDefaultsVersion,
+      modelSettings: modelSettings
     )
   }
 }
@@ -294,6 +302,7 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
   public let descendantScope: SignalboxDescendantTerminationScope
+  public let modelSettings: SignalboxModelSettingsOverlay
   public let modelSelection: SignalboxModelSelection
 
   public init(
@@ -303,7 +312,8 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
     descendantScope: SignalboxDescendantTerminationScope = .parentAlone,
-    modelSelection: SignalboxModelSelection
+    modelSelection: SignalboxModelSelection,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) {
     self.commandID = commandID
     self.sessionID = sessionID
@@ -312,6 +322,7 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
     self.expectedDefaultsVersion = expectedDefaultsVersion
     self.descendantScope = descendantScope
     self.modelSelection = modelSelection
+    self.modelSettings = modelSettings
   }
 
   fileprivate var request: SignalboxProcessClientRequest {
@@ -321,13 +332,33 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
       expectedActiveTurnID: activeTurnID,
       content: content,
       expectedDefaultsVersion: expectedDefaultsVersion,
-      descendantScope: descendantScope
+      descendantScope: descendantScope,
+      modelSettings: modelSettings
     )
+  }
+}
+
+public struct SignalboxPreparedDefaultsReplacement: Equatable, Sendable {
+  public let commandID: SignalboxCommandID
+  public let defaults: SignalboxSessionDefaultsRead
+  public let modelSelection: SignalboxModelSelection
+  public let modelSettings: SignalboxModelSettingsOverlay
+
+  fileprivate var request: SignalboxProcessClientRequest {
+    .replaceSessionDefaults(commandID: commandID, defaults: defaults,
+      modelSelection: modelSelection, modelSettings: modelSettings)
   }
 }
 
 public protocol SignalboxProcessServiceProtocol: Sendable {
   func testConnection() async throws
+  func listModelCapabilities() async throws -> [SignalboxModelCapabilityItem]
+  func readDefaults(sessionID: SignalboxCanonicalUUID) async throws -> SignalboxSessionDefaultsRead
+  func prepareDefaultsReplacement(defaults: SignalboxSessionDefaultsRead,
+    modelSelection: SignalboxModelSelection, modelSettings: SignalboxModelSettingsOverlay
+  ) async throws -> SignalboxPreparedDefaultsReplacement
+  func replaceDefaults(_ prepared: SignalboxPreparedDefaultsReplacement) async throws
+    -> SignalboxSessionDefaultsRead
   func listConversations(includeArchived: Bool, after: SignalboxConversationCursor?) async throws -> SignalboxConversationListPage
   func listModelAliases() async throws -> [SignalboxModelAliasSummary]
   func listSessions(includeArchived: Bool) async throws -> [SignalboxProcessSession]
@@ -348,7 +379,8 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   ) async throws -> SignalboxProcessSession
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay
   ) async throws -> SignalboxPreparedInputSubmission
   func submit(
     _ submission: SignalboxPreparedInputSubmission
@@ -387,7 +419,8 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   func prepareTurnReconciliation(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay
   ) async throws -> SignalboxPreparedTurnReconciliation
   func reconcileTurn(
     _ prepared: SignalboxPreparedTurnReconciliation
@@ -395,7 +428,8 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
   func prepareTurnStop(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay
   ) async throws -> SignalboxPreparedTurnStop
   func stopTurn(
     _ prepared: SignalboxPreparedTurnStop
@@ -407,6 +441,25 @@ public protocol SignalboxProcessServiceProtocol: Sendable {
 }
 
 extension SignalboxProcessServiceProtocol {
+  public func listModelCapabilities() async throws -> [SignalboxModelCapabilityItem] {
+    throw SignalboxProcessServiceError.unexpectedMessage("The service does not implement model capabilities.")
+  }
+
+  public func readDefaults(sessionID: SignalboxCanonicalUUID) async throws -> SignalboxSessionDefaultsRead {
+    throw SignalboxProcessServiceError.unexpectedMessage("The service does not implement defaults reads.")
+  }
+
+  public func prepareDefaultsReplacement(defaults: SignalboxSessionDefaultsRead,
+    modelSelection: SignalboxModelSelection, modelSettings: SignalboxModelSettingsOverlay
+  ) async throws -> SignalboxPreparedDefaultsReplacement {
+    throw SignalboxProcessServiceError.unexpectedMessage("The service does not implement defaults replacement.")
+  }
+
+  public func replaceDefaults(_ prepared: SignalboxPreparedDefaultsReplacement) async throws
+    -> SignalboxSessionDefaultsRead {
+    throw SignalboxProcessServiceError.unexpectedMessage("The service does not implement defaults replacement.")
+  }
+
   public func readSession(sessionID: SignalboxCanonicalUUID) async throws -> SignalboxProcessSession {
     throw SignalboxProcessServiceError.unexpectedMessage("This process service does not implement session reads.")
   }
@@ -533,7 +586,8 @@ extension SignalboxProcessServiceProtocol {
   public func prepareTurnReconciliation(
     session _: SignalboxProcessSession,
     activeTurnID _: SignalboxCanonicalUUID,
-    content _: String
+    content _: String,
+    modelSettings _: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnReconciliation {
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement turn reconciliation."
@@ -552,7 +606,8 @@ extension SignalboxProcessServiceProtocol {
   public func prepareTurnStop(
     session _: SignalboxProcessSession,
     activeTurnID _: SignalboxCanonicalUUID,
-    content _: String
+    content _: String,
+    modelSettings _: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnStop {
     throw SignalboxProcessServiceError.unexpectedMessage(
       "This process service does not implement turn stops."
@@ -609,6 +664,63 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       includeArchived: includeArchived, after: after,
       pageSize: policy.metadataPageSize,
       maximumRetainedUTF8Bytes: policy.maximumMetadataListUTF8Bytes)
+  }
+
+  public func listModelCapabilities() async throws -> [SignalboxModelCapabilityItem] {
+    try await withExchange(request: .listModelCapabilities) { exchange in
+      var items: [SignalboxModelCapabilityItem] = []
+      var started = false
+      while let frame = try await nextFrame(from: exchange) {
+        switch frame.message {
+        case .modelCapabilitiesStart where !started:
+          started = true
+        case .modelCapabilityItem(let item) where started:
+          guard items.count < SignalboxProcessProtocol.maximumModelCapabilityCatalogEntries else {
+            throw SignalboxProcessServiceError.invalidPage("The model-capability catalog exceeded the protocol limit.")
+          }
+          guard items.last.map({ $0.selectionID.rawValue < item.selectionID.rawValue }) ?? true else {
+            throw SignalboxProcessServiceError.invalidPage("Model capabilities were not in strict identity order.")
+          }
+          items.append(item)
+        case .modelCapabilitiesEnd(let count) where started:
+          guard count.rawValue == UInt64(items.count) else {
+            throw SignalboxProcessServiceError.invalidPage("The model-capability count did not match the sequence.")
+          }
+          return items
+        case .protocolError(let error): throw remote(error)
+        default:
+          throw SignalboxProcessServiceError.unexpectedMessage("The model-capability sequence was malformed.")
+        }
+      }
+      throw SignalboxProcessServiceError.unexpectedMessage("The model-capability sequence ended before its terminator.")
+    }
+  }
+
+  public func prepareDefaultsReplacement(defaults: SignalboxSessionDefaultsRead,
+    modelSelection: SignalboxModelSelection, modelSettings: SignalboxModelSettingsOverlay
+  ) async throws -> SignalboxPreparedDefaultsReplacement {
+    SignalboxPreparedDefaultsReplacement(commandID: try commandID(), defaults: defaults,
+      modelSelection: modelSelection, modelSettings: modelSettings)
+  }
+
+  public func replaceDefaults(_ prepared: SignalboxPreparedDefaultsReplacement) async throws
+    -> SignalboxSessionDefaultsRead {
+    let installed: SignalboxSessionDefaultsRead = try await mutation(prepared.request) { message in
+      guard case .sessionDefaultsReplaced(let defaults) = message else { return nil }
+      return defaults
+    }
+    let nextVersion = prepared.defaults.defaultsVersion.rawValue.addingReportingOverflow(1)
+    guard installed.sessionID == prepared.defaults.sessionID,
+      !nextVersion.overflow, installed.defaultsVersion.rawValue == nextVersion.partialValue,
+      installed.modelSelection == prepared.modelSelection,
+      installed.dangerousToolAutoApproval == prepared.defaults.dangerousToolAutoApproval,
+      installed.systemPrompt == prepared.defaults.systemPrompt,
+      installed.modelSettings.matchesReplacement(from: prepared.defaults.modelSettings,
+        callerOverride: prepared.modelSettings)
+    else {
+      throw SignalboxProcessServiceError.unexpectedMessage("The defaults receipt did not match the replacement.")
+    }
+    return installed
   }
 
   public func listModelAliases() async throws -> [SignalboxModelAliasSummary] {
@@ -815,6 +927,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
               ?? "The imported transcript contained an unrecognized \(kind) message."
           )
         case .sessionCreated, .inputSubmitted, .toolRequestDecided, .toolDenialOverridden, .sessionDefaults,
+          .sessionDefaultsReplaced, .modelCapabilitiesStart, .modelCapabilityItem, .modelCapabilitiesEnd,
           .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,
           .sessionMetadataSummary, .sessionMetadataPageEnd, .sessionMetadata,
           .sessionMetadataReplaced, .conversationImportInserted,
@@ -892,14 +1005,16 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
 
   public func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     SignalboxPreparedInputSubmission(
       commandID: try commandID(),
       sessionID: session.id,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -925,7 +1040,9 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         "The input-submission receipt unexpectedly carried termination metadata."
       )
     }
-    guard submitted.modelSettings.matches(submission.modelSelection) else {
+    guard submitted.modelSettings.matches(submission.modelSelection),
+      submitted.modelSettings.precedence.perCall == submission.modelSettings
+    else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The input-submission receipt settings named a different direct model."
       )
@@ -1070,7 +1187,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   public func prepareTurnReconciliation(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnReconciliation {
     SignalboxPreparedTurnReconciliation(
       commandID: try commandID(),
@@ -1078,7 +1196,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       activeTurnID: activeTurnID,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -1104,7 +1223,9 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         "The reconciliation receipt unexpectedly carried termination metadata."
       )
     }
-    guard submitted.modelSettings.matches(prepared.modelSelection) else {
+    guard submitted.modelSettings.matches(prepared.modelSelection),
+      submitted.modelSettings.precedence.perCall == prepared.modelSettings
+    else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The reconciliation receipt settings named a different direct model."
       )
@@ -1115,7 +1236,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
   public func prepareTurnStop(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnStop {
     SignalboxPreparedTurnStop(
       commandID: try commandID(),
@@ -1123,7 +1245,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       activeTurnID: activeTurnID,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -1151,7 +1274,9 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         "The stop receipt omitted termination metadata or named a different descendant scope."
       )
     }
-    guard submitted.modelSettings.matches(prepared.modelSelection) else {
+    guard submitted.modelSettings.matches(prepared.modelSelection),
+      submitted.modelSettings.precedence.perCall == prepared.modelSettings
+    else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The stop receipt settings named a different direct model."
       )
@@ -1534,7 +1659,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     }
   }
 
-  private func readDefaults(
+  public func readDefaults(
     sessionID: SignalboxCanonicalUUID
   ) async throws -> SignalboxSessionDefaultsRead {
     try await withExchange(

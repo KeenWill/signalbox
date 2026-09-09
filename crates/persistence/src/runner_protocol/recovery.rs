@@ -204,12 +204,11 @@ impl RunnerProtocolStore {
         boundary: Option<&signalbox_domain::ResolvedContextFrontierSnapshot>,
     ) -> Result<(bool, Option<signalbox_domain::RunnerPlacementBoundary>), RunnerProtocolStoreError>
     {
-        let command: Option<Uuid> = sqlx::query_scalar(
-            "SELECT command_id FROM runner_replacement_stage WHERE session_id = $1 FOR UPDATE",
-        )
-        .bind(session.into_uuid())
-        .fetch_optional(&mut **transaction)
-        .await?;
+        let command: Option<Uuid> =
+            sqlx::query_scalar(crate::lock_inventory::RUNNER_REPLACEMENT_STAGE)
+                .bind(session.into_uuid())
+                .fetch_optional(&mut **transaction)
+                .await?;
         let Some(command) = command else {
             return Ok((true, None));
         };
@@ -1330,19 +1329,12 @@ pub(crate) async fn retire_replacement_for_terminal_batch(
     session: SessionId,
     turn: TurnId,
 ) -> Result<(), RunnerProtocolStoreError> {
-    let command: Option<Uuid> = sqlx::query_scalar(
-        "SELECT stage.command_id
-        FROM runner_replacement_stage AS stage JOIN turn_lifecycle AS turn USING (session_id)
-        WHERE stage.session_id = $1 AND turn.turn_id = $2
-          AND (turn.active_tool_round_call_id IS NOT NULL OR EXISTS (
-              SELECT 1 FROM tool_round AS round WHERE round.session_id = turn.session_id
-                  AND round.turn_id = turn.turn_id AND round.boundary_kind = 'closed_by_turn_end'
-          )) FOR UPDATE OF stage",
-    )
-    .bind(session.into_uuid())
-    .bind(turn.into_uuid())
-    .fetch_optional(&mut *connection)
-    .await?;
+    let command: Option<Uuid> =
+        sqlx::query_scalar(crate::lock_inventory::RUNNER_REPLACEMENT_TERMINAL_BATCH)
+            .bind(session.into_uuid())
+            .bind(turn.into_uuid())
+            .fetch_optional(&mut *connection)
+            .await?;
     if let Some(command) = command {
         insert_replacement_result(
             connection,

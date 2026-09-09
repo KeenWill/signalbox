@@ -138,15 +138,19 @@ kbd {
 
 .product-shell {
   display: grid;
-  grid-template-columns:
-    var(--product-navigation-width, 218px) minmax(420px, 1fr)
-    var(--product-inspector-width, 252px);
+  grid-template-columns: var(--product-navigation-width, 218px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   height: 100dvh;
   background: var(--canvas);
 }
+.product-shell.has-artifact-inspector {
+  grid-template-columns: var(--product-navigation-width, 218px) minmax(0, 1fr) var(
+      --product-inspector-width,
+      252px
+    );
+}
 .product-shell.layout-focus {
-  grid-template-columns: minmax(0, 1120px);
-  justify-content: center;
+  grid-template-columns: minmax(0, 1fr);
 }
 .product-navigation-pane,
 .product-inspector {
@@ -205,11 +209,12 @@ kbd {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: 54px auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   background: var(--surface-2);
 }
 .product-header {
   display: flex;
+  min-height: 54px;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
@@ -217,25 +222,36 @@ kbd {
   border-bottom: 1px solid var(--border);
   background: var(--surface-1);
 }
-.product-header > div:first-child {
-  display: grid;
-  gap: 0.15rem;
-}
 .product-header h1 {
   font-size: 0.92rem;
 }
-.surface-question {
+.product-header-actions,
+.product-connection {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  min-height: 54px;
-  padding: 0.65rem 0.9rem;
-  border-bottom: 1px solid var(--border);
+  gap: 0.6rem;
 }
-.surface-question p {
-  font-size: 0.78rem;
-  font-weight: 650;
+.product-header-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  padding-block: 0.3rem;
+}
+.layout-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 0.68rem;
+  cursor: pointer;
+}
+.layout-button svg {
+  width: 16px;
+  height: 16px;
 }
 .contract-state {
   color: var(--text-muted);
@@ -252,9 +268,6 @@ kbd {
   border-radius: 50%;
   background: var(--warning);
   content: "";
-}
-.contract-state.ready::before {
-  background: var(--success);
 }
 .contract-state.failed::before {
   background: var(--danger);
@@ -620,23 +633,7 @@ kbd {
 .product-inspector h2 {
   margin: 0.25rem 0 0.55rem;
 }
-.selection-inspector-details {
-  margin: 1rem 0 0;
-}
-.selection-inspector-details div {
-  display: flex;
-  justify-content: space-between;
-  padding: 0.42rem 0;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.62rem;
-}
-.selection-inspector-details dd {
-  min-width: 0;
-  margin: 0;
-  overflow-wrap: anywhere;
-  font-family: var(--signalbox-font-mono, ui-monospace), monospace;
-  text-align: right;
-}
+
 .artifact-inspector {
   display: grid;
   align-content: start;
@@ -1001,16 +998,9 @@ kbd {
   .product-navigation-pane {
     display: none;
   }
-  .product-main {
-    grid-template-rows: 49px auto minmax(0, 1fr);
-  }
   .product-header {
+    min-height: 49px;
     padding: 0 0.55rem;
-  }
-  .surface-question {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 0.35rem;
   }
   .surface-body {
     padding: 0.65rem;
@@ -1529,9 +1519,6 @@ kbd {
   .imports-workspace-product .imports-filters > label > select {
     width: 100%;
     min-width: 0;
-  }
-  .product-main-imports .surface-question p {
-    width: min(320px, 100%);
   }
   .imports-workspace-product .import-inspector-body {
     grid-template-columns: minmax(0, 1fr);

@@ -361,7 +361,11 @@ pub(crate) struct FilesystemExecutionTimeWindow {
 
 impl FilesystemExecutionTimeWindow {
     pub(crate) fn contains_modified(self, modified: SystemTime) -> bool {
-        (self.started..=self.finished).contains(&modified)
+        let contains = (self.started..=self.finished).contains(&modified);
+        if !contains {
+            eprintln!("Filesystem fixture mtime outside {self:?}: {modified:?}");
+        }
+        contains
     }
 
     pub(crate) fn contains_git_modified(
@@ -393,9 +397,13 @@ impl FilesystemExecutionTimeWindow {
         let Ok(nanoseconds) = u32::try_from(identity.change_time_nanoseconds) else {
             return false;
         };
-        ((started.as_secs(), started.subsec_nanos())
+        let contains = ((started.as_secs(), started.subsec_nanos())
             ..=(finished.as_secs(), finished.subsec_nanos()))
-            .contains(&(seconds, nanoseconds))
+            .contains(&(seconds, nanoseconds));
+        if !contains {
+            eprintln!("Filesystem fixture ctime outside {self:?}: {identity:?}");
+        }
+        contains
     }
 }
 

@@ -944,6 +944,7 @@ async fn assert_checkout_keeps_composed_runner(
         configuration.git_identity().clone(),
         configuration.exec_supervisor_executable(),
         None,
+        &Default::default(),
         WebFetchEgressPolicy::deny_all(),
     )?;
     fixture.sink.checkout_runner = tools.process_runner();
@@ -1136,10 +1137,10 @@ async fn cancellation_during_identity_retention_preserves_staging_for_replay()
     std::fs::remove_dir(&staged)?;
     let core = fixture.core.clone();
     // This fixture lock pauses only the ownership UPDATE, after prepare has created staging.
-    sqlx::query("CREATE FUNCTION mod_repo_watch.pause_checkout_identity() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1); RETURN NEW; END $$")
-        .execute(&core).await?;
-    sqlx::query("CREATE TRIGGER pause_checkout_identity BEFORE UPDATE OF checkout_device ON mod_repo_watch.dispatch_ledger FOR EACH ROW EXECUTE FUNCTION mod_repo_watch.pause_checkout_identity()")
-        .execute(&core).await?;
+    sqlx::query("CREATE FUNCTION pause_checkout_identity() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(1); RETURN NEW; END $$")
+        .execute(&fixture.module).await?;
+    sqlx::query("CREATE TRIGGER pause_checkout_identity BEFORE UPDATE OF checkout_device ON dispatch_ledger FOR EACH ROW EXECUTE FUNCTION pause_checkout_identity()")
+        .execute(&fixture.module).await?;
     let mut blocker = core.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(1)")
         .execute(&mut *blocker)
@@ -1491,6 +1492,7 @@ async fn cleanup_restores_owner_permissions_on_root_and_nested_directories()
 async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_commands()
 -> Result<(), Box<dyn Error>> {
     use signalboxd::repo_watch_runtime::{RepositoryWatchRuntime, RepositoryWatchServices};
+    use sqlx::Connection as _;
 
     let mut fixture = CheckoutFixture::new().await?;
     fixture.dispatch().await;
@@ -1545,12 +1547,12 @@ async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_command
     worker.await?.expect("disabled runtime shuts down cleanly");
     cleanup??;
     assert!(!root.exists());
-    let pending: bool = sqlx::query_scalar(
-        "SELECT submission_pending FROM mod_repo_watch.dispatch_ledger WHERE command_id = $1",
-    )
-    .bind(fixture.command.into_uuid())
-    .fetch_one(&fixture.core)
-    .await?;
+    let mut module = sqlx::PgConnection::connect_with(&fixture.module.connect_options()).await?;
+    let pending: bool =
+        sqlx::query_scalar("SELECT submission_pending FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&mut module)
+            .await?;
     assert!(
         pending,
         "disabled runtime must not submit retained commands"
@@ -2160,6 +2162,7 @@ impl CheckoutFixture {
             configuration.git_identity().clone(),
             configuration.exec_supervisor_executable(),
             configuration.cargo_registry_cache(),
+            configuration.sandbox(),
             self.sink.models.web_fetch_egress_policy(),
         )?;
         Ok(tools.into_parts())

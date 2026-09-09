@@ -57,13 +57,16 @@ pinned target, a byte allowance for model-visible content that input does not
 cover, and the configured output reservation, and compares the sum with the
 configured context window. Queued-turn allowances measure each uncovered entry
 through the effective adapter's message serializer, including framing and
-content-free messages. Before activating a queued turn it may spend one
-automatic compaction; when that compaction fails, or the request still exceeds
-the window after it, one transaction fails the queued turn with no ordinary call
-prepared. Inside the tool-result continuation transaction an exceeded bound
-commits the tool results, prepares no continuation call, and fails the turn with
-a headroom record. For a repository-watch-created session, the daemon queues at
-most one successor per such terminalization with the fixed input
+content-free messages. Before activating a queued turn, the guard repeats
+automatic compaction until the continuation fits. Each attempt after the first
+must replace at least two visible entries, so the starting frontier member count
+bounds attempts across restarts. A failed attempt, an uncompactable prefix, or a
+summary and pending input that still exceed the window fails the queued turn
+with no ordinary call prepared. Inside the tool-result continuation transaction
+an exceeded bound commits the tool results, prepares no continuation call, and
+fails the turn with a headroom record. For a repository-watch-created session,
+the daemon queues at most one successor per such terminalization with the fixed
+input
 `Continue the unfinished repository-watch task from the compacted context.` and
 compacts the terminal frontier through the existing automatic compaction path
 using that successor's frozen direct model selection before activating it; the

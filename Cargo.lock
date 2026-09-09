@@ -4907,6 +4907,7 @@ dependencies = [
  "signalbox-domain",
  "signalbox-test-bin",
  "signalbox-tool-contract",
+ "tempfile",
  "tokio",
 ]
 

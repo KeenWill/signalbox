@@ -3002,6 +3002,7 @@ mod tests {
     struct RecordingAdmissionObserver {
         values: Mutex<Vec<usize>>,
         released: std::sync::atomic::AtomicBool,
+        reacquired: Arc<Notify>,
     }
 
     impl super::SchedulerOccupancyObserver for RecordingAdmissionObserver {
@@ -3010,13 +3011,18 @@ mod tests {
             if occupancy == 0 && values.contains(&1) {
                 self.released.store(true, Ordering::SeqCst);
             }
+            if occupancy == 1 && self.released.load(Ordering::SeqCst) {
+                self.reacquired.notify_one();
+            }
             assert_eq!(oldest.is_some(), occupancy != 0);
             values.push(occupancy);
         }
     }
 
     #[derive(Clone)]
-    struct ImmediatelyReleasingPass;
+    struct ImmediatelyReleasingPass {
+        reacquired: Arc<Notify>,
+    }
 
     impl EligibilityPass for ImmediatelyReleasingPass {
         type Error = FakeSweepError;
@@ -3025,7 +3031,12 @@ mod tests {
             &mut self,
             _: SessionId,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-            super::with_released_scheduler_admission(ready(Ok(())))
+            let reacquired = Arc::clone(&self.reacquired);
+            async move {
+                super::with_released_scheduler_admission(ready(())).await;
+                reacquired.notified().await;
+                Ok(())
+            }
         }
     }
 
@@ -3036,7 +3047,9 @@ mod tests {
             FakeWorkSource {
                 hints: VecDeque::from([Ok(session(0x1287))]),
             },
-            ImmediatelyReleasingPass,
+            ImmediatelyReleasingPass {
+                reacquired: Arc::clone(&observer.reacquired),
+            },
             NonZeroUsize::new(1).expect("one slot"),
         )
         .with_occupancy_observer(observer.clone());
@@ -3044,9 +3057,9 @@ mod tests {
         let shutdown = std::future::poll_fn(|_| {
             if observer.released.load(Ordering::SeqCst) {
                 released_polls += 1;
-                // First poll precedes receipt of Resume; the next occurs after
-                // that queued session is popped for admission.
-                if released_polls == 2 {
+                // Slot release is observed before the Release and Resume
+                // messages; the third poll follows popping the queued session.
+                if released_polls == 3 {
                     return std::task::Poll::Ready(());
                 }
             }
@@ -3058,7 +3071,7 @@ mod tests {
                 .expect("shutdown must drain the popped reacquisition"),
             SchedulerLoopExit::Shutdown,
         );
-        assert_eq!(released_polls, 2);
+        assert_eq!(released_polls, 3);
         let mut values = observer.values.lock().expect("recorded occupancy").clone();
         values.dedup();
         assert_eq!(values, [0, 1, 0, 1, 0]);

@@ -491,8 +491,14 @@ test('opens the selected catalog row in the landed timeline workspace', async ({
 
   await expect.poll(() => new URL(page.url()).searchParams.get('workspace')).toBe('true')
   await expect(page.getByRole('textbox', { name: 'Session ID' })).toHaveValue(firstSessionId)
-  await expect(page.getByRole('textbox', { name: 'Session ID' })).toBeFocused()
-  await expect(page.getByText(`Session workspace loaded for ${firstSessionId}.`)).toBeVisible()
+  await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+  await expect(page.getByRole('main')).toBeFocused()
+  await page.keyboard.press('Escape')
+  const row = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
+  await expect(row).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -526,9 +532,7 @@ test('gates catalog reads on a successful bootstrap', async ({ page }) => {
 
   await page.goto('/sessions')
   await expect(page.getByText('Contract rejected')).toBeVisible()
-  await expect(
-    page.getByText('Sessions are unavailable until the browser contract handshake succeeds.'),
-  ).toBeVisible()
+  await expect(page.getByText('Sessions unavailable')).toBeVisible()
   expect(sessionReads).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -545,7 +549,9 @@ test('recovers after retrying a transient bootstrap failure', async ({ page }) =
   await page.route('**/api/sessions?**', (route) => route.fulfill({ json: firstPage }))
 
   await page.goto('/sessions')
-  await page.getByRole('button', { name: 'Retry contract handshake' }).click()
+  await expect(page.getByRole('button', { name: 'Retry connection', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Retry/ })).toHaveCount(1)
+  await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
   await expect(page.getByRole('heading', { name: `${firstPage.total} sessions` })).toBeVisible()
   await expect(page.getByRole('main')).toBeFocused()
   expect(bootstrapReads).toBe(2)
@@ -689,6 +695,37 @@ test('replaces catalog continuation history instead of accumulating visited page
   await expect(page).toHaveURL(/\/attention$/)
 })
 
+for (const entry of ['direct', 'reload'] as const) {
+  test(`focuses empty workspace entry after bootstrap on ${entry}`, async ({ page }) => {
+    await useCatalogFixture(page)
+    const input = page.getByRole('textbox', { name: 'Session ID', exact: true })
+    if (entry === 'reload') {
+      await page.goto('/sessions?workspace=true')
+      await expect(input).toBeVisible()
+    }
+    const bootstrapReady = Promise.withResolvers<void>()
+    await page.route('**/api/bootstrap', async (route) => {
+      await bootstrapReady.promise
+      await route.fulfill({ json: bootstrapFixture })
+    })
+    try {
+      if (entry === 'reload') await page.reload()
+      else await page.goto('/sessions?workspace=true')
+      await expect(page.getByRole('main')).toBeFocused()
+      await expect(input).toHaveCount(0)
+      bootstrapReady.resolve()
+      await expect(input).toBeVisible()
+      await expect(input).toBeFocused()
+      await page.keyboard.insertText(firstSessionId)
+      await page.keyboard.press('Enter')
+      await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+      await expect(page.getByRole('main')).toBeFocused()
+    } finally {
+      bootstrapReady.resolve()
+    }
+  })
+}
+
 test('keeps opened workspace identities in the URL and restores them on reload', async ({
   page,
 }) => {
@@ -700,14 +737,16 @@ test('keeps opened workspace identities in the URL and restores them on reload',
   await input.fill(firstSessionId)
   await input.press('Enter')
   await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
-  await expect(page.getByText(`Session workspace loaded for ${firstSessionId}.`)).toBeVisible()
+  await expect(page.getByRole('heading', { name: firstSessionId, exact: true })).toBeVisible()
+  await expect(page.getByRole('main')).toBeFocused()
   await input.fill(secondSessionId)
   await input.press('Enter')
   await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(secondSessionId)
-  await expect(page.getByText(`Session workspace loaded for ${secondSessionId}.`)).toBeVisible()
+  await expect(page.getByRole('heading', { name: secondSessionId, exact: true })).toBeVisible()
+  await expect(page.getByRole('main')).toBeFocused()
   await page.reload()
   await expect(input).toHaveValue(secondSessionId)
-  await expect(page.getByText(`Session workspace loaded for ${secondSessionId}.`)).toBeVisible()
+  await expect(page.getByRole('heading', { name: secondSessionId, exact: true })).toBeVisible()
 })
 
 test('classifies a catalog connection failure as transport unavailability', async ({ page }) => {

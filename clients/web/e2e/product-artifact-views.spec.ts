@@ -45,17 +45,12 @@ test('keeps the imported typed artifact view synchronized with keyboard selectio
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('renders unavailable review evidence as a typed committed state', async ({ page }) => {
+test('shows the unavailable Reviews surface once', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/reviews')
-
-  const reviewArtifact = page.getByRole('article', { name: 'Artifact Review evidence' })
-  await expect(reviewArtifact).toContainText('review evidence artifact')
-  await expect(reviewArtifact).toContainText('Artifact blocked')
-  await expect(reviewArtifact).toContainText(
-    'Review evidence is not exposed by the current daemon contract.',
-  )
+  await expect(page.getByRole('heading', { name: 'Reviews unavailable' })).toBeVisible()
+  await expect(page.getByRole('article')).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

@@ -706,6 +706,62 @@ it('retains the paginated first page and continuation when the tail grows', asyn
   expect(fetch).toHaveBeenCalledTimes(1)
 })
 
+it('exposes an empty runner continuation without automatically retrying it', async () => {
+  const continuation = { type: 'more_at' as const, address: { event_sequence: '1' } }
+  const empty = { ...inputPage(0), continuation }
+  const fetch = vi.fn(async () => Response.json(empty))
+  vi.stubGlobal('fetch', fetch)
+  const window = { sessionId, first: '1', through: '1000000' }
+  const bounded = { ...limits, max_timeline_detail_bytes: 256 }
+  const first = await readExtendedSessionTranscript(window, null, bounded, null)
+  expect(first.page).toEqual({ items: [], projected_body_bytes: 0, continuation })
+  expect(first.rawPage).toEqual(empty)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  const next = await readExtendedSessionTranscript(window, continuation, bounded, first)
+  expect(next.page).toEqual(first.page)
+  expect(next.rawPage).toEqual(empty)
+  expect(fetch).toHaveBeenCalledTimes(2)
+})
+
+it('preserves earlier text when a runner item cannot fit the remaining scan budget', async () => {
+  const continuation = { type: 'more_at' as const, address: { event_sequence: '2' } }
+  // The input envelope and text leave 408 bytes of the 65,536-byte scan budget.
+  const input = { ...inputPage(1, 65_000), continuation }
+  const empty = { ...inputPage(0), continuation }
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json(input))
+    .mockResolvedValueOnce(Response.json(empty))
+    .mockRejectedValue(new Error('an unreturned item must end the automatic scan'))
+  vi.stubGlobal('fetch', fetch)
+  const result = await readExtendedSessionTranscript(
+    { sessionId, first: '1', through: '1000000' },
+    null,
+    limits,
+    null,
+  )
+  expect(result.page.items).toEqual(input.items)
+  expect(result.page.projected_body_bytes).toBe(65_128)
+  expect(result.page.continuation).toEqual(continuation)
+  expect(result.rawPage).toEqual(empty)
+  expect(fetch).toHaveBeenCalledTimes(2)
+  const query = new URL(fetch.mock.calls[1]?.[0], 'http://localhost').searchParams
+  expect(query.get('cursor_address')).toBe('2')
+  expect(query.get('max_bytes')).toBe('408')
+})
+
+it('rejects an empty continuation page that skips the requested item', async () => {
+  const requested = { type: 'more_at' as const, address: { event_sequence: '1' } }
+  const empty = {
+    ...inputPage(0),
+    continuation: { type: 'more_at', address: { event_sequence: '2' } },
+  }
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(empty)))
+  await expect(readSessionTranscript(sessionId, '1', '9', requested)).rejects.toThrow(
+    'continuation address',
+  )
+})
+
 it('stops a bookkeeping scan at the workspace record budget regardless of history length', async () => {
   const fetch = vi.fn(async (url: string) => {
     const query = new URL(url, 'http://localhost').searchParams
