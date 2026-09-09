@@ -3,7 +3,14 @@
 This committed unbuilt design extends [repository watch](../spec/repo-watch.md)
 with programs on the [workflows host](program-substrate.md).
 
-## Boundary
+## Goal
+
+Run repository watch through workflows while preserving accepted events,
+dispatch behavior and recovery.
+
+## Design
+
+### Boundary
 
 Compiled Rust programs and checked effect adapters live in
 `apps/signalboxd/src/workflows/repo_watch/`. `ObserveRepository` accepts one
@@ -20,7 +27,7 @@ program code. The module retains its pure reducers and SQL under the existing
 ownership seam (`docs/spec/repo-watch.md:267`); it acquires no dependency on the
 workflow runtime or core persistence.
 
-## Effects and receipts
+### Effects and receipts
 
 One `RepoWatch` capability admits the following methods, with checked request
 and result codecs. The host journals requests before effects and deliveries
@@ -49,7 +56,7 @@ source positions; poll timing uses host time/sleep requests and preserves
 start-to-start deadlines and queued webhook wakes
 (`crates/modules/repo-watch-v2/src/ingest.rs:273`).
 
-## Retained daemon authority
+### Retained daemon authority
 
 The authenticated webhook listener persists deliveries and retains its
 primary/shadow meaning; polling credentials remain repository-scoped daemon
@@ -76,77 +83,7 @@ approval-gated transport; workflows add no push effect. The executor boundary
 exists at `crates/tools-git/src/push_executor.rs:24`; production registration is
 unbuilt at this baseline (`docs/spec/tool-loop.md:156`).
 
-## Retirement and guards
-
-Dispatch preserves independent checked revisions, matchers, ordered actions,
-activation tails, singleton scopes and cooldowns (`docs/spec/repo-watch.md:30`,
-`docs/spec/repo-watch.md:198`). Complete template defaults remain frozen in held
-creation without initial input or a turn; checkout clones the watched repository
-at the derived workspace root with the retained branch/SHA before submission
-completes (`docs/spec/repo-watch.md:222`, `docs/spec/repo-watch.md:326`).
-
-Goal commissioning/resumption releases the held start; goal achievement or user
-stop issues a parent-only sticky stop. A close/merge event later than the
-dispatch event retires its live session with the original rule/action and
-reason. Durable terminal facts, including those pending at the cursor, prevent
-retirement of an already terminal session (`docs/spec/repo-watch.md:208`).
-Nonsticky termination releases its action and starts cooldown when the final
-action releases; sticky stops retain suppression
-(`docs/spec/repo-watch.md:203`).
-
-Rule removal leaves pending commands and lifecycle reactions recoverable;
-repository removal retires unprovisioned work as `repository_unconfigured` with
-a parent-only nonsticky stop (`docs/spec/repo-watch.md:184`). Provisioning
-failure retains its step/status and stops the session; cleanup survives disabled
-or absent configuration, restart and cancellation, using retained staging,
-device/inode and marker evidence (`docs/spec/repo-watch.md:230`).
-
-Configuration ceilings, observation budgets, webhook body/retention limits,
-credential scoping, checkout ownership checks and core session/approval gates
-remain host-enforced
-(`apps/signalboxd/src/configuration/repository_watch.rs:26`,
-`docs/spec/repo-watch.md:118`, `docs/spec/repo-watch.md:155`,
-`docs/spec/repo-watch.md:222`, `apps/signalboxd/src/repo_watch_dispatch.rs:411`,
-`docs/spec/tool-loop.md:26`). No new guard policy or higher ceiling is added.
-
-## Cutover and removal
-
-One temporary `repository_watch.workflows_enabled` boolean defaults to false and
-selects the orchestrator for the whole configured module. Both engines use the
-same store and receipts; exactly one owns observation, event consumption and
-command execution. Webhook primary/shadow mode is independent. There is one
-listener and one pending-command executor, with no shadow ledger, second cursor,
-data copy or backfill.
-
-Named parity fixtures preserve the complete configured checked definitions:
-
-| Fixture | Pinned rule and behavior                                                                                                                                                                                 |
-| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A       | `renovate-merge-forward`, revision 3: Renovate branches becoming `CONFLICTING` receive one merge-forward session per pull request through template `merge-forward`.                                      |
-| B       | `labeled-review-response`, revision 5: pull requests carrying `repo-watch` receive a session through template `review-response-sol` on `checks_completed`, `head_changed` and `mergeable_state_changed`. |
-
-Fixtures copy each rule's exact matchers, ordered actions, singleton scope and
-cooldown unchanged, and compare held commands, checkout and retirement across
-equivalent disposable databases. Both use `EvaluateRule`; neither gets a special
-engine branch. Acceptance also covers nonmatch/suppression recovery, lost
-journal answers, revision activation, multi-action ordering, removed
-configuration, terminal facts pending at the cursor and checkout interruption.
-
-Reload stops and joins the previous engine before starting its replacement from
-retained cursors, receipts and accepted webhook/event backlog. It preserves the
-existing listener reload and cleanup contracts (`docs/spec/repo-watch.md:296`).
-Cutover and rollback tests include a pending command, webhook backlog, removed
-rule, live held session and pending checkout removal; restart resumes one owner.
-The flag stays false until observation, dispatch, lifecycle and restart parity
-and both handoff directions pass. The owner enables it through ordinary reload.
-
-After the owner confirms successful operation, remove the flag and superseded
-repository-task, evaluation and lifecycle orchestration. Workflows become the
-sole orchestrator; retain pure reducers, module SQL/receipts, ingestion/cache,
-checkout adapters, provenance readers, journal data and the convergence sweep.
-The removed flag fails ordinary unknown-field configuration admission.
-
-## Store retention versus rebuild
+### Store retention versus rebuild
 
 Path A is the design above: retain module storage and move orchestration into
 workflows. Path B is an alternative for owner consideration: remove
@@ -155,7 +92,7 @@ authoritative. The comparison does not select B or amend the host contract. Both
 paths retain the provider client, pure differ/matchers, webhook listener,
 credential boundaries, checkout operations and separate convergence sweep.
 
-### State mapping
+#### State mapping
 
 The migrations below define sixteen module tables. The inventory includes reload
 receipts and both poll-cache tables, beyond the thirteen listed at
@@ -197,7 +134,7 @@ no independent state; B must replace their admission or lookup function
 Convergence state belongs to the separate sweep and is outside this store
 replacement (`docs/spec/repo-watch.md:79`).
 
-### What the host would need
+#### What the host would need
 
 P01 can encode the baselines, checked rules, pure decisions, command intents and
 results above as bytes, and replay them. It does not supply the following
@@ -221,7 +158,7 @@ It does not remove webhook, checkout or cross-run ownership state; those become
 host-owned contracts. A design forbidding all storage outside the journal cannot
 retain the current expiry and external-effect recovery behavior.
 
-### Delivery estimate and cutover
+#### Delivery estimate and cutover
 
 These are estimates of narrow implementation PRs after the shared host work,
 excluding this design PR. They assume reuse of provider/checkout code and the
@@ -249,3 +186,73 @@ coordination and effect evidence that the module owns. Rebuilding on it now
 would add those contracts to the host while changing the recovery path. Keep the
 store, move the orchestration, and judge a later removal by how much state the
 host can actually replace.
+
+## Compatibility constraints
+
+Dispatch preserves independent checked revisions, matchers, ordered actions,
+activation tails, singleton scopes and cooldowns (`docs/spec/repo-watch.md:30`,
+`docs/spec/repo-watch.md:198`). Complete template defaults remain frozen in held
+creation without initial input or a turn; checkout clones the watched repository
+at the derived workspace root with the retained branch/SHA before submission
+completes (`docs/spec/repo-watch.md:222`, `docs/spec/repo-watch.md:326`).
+
+Goal commissioning/resumption releases the held start; goal achievement or user
+stop issues a parent-only sticky stop. A close/merge event later than the
+dispatch event retires its live session with the original rule/action and
+reason. Durable terminal facts, including those pending at the cursor, prevent
+retirement of an already terminal session (`docs/spec/repo-watch.md:208`).
+Nonsticky termination releases its action and starts cooldown when the final
+action releases; sticky stops retain suppression
+(`docs/spec/repo-watch.md:203`).
+
+Rule removal leaves pending commands and lifecycle reactions recoverable;
+repository removal retires unprovisioned work as `repository_unconfigured` with
+a parent-only nonsticky stop (`docs/spec/repo-watch.md:184`). Provisioning
+failure retains its step/status and stops the session; cleanup survives disabled
+or absent configuration, restart and cancellation, using retained staging,
+device/inode and marker evidence (`docs/spec/repo-watch.md:230`).
+
+Configuration ceilings, observation budgets, webhook body/retention limits,
+credential scoping, checkout ownership checks and core session/approval gates
+remain host-enforced
+(`apps/signalboxd/src/configuration/repository_watch.rs:26`,
+`docs/spec/repo-watch.md:118`, `docs/spec/repo-watch.md:155`,
+`docs/spec/repo-watch.md:222`, `apps/signalboxd/src/repo_watch_dispatch.rs:411`,
+`docs/spec/tool-loop.md:26`). No new guard policy or higher ceiling is added.
+
+## Acceptance criteria
+
+One temporary `repository_watch.workflows_enabled` boolean defaults to false and
+selects the orchestrator for the whole configured module. Both engines use the
+same store and receipts; exactly one owns observation, event consumption and
+command execution. Webhook primary/shadow mode is independent. There is one
+listener and one pending-command executor, with no shadow ledger, second cursor,
+data copy or backfill.
+
+Named parity fixtures preserve the complete configured checked definitions:
+
+| Fixture | Pinned rule and behavior                                                                                                                                                                                 |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A       | `renovate-merge-forward`, revision 3: Renovate branches becoming `CONFLICTING` receive one merge-forward session per pull request through template `merge-forward`.                                      |
+| B       | `labeled-review-response`, revision 5: pull requests carrying `repo-watch` receive a session through template `review-response-sol` on `checks_completed`, `head_changed` and `mergeable_state_changed`. |
+
+Fixtures copy each rule's exact matchers, ordered actions, singleton scope and
+cooldown unchanged, and compare held commands, checkout and retirement across
+equivalent disposable databases. Both use `EvaluateRule`; neither gets a special
+engine branch. Acceptance also covers nonmatch/suppression recovery, lost
+journal answers, revision activation, multi-action ordering, removed
+configuration, terminal facts pending at the cursor and checkout interruption.
+
+Reload stops and joins the previous engine before starting its replacement from
+retained cursors, receipts and accepted webhook/event backlog. It preserves the
+existing listener reload and cleanup contracts (`docs/spec/repo-watch.md:296`).
+Cutover and rollback tests include a pending command, webhook backlog, removed
+rule, live held session and pending checkout removal; restart resumes one owner.
+The flag stays false until observation, dispatch, lifecycle and restart parity
+and both handoff directions pass. The owner enables it through ordinary reload.
+
+After the owner confirms successful operation, remove the flag and superseded
+repository-task, evaluation and lifecycle orchestration. Workflows become the
+sole orchestrator; retain pure reducers, module SQL/receipts, ingestion/cache,
+checkout adapters, provenance readers, journal data and the convergence sweep.
+The removed flag fails ordinary unknown-field configuration admission.

@@ -325,3 +325,8 @@ session identity. Transcript snapshots and browser session descriptors project
 that retained origin as soon as creation commits, before ledger settlement; the
 browser workspace displays it. Held creation submits no initial input and
 creates no turn.
+
+## Planned
+
+- Repository-watch orchestration through workflows
+  ([design](../design/repo-watch.md)).
