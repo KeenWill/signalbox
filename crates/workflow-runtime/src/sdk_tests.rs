@@ -727,3 +727,51 @@ if (result.kind !== "reject" || result.reason !== "capability_denied") throw new
     assert_eq!(wire["grants"], serde_json::json!(["session"]));
     assert_eq!(request.method(), "register");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn typed_primitives_preserve_full_width_values_and_exact_event_bytes()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::program_primitives::{
+        AwaitProgramEvent, ProgramEvent, ProgramEventSource, RandomValue, SleepUntil, UnixMillis,
+    };
+    const SOURCE_RUN: &str = "12345678-1234-1234-1234-123456789abc";
+    let now = UnixMillis(9_007_199_254_740_993);
+    let random = RandomValue(u64::MAX);
+    let deadline = SleepUntil(UnixMillis(9_007_199_254_740_994));
+    let event = ProgramEvent {
+        position: u64::MAX,
+        payload: InlineFramePayload::new(vec![0, 128, 255]),
+    };
+    let (result, requests) = sdk_script(
+        r#"
+const now = await sdk.primitives.now();
+const random = await sdk.primitives.random();
+const wake = await sdk.primitives.sleepUntil("9007199254740994");
+const event = await sdk.primitives.awaitEvent({ source: { kind: "program_answers", run: "12345678-1234-1234-1234-123456789abc" }, after: "9007199254740993" });
+if (now.value !== "9007199254740993" || random.value !== "18446744073709551615" || wake.value !== "9007199254740994" || event.value.position !== "18446744073709551615" || event.value.payload.join() !== "0,128,255") throw new Error("primitive precision lost");
+"#,
+        [
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: now.encode() },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: random.encode() },
+            DeliveryKind::Wake { resolves: SCRIPTED_REQUEST, payload: deadline.0.encode() },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: event.encode() },
+        ],
+    ).await;
+    result?;
+    let wait = AwaitProgramEvent {
+        source: ProgramEventSource::ProgramAnswers(ProgramRunId::from_uuid(uuid::Uuid::parse_str(
+            SOURCE_RUN,
+        )?)),
+        after: now.0,
+    };
+    assert_eq!(
+        requests,
+        vec![
+            RequestKind::Now(InlineFramePayload::default()),
+            RequestKind::Random(InlineFramePayload::default()),
+            RequestKind::Sleep(deadline.encode()),
+            RequestKind::AwaitEvent(wait.encode())
+        ]
+    );
+    Ok(())
+}

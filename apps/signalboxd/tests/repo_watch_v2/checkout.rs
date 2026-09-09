@@ -223,21 +223,20 @@ impl ProcessRunner for CheckoutBarrierRunner {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn input_during_checkout_waits_for_provisioned_first_turn_git_tools()
--> Result<(), Box<dyn Error>> {
+async fn kickoff_precedes_input_deferred_during_checkout() -> Result<(), Box<dyn Error>> {
     assert_input_during_checkout_waits(None).await
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn release_start_during_checkout_cannot_activate_queued_input() -> Result<(), Box<dyn Error>>
-{
+async fn release_start_during_checkout_cannot_admit_input_ahead_of_kickoff()
+-> Result<(), Box<dyn Error>> {
     assert_input_during_checkout_waits(Some(SessionLifecycleOperation::ReleaseStart)).await
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
-async fn release_ownership_during_checkout_cannot_activate_queued_input()
+async fn release_ownership_during_checkout_cannot_admit_input_ahead_of_kickoff()
 -> Result<(), Box<dyn Error>> {
     assert_input_during_checkout_waits(Some(SessionLifecycleOperation::Release)).await
 }
@@ -258,7 +257,7 @@ async fn assert_input_during_checkout_waits(
     };
     use signalbox_persistence::{
         start_eligible_turn::{CommitActivationPreviewOutcome, StartEligibleTurnRepository},
-        submit_input::SubmitInputRepository,
+        submit_input::{SubmitInputRepository, SubmitInputRepositoryError},
     };
 
     // A reconciliation hint must not substitute for checkout completion's nudge.
@@ -321,30 +320,29 @@ async fn assert_input_during_checkout_waits(
             .await
             .expect("session created with provisioning hold"),
         );
-        let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(origin),
-        )) = submit
-            .execute(
-                SubmitInputRequest::try_new(
-                    DurableCommandId::from_uuid(Uuid::now_v7()),
-                    session,
-                    UserContent::try_text("Inspect the checkout".to_owned()).expect("input text"),
-                    DeliveryRequest::StartWhenNoActiveTurn {
-                        configuration: PerInputConfigurationChoices::new(
-                            SessionConfigurationDefaultsVersion::first(),
-                            ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
-                                DirectModelSelection::from_uuid(Uuid::now_v7()),
-                            )),
-                        ),
-                    },
-                )
-                .expect("input request"),
-            )
+        let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+            .fetch_one(&fixture.core)
             .await
-            .expect("input submission")
-        else {
-            panic!("input must be accepted while checkout is pending");
-        };
+            .expect("input count during clone");
+        assert_eq!(inputs, 0, "kickoff waits until checkout is recorded");
+        let request = SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            UserContent::try_text("Inspect the checkout".to_owned()).expect("input text"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(
+                        DirectModelSelection::from_uuid(Uuid::now_v7()),
+                    )),
+                ),
+            },
+        )
+        .expect("input request");
+        assert!(matches!(
+            submit.execute(request.clone()).await,
+            Err(SubmitInputRepositoryError::CheckoutProvisioningPending)
+        ));
         if let Some(operation) = early_release {
             use signalbox_domain::{CommandPrincipal, SessionLifecycleCommandResult};
             use signalbox_persistence::session_lifecycle_command::{
@@ -379,7 +377,18 @@ async fn assert_input_during_checkout_waits(
                 "the public command released the ordinary start gate"
             );
         }
-        assert_eq!(work.next().await.expect("input wake"), session);
+        assert!(matches!(
+            submit.execute(request.clone()).await,
+            Err(SubmitInputRepositoryError::CheckoutProvisioningPending)
+        ));
+        assert!(
+            SubmitInputRepository::new(fixture.core.clone())
+                .load(request.command_id())
+                .await
+                .expect("deferred command lookup")
+                .is_none(),
+            "deferred client input must not claim its command identity"
+        );
         assert_eq!(
             start.execute(session).await.expect("eligibility pass"),
             StartEligibleTurnOutcome::NoEligibleTurn
@@ -392,15 +401,39 @@ async fn assert_input_during_checkout_waits(
                 .is_none()
         );
         resume.notify_one();
-        (session, origin)
+        (session, request)
     };
-    let (provisioned, (session, origin)) = tokio::join!(provisioning, while_cloned);
+    let (provisioned, (session, request)) = tokio::join!(provisioning, while_cloned);
     provisioned.expect("checkout completes");
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), work.next()).await??,
         session,
         "checkout completion wakes queued input"
     );
+    let operator_command = request.command_id();
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(operator_origin),
+    )) = submit.execute(request).await?
+    else {
+        panic!("the deferred command is accepted after kickoff");
+    };
+    let kickoff: Uuid =
+        sqlx::query_scalar("SELECT kickoff_command_id FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    let recorded = SubmitInputRepository::new(fixture.core.clone())
+        .load(DurableCommandId::from_uuid(kickoff))
+        .await?
+        .expect("kickoff recorded");
+    let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(kickoff_origin)) =
+        recorded.result()
+    else {
+        panic!("kickoff owns the first queued turn");
+    };
+    let queued: Vec<Uuid> = sqlx::query_scalar("SELECT accepting_command_id FROM accepted_input WHERE session_id = $1 ORDER BY acceptance_position")
+        .bind(session.into_uuid()).fetch_all(&fixture.core).await?;
+    assert_eq!(queued, [kickoff, operator_command.into_uuid()]);
     let preview = repository
         .preview(session, identities)
         .await?
@@ -410,7 +443,8 @@ async fn assert_input_during_checkout_waits(
     else {
         panic!("first turn activates after provisioning");
     };
-    assert_eq!(activated.turn(), origin.turn());
+    assert_eq!(activated.turn(), kickoff_origin.turn());
+    assert_ne!(activated.turn(), operator_origin.turn());
     let status = run_git_tool(
         &catalog,
         &executor,
@@ -425,12 +459,667 @@ async fn assert_input_during_checkout_waits(
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn kickoff_replays_after_provisioning_and_after_input_commit() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{DeliveryRequest, SubmitInputResult};
+    use signalbox_persistence::submit_input::SubmitInputRepository;
+
+    let mut fixture =
+        CheckoutFixture::with_rule("checkout/project", "labeled-review-response").await?;
+    // Fail only kickoff, after creation and checkout have committed.
+    sqlx::raw_sql("CREATE FUNCTION reject_kickoff() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.command_kind = 'submit_input' THEN RAISE EXCEPTION 'fixture kickoff interruption'; END IF;
+        RETURN NEW; END $$;
+        CREATE TRIGGER reject_kickoff BEFORE INSERT ON durable_command FOR EACH ROW EXECUTE FUNCTION reject_kickoff();")
+        .execute(&fixture.core).await?;
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("configuration")
+        .clone();
+    assert!(
+        submit_pending_with_runner(
+            &fixture.store,
+            &configuration,
+            &mut fixture.sink,
+            fixture.runner.clone()
+        )
+        .await
+        .is_err()
+    );
+    let (kickoff, head, pending): (Uuid, String, bool) = sqlx::query_as(
+        "SELECT kickoff_command_id, checkout_head_sha, submission_pending FROM dispatch_ledger WHERE command_id = $1",
+    ).bind(fixture.command.into_uuid()).fetch_one(&fixture.module).await?;
+    assert_eq!(head, fixture.head.as_str());
+    assert!(pending);
+    let repository = SubmitInputRepository::new(fixture.core.clone());
+    assert!(
+        repository
+            .load(DurableCommandId::from_uuid(kickoff))
+            .await?
+            .is_none()
+    );
+    sqlx::raw_sql(
+        "DROP TRIGGER reject_kickoff ON durable_command; DROP FUNCTION reject_kickoff();",
+    )
+    .execute(&fixture.core)
+    .await?;
+    // Replay retains the publication instruction even when push becomes available.
+    fixture.enable_push()?;
+    // A later observation cannot rewrite dispatch-time instructions during replay.
+    sqlx::query("UPDATE repository_state SET comparison_baseline = jsonb_set(comparison_baseline, '{pull_requests}', '[]')")
+        .execute(&fixture.module).await?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    let recorded = repository
+        .load(DurableCommandId::from_uuid(kickoff))
+        .await?
+        .expect("kickoff committed");
+    assert!(matches!(recorded.result(), SubmitInputResult::Applied(_)));
+    assert!(matches!(
+        recorded.command().delivery(),
+        DeliveryRequest::StartWhenNoActiveTurn { .. }
+    ));
+    let text = recorded
+        .command()
+        .content()
+        .single_text()
+        .expect("kickoff text")
+        .as_str();
+    assert!(text.contains("This session has no Git push authority."));
+    assert!(text.contains("No unresolved review threads were present at dispatch time."));
+    assert!(text.contains("one-turn convergence check of mergeability and gating checks"));
+    assert!(text.contains("Post a plain reply on the pull request"));
+    assert!(text.contains("Target pull request: checkout/project#1"));
+    assert!(text.contains("Title: Review the retained head"));
+    assert!(text.contains("Head branch: review"));
+    assert!(text.contains(fixture.head.as_str()));
+    assert!(text.contains("Base branch: main"));
+    let issuer: (String, String) = sqlx::query_as(
+        "SELECT issuer_kind, issuer_module FROM durable_command WHERE command_id = $1",
+    )
+    .bind(kickoff)
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(issuer, ("module".to_owned(), "repo_watch".to_owned()));
+    // Recreate the restart window after core acceptance but before module acknowledgement.
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    let replay = repository
+        .load(DurableCommandId::from_uuid(kickoff))
+        .await?
+        .expect("same kickoff");
+    assert_eq!(
+        replay.command().command_id(),
+        recorded.command().command_id()
+    );
+    assert_eq!(replay.command(), recorded.command());
+    assert_eq!(replay.result(), recorded.result());
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&fixture.core)
+        .await?;
+    assert_eq!(inputs, 1);
+    assert_eq!(
+        *fixture.runner.steps.lock().expect("Git steps"),
+        ["clone", "fetch", "checkout"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn kickoff_uses_defaults_replaced_during_provisioning() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        DeliveryRequest, ModelSelectionOverride, PerInputConfigurationChoices, SubmitInputResult,
+    };
+    use signalbox_persistence::submit_input::SubmitInputRepository;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    let cloned = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let runner = CheckoutBarrierRunner {
+        runner: fixture.runner.clone(),
+        cloned: cloned.clone(),
+        resume: resume.clone(),
+    };
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("configuration")
+        .clone();
+    let provisioning =
+        submit_pending_with_runner(&fixture.store, &configuration, &mut fixture.sink, runner);
+    let replace = async {
+        cloned.notified().await;
+        let session = SessionId::from_uuid(
+            sqlx::query_scalar(
+                "SELECT checkout_session_id FROM dispatch_ledger WHERE command_id = $1",
+            )
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?,
+        );
+        let version = replace_kickoff_defaults(&fixture.core, session).await?;
+        resume.notify_one();
+        Ok::<_, Box<dyn Error>>(version)
+    };
+    let (submitted, version) = tokio::join!(provisioning, replace);
+    submitted.expect("kickoff after defaults replacement");
+    let version = version?;
+    let kickoff: Uuid =
+        sqlx::query_scalar("SELECT kickoff_command_id FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    let recorded = SubmitInputRepository::new(fixture.core.clone())
+        .load(DurableCommandId::from_uuid(kickoff))
+        .await?
+        .expect("recorded kickoff");
+    assert!(matches!(recorded.result(), SubmitInputResult::Applied(_)));
+    assert_eq!(
+        recorded.command().delivery(),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: PerInputConfigurationChoices::new(
+                version,
+                ModelSelectionOverride::UseSessionDefault
+            ),
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn rejected_kickoff_retries_once_and_keeps_the_hold_until_recovery()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::SubmitInputResult;
+    use signalbox_persistence::submit_input::SubmitInputRepository;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    // Fixture locks 1 and 2 pause each attempt after defaults are read, before core validation.
+    sqlx::raw_sql(
+        "CREATE SEQUENCE kickoff_attempt;
+        CREATE FUNCTION pause_kickoff() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.command_kind = 'submit_input' THEN
+            PERFORM pg_advisory_xact_lock(nextval('kickoff_attempt'));
+        END IF; RETURN NEW; END $$;
+        CREATE TRIGGER pause_kickoff BEFORE INSERT ON durable_command
+        FOR EACH ROW EXECUTE FUNCTION pause_kickoff();",
+    )
+    .execute(&fixture.core)
+    .await?;
+    let mut first = fixture.core.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(1)")
+        .execute(&mut *first)
+        .await?;
+    let mut second = fixture.core.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(2)")
+        .execute(&mut *second)
+        .await?;
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("configuration")
+        .clone();
+    let provisioning = submit_pending_with_runner(
+        &fixture.store,
+        &configuration,
+        &mut fixture.sink,
+        fixture.runner.clone(),
+    );
+    let replace = async {
+        wait_for_kickoff_attempt(&fixture.core, 1).await?;
+        let session = SessionId::from_uuid(
+            sqlx::query_scalar(
+                "SELECT checkout_session_id FROM dispatch_ledger WHERE command_id = $1",
+            )
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?,
+        );
+        replace_kickoff_defaults(&fixture.core, session).await?;
+        first.commit().await?;
+        wait_for_kickoff_attempt(&fixture.core, 2).await?;
+        let held: bool = sqlx::query_scalar("SELECT checkout_provisioning_pending AND start_gate_held FROM session_lifecycle WHERE session_id = $1")
+            .bind(session.into_uuid()).fetch_one(&fixture.core).await?;
+        assert!(
+            held,
+            "a recorded rejection cannot release the hold before retry"
+        );
+        replace_kickoff_defaults(&fixture.core, session).await?;
+        second.commit().await?;
+        Ok::<_, Box<dyn Error>>(session)
+    };
+    let (submitted, session) = tokio::join!(provisioning, replace);
+    assert!(matches!(
+        submitted,
+        Err(
+            signalbox_module_repo_watch_v2::dispatch::SubmissionError::Sink(
+                signalboxd::repo_watch_dispatch::RepositoryWatchCommandError::KickoffDefaultsChanged
+            )
+        )
+    ));
+    let session = session?;
+    let held: bool = sqlx::query_scalar("SELECT checkout_provisioning_pending AND start_gate_held FROM session_lifecycle WHERE session_id = $1")
+        .bind(session.into_uuid()).fetch_one(&fixture.core).await?;
+    assert!(held, "a rejected retry leaves provisioning held");
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM durable_command WHERE command_kind = 'submit_input'",
+    )
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(attempts, 2, "one initial attempt and one retry");
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&fixture.core)
+        .await?;
+    assert_eq!(inputs, 0);
+    let (rejected, pending): (Uuid, bool) = sqlx::query_as(
+        "SELECT kickoff_command_id, submission_pending FROM dispatch_ledger WHERE command_id = $1",
+    )
+    .bind(fixture.command.into_uuid())
+    .fetch_one(&fixture.module)
+    .await?;
+    assert!(pending);
+    let repository = SubmitInputRepository::new(fixture.core.clone());
+    let rejection = repository
+        .load(DurableCommandId::from_uuid(rejected))
+        .await?
+        .expect("recorded rejection");
+    assert!(matches!(
+        rejection.result(),
+        SubmitInputResult::Rejected(
+            signalbox_domain::SubmitInputRejectedResult::SessionDefaultsVersionMismatch { .. }
+        )
+    ));
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    let accepted: Uuid =
+        sqlx::query_scalar("SELECT kickoff_command_id FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert_ne!(accepted, rejected);
+    let recorded = repository
+        .load(DurableCommandId::from_uuid(accepted))
+        .await?
+        .expect("accepted retry");
+    assert!(matches!(recorded.result(), SubmitInputResult::Applied(_)));
+    let held: bool = sqlx::query_scalar("SELECT checkout_provisioning_pending OR start_gate_held FROM session_lifecycle WHERE session_id = $1")
+        .bind(session.into_uuid()).fetch_one(&fixture.core).await?;
+    assert!(!held);
+    // Recovery after acceptance must preserve delivery even if defaults have advanced again.
+    replace_kickoff_defaults(&fixture.core, session).await?;
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    let replay = repository
+        .load(DurableCommandId::from_uuid(accepted))
+        .await?
+        .expect("same accepted kickoff");
+    assert_eq!(replay.command(), recorded.command());
+    assert_eq!(replay.result(), recorded.result());
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&fixture.core)
+        .await?;
+    assert_eq!(inputs, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn unavailable_kickoff_alias_retires_once_across_stop_recovery() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_domain::{SubmitInputRejectedResult, SubmitInputResult};
+    use signalbox_module_repo_watch_v2::checkout::CheckoutRetirementReason;
+    use signalbox_persistence::submit_input::SubmitInputRepository;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    // Interrupt publication so the next command-loop tick uses a reloaded model catalog.
+    sqlx::raw_sql("CREATE FUNCTION interrupt_kickoff() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.command_kind = 'submit_input' THEN RAISE EXCEPTION 'fixture kickoff interruption'; END IF;
+        RETURN NEW; END $$;
+        CREATE TRIGGER interrupt_kickoff BEFORE INSERT ON durable_command
+        FOR EACH ROW EXECUTE FUNCTION interrupt_kickoff();").execute(&fixture.core).await?;
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("configuration")
+        .clone();
+    assert!(
+        submit_pending_with_runner(
+            &fixture.store,
+            &configuration,
+            &mut fixture.sink,
+            fixture.runner.clone()
+        )
+        .await
+        .is_err()
+    );
+    let kickoff: Uuid =
+        sqlx::query_scalar("SELECT kickoff_command_id FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    // This is the alias selected by the fixture's watch template; reload removes that identity.
+    fixture.sink.models = Arc::new(HubModelConfiguration::parse(&fixture.catalog.replace(
+        "540ce009-c2ec-4a04-b823-c411ea189778",
+        &Uuid::now_v7().to_string(),
+    ))?);
+    sqlx::raw_sql(
+        "DROP TRIGGER interrupt_kickoff ON durable_command;
+        DROP FUNCTION interrupt_kickoff();
+        CREATE FUNCTION interrupt_stop() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'fixture stop interruption'; END $$;
+        CREATE TRIGGER interrupt_stop BEFORE INSERT ON session_lifecycle_command
+        FOR EACH ROW EXECUTE FUNCTION interrupt_stop();",
+    )
+    .execute(&fixture.core)
+    .await?;
+    assert!(
+        submit_pending_with_runner(
+            &fixture.store,
+            &configuration,
+            &mut fixture.sink,
+            fixture.runner.clone()
+        )
+        .await
+        .is_err()
+    );
+    let checkout = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("retired checkout");
+    assert_eq!(
+        checkout.retired_reason,
+        Some(CheckoutRetirementReason::KickoffRejected)
+    );
+    let stop = checkout.stop_command.expect("durable stop identity");
+    let rejected = SubmitInputRepository::new(fixture.core.clone())
+        .load(DurableCommandId::from_uuid(kickoff))
+        .await?
+        .expect("recorded rejection");
+    assert!(matches!(
+        rejected.result(),
+        SubmitInputResult::Rejected(SubmitInputRejectedResult::UnknownModelAlias { .. })
+    ));
+    sqlx::raw_sql(
+        "DROP TRIGGER interrupt_stop ON session_lifecycle_command; DROP FUNCTION interrupt_stop();",
+    )
+    .execute(&fixture.core)
+    .await?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.submit_without_lifecycle_settlement().await;
+    let lifecycle = signalbox_session_ownership::LifecycleEventSource::new(fixture.core.clone());
+    let mut factory = FixtureSessionFactory {
+        next_command: Uuid::now_v7().as_u128(),
+        model: Uuid::now_v7().as_u128(),
+    };
+    while let Some(event) = lifecycle.next().await? {
+        fixture
+            .store
+            .react_to_lifecycle(
+                &event,
+                &mut factory,
+                &mut RepositoryWatchCommandCodec,
+                &lifecycle,
+            )
+            .await?;
+        lifecycle.acknowledge(&event).await?;
+    }
+    fixture.dispatch().await;
+    fixture.dispatch().await;
+    // Replay after terminal settlement must retain both identities and never retry the kickoff.
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let terminal: bool = sqlx::query_scalar("SELECT state_kind = 'terminal' AND terminal_outcome_kind = 'stopped' AND NOT terminal_stop_sticky FROM session_lifecycle WHERE session_id = $1")
+        .bind(session.into_uuid()).fetch_one(&fixture.core).await?;
+    assert!(terminal);
+    let settled: bool = sqlx::query_scalar("SELECT NOT submission_pending AND singleton_released_at IS NOT NULL AND kickoff_command_id = $2 AND checkout_stop_command_id = $3 AND checkout_retired_reason = 'kickoff_rejected' FROM dispatch_ledger WHERE command_id = $1")
+        .bind(fixture.command.into_uuid()).bind(kickoff).bind(stop.into_uuid()).fetch_one(&fixture.module).await?;
+    assert!(settled);
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM durable_command WHERE command_kind = 'submit_input'",
+    )
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(
+        attempts, 1,
+        "non-recoverable rejection never mints another kickoff identity"
+    );
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&fixture.core)
+        .await?;
+    assert_eq!(inputs, 0);
+    let stops: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM session_lifecycle_command WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&fixture.core)
+            .await?;
+    assert_eq!(stops, 1, "stop recovery replays the retained identity");
+    Ok(())
+}
+
+async fn replace_kickoff_defaults(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<signalbox_domain::SessionConfigurationDefaultsVersion, Box<dyn Error>> {
+    use signalbox_persistence::{
+        replace_session_defaults::{
+            ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepository,
+        },
+        session::SessionRepository,
+    };
+    let current = SessionRepository::new(pool.clone())
+        .load_session(session)
+        .await?
+        .expect("current session");
+    let defaults = current.current_configuration_defaults();
+    let result = ReplaceSessionDefaultsRepository::new(pool.clone())
+        .handle(signalbox_domain::ReplaceSessionDefaults::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            defaults.version(),
+            defaults.defaults().clone(),
+        ))
+        .await?;
+    assert!(matches!(
+        result,
+        ReplaceSessionDefaultsHandlingOutcome::Applied(_)
+    ));
+    Ok(defaults.version().checked_next().expect("next version"))
+}
+
+async fn wait_for_kickoff_attempt(pool: &PgPool, attempt: i64) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid::bigint = $1 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))")
+                .bind(attempt).fetch_one(pool).await?;
+            if waiting { return Ok::<_, sqlx::Error>(()); }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await??;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn kickoff_with_unresolved_threads_requests_repair_and_thread_replies()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = CheckoutFixture::with_threads(
+        "checkout/project",
+        "labeled-review-response",
+        vec![RepoWatchThreadObservation::new(
+            ReviewThreadId::try_new("fixture-thread".to_owned())?,
+            RepoWatchThreadState::Open,
+        )],
+    )
+    .await?;
+    fixture.enable_push()?;
+    fixture.dispatch().await;
+    let text: String =
+        sqlx::query_scalar("SELECT kickoff_text FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert!(text.contains("fix every unresolved review thread"));
+    assert!(text.contains("push with git_push_configured to the head branch"));
+    assert!(
+        text.contains("Reply on each addressed thread naming the fixing commit and resolve it")
+    );
+    assert!(!text.contains("No unresolved review threads"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn kickoff_for_renovate_requests_the_template_merge_forward() -> Result<(), Box<dyn Error>> {
+    let mut fixture =
+        CheckoutFixture::with_rule("checkout/project", "renovate-merge-forward").await?;
+    fixture.enable_push()?;
+    fixture.dispatch().await;
+    let text: String =
+        sqlx::query_scalar("SELECT kickoff_text FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert!(
+        text.contains("base branch forward into its head branch, resolve only merge conflicts")
+    );
+    assert!(text.contains("push with git_push_configured to the head branch"));
+    assert!(text.contains("intended change survives the merge"));
+    assert!(text.contains("For each conflict hunk, report which side was retained"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn kickoff_without_push_credentials_requests_a_reviewable_diff() -> Result<(), Box<dyn Error>>
+{
+    let mut fixture = CheckoutFixture::with_threads(
+        "checkout/project",
+        "labeled-review-response",
+        vec![RepoWatchThreadObservation::new(
+            ReviewThreadId::try_new("fixture-thread".to_owned())?,
+            RepoWatchThreadState::Open,
+        )],
+    )
+    .await?;
+    assert!(
+        fixture
+            .sink
+            .models
+            .repository_watch()
+            .expect("configuration")
+            .repositories()[0]
+            .push_credential_file()
+            .is_none()
+    );
+    fixture.dispatch().await;
+    let text: String =
+        sqlx::query_scalar("SELECT kickoff_text FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert!(text.contains("fix every unresolved review thread"));
+    assert!(text.contains("This session has no Git push authority. Do not push."));
+    assert!(text.contains(
+        "Provide any fix as a reviewable diff in a plain pull request reply and finish cleanly."
+    ));
+    assert!(text.contains("Leave unresolved review threads open"));
+    assert!(!text.contains("push with git_push_configured"));
+    assert!(!text.contains("and resolve it"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn kickoff_for_a_fork_head_requests_a_diff_despite_configured_push_credentials()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture =
+        CheckoutFixture::with_rule("contributor/project", "renovate-merge-forward").await?;
+    fixture.enable_push()?;
+    assert!(
+        fixture
+            .sink
+            .models
+            .repository_watch()
+            .expect("configuration")
+            .repositories()[0]
+            .push_credential_file()
+            .is_some()
+    );
+    fixture.dispatch().await;
+    let text: String =
+        sqlx::query_scalar("SELECT kickoff_text FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert!(
+        text.contains("base branch forward into its head branch, resolve only merge conflicts")
+    );
+    assert!(text.contains("This session has no Git push authority. Do not push."));
+    assert!(text.contains(
+        "Provide any fix as a reviewable diff in a plain pull request reply and finish cleanly."
+    ));
+    assert!(!text.contains("push with git_push_configured"));
+    assert!(!text.contains("and resolve it"));
+    Ok(())
+}
+
 impl CheckoutFixture {
+    fn enable_push(&mut self) -> Result<PathBuf, Box<dyn Error>> {
+        let credential = self._files.path().join("push-token");
+        std::fs::write(&credential, "push-fixture-token")?;
+        std::fs::set_permissions(
+            &credential,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
+        let catalog_text = self.catalog.replace(
+            "credential_file =",
+            &format!(
+                "push_credential_file = \"{}\"\ncredential_file =",
+                credential.display()
+            ),
+        );
+        self.sink.models = Arc::new(HubModelConfiguration::parse(&catalog_text)?);
+        Ok(credential)
+    }
+
     async fn new() -> Result<Self, Box<dyn Error>> {
         Self::with_head_repository("checkout/project").await
     }
 
     async fn with_head_repository(head_repository: &str) -> Result<Self, Box<dyn Error>> {
+        Self::with_rule(head_repository, "review").await
+    }
+
+    async fn with_rule(head_repository: &str, rule: &str) -> Result<Self, Box<dyn Error>> {
+        Self::with_threads(head_repository, rule, Vec::new()).await
+    }
+
+    async fn with_threads(
+        head_repository: &str,
+        rule: &str,
+        threads: Vec<RepoWatchThreadObservation>,
+    ) -> Result<Self, Box<dyn Error>> {
         let (container, core, url) = postgres().await?;
         migrate(&core).await?;
         sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
@@ -488,7 +1177,7 @@ repository = "checkout/project"
 poll_interval_seconds = 60
 credential_file = "{}"
 [[repository_watch.rules]]
-id = "review"
+id = "{rule}"
 version = 1
 singleton_per = "pull_request"
 cooldown_seconds = 0
@@ -539,7 +1228,7 @@ template = "watch"
                         completed_check_suites: Vec::new(),
                         completed_check_runs: Vec::new(),
                         reviews: Vec::new(),
-                        threads: Vec::new(),
+                        threads,
                         reactions: Vec::new(),
                     },
                 )?],
@@ -990,20 +1679,7 @@ async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposit
             )
             .is_none()
     );
-    let credential = fixture._files.path().join("push-token");
-    std::fs::write(&credential, "push-fixture-token")?;
-    std::fs::set_permissions(
-        &credential,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )?;
-    let catalog_text = fixture.catalog.replace(
-        "credential_file =",
-        &format!(
-            "push_credential_file = \"{}\"\ncredential_file =",
-            credential.display()
-        ),
-    );
-    fixture.sink.models = Arc::new(HubModelConfiguration::parse(&catalog_text)?);
+    let credential = fixture.enable_push()?;
     fixture.dispatch().await;
     let session = fixture.session().await;
     let root = fixture.root(session);
@@ -1322,7 +1998,7 @@ async fn dispatch_provisions_the_retained_head_at_the_git_tools_root() -> Result
     let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
         .fetch_one(&fixture.core)
         .await?;
-    assert_eq!(inputs, 0);
+    assert_eq!(inputs, 1);
     assert_git_status(&root, tools.git_identity().clone(), session).await;
     Ok(())
 }
@@ -1468,6 +2144,16 @@ async fn clone_failure_retires_dispatch_with_only_step_and_exit_status()
     .fetch_one(&fixture.core)
     .await?;
     assert_eq!(state, "stopped");
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&fixture.core)
+        .await?;
+    assert_eq!(inputs, 0, "failed provisioning submits no kickoff");
+    let kickoff: Option<Uuid> =
+        sqlx::query_scalar("SELECT kickoff_command_id FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    assert!(kickoff.is_none());
     fixture.dispatch().await;
     assert_eq!(*fixture.runner.steps.lock().expect("steps"), ["clone"]);
     Ok(())

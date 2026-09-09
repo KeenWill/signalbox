@@ -137,6 +137,16 @@ impl WorkspaceInstructionRuntime {
         }
     }
 
+    pub(crate) async fn session_is_parked(
+        &self,
+        session: SessionId,
+    ) -> Result<bool, WorkspaceInstructionRuntimeError> {
+        self.repository
+            .session_is_parked(session)
+            .await
+            .map_err(WorkspaceInstructionRuntimeError::Persistence)
+    }
+
     /// Greedily scans and atomically records an empty turn-start manifest.
     ///
     /// `false` means the turn stopped being active before evidence could bind

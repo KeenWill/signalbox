@@ -982,6 +982,7 @@ fn frontier_rendering_resolves_exact_tool_roles_in_source_order() {
             source: completed_result_source,
             request: completed_request.clone(),
             context_text: Some(admitted_text.clone()),
+            context_error_detail: None,
             attempt: completed_attempt,
         },
         ResolvedToolConversationEntry::AssistantToolUse {
@@ -1050,6 +1051,67 @@ fn frontier_rendering_resolves_exact_tool_roles_in_source_order() {
     );
 }
 
+#[test]
+fn frontier_rendering_uses_bounded_failure_detail_with_the_exact_kind() {
+    use signalbox_domain::{ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind};
+
+    let request = model_tool_request(0);
+    let source = SemanticTranscriptEntryRef::from_source(
+        request.session(),
+        identity(111, SemanticTranscriptEntryId::from_uuid),
+    );
+    let attempt_id = identity(116, signalbox_domain::ToolAttemptId::from_uuid);
+    let exact = ToolExecutionError::new(
+        ToolExecutionErrorKind::ExecutionFailed,
+        Some(ToolExecutionErrorDetail::try_new(String::from("exact executor detail")).unwrap()),
+    );
+    let admitted =
+        ToolExecutionErrorDetail::try_new(String::from("bounded context detail")).unwrap();
+    let signalbox_domain::ReconstitutedToolAttempt::Ended(attempt) =
+        ToolAttemptReconstitutionInput::new(
+            attempt_id,
+            request.id(),
+            request.session(),
+            request.turn(),
+            identity(117, TurnAttemptId::from_uuid),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::KnownFailed {
+                error: exact.clone(),
+            }),
+        )
+        .reconstitute()
+        .unwrap()
+    else {
+        panic!("terminal fixture reconstitutes as ended")
+    };
+    let evidence = [ResolvedToolConversationEntry::ExecutionResult {
+        source,
+        request: request.clone(),
+        attempt: attempt.clone(),
+        context_text: None,
+        context_error_detail: Some(admitted.clone()),
+    }];
+    let payload = SemanticTranscriptEntryPayload::ToolExecutionResult {
+        attempt: attempt_id,
+    };
+    let messages =
+        render_frontier_messages([(source, &payload)], |_| None, |_| None, evidence.iter())
+            .unwrap();
+    assert_eq!(
+        messages.as_ref(),
+        &[ModelConversationMessage::ToolResult {
+            source,
+            request: request.id(),
+            content: ModelToolResultContent::ExecutionError(ToolExecutionError::new(
+                exact.kind(),
+                Some(admitted),
+            )),
+        }]
+    );
+    assert_eq!(attempt.end(), &ToolAttemptEnd::KnownFailed { error: exact });
+}
+
 /// a terminal attempt from another turn cannot supply authority for a tool-result semantic
 /// entry.
 #[test]
@@ -1087,6 +1149,7 @@ fn frontier_rendering_rejects_cross_turn_tool_result_evidence() {
     let evidence = ResolvedToolConversationEntry::ExecutionResult {
         source,
         request,
+        context_error_detail: None,
         context_text: match cross_turn_attempt.end() {
             ToolAttemptEnd::Completed {
                 result: ToolResultContent::Text(text),

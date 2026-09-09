@@ -189,8 +189,45 @@
   const capabilities = ["time", "random", "sleep", "subscribe", "session", "judge",
     "exec-stage", "corpus", "eval-record", "blob", "register"];
 
+  const unsigned = (value) => {
+    if (typeof value !== "string" || !regexExec(/^(0|[1-9][0-9]*)$/, value)
+        || parseBigInt(value) > 18446744073709551615n) {
+      throw new CodecTypeError("expected a u64 decimal string");
+    }
+    return value;
+  };
+  const field = (value, name) => {
+    if (objectKeys(value).length !== 1) throw new CodecTypeError("invalid primitive answer fields");
+    return unsigned(value[name]);
+  };
+  const primitives = freeze({
+    now() { return answer(call("now", new ByteArray()), (value) => field(value, "unix_ms")); },
+    random() { return answer(call("random", new ByteArray()), (value) => field(value, "value")); },
+    async sleepUntil(deadlineUnixMs) {
+      const result = await call("sleep", encodeJson({ deadline_unix_ms: unsigned(deadlineUnixMs) }));
+      if (result.kind !== "wake") return result;
+      const data = byteArray(result.payload);
+      const payload = new ByteArray(data.length);
+      for (let index = 0; index < data.length; index++) payload[index] = data[index];
+      return { kind: "wake", value: field(record(snapshotJson(decodeJson(payload))), "unix_ms") };
+    },
+    awaitEvent(input) {
+      record(input);
+      record(input.source);
+      if (input.source.kind !== "program_answers") throw new CodecTypeError("invalid program event source");
+      const payload = encodeJson({ source: { kind: "program_answers", run: uuid(input.source.run) }, after: unsigned(input.after) });
+      return answer(call("await_event", payload), (value) => {
+        if (objectKeys(value).length !== 2) throw new CodecTypeError("invalid program event fields");
+        const position = unsigned(value.position);
+        if (position === "0") throw new CodecTypeError("expected a positive event position");
+        return { position, payload: byteArray(value.payload) };
+      });
+    },
+  });
+
   return freeze({
     jsonCodec,
+    primitives,
     defineProgram({ input, output, run }) {
       return async (payload) => bytes(output.encode(await run(input.decode(bytes(payload)))));
     },

@@ -13,7 +13,7 @@ gix-validate = "0.11.4"
 hex = "0.4.3"
 regex = { version = "1.12.2", default-features = false, features = ["std", "perf", "unicode"] }
 rpds = "1.2.1"
-serde = "1.0.203"
+serde = { version = "1.0.203", features = ["derive"] }
 # Tool arguments retain numeric values beyond machine integer and float ranges.
 serde_json = { version = "1.0.140", features = ["arbitrary_precision", "unbounded_depth"] }
 serde_stacker = "0.1.14"
