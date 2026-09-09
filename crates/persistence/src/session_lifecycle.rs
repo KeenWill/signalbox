@@ -640,6 +640,7 @@ pub(crate) async fn restore_module_park_in_transaction(
     session: SessionId,
     module: DispatchingModule,
 ) -> Result<bool, SessionLifecycleRepositoryError> {
+    lock_supervision_frontier(connection, session).await?;
     let held = load_locked(connection, session).await?;
     if held.state
         != (SessionLifecycleState::Parked {

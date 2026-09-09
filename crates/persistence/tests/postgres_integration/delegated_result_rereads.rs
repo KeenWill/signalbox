@@ -915,6 +915,91 @@ async fn delegated_tool_crash_locks_parent_before_child_scheduler() -> Result<()
     Ok(())
 }
 
+/// Module restoration waits for the parent before holding a supervised child's terminal frontier.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn supervised_module_park_restoration_locks_parent_before_child() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_domain::{
+        DispatchingModule, LifecycleActor, SessionParkCause, SessionParkResponder,
+    };
+    use signalbox_persistence::session_lifecycle::SessionLifecycleRepository;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = prepare_delegated_tool_crash_fixture(&pool, 0xf100).await?;
+    assert!(fixture.parent.as_uuid() < fixture.child.as_uuid());
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    lifecycle
+        .adopt(fixture.child, LifecycleActor::Operator)
+        .await?;
+    let module = DispatchingModule::RepositoryWatch;
+    lifecycle
+        .park(
+            fixture.child,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module { module },
+            None,
+            LifecycleActor::Module { module },
+        )
+        .await?;
+    let failure = signalbox_persistence::startup::StartupScanRepositoryError::from(
+        signalbox_persistence::startup::StartupScanCorruption::Missing(
+            "fixture execution evidence",
+        ),
+    );
+    lifecycle
+        .record_supervision_failure(fixture.child, &failure)
+        .await?;
+    let mut parent_lock = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.parent.into_uuid())
+        .execute(&mut *parent_lock)
+        .await?;
+    let restore_pool = pool.clone();
+    let restored = tokio::spawn(async move {
+        signalbox_persistence::test_support::restore_module_park(
+            &restore_pool,
+            fixture.child,
+            module,
+        )
+        .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "module restoration waits for the parent endpoint"
+    );
+    sqlx::query("SET LOCAL lock_timeout = '250ms'")
+        .execute(&mut *parent_lock)
+        .await?;
+    let child: Uuid = sqlx::query_scalar(
+        "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE",
+    )
+    .bind(fixture.child.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
+    let scheduler: Uuid = sqlx::query_scalar(
+        "SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE",
+    )
+    .bind(fixture.child.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
+    assert_eq!(child, fixture.child.into_uuid());
+    assert_eq!(scheduler, child);
+    parent_lock.rollback().await?;
+    assert!(restored.await??);
+    let resumed = lifecycle.load(fixture.child).await?.unwrap();
+    assert!(!resumed.state().is_parked());
+    assert!(!resumed.supervision_failure().unwrap().pending);
+    let terminal: bool =
+        sqlx::query_scalar("SELECT state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(terminal);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// completing a delegated initial task atomically creates its typed returned result, parent update,
 /// and parent wake before commit.
 #[tokio::test(flavor = "multi_thread")]
