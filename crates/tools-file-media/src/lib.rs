@@ -504,7 +504,7 @@ fn service_evidence<T>(
 ) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
     match result {
         Ok(value) => Ok(completed(value)),
-        Err(FileMediaServiceFailure::File(failure)) => Ok(failure_evidence(failure)),
+        Err(FileMediaServiceFailure::File(failure)) => failure_evidence(failure),
         Err(FileMediaServiceFailure::Operator(error)) => Err(error),
     }
 }
@@ -631,8 +631,15 @@ fn continuation_cursor(
     }
 }
 
-fn failure_evidence(failure: FileMediaFailure) -> ToolExecutorEvidence {
+fn failure_evidence(
+    failure: FileMediaFailure,
+) -> Result<ToolExecutorEvidence, FileMediaExecutorError> {
     let value = match failure {
+        FileMediaFailure::SourceIntegrity => {
+            return Err(FileMediaExecutorError::from_class(
+                OperatorFailureClass::FailClosedCorruption,
+            ));
+        }
         FileMediaFailure::BlobNotVisible => json!({"status": "blob_not_visible"}),
         FileMediaFailure::BlobMissing => json!({"status": "blob_missing"}),
         FileMediaFailure::BlobCorrupt => json!({"status": "blob_corrupt"}),
@@ -672,7 +679,7 @@ fn failure_evidence(failure: FileMediaFailure) -> ToolExecutorEvidence {
         FileMediaFailure::ProcessorTimedOut => json!({"status": "processor_timed_out"}),
         FileMediaFailure::Cancelled => json!({"status": "cancelled"}),
     };
-    known_failure(value)
+    Ok(known_failure(value))
 }
 
 fn completed_json(value: Value) -> ToolExecutorEvidence {
@@ -739,6 +746,26 @@ mod tests {
             unavailable,
             ToolExecutorEvidence::KnownFailed { .. }
         ));
+    }
+
+    #[test]
+    fn source_integrity_failure_cannot_commit_an_ordinary_failed_tool_result() {
+        let failure = FileMediaFailure::from(
+            signalbox_file_media_runtime::ProcessorBoundaryFailure::Source(
+                signalbox_file_media_runtime::SourceReadError::Integrity,
+            ),
+        );
+        let inspected = service_evidence(Err(failure.clone().into()), inspection_evidence);
+        let read = service_evidence(Err(failure.into()), read_evidence);
+
+        assert_eq!(
+            inspected.unwrap_err().operator_failure_class(),
+            OperatorFailureClass::FailClosedCorruption
+        );
+        assert_eq!(
+            read.unwrap_err().operator_failure_class(),
+            OperatorFailureClass::FailClosedCorruption
+        );
     }
 
     struct UnusedService;
