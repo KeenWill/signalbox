@@ -1,7 +1,7 @@
 //! Metadata-only bounds for the objects and delta programs a packed read decodes.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::Read,
 };
 
@@ -14,7 +14,7 @@ use crate::limits::MAX_OBJECT_BYTES;
 pub(super) fn collect_unreadable_objects(
     pack: &[u8],
     indexed: &[(Oid, usize)],
-    unreadable: &mut HashSet<Oid>,
+    unreadable: &mut BTreeSet<Oid>,
 ) {
     let offsets = indexed
         .iter()
@@ -25,7 +25,7 @@ pub(super) fn collect_unreadable_objects(
         .iter()
         .enumerate()
         .map(|(index, &(oid, _))| (oid, index))
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
     let mut dependents = vec![Vec::new(); indexed.len()];
     let mut pending = Vec::new();
     for (index, &(_, offset)) in indexed.iter().enumerate() {
@@ -55,7 +55,7 @@ fn bounded_entry_base(
     pack: &[u8],
     offset: usize,
     offsets: &HashMap<usize, usize>,
-    ids: &HashMap<Oid, usize>,
+    ids: &BTreeMap<Oid, usize>,
 ) -> Result<Option<usize>, ()> {
     if offset < 12 {
         return Err(());
