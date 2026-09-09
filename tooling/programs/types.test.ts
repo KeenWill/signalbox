@@ -6,6 +6,35 @@ const text = jsonCodec((value: unknown): string => {
   return value;
 });
 
+// @ts-expect-error JSON validators cannot produce promises.
+jsonCodec(async () => "ok");
+// @ts-expect-error Explicit type arguments cannot admit promise values.
+jsonCodec<Promise<string>>(async () => "ok");
+// @ts-expect-error Undefined is outside the JSON value domain.
+jsonCodec(() => undefined);
+// @ts-expect-error Dates cannot be encoded as JSON data without conversion.
+jsonCodec(() => new Date());
+// @ts-expect-error Big integers require conversion to JSON strings.
+jsonCodec(() => 1n);
+// @ts-expect-error Functions are not JSON values.
+jsonCodec(() => () => "ok");
+// @ts-expect-error Non-JSON values nested in records are also rejected.
+jsonCodec(() => ({ nested: { value: Promise.resolve("ok") } }));
+// @ts-expect-error Array elements must be JSON values.
+jsonCodec(() => ["ok", undefined]);
+
+interface JsonRecord {
+  label: string;
+  nested: { count: number; active: boolean; empty: null };
+  values: readonly (string | number)[];
+  optional?: string;
+}
+const jsonRecord = jsonCodec((_value: unknown): JsonRecord => ({
+  label: "checked", nested: { count: 1, active: true, empty: null }, values: ["ok", 1],
+}));
+const preservedRecordType: Codec<JsonRecord> = jsonRecord;
+void preservedRecordType;
+
 const receiverValidator = function (this: { prefix: string }, value: unknown): string {
   return this.prefix + String(value);
 };
