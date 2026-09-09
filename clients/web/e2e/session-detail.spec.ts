@@ -331,6 +331,10 @@ test('reads tool arguments and output in conversation order with events hidden',
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
+  await expect(page.locator('.session-telemetry')).toBeHidden()
+  await expect(conversation.getByRole('list', { name: 'Attachment references' })).toContainText(
+    'image/png · 4 B',
+  )
   await expect(conversation.getByRole('region', { name: 'Arguments', exact: true })).toContainText(
     'release status --json',
   )
@@ -355,6 +359,7 @@ test('reads tool arguments and output in conversation order with events hidden',
   await expect(conversation).toBeFocused()
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
   await expect(toolRow(page)).toBeVisible()
+  await expect(page.locator('.session-telemetry')).toBeVisible()
 })
 
 test('shows reconciliation-required turn outcomes with events hidden', async ({ page }) => {

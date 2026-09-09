@@ -229,7 +229,7 @@ test('filters and opens a session with Enter, then returns to the catalog', asyn
   await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toHaveValue(
     firstSessionId,
   )
-  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
   await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
   await expect(page).toHaveURL(/q=Release/)
   await expect(session).toBeFocused()
@@ -243,8 +243,8 @@ test('leaves the composer before returning to the catalog on Escape', async ({ p
   await page.goto('/sessions')
   const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await session.click()
-  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
-  const composer = page.getByRole('textbox', { name: 'Message to session', exact: true })
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
+  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
   const draft = 'Keep the draft while leaving the field.'
   await composer.fill(draft)
   await composer.press('Escape')
@@ -263,7 +263,7 @@ test('returns browser Back focus to the row that opened a workspace', async ({
   await page.goto('/sessions')
   const session = page.getByRole('button', { name: firstPage.summaries[1].title_summary })
   await session.click()
-  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  const timeline = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(timeline).toBeVisible()
   await timeline.focus()
   await page.goBack()
@@ -286,7 +286,7 @@ for (const returnMethod of ['Escape', 'Back'] as const) {
       page.getByRole('button', { name: firstPage.summaries[1].title_summary }),
     ).toHaveCount(0)
     await session.click()
-    await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+    await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
     if (returnMethod === 'Escape')
       await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
     else await page.goBack()
@@ -306,7 +306,7 @@ test('consumes return focus before a later catalog remount', async ({ page }) =>
   await page.goto('/sessions')
   const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await session.click()
-  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toBeVisible()
   await page.getByRole('textbox', { name: 'Session ID', exact: true }).press('Escape')
   await expect(session).toBeFocused()
   await page.getByRole('link', { name: /Settings/ }).click()

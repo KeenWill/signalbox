@@ -244,6 +244,11 @@ test('discovers the artifact inspector through the command palette', async ({ pa
   await useArtifactScenario(page)
   await page.goto('/sessions?workspace=true')
 
+  await expect(
+    page.getByRole('button', { name: 'Open artifact inspector', exact: true }),
+  ).toBeEnabled()
+  await expect(page.getByRole('textbox', { name: 'Session ID', exact: true })).toBeFocused()
+  await page.getByRole('button', { name: 'Open artifact inspector', exact: true }).focus()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   const palette = page.getByRole('dialog', { name: 'Command palette' })

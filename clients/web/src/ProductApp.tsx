@@ -630,8 +630,9 @@ export function ProductApp({
   useEffect(() => {
     void surface
     void sessionState.session
+    void sessionState.workspace
     if (document.activeElement === document.body) mainRef.current?.focus()
-  }, [surface, sessionState.session])
+  }, [surface, sessionState.session, sessionState.workspace])
   const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
     productHotkeyBindings
