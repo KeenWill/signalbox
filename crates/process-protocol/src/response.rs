@@ -729,6 +729,9 @@ pub enum ServerMessage {
     },
     /// Begins one transcript snapshot sequence.
     TranscriptSnapshotStart {
+        /// Recorded daemon-local workspace kind, absent before binding.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        workspace_root_kind: Option<crate::SessionWorkspaceRootKind>,
         /// Retained repository-watch origin, absent for other creation causes.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         repository_watch: Option<crate::RepositoryWatchProvenance>,

@@ -201,9 +201,9 @@ impl<Clock>
             eligibility_nudge,
         ))
         .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
-        let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
+        let plan = PlanTools::try_new(SessionPlanRepository::new(pool.clone()))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
-        Self::try_new_with_tools(
+        let mut tools = Self::try_new_with_tools(
             clock,
             ComposedToolFamilies {
                 web_fetch,
@@ -217,7 +217,11 @@ impl<Clock>
                 delegation,
                 goal: Some(goal),
             },
-        )
+        )?;
+        if let Some(workspace) = &mut tools.executor.workspace_bound {
+            workspace.binding_pool = Some(pool);
+        }
+        Ok(tools)
     }
 
     /// Composes the base production catalog without constructing any dependency

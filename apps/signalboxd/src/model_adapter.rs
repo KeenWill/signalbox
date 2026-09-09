@@ -1102,6 +1102,11 @@ service_tiers = ["priority"]
         let file_credential = "synthetic-claude-file-value";
         std::fs::write(&credential_file, file_credential)
             .expect("the Claude credential fixture is writable");
+        std::fs::set_permissions(
+            &credential_file,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .expect("the Claude credential fixture is private");
         std::fs::write(
             &executable,
             r#"#!/bin/sh
