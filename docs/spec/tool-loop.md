@@ -311,14 +311,15 @@ human, `AlwaysConfirm`, or automatic selection is never overridden, and the
 consuming request still freezes the delegated posture.
 
 Each family supplies its compiled declarations and matching executor and owns
-its exact argument schemas, permission defaults, effect classes, bounds, and
-execution results. The catalog owns only their composition and the name-directed
-executor, which covers exactly the composed families; disagreement between the
-advertised catalog and the executor is a daemon defect. A tool name shared with
-a runner declaration is admitted only when the model-facing definition and
-permission are equal and the local effect class maps exactly, `EffectFree` to
-`Pure` and `ExternalEffect` to `SideEffecting`. Effect class controls crash
-classification, not permission identity.
+its exact argument schemas, permission defaults, effect classes, and execution
+results; deployment configuration supplies its policy bounds. The catalog owns
+only their composition and the name-directed executor, which covers exactly the
+composed families; disagreement between the advertised catalog and the executor
+is a daemon defect. A tool name shared with a runner declaration is admitted
+only when the model-facing definition and permission are equal and the local
+effect class maps exactly, `EffectFree` to `Pure` and `ExternalEffect` to
+`SideEffecting`. Effect class controls crash classification, not permission
+identity.
 
 The workspace read, workspace mutation, local Git, and execution families bind
 one workspace root, and that root is per session;

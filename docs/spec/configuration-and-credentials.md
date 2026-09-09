@@ -120,6 +120,8 @@ fresh `/proc`. A container-process-namespace variant omits the pid unshare and
 read-only binds the existing `/proc`; it is admissible only when an outer
 container already isolates that namespace. The child inherits none of the
 daemon's environment; deployment settings supply additional runtime inputs. The
+required `[daemon_tools].sandboxed_exec_timeout_bound` is a positive friendly
+duration or `"none"` and bounds the timeout requested from `sandboxed_exec`. The
 optional `[daemon_tools]` keys `sandbox_network` (default `"none"`, or
 `"host"`), `sandbox_read_only_binds` (default `[]`), and `sandbox_path_prepend`
 (default `[]`) select networking, absolute host paths bound read-only at the
