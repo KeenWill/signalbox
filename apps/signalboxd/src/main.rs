@@ -1619,6 +1619,10 @@ async fn run_hub(
         reconciliation_sweep_interval,
         nudge_buffer_capacity,
     );
+    let approval_wait_wakeups = signalboxd::ApprovalWaitWakeups::new(
+        signalbox_persistence::tool_loop::PostgresToolLoopRepository::new(pool.clone()),
+        eligibility_nudge.clone(),
+    );
     let invocation_processes =
         signalboxd::credential_invocations::CredentialInvocationProcesses::new(
             pool.clone(),
@@ -1701,6 +1705,7 @@ async fn run_hub(
     let migration_oauth_registrations = model_configuration.oauth_registrations();
     let invocation_registrations = model_configuration.credential_invocation_registrations();
     let scan_pool = pool.clone();
+    let scan_approval_wait_wakeups = approval_wait_wakeups.clone();
     let startup = migrate_scan_then_schedule(
         async {
             install_oauth_registrations(&pool, &migration_oauth_registrations).await?;
@@ -1751,6 +1756,15 @@ async fn run_hub(
                     erase_startup_cause(
                         RuntimePhase::StartupScan,
                         SanitizedStartupCause::Static("runner_replacement_recovery_failed"),
+                    )
+                })?;
+            scan_approval_wait_wakeups
+                .refresh(None)
+                .await
+                .map_err(|_| {
+                    erase_startup_cause(
+                        RuntimePhase::StartupScan,
+                        SanitizedStartupCause::Static("approval_wait_deadline_restore_failed"),
                     )
                 })?;
             tracing::info!(
@@ -2232,6 +2246,7 @@ async fn run_hub(
                 model_configuration.clone(),
                 approval_judge_repository_watch.clone(),
             )
+            .with_approval_wait_wakeups(approval_wait_wakeups.clone())
             .with_shutdown_checkpoint(turn_execution_shutdown_receiver.clone()),
         );
         Ok::<_, signalboxd::model_catalog_runtime::ModelRuntimeBuildError>(
