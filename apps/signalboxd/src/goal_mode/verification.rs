@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, future::Future, time::Duration};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use signalbox_domain::{CommitSha, Goal, GoalGeneration, GoalGuidance, SessionId};
+use signalbox_domain::{CommitSha, Goal, GoalGeneration, GoalGuidance, RepositorySlug, SessionId};
 use signalbox_module_repo_watch_v2::github::GitHubClient;
 use signalbox_persistence::goal::{GoalCompletedTool, GoalCompletionCheck, GoalCompletionResult};
 
@@ -139,6 +139,23 @@ fn assess(
 
 const THREADS: &str = "query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid headRefName headRepository{nameWithOwner} reviewThreads(first:100,after:$cursor){nodes{id isResolved} pageInfo{hasNextPage endCursor}}}}}";
 
+fn observed_head(target: &Target, pr: &Value) -> Result<CommitSha, ()> {
+    let repository = RepositorySlug::try_new(
+        pr["headRepository"]["nameWithOwner"]
+            .as_str()
+            .ok_or(())?
+            .to_owned(),
+    )
+    .map_err(|_| ())?;
+    let expected_repository =
+        RepositorySlug::try_new(target.head_repository.clone()).map_err(|_| ())?;
+    if pr["headRefName"].as_str() != Some(&target.head_branch) || repository != expected_repository
+    {
+        return Err(());
+    }
+    CommitSha::try_new(pr["headRefOid"].as_str().ok_or(())?.to_owned()).map_err(|_| ())
+}
+
 async fn observe(
     client: &GitHubClient,
     target: &Target,
@@ -164,13 +181,7 @@ async fn observe(
             return Err(());
         }
         let pr = &response["data"]["repository"]["pullRequest"];
-        if pr["headRefName"].as_str() != Some(&target.head_branch)
-            || pr["headRepository"]["nameWithOwner"].as_str() != Some(&target.head_repository)
-        {
-            return Err(());
-        }
-        let observed =
-            CommitSha::try_new(pr["headRefOid"].as_str().ok_or(())?.to_owned()).map_err(|_| ())?;
+        let observed = observed_head(target, pr)?;
         if head.as_ref().is_some_and(|head| *head != observed) {
             return missing("The pull-request head changed during verification; verify the pushed commit and resolved threads against the new head.".to_owned());
         }
@@ -404,6 +415,37 @@ mod tests {
             number: "7".to_owned(),
             head_repository: "example/project".to_owned(),
             head_branch: "fix".to_owned(),
+        }
+    }
+
+    #[test]
+    fn goal_head_verification_accepts_mixed_case_repository_display_names() {
+        let response = json!({
+            "headRefOid": PUSHED,
+            "headRefName": "fix",
+            "headRepository": {"nameWithOwner": "ExAmPlE/PrOjEcT"},
+        });
+
+        assert_eq!(
+            observed_head(&target(), &response),
+            Ok(CommitSha::try_new(PUSHED.to_owned()).unwrap())
+        );
+    }
+
+    #[test]
+    fn goal_head_verification_rejects_a_different_repository_or_branch() {
+        for (repository, branch) in [("Other/Project", "fix"), ("Example/Project", "FIX")] {
+            let response = json!({
+                "headRefOid": PUSHED,
+                "headRefName": branch,
+                "headRepository": {"nameWithOwner": repository},
+            });
+
+            assert_eq!(
+                observed_head(&target(), &response),
+                Err(()),
+                "repository {repository}, branch {branch} must not match example/project on fix"
+            );
         }
     }
 
