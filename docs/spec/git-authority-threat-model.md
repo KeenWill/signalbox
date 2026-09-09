@@ -58,8 +58,9 @@ the destination come from the watched repository's deployment configuration; the
 retained dispatch head fences the branch.
 
 For dispatched pushes, object capture follows the branch's commits after the
-retained dispatch head. The fence commit and its tree metadata are retained for
-negotiation; earlier commits and unchanged fence blobs are omitted. Selected
+retained dispatch head. Merge paths stop at ancestors shared with that head. The
+fence and shared-ancestor boundary commits retain their tree metadata for
+negotiation; earlier commits and unchanged boundary blobs are omitted. Selected
 packed objects and their delta dependencies retain the content bounds.
 Pack-index lookups do not count unrelated entries against the push-range
 inspection bound. The transport disables delta compression against omitted

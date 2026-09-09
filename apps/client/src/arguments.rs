@@ -477,6 +477,27 @@ struct ProgramArguments {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProgramCommand {
+    /// Register a JSON description containing a native key or source and emitted JavaScript.
+    Register {
+        #[arg(value_parser = canonical_uuid)]
+        registration_id: CanonicalUuid,
+        #[arg(value_name = "REGISTRATION_JSON")]
+        registration: PathBuf,
+    },
+    /// Start with the program codec's exact encoded input bytes.
+    Start {
+        #[arg(value_parser = canonical_uuid)]
+        run_id: CanonicalUuid,
+        #[arg(value_parser = canonical_uuid)]
+        registration_id: CanonicalUuid,
+        #[arg(long, value_name = "FILE")]
+        input: PathBuf,
+    },
+    /// Read retained run input, state, and result bytes.
+    Read {
+        #[arg(value_parser = canonical_uuid)]
+        run_id: CanonicalUuid,
+    },
     /// Cancel a retained program run.
     Cancel {
         #[arg(value_name = "RUN_ID", value_parser = canonical_uuid)]

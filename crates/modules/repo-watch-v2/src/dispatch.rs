@@ -173,12 +173,10 @@ impl RepoWatchStore {
                     GoalEventKind::Commissioned | GoalEventKind::Resumed => {
                         Some(SessionLifecycleOperation::ReleaseStart)
                     }
-                    GoalEventKind::Achieved | GoalEventKind::UserStopped => {
-                        Some(SessionLifecycleOperation::Stop {
-                            sticky: StopStickiness::Sticky,
-                            descendant_scope: DescendantTerminationScope::ParentAlone,
-                        })
-                    }
+                    GoalEventKind::UserStopped => Some(SessionLifecycleOperation::Stop {
+                        sticky: StopStickiness::Sticky,
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    }),
                     _ => None,
                 },
                 _ => None,

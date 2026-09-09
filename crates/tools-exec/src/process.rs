@@ -2522,6 +2522,10 @@ async fn read_supervised_stdout(
         .map_err(|_| std::io::Error::other("supervisor status trailer is malformed"))?;
     let launcher_trailer = match (status_protocol, status) {
         (ProcessStatusProtocol::SandboxDispatch, SupervisorStatus::SpawnFailed { .. }) => None,
+        (
+            ProcessStatusProtocol::SandboxDispatch,
+            SupervisorStatus::TimedOut | SupervisorStatus::Cancelled,
+        ) => None,
         (ProcessStatusProtocol::SandboxDispatch, _) => {
             let (launcher_marker, launcher_status) = parse_launcher_status(&tail[..marker])
                 .ok_or_else(|| {
@@ -4073,6 +4077,87 @@ mod tests {
             result,
             Err(ExecToolConstructionError::SupervisorProgram { source: None, .. })
         ));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandbox_timeout_retains_output_without_a_launcher_completion()
+    -> Result<(), Box<dyn Error>> {
+        const STARTED_OUTPUT: &[u8] = b"started before timeout\n";
+        let mut output = STARTED_OUTPUT.to_vec();
+        output.extend_from_slice(SUPERVISOR_STATUS_TRAILER);
+        serde_json::to_writer(&mut output, &SupervisorStatus::TimedOut)?;
+        output.push(b'\n');
+
+        let (stdout, status, launcher_status) = read_supervised_stdout(
+            output.as_slice(),
+            EXEC_CAPTURE_BYTES,
+            ProcessStatusProtocol::SandboxDispatch,
+        )
+        .await?;
+
+        assert_eq!(stdout.bytes, STARTED_OUTPUT);
+        assert_eq!(status, SupervisorStatus::TimedOut);
+        assert_eq!(launcher_status, None);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandbox_cancellation_retains_output_without_a_launcher_completion()
+    -> Result<(), Box<dyn Error>> {
+        const STARTED_OUTPUT: &[u8] = b"started before cancellation\n";
+        let mut output = STARTED_OUTPUT.to_vec();
+        output.extend_from_slice(SUPERVISOR_STATUS_TRAILER);
+        serde_json::to_writer(&mut output, &SupervisorStatus::Cancelled)?;
+        output.push(b'\n');
+
+        let (stdout, status, launcher_status) = read_supervised_stdout(
+            output.as_slice(),
+            EXEC_CAPTURE_BYTES,
+            ProcessStatusProtocol::SandboxDispatch,
+        )
+        .await?;
+
+        assert_eq!(stdout.bytes, STARTED_OUTPUT);
+        assert_eq!(status, SupervisorStatus::Cancelled);
+        assert_eq!(launcher_status, None);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn interrupted_sandbox_retains_command_emitted_launcher_markers()
+    -> Result<(), Box<dyn Error>> {
+        for interrupted_status in [SupervisorStatus::TimedOut, SupervisorStatus::Cancelled] {
+            let mut command_output = b"command output\n".to_vec();
+            command_output.extend_from_slice(LAUNCH_STATUS_TRAILER);
+            serde_json::to_writer(
+                &mut command_output,
+                &LauncherStatus::Exited {
+                    code: Some(SUCCESSFUL_EXIT_CODE),
+                    stdout: SupervisorCaptureCompleteness::Complete,
+                    stderr: SupervisorCaptureCompleteness::Complete,
+                },
+            )?;
+            command_output.push(b'\n');
+            let mut output = command_output.clone();
+            output.extend_from_slice(SUPERVISOR_STATUS_TRAILER);
+            serde_json::to_writer(&mut output, &interrupted_status)?;
+            output.push(b'\n');
+
+            let (stdout, status, launcher_status) = read_supervised_stdout(
+                output.as_slice(),
+                EXEC_CAPTURE_BYTES,
+                ProcessStatusProtocol::SandboxDispatch,
+            )
+            .await?;
+
+            assert_eq!(stdout.bytes, command_output, "{interrupted_status:?}");
+            assert_eq!(status, interrupted_status);
+            assert_eq!(launcher_status, None);
+        }
         Ok(())
     }
 
