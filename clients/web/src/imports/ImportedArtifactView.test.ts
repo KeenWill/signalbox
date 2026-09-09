@@ -72,9 +72,7 @@ describe('imported artifact projection', () => {
         }),
       ),
     )
-    expect(markup).toContain(
-      'Server-truncated source prefix shown; additional source content is not loaded.',
-    )
+    expect(markup).toContain('Partial text')
     expect(markup).not.toContain('Complete bounded content shown')
   })
 

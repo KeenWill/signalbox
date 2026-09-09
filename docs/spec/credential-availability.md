@@ -250,3 +250,7 @@ A terminal release after a predecessor call projects
 `failed_after_credential_wait` with the fresh terminal attempt and the
 predecessor's provider failure. A release without a predecessor uses the typed
 pre-call exhaustion state and live event.
+
+## Planned
+
+None.
