@@ -28,6 +28,9 @@ use signalbox_workflow_runtime::{
 use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot, watch};
 
+mod effects;
+use effects::{AttemptEffects, RuntimeEffects};
+
 use super::WorkflowService;
 #[cfg(target_os = "linux")]
 use super::{CLOCK_ENTRY, CLOCK_REVISION, compiled_catalog};
@@ -98,6 +101,7 @@ pub struct WorkflowRuntime {
     journal: ProgramJournalRepository,
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedReceiver<WorkflowWake>,
+    repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
 }
 
 impl WorkflowRuntime {
@@ -136,8 +140,18 @@ impl WorkflowRuntime {
                 journal,
                 registrations,
                 wake: receiver,
+                repository_watch: None,
             },
         ))
+    }
+
+    /// Routes repository-watch effects through the daemon's serialized module services.
+    pub fn with_repository_watch(
+        mut self,
+        runtime: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
+    ) -> Self {
+        self.repository_watch = runtime;
+        self
     }
 
     /// Owns non-Send isolate/root futures on one local executor and joins it on shutdown.
@@ -205,6 +219,7 @@ impl WorkflowRuntime {
                     self.journal.clone(),
                     run,
                     primitives(events.clone()),
+                    self.repository_watch.clone(),
                     cancelled,
                 ));
             }
@@ -220,7 +235,7 @@ impl WorkflowRuntime {
                                 if let std::collections::btree_map::Entry::Vacant(entry) = active.entry(run) {
                                     let (cancel, cancelled) = oneshot::channel();
                                     entry.insert(Some(cancel));
-                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(events.clone()), cancelled));
+                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(events.clone()), self.repository_watch.clone(), cancelled));
                                 }
                             }
                             WorkflowWake::Cancel(run) => {
@@ -260,12 +275,16 @@ fn cancellable_attempt<P: LiveDeliverySource + 'static>(
     journal: ProgramJournalRepository,
     run: ProgramRunId,
     primitives: P,
+    repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
     cancelled: oneshot::Receiver<()>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        interruptible(attempt(host, journal, run, primitives), cancelled)
-            .await
-            .unwrap_or(Ok(run))
+        interruptible(
+            attempt(host, journal, run, primitives, repository_watch),
+            cancelled,
+        )
+        .await
+        .unwrap_or(Ok(run))
     })
 }
 
@@ -274,9 +293,10 @@ fn attempt<P: LiveDeliverySource + 'static>(
     journal: ProgramJournalRepository,
     run: ProgramRunId,
     mut primitives: P,
+    repository_watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        let mut effects = UnavailableEffects::default();
+        let mut effects = RuntimeEffects::new(repository_watch, journal.clone());
         let execution = drive_run(&host, &journal, run, &mut primitives, &mut effects).await;
         let Err(source) = execution else {
             return Ok(run);
@@ -326,10 +346,16 @@ async fn drive_run(
     journal: &ProgramJournalRepository,
     run: ProgramRunId,
     primitives: &mut impl LiveDeliverySource,
-    effects: &mut impl EffectExecutor,
+    effects: &mut impl AttemptEffects,
 ) -> Result<(), WorkflowHostError> {
     loop {
         let outcome = host.execute_registered(run, primitives, effects).await?;
+        if matches!(
+            outcome,
+            ProgramExecutionOutcome::Completed(_) | ProgramExecutionOutcome::Suspended(_)
+        ) {
+            effects.acknowledge().await?;
+        }
         let ProgramExecutionOutcome::Suspended(outstanding) = outcome else {
             return Ok::<(), WorkflowHostError>(());
         };
@@ -497,34 +523,6 @@ impl LiveDeliverySource for ClockSource {
                     reason: RejectReason::UnsupportedOperation,
                 }),
             }
-        })
-    }
-}
-
-#[derive(Default)]
-struct UnavailableEffects {
-    rejected: Option<ProgramCapability>,
-}
-impl EffectExecutor for UnavailableEffects {
-    fn recovery(&self, _: &EffectRequest) -> EffectRecovery {
-        EffectRecovery::Idempotent
-    }
-    fn adopt<'a>(
-        &'a mut self,
-        _: EffectInvocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
-    {
-        Box::pin(async { Ok(None) })
-    }
-    fn execute<'a>(
-        &'a mut self,
-        invocation: EffectInvocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
-        self.rejected = Some(invocation.request.capability());
-        Box::pin(async {
-            Err(LiveDeliveryFailure::new(
-                "daemon workflow effect is unavailable",
-            ))
         })
     }
 }
@@ -1005,6 +1003,8 @@ mod tests {
                 })
             }
         }
+
+        impl AttemptEffects for PendingSessionEffect {}
 
         #[tokio::test(flavor = "current_thread")]
         #[ignore = "requires ephemeral PostgreSQL"]

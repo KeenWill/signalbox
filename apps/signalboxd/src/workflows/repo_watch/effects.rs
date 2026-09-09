@@ -214,12 +214,7 @@ impl<
 > EffectExecutor for RepoWatchEffects<Ids, Factory, Codec, Sink>
 {
     fn recovery(&self, request: &EffectRequest) -> EffectRecovery {
-        match RepoWatchRequest::decode(request) {
-            Some(
-                RepoWatchRequest::NextRuleEvent { .. } | RepoWatchRequest::CommitEvaluation { .. },
-            ) => EffectRecovery::Idempotent,
-            _ => EffectRecovery::Ambiguous,
-        }
+        recovery(request)
     }
     fn adopt<'a>(
         &'a mut self,
@@ -318,6 +313,15 @@ impl<
             };
             Ok(InlineFramePayload::new(result))
         })
+    }
+}
+
+pub(crate) fn recovery(request: &EffectRequest) -> EffectRecovery {
+    match RepoWatchRequest::decode(request) {
+        Some(
+            RepoWatchRequest::NextRuleEvent { .. } | RepoWatchRequest::CommitEvaluation { .. },
+        ) => EffectRecovery::Idempotent,
+        _ => EffectRecovery::Ambiguous,
     }
 }
 

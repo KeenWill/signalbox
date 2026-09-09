@@ -2049,6 +2049,7 @@ async fn run_hub(
     };
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let approval_judge_repository_watch = repository_watch_runtime.clone();
+    let workflow_repository_watch = repository_watch_runtime.clone();
     let repository_watch_worker = match repository_watch_runtime {
         Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
         None => None,
@@ -2320,7 +2321,13 @@ async fn run_hub(
         );
     }
     let (workflow_shutdown, workflow_shutdown_receiver) = oneshot::channel();
-    let workflows = signalboxd::workflows::WorkflowRuntime::new(pool.clone());
+    let workflows =
+        signalboxd::workflows::WorkflowRuntime::new(pool.clone()).map(|(service, runtime)| {
+            (
+                service,
+                runtime.with_repository_watch(workflow_repository_watch),
+            )
+        });
     let process_runtime = match &workflows {
         Ok((service, _)) => process_runtime.with_workflows(service.clone()),
         Err(_) => process_runtime,

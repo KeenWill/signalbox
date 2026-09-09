@@ -1,5 +1,7 @@
 //! Daemon composition of repository ingestion, dispatch, and lifecycle consumption.
 
+mod workflows;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use ring::rand::{SecureRandom, SystemRandom};

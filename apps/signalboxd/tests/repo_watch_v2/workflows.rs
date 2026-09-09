@@ -1,6 +1,9 @@
 //! Host/module receipt adoption and checked repository-watch effects.
 //! Exercises docs/spec/workflows.md and docs/spec/repo-watch.md.
 
+#[path = "workflows/production.rs"]
+mod production;
+
 use super::*;
 use signalbox_domain::{
     InlineFramePayload, ProgramCapability, ProgramRunId,
