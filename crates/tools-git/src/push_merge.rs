@@ -11,7 +11,7 @@ use git2::{Delta, Diff, DiffFindOptions, DiffOptions, ObjectType, Odb, Oid, Patc
 use serde::Serialize;
 
 use crate::{
-    limits::MAX_REPOSITORY_INSPECTIONS,
+    limits::{MAX_REPOSITORY_INSPECTIONS, MAX_WORKTREE_PATH_BYTES},
     pinning::PinnedRepository,
     push_executor::{GitPushFailure, MAX_MERGE_DETAIL_BYTES},
     push_objects::ObjectSource,
@@ -102,15 +102,17 @@ pub(super) fn verify_merge(
     let mut preview_bytes = MAX_MERGE_DETAIL_BYTES;
     let mut trees = Vec::new();
     for commit in [target, branch, base, ancestor] {
-        trees.push(
+        trees.push((
             repository
                 .find_commit(commit)
                 .map_err(repository_failure)?
                 .tree_id(),
-        );
+            0usize,
+        ));
     }
     let mut inspected_entries = 0;
-    while let Some(oid) = trees.pop() {
+    let mut path_bytes = 0;
+    while let Some((oid, prefix_bytes)) = trees.pop() {
         source.capture(&database, oid).map_err(repository_failure)?;
         let tree = repository.find_tree(oid).map_err(repository_failure)?;
         if tree.len() > MAX_REPOSITORY_INSPECTIONS - inspected_entries {
@@ -119,8 +121,13 @@ pub(super) fn verify_merge(
         inspected_entries += tree.len();
         // Shared tree objects still contribute entries at every path where they occur.
         for entry in &tree {
+            let entry_path_bytes = prefix_bytes + entry.name_bytes().len();
+            if entry_path_bytes > MAX_WORKTREE_PATH_BYTES - path_bytes {
+                return Err(GitPushFailure::Repository);
+            }
+            path_bytes += entry_path_bytes;
             if entry.kind() == Some(ObjectType::Tree) {
-                trees.push(entry.id());
+                trees.push((entry.id(), entry_path_bytes + 1));
             }
         }
     }
@@ -142,13 +149,13 @@ pub(super) fn verify_merge(
     detect_renames(&mut base_changes, &mut source, &database)?;
     detect_renames(&mut carried, &mut source, &database)?;
     detect_renames(&mut own, &mut source, &database)?;
-    let base_renames: BTreeMap<_, _> = base_changes
+    let base_sources: BTreeMap<_, _> = base_changes
         .deltas()
         .filter(|delta| delta.status() == Delta::Renamed)
         .map(|delta| {
             Ok((
-                delta.old_file().path().ok_or(GitPushFailure::Repository)?,
                 delta.new_file().path().ok_or(GitPushFailure::Repository)?,
+                delta.old_file().path().ok_or(GitPushFailure::Repository)?,
             ))
         })
         .collect::<Result<_, GitPushFailure>>()?;
@@ -164,8 +171,7 @@ pub(super) fn verify_merge(
         } else {
             path
         };
-        let path = base_renames.get(source_path).copied().unwrap_or(path);
-        own_by_path.entry(path).or_insert(index);
+        own_by_path.entry(source_path).or_insert(index);
     }
     for (index, delta) in carried.deltas().enumerate() {
         let path = delta
@@ -173,7 +179,16 @@ pub(super) fn verify_merge(
             .path()
             .or_else(|| delta.old_file().path())
             .ok_or(GitPushFailure::Repository)?;
-        let own_index = own_by_path.get(path).copied();
+        let source_path = if delta.status() == Delta::Renamed {
+            delta.old_file().path().ok_or(GitPushFailure::Repository)?
+        } else {
+            path
+        };
+        let source_path = base_sources
+            .get(source_path)
+            .copied()
+            .unwrap_or(source_path);
+        let own_index = own_by_path.get(source_path).copied();
         // Capture compared paths only, in addition to the rename candidates.
         for delta in std::iter::once(delta).chain(own_index.and_then(|index| own.get_delta(index)))
         {
@@ -186,14 +201,14 @@ pub(super) fn verify_merge(
             }
         }
         let branch_hunks = own_index
-            .map(|index| hunks(&own, index))
+            .map(|index| hunks(&own, index, None))
             .transpose()?
             .unwrap_or_default();
         let mut permitted = BTreeMap::new();
         for effect in branch_hunks.iter().flat_map(Hunk::effects) {
             *permitted.entry(effect).or_insert(0usize) += 1;
         }
-        for hunk in hunks(&carried, index)? {
+        for hunk in hunks(&carried, index, Some(source_path))? {
             let carried = hunk.effects().all(|effect| {
                 let Some(remaining) = permitted.get_mut(effect) else {
                     return false;
@@ -289,7 +304,11 @@ impl Hunk {
     }
 }
 
-fn hunks(diff: &Diff<'_>, index: usize) -> Result<Vec<Hunk>, GitPushFailure> {
+fn hunks(
+    diff: &Diff<'_>,
+    index: usize,
+    rename_source: Option<&Path>,
+) -> Result<Vec<Hunk>, GitPushFailure> {
     let delta = diff.get_delta(index).ok_or(GitPushFailure::Repository)?;
     let mut hunks = Vec::new();
     if delta.status() == Delta::Renamed {
@@ -300,7 +319,7 @@ fn hunks(diff: &Diff<'_>, index: usize) -> Result<Vec<Hunk>, GitPushFailure> {
         hunks.push(Hunk::single(
             [
                 b"rename ".as_slice(),
-                &quoted(delta.old_file().path())?,
+                &quoted(rename_source.or_else(|| delta.old_file().path()))?,
                 b" -> ",
                 &quoted(delta.new_file().path())?,
             ]
