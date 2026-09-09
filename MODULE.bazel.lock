@@ -536,7 +536,7 @@
           "ENV:CARGO_BAZEL_TIMEOUT \\0",
           "ENV:REPIN \\0",
           "REPO_MAPPING:,rusty_v8_archive +v8+rusty_v8_archive",
-          "REPO_MAPPING:,signalbox_rust_host_tools rules_rust++rust_host_tools+signalbox_rust_host_tools",
+          "REPO_MAPPING:,signalbox_rust_host_tools +rust_host_tools+signalbox_rust_host_tools",
           "REPO_MAPPING:bazel_features+,bazel_features_globals bazel_features++version_extension+bazel_features_globals",
           "REPO_MAPPING:bazel_features+,bazel_features_version bazel_features++version_extension+bazel_features_version",
           "REPO_MAPPING:rules_cc+,bazel_skylib bazel_skylib+",
@@ -8636,6 +8636,13 @@
     "//tooling/bazel:playwright.bzl%playwright": {
       "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2": "fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7",
       "https://mcr.microsoft.com/v2/playwright/manifests/v1.62.1-noble": "dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e"
+    },
+    "//tooling/bazel:rust_toolchains.bzl%rust": {
+      "https://static.rust-lang.org/dist/2026-09-09/channel-rust-nightly.toml": "1aba52425f0ea06ee2f0fb4b6b19b1b622059f9424cd710cf7caf4445513b4f0",
+      "https://static.rust-lang.org/dist/channel-rust-1.98.1.toml": "a7c8774a5fd8441c997d94c029776cbc5eb111e9d72ab5d256fa69866644347e"
+    },
+    "//tooling/bazel:rust_toolchains.bzl%rust_host_tools": {
+      "https://static.rust-lang.org/dist/channel-rust-1.98.1.toml": "a7c8774a5fd8441c997d94c029776cbc5eb111e9d72ab5d256fa69866644347e"
     },
     "//tooling/bazel:v8.bzl%v8": {
       "https://github.com/denoland/rusty_v8/releases/download/v150.4.0/librusty_v8_simdutf_release_x86_64-unknown-linux-gnu.a.gz": "f48762ca10d1f1fc605a441c5ae430ec8ce1e9e80f14d78fbc42cb878c30b476"

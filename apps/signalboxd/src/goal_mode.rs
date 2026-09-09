@@ -1013,6 +1013,13 @@ impl PostgresGoalPassDisposition {
                 );
                 ResumeAttempt::Settled
             }
+            Ok(GoalCommandHandlingOutcome::StopAwaitingApproval { .. }) => {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    "automatic goal resume returned a stop-only rejection"
+                );
+                ResumeAttempt::InfrastructureUnsettled
+            }
             Ok(GoalCommandHandlingOutcome::LineageMoved) => {
                 tracing::info!(
                     session = %session.into_uuid(),

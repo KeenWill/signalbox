@@ -134,6 +134,14 @@ const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
         ],
       ]}
     />
+    {event.type === 'user_stopped' && (
+      <Facts
+        facts={[
+          ['Settling turn', event.settling_turn_id ?? 'none'],
+          ['Abandoned approved actions', event.abandoned_actions ?? 'settlement pending'],
+        ]}
+      />
+    )}
     {'text' in event && event.text && <TextDetail label="Goal text" excerpt={event.text} />}
   </article>
 )
