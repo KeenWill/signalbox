@@ -9,6 +9,53 @@ final class ProcessProtocolTests: XCTestCase {
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"
   private let blobDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+  func testAutomaticReconciliationExhaustionPreservesTurnAndOperationIdentities() throws {
+    let cases: [(String, SignalboxReconciliationOperationKind)] = [
+      ("model_call", .modelCall), ("tool_attempt", .toolAttempt),
+    ]
+    for (spelling, kind) in cases {
+      let payload = [
+        "type": "automatic_reconciliation_exhausted", "turn_id": turnID,
+        "operation_kind": spelling, "operation_id": toolRequestID,
+      ]
+      let event = try SignalboxJSONCoding.decoder().decode(
+        SignalboxProcessSessionEvent.self,
+        from: JSONSerialization.data(withJSONObject: payload))
+      XCTAssertEqual(event, .automaticReconciliationExhausted(
+        turnID: try .init(validating: turnID), operationKind: kind,
+        operationID: try .init(validating: toolRequestID)))
+    }
+  }
+
+  func testMalformedAutomaticReconciliationExhaustionRetainsADecodingDiagnostic() throws {
+    let valid: [String: Any] = [
+      "type": "automatic_reconciliation_exhausted", "turn_id": turnID,
+      "operation_kind": "model_call", "operation_id": toolRequestID,
+    ]
+    var malformed: [[String: Any]] = []
+    for field in ["turn_id", "operation_kind", "operation_id"] {
+      var missing = valid
+      missing.removeValue(forKey: field)
+      malformed.append(missing)
+      var invalid = valid
+      invalid[field] = "invalid"
+      malformed.append(invalid)
+    }
+    var extra = valid
+    extra["unexpected"] = true
+    malformed.append(extra)
+    for payload in malformed {
+      let event = try SignalboxJSONCoding.decoder().decode(
+        SignalboxProcessSessionEvent.self,
+        from: JSONSerialization.data(withJSONObject: payload))
+      guard case .unknown(let kind, _, let diagnostic) = event else {
+        return XCTFail("Malformed exhaustion must retain its decoding failure.")
+      }
+      XCTAssertEqual(kind, "automatic_reconciliation_exhausted")
+      XCTAssertNotNil(diagnostic)
+    }
+  }
+
   func testSettingsOverlayEncodesUntouchedMembersAsInherit() throws {
     var overlay = SignalboxModelSettingsOverlay.inheritAll
     overlay.reasoningLevel = .value(.high)

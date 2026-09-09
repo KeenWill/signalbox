@@ -4370,7 +4370,16 @@ private struct SignalboxTurnModelSettingsEvidence: Decodable {
   }
 }
 
+public enum SignalboxReconciliationOperationKind: String, Decodable, Equatable, Sendable {
+  case modelCall = "model_call"
+  case toolAttempt = "tool_attempt"
+}
+
 public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
+  case automaticReconciliationExhausted(
+    turnID: SignalboxCanonicalUUID,
+    operationKind: SignalboxReconciliationOperationKind,
+    operationID: SignalboxCanonicalUUID)
   case goalTurnRetired(turnID: SignalboxCanonicalUUID)
   case childSpawned(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, relationship: SignalboxDelegationPolicy)
   case childWaiting(awaitRequestID: SignalboxCanonicalUUID, spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, mode: SignalboxDelegationWaitMode)
@@ -4438,6 +4447,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     do {
       switch tagged.kind {
+      case "automatic_reconciliation_exhausted":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "operation_kind", "operation_id"], decoder: decoder)
+        self = .automaticReconciliationExhausted(
+          turnID: try decoder.decode("turn_id"),
+          operationKind: try decoder.decode("operation_kind"),
+          operationID: try decoder.decode("operation_id"))
       case "goal_turn_retired":
         try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
         self = .goalTurnRetired(

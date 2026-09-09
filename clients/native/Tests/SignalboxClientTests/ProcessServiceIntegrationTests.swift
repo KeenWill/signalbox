@@ -349,6 +349,32 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertTrue(viewModel.timeline.isEmpty)
   }
 
+  @MainActor
+  func testLiveAutomaticReconciliationExhaustionPresentsItsExactOperation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let turnID = "22222222-2222-4222-8222-222222222222"
+    let operationID = "33333333-3333-4333-8333-333333333333"
+    for (kind, label) in [("model_call", "model call"), ("tool_attempt", "tool attempt")] {
+      let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+      let payload: [String: Any] = [
+        "cursor": "1", "session_id": session.id.rawValue,
+        "event": [
+          "type": "automatic_reconciliation_exhausted", "turn_id": turnID,
+          "operation_kind": kind, "operation_id": operationID,
+        ],
+      ]
+      let event = try SignalboxJSONCoding.decoder().decode(
+        SignalboxFollowedSessionEvent.self,
+        from: JSONSerialization.data(withJSONObject: payload))
+      viewModel.apply(.event(event))
+      XCTAssertEqual(viewModel.latestDiagnostic,
+        "Automatic reconciliation exhausted for turn \(turnID) "
+          + "(\(label) \(operationID)). Waiting for an operator decision.")
+      XCTAssertTrue(viewModel.timeline.isEmpty)
+    }
+  }
+
   /// An imported transcript frontier creates an independent native session.
   func testImportedTranscriptCanContinueAsANativeSession() async throws {
     let service = makeService()
