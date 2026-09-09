@@ -518,6 +518,7 @@ enum RuntimeDrainOutcome {
 enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     FencedPoolFloor,
+    Workflows(Result<(), signalboxd::workflows::WorkflowRuntimeError>),
     CredentialInvocations,
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
@@ -997,6 +998,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
+        | Ok(RuntimeTaskExit::Workflows(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness)
         | Ok(RuntimeTaskExit::LifecycleDeadline)
         | Ok(RuntimeTaskExit::LifecycleMetrics) => RuntimeTaskCompletion::Clean,
@@ -1010,6 +1012,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         }
         Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
             tracing::error!(?error, "repository-watch runtime failed");
+            RuntimeTaskCompletion::Failed
+        }
+        Ok(RuntimeTaskExit::Workflows(Err(error))) => {
+            tracing::error!(cause = error.cause_code(), "workflow runtime failed");
             RuntimeTaskCompletion::Failed
         }
         Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
@@ -2311,6 +2317,8 @@ async fn run_hub(
             "scheduler pass admission uses the deployment override"
         );
     }
+    let (workflow_shutdown, workflow_shutdown_receiver) = oneshot::channel();
+    let workflow_pool = pool.clone();
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (fenced_pool_floor_shutdown, fenced_pool_floor_shutdown_receiver) = watch::channel(false);
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
@@ -2320,6 +2328,18 @@ async fn run_hub(
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
+    runtime_tasks.spawn(async move {
+        let result = async {
+            let (_service, workflows) = signalboxd::workflows::WorkflowRuntime::new(workflow_pool)?;
+            workflows
+                .run(async {
+                    let _ = workflow_shutdown_receiver.await;
+                })
+                .await
+        }
+        .await;
+        RuntimeTaskExit::Workflows(result)
+    });
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
             scheduler
@@ -2402,6 +2422,13 @@ async fn run_hub(
             () = &mut guard_loss => RuntimeStopCause::GuardLost,
             completed = runtime_tasks.join_next() => {
                 match completed {
+                    Some(Ok(RuntimeTaskExit::Workflows(result))) => {
+                        match result {
+                            Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
+                            Err(error) => tracing::error!(cause = error.cause_code(), "workflow runtime failed"),
+                        }
+                        RuntimeStopCause::RuntimeFailed
+                    }
                     Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
                         report_process_runtime_failure(&error);
                         RuntimeStopCause::RuntimeFailed
@@ -2486,6 +2513,7 @@ async fn run_hub(
             }
         };
 
+        let _ = workflow_shutdown.send(());
         let _ = repository_watch_shutdown.send(true);
         if cause == RuntimeStopCause::GuardLost {
             runtime_tasks.abort_all();
