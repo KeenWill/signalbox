@@ -55,17 +55,27 @@ impl ArrivalReader {
                     // A write-half close does not end a follow stream or pending receipt.
                     return std::future::pending().await;
                 }
-                unread_since.send_if_modified(|since| {
-                    if since.is_some() {
-                        false
-                    } else {
-                        *since = Some(Instant::now());
-                        true
-                    }
-                });
+                record_input_arrival(socket, &unread_since);
             }
         }
     }
+}
+
+fn record_input_arrival(socket: &UnixStream, unread_since: &watch::Sender<Option<Instant>>) {
+    unread_since.send_if_modified(|since| {
+        // Recheck under the marker's write lock: a read may have drained the peeked byte.
+        if since.is_some()
+            || !matches!(
+                socket.try_io(Interest::READABLE, || peek_input(socket)),
+                Ok(available) if available > 0
+            )
+        {
+            false
+        } else {
+            *since = Some(Instant::now());
+            true
+        }
+    });
 }
 
 fn peek_input(socket: &UnixStream) -> io::Result<usize> {
@@ -183,6 +193,31 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
     use tokio::time::timeout;
+
+    #[tokio::test(start_paused = true)]
+    async fn drained_peek_does_not_age_input_arriving_after_an_idle_gap() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (server, _writer) = server.into_split();
+        let mut reader = ArrivalReader::new(server);
+        let observer = reader.reader.clone();
+        let socket = observer.as_ref().as_ref();
+        client.write_all(b"a").await.unwrap();
+        assert_eq!(
+            socket
+                .async_io(Interest::READABLE, || peek_input(socket))
+                .await
+                .unwrap(),
+            1
+        );
+
+        // The read wins between the watcher's successful peek and marker publication.
+        assert_eq!(reader.read_u8().await.unwrap(), b'a');
+        record_input_arrival(socket, &reader.unread_since);
+        sleep(Duration::from_secs(60)).await;
+        client.write_all(b"b").await.unwrap();
+        assert_eq!(reader.read_u8().await.unwrap(), b'b');
+        assert_eq!(reader.received_at, Instant::now());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn socket_arrival_survives_short_reads_until_the_receive_buffer_drains() {
