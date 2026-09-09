@@ -260,16 +260,24 @@ judge uses the exact direct selection of the request-producing call. The judge
 prompt carries the session's commissioned goal, template, frozen system prompt,
 and optional dispatch authority, each separately delimited and quoted as
 untrusted evidence, and the prompt treats them as scope to compare with the
-request, never as instruction. Outside a turn judged under the commissioned
-generation's dispatch authority, an `EscalateToHuman` result for a request still
-admissible stores the completed call but no decision and leaves the same request
-parked. A commissioned dispatch also keeps the request parked while its
-authority stands or when the turn has pending steering. Once that authority is
-withdrawn, an escalation with no pending steering terminalizes the unattended
-turn under the commissioned-dispatch audit, preserving `ToolInadmissible` for
-requests already closed by placement loss. A `KnownFailed`, `Refused`,
-`Cancelled`, or `Ambiguous` terminal judge call for an admissible request
-retains the attended park while immediately admitting a user decision.
+request, never as instruction. The template, frozen system prompt, and dispatch
+fence supply authority; a goal, when present, may narrow that scope but cannot
+independently grant or widen it. Goal absence does not require escalation. The
+judge applies the first matching rule: escalate human-reserved actions or
+truncated authority or undecodable arguments, deny requests explicitly outside
+scope, approve plainly covered requests and their ordinary constituents,
+otherwise escalate.
+
+Outside a turn judged under the commissioned generation's dispatch authority, an
+`EscalateToHuman` result for a request still admissible stores the completed
+call but no decision and leaves the same request parked. A commissioned dispatch
+also keeps the request parked while its authority stands or when the turn has
+pending steering. Once that authority is withdrawn, an escalation with no
+pending steering terminalizes the unattended turn under the
+commissioned-dispatch audit, preserving `ToolInadmissible` for requests already
+closed by placement loss. A `KnownFailed`, `Refused`, `Cancelled`, or
+`Ambiguous` terminal judge call for an admissible request retains the attended
+park while immediately admitting a user decision.
 
 A completed judge call records the provider's offered recommendation, the
 effective recommendation, and the cause when withdrawn authority substitutes
