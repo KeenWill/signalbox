@@ -281,7 +281,7 @@ pub(super) fn parse_daemon_tool_settings(
         Some("none") => None,
         Some(value) => Some(
             parse_numeric_bound_duration(value)
-                .filter(|duration| !duration.is_zero())
+                .filter(|duration| duration.as_secs() > 0)
                 .ok_or(HubModelConfigurationError::InvalidDaemonToolSettings)?,
         ),
         None => return Err(HubModelConfigurationError::InvalidDaemonToolSettings),

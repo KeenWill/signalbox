@@ -2806,10 +2806,11 @@ fn daemon_sandboxed_exec_timeout_bound_accepts_none_and_a_friendly_duration() {
 }
 
 #[test]
-fn daemon_sandboxed_exec_timeout_bound_is_required_and_positive_when_finite() {
+fn daemon_sandboxed_exec_timeout_bound_is_required_and_at_least_one_second_when_finite() {
     for replacement in [
         "",
         "sandboxed_exec_timeout_bound = \"0s\"",
+        "sandboxed_exec_timeout_bound = \"500ms\"",
         "sandboxed_exec_timeout_bound = 120",
     ] {
         let configured =

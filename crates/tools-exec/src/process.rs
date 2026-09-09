@@ -99,6 +99,12 @@ fn default_timeout_seconds() -> u64 {
     DEFAULT_TIMEOUT_SECONDS
 }
 
+fn effective_default_timeout_seconds(timeout_bound: Option<Duration>) -> u64 {
+    timeout_bound.map_or(DEFAULT_TIMEOUT_SECONDS, |bound| {
+        DEFAULT_TIMEOUT_SECONDS.min(bound.as_secs())
+    })
+}
+
 fn default_working_directory() -> String {
     String::from(".")
 }
@@ -399,14 +405,22 @@ fn compile_exec_contract_definition<Contract: ToolContract<Arguments = ExecArgum
         .map_err(|_| ToolContractCompileError::Name)?;
     let mut schema = rendered_contract_schema::<Contract>();
     if let Some(timeout_bound) = timeout_bound {
-        schema
+        let timeout_bound_seconds = timeout_bound.as_secs();
+        if timeout_bound_seconds == 0 {
+            return Err(ToolContractCompileError::Schema);
+        }
+        let timeout_schema = schema
             .pointer_mut("/properties/timeout_seconds")
             .and_then(serde_json::Value::as_object_mut)
-            .ok_or(ToolContractCompileError::Schema)?
-            .insert(
-                String::from("maximum"),
-                serde_json::Value::from(timeout_bound.as_secs()),
-            );
+            .ok_or(ToolContractCompileError::Schema)?;
+        timeout_schema.insert(
+            String::from("maximum"),
+            serde_json::Value::from(timeout_bound_seconds),
+        );
+        timeout_schema.insert(
+            String::from("default"),
+            serde_json::Value::from(effective_default_timeout_seconds(Some(timeout_bound))),
+        );
     }
     let schema = ToolInputSchema::try_new(schema.to_string())
         .map_err(|_| ToolContractCompileError::Schema)?;
@@ -446,8 +460,16 @@ fn decode_arguments(
     arguments: &NormalizedToolArguments,
     timeout_bound: Option<Duration>,
 ) -> Result<ExecArguments, InvalidExecArguments> {
-    let decoded: ExecArguments =
+    let mut value: serde_json::Value =
         serde_json::from_str(arguments.as_str()).map_err(|_| InvalidExecArguments)?;
+    value
+        .as_object_mut()
+        .ok_or(InvalidExecArguments)?
+        .entry("timeout_seconds")
+        .or_insert_with(|| {
+            serde_json::Value::from(effective_default_timeout_seconds(timeout_bound))
+        });
+    let decoded: ExecArguments = serde_json::from_value(value).map_err(|_| InvalidExecArguments)?;
     validate_arguments(&decoded, timeout_bound)?;
     Ok(decoded)
 }
@@ -462,6 +484,9 @@ fn validate_arguments(
         || arguments.program.len() > MAX_PROGRAM_BYTES
         || arguments.timeout_seconds == 0
         || timeout_bound.is_some_and(|bound| Duration::from_secs(arguments.timeout_seconds) > bound)
+        || tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(arguments.timeout_seconds))
+            .is_none()
         || invalid_relative_directory(&arguments.working_directory)
     {
         return Err(InvalidExecArguments);
@@ -965,7 +990,16 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         requested_timeout: Duration,
         capture_bytes: usize,
     ) -> ExecResult {
-        let deadline = tokio::time::Instant::now() + requested_timeout;
+        let Some(deadline) = tokio::time::Instant::now().checked_add(requested_timeout) else {
+            return ExecResult {
+                confinement: ExecutionConfinement::SandboxSetupFailed,
+                outcome: ProcessOutcome::SpawnFailed {
+                    reason: ProcessSpawnFailure::Other,
+                },
+                stdout: OutputCapture::empty(),
+                stderr: OutputCapture::empty(),
+            };
+        };
         #[cfg(target_os = "linux")]
         if !self.workspace_identity.matches(&self.workspace_root) {
             return ExecResult {
@@ -4677,13 +4711,14 @@ mod tests {
     }
 
     #[test]
-    fn argument_schema_publishes_only_a_configured_timeout_maximum() -> Result<(), Box<dyn Error>> {
+    fn argument_schema_publishes_the_configured_timeout_maximum_and_effective_default()
+    -> Result<(), Box<dyn Error>> {
         let root = std::env::current_dir()?;
         let runner = FakeRunner::returning(BwrapAvailability::Available, successful_process(b""));
         let unbounded = SandboxedExecTool::try_new(runner.clone(), &root, None)?
             .into_parts()
             .0;
-        let finite = SandboxedExecTool::try_new(runner, root, Some(Duration::from_secs(10 * 60)))?
+        let finite = SandboxedExecTool::try_new(runner, root, Some(Duration::from_secs(60)))?
             .into_parts()
             .0;
         let name = ToolName::try_new(String::from(SANDBOXED_EXEC_NAME))
@@ -4717,8 +4752,25 @@ mod tests {
         );
         assert_eq!(
             finite_schema.pointer("/properties/timeout_seconds/maximum"),
-            Some(&serde_json::json!(600))
+            Some(&serde_json::json!(60))
         );
+        assert_eq!(
+            finite_schema.pointer("/properties/timeout_seconds/default"),
+            Some(&serde_json::json!(60))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn subsecond_timeout_bound_is_rejected() -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let result = SandboxedExecTool::try_new(
+            FakeRunner::returning(BwrapAvailability::Available, successful_process(b"")),
+            root,
+            Some(Duration::from_millis(500)),
+        );
+
+        assert!(matches!(result, Err(ExecToolConstructionError::Schema)));
         Ok(())
     }
 
@@ -4759,6 +4811,46 @@ mod tests {
             decode_arguments(&arguments, None)?.timeout_seconds,
             DEFAULT_TIMEOUT_SECONDS
         );
+        Ok(())
+    }
+
+    #[test]
+    fn omitted_request_timeout_uses_a_lower_configured_bound() -> Result<(), Box<dyn Error>> {
+        let arguments =
+            NormalizedToolArguments::try_from_provider_text(String::from(r#"{"program":"cargo"}"#))
+                .map_err(|_| std::io::Error::other("bounded arguments"))?;
+
+        assert_eq!(
+            decode_arguments(&arguments, Some(Duration::from_secs(60)))?.timeout_seconds,
+            60
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unrepresentable_timeout_is_rejected() -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let tool = SandboxedExecTool::try_new(
+            FakeRunner::returning(BwrapAvailability::Available, successful_process(b"")),
+            root,
+            None,
+        )?;
+        let catalog = tool.into_parts().0;
+        let name = ToolName::try_new(String::from(SANDBOXED_EXEC_NAME))
+            .map_err(|_| std::io::Error::other("static sandboxed name"))?;
+        let arguments = NormalizedToolArguments::try_from_provider_text(
+            serde_json::json!({
+                "program": "cargo",
+                "timeout_seconds": u64::MAX,
+            })
+            .to_string(),
+        )
+        .map_err(|_| std::io::Error::other("bounded arguments"))?;
+
+        assert!(matches!(
+            catalog.validate_arguments(&name, &arguments),
+            Err(ToolCatalogValidationFailure::InvalidArguments { .. })
+        ));
         Ok(())
     }
 
