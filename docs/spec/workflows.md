@@ -123,9 +123,10 @@ retained requests and deliveries.
 The Linux compiled catalog includes `clock` revision `1`: its input is a
 big-endian u64, and its result concatenates that input and a journaled
 big-endian u64 Unix time in seconds. The runner resolves admitted JavaScript
-artifacts from their registrations without requiring a native catalog.
-Registration effects and the clock are composed; other effects and durable waits
-are not composed. There is no public launch command.
+artifacts from their registrations without requiring a native catalog. Empty
+`Now` requests receive the SDK's typed Unix-millisecond answer. Registration
+effects and the clock are composed; other effects and durable waits are not
+composed. There is no public launch command.
 
 ## Native programs
 
