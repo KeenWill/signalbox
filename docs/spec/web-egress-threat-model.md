@@ -21,10 +21,10 @@ The transport floor in `crates/egress-transport` fixes how a `web_fetch`
 connection is made. Origin admission, stated in
 [configuration-and-credentials.md](configuration-and-credentials.md), fixes
 which origins `web_fetch` may reach; `web_search` reaches one fixed provider.
-The approval flow, both tools' declarations, and their shipped human posture are
-stated in [tool-loop.md](tool-loop.md). Transport and admission constrain where
-bytes go, approval constrains whether they go, and structure constrains what
-comes back.
+The approval flow, both tools' declarations, and their default delegated posture
+are stated in [tool-loop.md](tool-loop.md). Transport and admission constrain
+where bytes go, approval constrains whether they go, and structure constrains
+what comes back.
 
 ## Design decisions
 
@@ -37,15 +37,10 @@ transforms, encodes, or splits; those forms are accepted residual risk.
 The trustworthiness, relevance, and safety of provider content are outside this
 model, which constrains how content is represented, not what it means.
 
-Origin admission constrains the recipient only; it establishes no user intent to
-send data and lets no external system direct another, so approval stays
-necessary even when a transport has an exact destination policy. Why: a model
-can put workspace content into a fetch URL, or take a code-host read as
-authority for a later search, and neither source authorizes that disclosure or
-delegation.
-
-Both tools' declarations are conservative, so deliberate operator policy and the
-ordinary approval flow are the only ways to widen egress authority.
+Origin admission is an optional destination restriction. The transport and
+scoped credentials constrain egress, and the judge approves ordinary task
+requests; human approval is a configured exception. Provider content does not
+establish authority to disclose workspace content to unrelated hosts.
 
 A demonstrated violation of the structural output boundary or a named bound is
 an implementation defect. A finding only about a residual named above, or about

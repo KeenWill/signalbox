@@ -1,5 +1,6 @@
 use super::{
     error::HubModelConfigurationError,
+    numeric_bounds::parse_numeric_bound_duration,
     toml_scalars::{reject_unknown_fields, required_string, required_uuid},
 };
 use signalbox_domain::{DirectModelSelection, InstructionPath, ToolApprovalPosture, ToolName};
@@ -19,6 +20,7 @@ pub struct DaemonToolConfiguration {
     workspace_root: PathBuf,
     git_identity: GitIdentity,
     exec_supervisor_executable: PathBuf,
+    sandboxed_exec_timeout_bound: Option<std::time::Duration>,
     cargo_registry_cache: Option<PathBuf>,
     sandbox: SandboxConfiguration,
 }
@@ -50,6 +52,11 @@ impl DaemonToolConfiguration {
     /// Absolute existing path of the separately packaged exec supervisor.
     pub fn exec_supervisor_executable(&self) -> &Path {
         &self.exec_supervisor_executable
+    }
+
+    /// Returns the sandboxed-exec timeout bound, or `None` when unbounded.
+    pub const fn sandboxed_exec_timeout_bound(&self) -> Option<std::time::Duration> {
+        self.sandboxed_exec_timeout_bound
     }
 
     /// Optional host Cargo registry pinned read-only into sandboxed execution.
@@ -215,6 +222,7 @@ pub(super) fn parse_tool_mappings(
         git_identity: git_identity
             .ok_or(HubModelConfigurationError::MissingGitIdentityConfiguration)?,
         exec_supervisor_executable: settings.exec_supervisor_executable,
+        sandboxed_exec_timeout_bound: settings.sandboxed_exec_timeout_bound,
         cargo_registry_cache: settings.cargo_registry_cache,
         sandbox: settings.sandbox,
     }))
@@ -223,6 +231,7 @@ pub(super) fn parse_tool_mappings(
 #[derive(Clone, Debug)]
 pub(super) struct DaemonToolSettings {
     exec_supervisor_executable: PathBuf,
+    sandboxed_exec_timeout_bound: Option<std::time::Duration>,
     cargo_registry_cache: Option<PathBuf>,
     sandbox: SandboxConfiguration,
 }
@@ -240,6 +249,7 @@ pub(super) fn parse_daemon_tool_settings(
         table,
         &[
             "exec_supervisor_executable",
+            "sandboxed_exec_timeout_bound",
             "cargo_registry_cache",
             "sandbox_network",
             "sandbox_read_only_binds",
@@ -261,6 +271,18 @@ pub(super) fn parse_daemon_tool_settings(
     if !executable.is_file() {
         return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
     }
+    let sandboxed_exec_timeout_bound = match table
+        .get("sandboxed_exec_timeout_bound")
+        .and_then(Item::as_str)
+    {
+        Some("none") => None,
+        Some(value) => Some(
+            parse_numeric_bound_duration(value)
+                .filter(|duration| duration.as_secs() > 0)
+                .ok_or(HubModelConfigurationError::InvalidDaemonToolSettings)?,
+        ),
+        None => return Err(HubModelConfigurationError::InvalidDaemonToolSettings),
+    };
     let cargo_registry_cache = table
         .get("cargo_registry_cache")
         .map(|_| {
@@ -311,6 +333,7 @@ pub(super) fn parse_daemon_tool_settings(
         .transpose()?;
     Ok(Some(DaemonToolSettings {
         exec_supervisor_executable: executable,
+        sandboxed_exec_timeout_bound,
         cargo_registry_cache,
         sandbox: SandboxConfiguration {
             network,
@@ -402,4 +425,29 @@ fn validate_conversation_tool_mapping(mapping: &Table) -> Result<(), HubModelCon
         return Err(HubModelConfigurationError::InvalidToolMappings);
     }
     Ok(())
+}
+
+pub(super) fn parse_approval_wait_timeout(
+    item: Option<&Item>,
+) -> Result<Option<std::time::Duration>, HubModelConfigurationError> {
+    // The default bounds unattended human waits to ten minutes.
+    let default = Some(std::time::Duration::from_secs(600));
+    let Some(item) = item else {
+        return Ok(default);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidToolSettings)?;
+    reject_unknown_fields(table, &["approval_wait_timeout"])
+        .map_err(|_| HubModelConfigurationError::InvalidToolSettings)?;
+    match table.get("approval_wait_timeout") {
+        None => Ok(default),
+        Some(item) if item.as_str() == Some("none") => Ok(None),
+        Some(item) => item
+            .as_str()
+            .and_then(super::numeric_bounds::parse_numeric_bound_duration)
+            .filter(|duration| !duration.is_zero())
+            .map(Some)
+            .ok_or(HubModelConfigurationError::InvalidToolSettings),
+    }
 }

@@ -1928,26 +1928,41 @@ async fn parent_only_interrupt_closes_foreground_wait_without_result() -> Result
     Ok(())
 }
 
-/// a durable foreground result reopens its exact parked tool batch under a fresh continued attempt
-/// after restart.
+/// Successive foreground results reopen the same batch across more than one continued attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn foreground_delegation_result_resumes_parked_tool_batch() -> Result<(), Box<dyn Error>> {
+async fn successive_foreground_results_resume_the_same_tool_batch() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xab00;
-    let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
+    let child = Uuid::from_u128(seed + 0x101);
+    let wait_arguments = serde_json::json!({
+        "child_session_id": child.to_string(),
+        "mode": "foreground",
+    })
+    .to_string();
+    let (fixture, model_repository, _, requests) = checkpoint_confirmed_tool_batch(
         &pool,
         seed,
-        &[("spawn_session", "{}"), ("await_session", "{}")],
+        &[
+            ("spawn_session", "{}"),
+            ("await_session", wait_arguments.as_str()),
+            ("await_session", wait_arguments.as_str()),
+            ("read_file", "{}"),
+        ],
     )
     .await?;
-    let [spawning_request, awaiting_request] = requests.as_slice() else {
-        panic!("the foreground fixture has spawn and await requests")
+    let [
+        spawning_request,
+        awaiting_request,
+        later_awaiting_request,
+        trailing_request,
+    ] = requests.as_slice()
+    else {
+        panic!("the foreground fixture has one spawn, two awaits, and one read")
     };
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(seed + 0x100, seed + 0x101, direct(seed + 5)))
         .await?;
-    let child = Uuid::from_u128(seed + 0x101);
     let repository = PostgresToolLoopRepository::new(pool.clone());
     let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0));
     repository
@@ -1965,6 +1980,26 @@ async fn foreground_delegation_result_resumes_parked_tool_batch() -> Result<(), 
             decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd1)),
                 *awaiting_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || panic!("the second approval leaves the later requests undecided"),
+        )
+        .await?;
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd2)),
+                *later_awaiting_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || panic!("the third approval leaves the read undecided"),
+        )
+        .await?;
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd3)),
+                *trailing_request,
                 ToolApprovalDecision::Approve,
             ),
             || issuing_attempt,
@@ -2177,6 +2212,139 @@ async fn foreground_delegation_result_resumes_parked_tool_batch() -> Result<(), 
         panic!("the delivered foreground result must resume execution");
     };
     assert_eq!(turn_attempt, continuation);
+
+    let later_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe4));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            later_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the second await follows the first delivered result");
+    repository
+        .authorize_attempt(fixture.session, fixture.turn, later_attempt)
+        .await?;
+    // The fixture checkpoints a second delivered wait; resumption runs with all triggers enabled.
+    // Interpolated values are typed fixture UUIDs.
+    let checkpoint = format!(
+        "ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         INSERT INTO session_delegation_wait
+             (awaiting_tool_request_id, spawning_tool_request_id, parent_session_id,
+              parent_turn_id, child_session_id, wait_mode)
+         SELECT '{later_request}', spawning_tool_request_id, parent_session_id,
+                parent_turn_id, child_session_id, wait_mode
+           FROM session_delegation_wait WHERE awaiting_tool_request_id = '{first_request}';
+         INSERT INTO session_child_result_delivery
+             (awaiting_tool_request_id, spawning_tool_request_id, parent_session_id)
+         SELECT '{later_request}', spawning_tool_request_id, parent_session_id
+           FROM session_child_result_delivery WHERE awaiting_tool_request_id = '{first_request}';
+         UPDATE tool_attempt SET state_kind = 'terminal',
+             terminal_disposition_kind = 'awaiting_child',
+             wait_spawning_request_id = '{spawning_request}', wait_child_session_id = '{child}'
+           WHERE attempt_id = '{later_attempt}';
+         UPDATE turn_attempt SET state_kind = 'ended', end_variant = 'without_stop',
+             end_disposition = 'yielded_to_durable_wait'
+           WHERE turn_attempt_id = '{continuation}';
+         UPDATE turn_lifecycle SET active_phase_kind = 'awaiting_child',
+             current_attempt_id = NULL, child_wait_request_id = '{later_request}'
+           WHERE turn_id = '{turn}';
+         ALTER TABLE session_delegation_wait ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery ENABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt ENABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt ENABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;",
+        later_request = later_awaiting_request.into_uuid(),
+        first_request = awaiting_request.into_uuid(),
+        spawning_request = spawning_request.into_uuid(),
+        later_attempt = later_attempt.into_uuid(),
+        continuation = continuation.into_uuid(),
+        turn = fixture.turn.into_uuid(),
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(checkpoint.as_str()))
+        .execute(&pool)
+        .await?;
+    let later_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe5));
+    assert!(
+        repository
+            .resume_child_wait(fixture.session, fixture.turn, later_continuation)
+            .await?
+    );
+    let reopened = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the second delivered result also restores the batch");
+    assert_eq!(
+        reopened.phase(),
+        signalbox_domain::ToolBatchPhase::Executing {
+            turn_attempt: later_continuation,
+        }
+    );
+
+    let read_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe6));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            read_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the ordinary tool follows both delivered child results");
+    let authorized_read = repository
+        .authorize_attempt(fixture.session, fixture.turn, read_attempt)
+        .await?;
+    repository
+        .commit_observation(
+            authorized_read
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("read after both children"))
+                            .expect("bounded read result"),
+                    ),
+                }),
+        )
+        .await?;
+
+    let outcome = model_repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x300)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x301)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x302)),
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x30a)),
+                ],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x303)),
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x304)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x305)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x306)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x307)),
+            ),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x308)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 0x309)),
+                )
+            },
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(_)
+    ));
 
     pool.close().await;
     drop(container);
