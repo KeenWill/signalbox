@@ -5,7 +5,7 @@ type Attachments = Extract<WebSessionTimelineDetailBody, { type: 'user_input' }>
 export function AttachmentReferences({ attachments }: { attachments: Attachments }) {
   if (attachments.length === 0) return null
   return (
-    <ul className="session-detail-attachments" aria-label="Attachment references">
+    <ul className="session-detail-attachments" aria-label="Attachments">
       {attachments.map((attachment, index) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: Accepted attachment positions are immutable; repeated digests are valid.
         <li key={`${attachment.blob_id}:${index}`}>

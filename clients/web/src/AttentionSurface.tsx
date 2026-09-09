@@ -3,21 +3,20 @@ import { ArrowRight, Radio, RefreshCw, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { type AttentionSyncPhase, attentionSnapshotsMatch, synchronizeAttention } from './attention'
 import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
+import { enumLabel } from './labels'
 import { ProductRequestError, productTransport } from './product'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
 type AttentionSummary = WebAttentionSnapshot['summaries'][number]
 
 const phaseCopy: Record<AttentionSyncPhase, string> = {
-  idle: 'Paged snapshot',
-  connecting: 'Connecting monitor',
-  live: 'Live monitor',
-  resyncing: 'Resynchronizing',
-  stale: 'Monitor paused',
-  failed: 'Monitor unavailable',
+  idle: 'Not live',
+  connecting: 'Connecting…',
+  live: 'Live',
+  resyncing: 'Reconnecting…',
+  stale: 'Live updates paused',
+  failed: 'Live updates unavailable',
 }
-
-const label = (value: string) => value.replaceAll('_', ' ')
 
 export const activityTime = (unixMilliseconds: string) => {
   const value = Number(unixMilliseconds)
@@ -198,7 +197,7 @@ export function AttentionSurface({
           onClick={monitorCanRestart ? restartMonitor : () => void attention.refetch()}
         >
           <RefreshCw aria-hidden="true" />
-          {monitorCanRestart ? 'Restart monitor' : 'Refresh'}
+          {monitorCanRestart ? 'Reconnect' : 'Refresh'}
         </button>
       </div>
 
@@ -206,11 +205,11 @@ export function AttentionSurface({
       {attention.isError && (
         <section className="surface-empty" role="alert">
           <div>
-            <h2>Attention could not be read</h2>
+            <h2>Couldn't load Attention</h2>
             <p>
               {attention.error instanceof ProductRequestError
                 ? `${attention.error.response.error.code}: ${attention.error.message}`
-                : 'The response did not match the generated web contract.'}
+                : 'The server sent an unexpected response.'}
             </p>
             <button ref={errorFocus} type="button" onClick={retryAttention}>
               Retry
@@ -248,11 +247,11 @@ export function AttentionSurface({
                     >
                       <span className="attention-rail" aria-hidden="true" />
                       <span className="attention-identity">
-                        <strong>{label(summary.state)}</strong>
+                        <strong>{enumLabel(summary.state)}</strong>
                         <code>{summary.session_id}</code>
                       </span>
                       <span className="attention-obligation">
-                        {summary.action ? label(summary.action) : '—'}
+                        {summary.action ? enumLabel(summary.action) : '—'}
                       </span>
                       <time>{activityTime(summary.last_activity.unix_milliseconds)}</time>
                       <ArrowRight aria-hidden="true" />
@@ -279,7 +278,7 @@ export function AttentionSurface({
             <aside className="attention-inspector" aria-labelledby="attention-inspector-heading">
               <header>
                 <div>
-                  <h2 id="attention-inspector-heading">{label(selected.state)}</h2>
+                  <h2 id="attention-inspector-heading">{enumLabel(selected.state)}</h2>
                 </div>
                 <button
                   ref={closeFocus}
@@ -299,27 +298,27 @@ export function AttentionSurface({
                 </div>
                 <div>
                   <dt>Required action</dt>
-                  <dd>{selected.action ? label(selected.action) : 'None'}</dd>
+                  <dd>{selected.action ? enumLabel(selected.action) : 'None'}</dd>
                 </div>
                 <div>
                   <dt>Current turn</dt>
                   <dd>{selected.current_turn_id ?? 'None'}</dd>
                 </div>
                 <div>
-                  <dt>Activity source</dt>
-                  <dd>{label(selected.last_activity.kind)}</dd>
+                  <dt>Last activity</dt>
+                  <dd>{enumLabel(selected.last_activity.kind)}</dd>
                 </div>
               </dl>
               {selected.goal_block && (
                 <section className="attention-goal-block">
                   <span className="eyebrow">
-                    Blocked goal · generation {selected.goal_block.generation}
+                    Blocked goal · Generation {selected.goal_block.generation}
                   </span>
-                  <strong>{label(selected.goal_block.reason)}</strong>
+                  <strong>{enumLabel(selected.goal_block.reason)}</strong>
                   <p>{selected.goal_block.need_summary}</p>
                 </section>
               )}
-              <section className="attention-judge" aria-label="Approval judgment outcomes">
+              <section className="attention-judge" aria-label="Approval outcomes">
                 <div>
                   <span>Actionable</span>
                   <strong>{selected.judge.actionable}</strong>

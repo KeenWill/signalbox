@@ -6,6 +6,7 @@ import type {
   WebTimelineDetailContinuation,
   WebTimelineTextExcerpt,
 } from './generated/web-contract.mjs'
+import { enumLabel } from './labels'
 import {
   type HeldSessionTranscript,
   readExtendedSessionTranscript,
@@ -26,7 +27,7 @@ function ToolText({ label, excerpt }: { label: string; excerpt: WebTimelineTextE
       <pre>{content}</pre>
       {(excerpt.offset_bytes !== '0' || excerpt.continuation != null) && (
         <small>
-          Text excerpt · byte {excerpt.offset_bytes} of {excerpt.total_bytes}
+          Showing from byte {excerpt.offset_bytes} of {excerpt.total_bytes}
         </small>
       )}
     </section>
@@ -52,14 +53,12 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
     )
   if (body.type === 'reconciliation')
     return (
-      <p className="session-turn-outcome">
-        Turn reconciliation required · {body.operation.type.replaceAll('_', ' ')}
-      </p>
+      <p className="session-turn-outcome">Turn needs recovery · {enumLabel(body.operation.type)}</p>
     )
   if (body.type === 'turn_lifecycle')
-    return <p className="session-turn-outcome">Turn {body.cause_code.replaceAll('_', ' ')}</p>
+    return <p className="session-turn-outcome">{enumLabel(`turn_${body.cause_code}`)}</p>
   if (body.type === 'event_fact' && body.kind === 'goal_turn_retired')
-    return <p className="session-turn-outcome">Goal turn retired</p>
+    return <p className="session-turn-outcome">{enumLabel(body.kind)}</p>
   if (body.type === 'event_fact' && body.kind === 'automatic_reconciliation_exhausted')
     return (
       <p className="session-turn-outcome">
@@ -71,17 +70,17 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
   if (!excerpt)
     return body.type === 'model_call' && body.provider_failure_cause ? (
       <p className="session-turn-outcome">
-        Assistant error: {body.provider_failure_cause.replaceAll('_', ' ')}
+        Provider error: {enumLabel(body.provider_failure_cause)}
       </p>
     ) : null
   return (
     <>
-      <span className="eyebrow">{body.type === 'user_input' ? 'You' : 'Assistant'}</span>
+      <span className="eyebrow">{body.type === 'user_input' ? 'Accepted input' : 'Assistant'}</span>
       <p className="session-message-text">{excerpt.text}</p>
       {body.type === 'user_input' && <AttachmentReferences attachments={body.attachments} />}
       {(excerpt.offset_bytes !== '0' || excerpt.continuation !== null) && (
         <small>
-          Text excerpt · byte {excerpt.offset_bytes} of {excerpt.total_bytes}
+          Showing from byte {excerpt.offset_bytes} of {excerpt.total_bytes}
         </small>
       )}
     </>
@@ -142,10 +141,10 @@ function TranscriptWindow({
   })
   return (
     <section className="session-transcript-text" aria-label="Transcript text">
-      {transcript.isPending && <p>Reading transcript text…</p>}
+      {transcript.isPending && <p>Loading transcript…</p>}
       {transcript.isError && (
         <p role="alert">
-          Transcript text could not be read.{' '}
+          Couldn't load the transcript.{' '}
           <button type="button" onClick={() => void transcript.refetch()}>
             Retry transcript text
           </button>

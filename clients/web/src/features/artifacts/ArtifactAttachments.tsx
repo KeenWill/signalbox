@@ -1,6 +1,7 @@
 import { FileQuestion, Paperclip, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
+import { enumLabel } from '../../labels'
 import { ArtifactRenderer } from './ArtifactRenderer'
 import { attachmentScenario } from './artifactScenario'
 import type { ArtifactItem } from './artifactTypes'
@@ -16,10 +17,10 @@ export const boundAttachments = (
 
 const attachmentKind = (artifact: ArtifactItem): string => {
   if (artifact.kind === 'blocked') {
-    return artifact.attemptedKind
+    return enumLabel(artifact.attemptedKind)
   }
-  if (artifact.kind === 'media_placeholder') return `${artifact.mediaKind} placeholder`
-  return artifact.kind
+  if (artifact.kind === 'media_placeholder') return enumLabel(artifact.mediaKind)
+  return enumLabel(artifact.kind)
 }
 
 function AttachmentList({
@@ -50,7 +51,7 @@ function AttachmentList({
         </span>
       </header>
       {bounded.visible.length === 0 ? (
-        <p className="attachment-empty">No attachments in this bounded client view.</p>
+        <p className="attachment-empty">No attachments.</p>
       ) : (
         <ul>
           {bounded.visible.map((artifact) => (
@@ -101,10 +102,7 @@ export function MissingAttachmentState({ placement }: { placement: 'composer' | 
         <strong>
           {placement === 'composer' ? 'Composer attachments' : 'Transcript attachments'}
         </strong>
-        <p>
-          Committed · unavailable. The current browser contract exposes no attachment descriptors
-          for this {placement}; no blob URL or media type was inferred.
-        </p>
+        <p>Attachments aren't available here.</p>
       </div>
     </section>
   )
@@ -122,14 +120,11 @@ export function AttachmentWorkbench({ commandContext }: { commandContext: Comman
     <section className="attachment-workbench" aria-labelledby="attachment-workbench-heading">
       <header className="section-header">
         <div>
-          <span className="eyebrow">Deterministic client presentation</span>
           <h1 id="attachment-workbench-heading">Artifact attachments</h1>
         </div>
-        <span className="attachment-bound">12-item display ceiling</span>
+        <span className="attachment-bound">Showing up to 12</span>
       </header>
-      <p className="artifact-bound-summary">
-        Typed attachment fixtures only · no production attachment facts · no media prefetched
-      </p>
+      <p className="artifact-bound-summary">Sample attachments</p>
       <div className="attachment-layout">
         <div className="attachment-columns">
           <AttachmentList
@@ -156,13 +151,13 @@ export function AttachmentWorkbench({ commandContext }: { commandContext: Comman
         </div>
         <section className="attachment-preview" aria-label="Selected attachment preview">
           <header>
-            <span className="eyebrow">Bounded preview</span>
+            <span className="eyebrow">Preview</span>
             <strong>{selected?.displayName ?? 'No attachment selected'}</strong>
           </header>
           {selected ? (
             <ArtifactRenderer artifact={selected} commandContext={commandContext} />
           ) : (
-            <p className="attachment-empty">Select an attachment to inspect its typed renderer.</p>
+            <p className="attachment-empty">Select an attachment to preview it.</p>
           )}
         </section>
       </div>
