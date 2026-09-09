@@ -38,13 +38,14 @@ trial never seals; no path rewrites or deletes the required lineage.
 The native `ApprovalJudgeEval` program enumerates trials and scores their
 outcomes with pure library code. Rust and TypeScript use the same checked method
 records, grants, request ordinals and replay driver; program code receives no
-provider, database or filesystem handle.
+provider, database or filesystem handle. Corpus cases are read through
+`blob.read` by digest, decoded by the daemon-independent library and verified
+against the manifest at sealing.
 
 | Capability / operation                   | Contract                                                                                                                                                                                                                                                                                             |
 | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Corpus read                              | Resolve the pinned digest and admitted input format into typed case data matching the manifest.                                                                                                                                                                                                      |
 | `judge.evaluate`                         | Evaluate one manifest trial through the daemon judge adapter; journal its binding, request/contract identity, verdict and rationale or classified failure, provider-reported model and available usage. Host-generated call identities are retained evidence; each measured repeat has its own call. |
-| `blob.read`                              | Read exact immutable reference bytes by digest through the catalog; use them as opaque input or through the case's declared decoder.                                                                                                                                                                 |
+| `blob.read`                              | Read exact immutable corpus and reference bytes by digest through the catalog; use them as opaque input or through the case's declared decoder.                                                                                                                                                      |
 | `eval-record.seal`                       | Record the calling run's complete snapshot from its manifest and retained trial evidence, returning a receipt for equal-retry adoption.                                                                                                                                                              |
 | Session creation for an evaluation trial | Verify the manifest reference and record the Eval cause through the host's checked session creation path.                                                                                                                                                                                            |
 
