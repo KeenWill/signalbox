@@ -190,7 +190,7 @@ async fn process_session_summary_page_batches_placement_projection() -> Result<(
         .ok_or("the earlier session summary is present")?;
     let first_query_started: String = sqlx::query_scalar(
         "SELECT query_start::text FROM pg_stat_activity
-          WHERE state = 'idle in transaction'
+          WHERE datname = current_database() AND state = 'idle in transaction'
             AND query LIKE '%runner_current_session_placement%'",
     )
     .fetch_one(&pool)
@@ -201,7 +201,7 @@ async fn process_session_summary_page_batches_placement_projection() -> Result<(
         .ok_or("the later session summary is present")?;
     let last_query_started: String = sqlx::query_scalar(
         "SELECT query_start::text FROM pg_stat_activity
-          WHERE state = 'idle in transaction'
+          WHERE datname = current_database() AND state = 'idle in transaction'
             AND query LIKE '%runner_current_session_placement%'",
     )
     .fetch_one(&pool)

@@ -1,13 +1,8 @@
 //! Shared test fixtures.
 
 use super::*;
+use signalbox_persistence::test_support::postgres::TestDatabase;
 
-#[path = "../../../../tooling/postgres_test_image.rs"]
-mod postgres_test_image;
-use postgres_test_image::POSTGRES_IMAGE_TAG;
-pub(crate) const DATABASE_USER: &str = "signalbox";
-pub(crate) const DATABASE_PASSWORD: &str = "signalbox-test";
-pub(crate) const DATABASE_NAME: &str = "signalbox";
 pub(crate) const ENROLLMENT: u128 = 0x9100;
 pub(crate) const RUNNER: u128 = 0x9200;
 pub(crate) const AUTHENTICATION: u128 = 0x9300;
@@ -56,37 +51,15 @@ pub(crate) const SECOND_SESSION_PHYSICAL_ATTEMPT: PhysicalAttemptFacts = Physica
     turn: 0x9804,
 };
 
-pub(crate) async fn unmigrated_postgres()
--> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_db_name(DATABASE_NAME)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let connection_options =
-        local_test_connection_options(&database_url)?.statement_cache_capacity(0);
+pub(crate) async fn migrated_postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, url) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(8).await?;
+    pool.close().await;
     let pool = PgPoolOptions::new()
         .max_connections(8)
-        .connect_with(connection_options)
+        .connect_with(local_test_connection_options(&url)?.statement_cache_capacity(0))
         .await?;
-    Ok((container, pool))
-}
-
-pub(crate) async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>>
-{
-    let (container, pool) = unmigrated_postgres().await?;
-    migrate(&pool).await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
+    Ok((database, pool))
 }
 
 pub(crate) fn uuid(value: u128) -> Uuid {

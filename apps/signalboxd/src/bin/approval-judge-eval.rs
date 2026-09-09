@@ -894,6 +894,12 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "repeats": verdicts.iter().map(|verdict| serde_json::json!({
                 "recommendation": recommendation_label(verdict.recommendation),
                 "rationale": verdict.rationale,
+                "usage": {
+                    "input_tokens": verdict.usage.input_tokens,
+                    "output_tokens": verdict.usage.output_tokens,
+                    "cache_creation_input_tokens": verdict.usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": verdict.usage.cache_read_input_tokens,
+                },
                 "provider_reported_model": if recording.is_some() {
                     storable_provider_reported_model(verdict.provider_reported_model.as_deref())
                 } else {

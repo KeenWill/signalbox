@@ -50,7 +50,8 @@ async fn blocked_backend_count(connection: &mut sqlx::PgConnection) -> Result<i6
     sqlx::query_scalar(
         "SELECT count(*)
            FROM pg_stat_activity
-          WHERE cardinality(pg_blocking_pids(pid)) > 0",
+          WHERE datname = current_database()
+            AND cardinality(pg_blocking_pids(pid)) > 0",
     )
     .fetch_one(connection)
     .await

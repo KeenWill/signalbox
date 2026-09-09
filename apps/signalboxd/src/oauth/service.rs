@@ -349,10 +349,6 @@ mod tests {
     use super::*;
     use signalbox_domain::DurableCommandId;
     use signalbox_persistence::oauth_credential::*;
-    use testcontainers_modules::{
-        postgres::Postgres,
-        testcontainers::{ImageExt, runners::AsyncRunner},
-    };
 
     #[derive(Default)]
     struct Installer(Option<OauthCredentialMaterial>);
@@ -415,24 +411,9 @@ mod tests {
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn cancelling_a_database_profile_wait_returns_before_the_lock_is_released()
     -> Result<(), Box<dyn std::error::Error>> {
-        let container = Postgres::default()
-            // Same PostgreSQL image as tests/process_protocol_runtime/fixtures.rs.
-            .with_tag("18.4-alpine3.23")
-            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
-            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
-            .with_labels(signalbox_persistence::disposable_test_container_labels())
-            .start()
-            .await?;
-        let url = format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?,
-        );
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(signalbox_persistence::local_test_connection_options(&url)?)
-            .await?;
-        signalbox_persistence::migrate(&pool).await?;
+        let (_container, pool, _url) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+
         let registration = OauthRegistration {
             client_id: "fixture-client".into(),
             token_url: "https://authorization.example/token".into(),
@@ -499,24 +480,9 @@ mod tests {
     #[ignore = "requires ephemeral PostgreSQL and local HTTPS"]
     async fn oauth_service_serializes_refresh_reprovision_delete_and_restart_recovery()
     -> Result<(), Box<dyn std::error::Error>> {
-        let container = Postgres::default()
-            // Same PostgreSQL image as tests/process_protocol_runtime/fixtures.rs.
-            .with_tag("18.4-alpine3.23")
-            .with_cmd(signalbox_persistence::disposable_postgres_server_args())
-            .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
-            .with_labels(signalbox_persistence::disposable_test_container_labels())
-            .start()
-            .await?;
-        let url = format!(
-            "postgres://postgres:postgres@{}:{}/postgres",
-            container.get_host().await?,
-            container.get_host_port_ipv4(5432).await?
-        );
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(signalbox_persistence::local_test_connection_options(&url)?)
-            .await?;
-        signalbox_persistence::migrate(&pool).await?;
+        let (_container, pool, _url) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(8).await?;
+
         let expiry = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs()

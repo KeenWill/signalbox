@@ -97,3 +97,34 @@ pub async fn seed_historical_repository_checkout(
     head: &signalbox_domain::CommitSha,
 ) -> result::Result<(), error::Error>;
 ```
+
+## TestDatabase
+
+```rust
+#[cfg(feature = "test-support")]
+#[cfg(feature = "postgres-integration")]
+pub struct TestDatabase {/* private */}
+// derives: fmt::Debug
+#[cfg(feature = "test-support")]
+#[cfg(feature = "postgres-integration")]
+impl drop::Drop for test_support::postgres::TestDatabase {
+    fn drop(&mut self);
+}
+```
+
+## migrated_postgres
+
+```rust
+#[cfg(feature = "test-support")]
+#[cfg(feature = "postgres-integration")]
+pub async fn migrated_postgres(
+    max_connections: u32,
+) -> result::Result<
+    (
+        test_support::postgres::TestDatabase,
+        sqlx_postgres::PgPool,
+        string::String,
+    ),
+    boxed::Box<dyn error::Error>,
+>;
+```
