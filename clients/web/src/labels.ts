@@ -94,7 +94,7 @@ const labels = new Map<string, string>(
     execution_failed: 'Execution failed',
     execution_failure: 'Execution failed',
     external_change_required: 'Needs an external change',
-    external_effect: 'Changes external systems',
+    external_effect: 'May change external systems',
     failed: 'Failed',
     failed_retryable: 'Failed; retry available',
     failed_structural: 'Failed; setup needs changes',
