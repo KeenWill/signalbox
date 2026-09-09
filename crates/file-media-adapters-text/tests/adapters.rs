@@ -1007,7 +1007,7 @@ impl signalbox_file_media_runtime::VerifiedBlobSource for StreamedTextSource {
         signalbox_file_media_runtime::FileDigest::from_bytes([0x51; 32])
     }
     fn byte_length(&self) -> std::num::NonZeroU64 {
-        std::num::NonZeroU64::new(5 * 1024 * 1024 * 1024).expect("five GiB is positive")
+        const { std::num::NonZeroU64::new(5 * 1024 * 1024 * 1024).expect("five GiB is positive") }
     }
     fn read_range(
         &self,
