@@ -44,7 +44,10 @@ impl RecordingPushTransport {
 }
 
 impl GitPushTransport for RecordingPushTransport {
-    fn push(&mut self, request: GitPushRequest) -> Result<GitPushReceipt, GitPushTransportFailure> {
+    async fn push(
+        &mut self,
+        request: GitPushRequest,
+    ) -> Result<GitPushReceipt, GitPushTransportFailure> {
         let receipt = GitPushReceipt::try_new(request.commit().to_owned())
             .expect("resolved commit forms a receipt");
         *self
@@ -112,8 +115,8 @@ fn push_contract_rejects_a_model_supplied_destination() {
     assert!(decode_push(&injected_destination).is_err());
 }
 
-#[test]
-fn push_resolves_a_real_branch_for_only_the_configured_transport() {
+#[tokio::test]
+async fn push_resolves_a_real_branch_for_only_the_configured_transport() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let initial = repository
@@ -137,6 +140,7 @@ fn push_resolves_a_real_branch_for_only_the_configured_transport() {
 
     let encoded = executor
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
         .expect("synthetic push succeeds");
     let result: serde_json::Value = serde_json::from_str(&encoded).expect("push result is JSON");
     let request = transport.request();
@@ -161,8 +165,8 @@ fn push_resolves_a_real_branch_for_only_the_configured_transport() {
     assert_eq!(result["commit"], fixture.initial.to_string());
 }
 
-#[test]
-fn push_rejects_a_replaced_workspace_before_transport_dispatch() {
+#[tokio::test]
+async fn push_rejects_a_replaced_workspace_before_transport_dispatch() {
     let fixture = Fixture::new();
     let remote = ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL)
         .expect("configured remote is admitted");
@@ -182,6 +186,7 @@ fn push_rejects_a_replaced_workspace_before_transport_dispatch() {
 
     let failure = executor
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
         .expect_err("replacement workspace rejects before dispatch");
 
     assert_eq!(failure, GitPushFailure::Repository);
@@ -232,4 +237,403 @@ fn every_minted_remote_name_builds_a_configured_remote() {
     assert_minted_name_builds_a_configured_remote("v1.0");
     assert_minted_name_builds_a_configured_remote("origin.lockfile");
     assert_minted_name_builds_a_configured_remote("a");
+}
+
+/// Stores selected fixture objects without compression so pack size is load-bearing.
+fn plant_uncompressed_push_pack(
+    repository: &Repository,
+    objects: &[git2::Oid],
+) -> std::path::PathBuf {
+    plant_push_pack_with_unrelated_objects(repository, objects, 0..0)
+}
+
+fn plant_push_pack_with_unrelated_objects(
+    repository: &Repository,
+    objects: &[git2::Oid],
+    unrelated: std::ops::Range<usize>,
+) -> std::path::PathBuf {
+    use flate2::{Compression, write::ZlibEncoder};
+    use sha1::{Digest, Sha1};
+    use std::io::Write;
+    let database = repository.odb().expect("fixture objects");
+    let mut pack = b"PACK\0\0\0\x02".to_vec();
+    pack.extend_from_slice(&((objects.len() + unrelated.len()) as u32).to_be_bytes());
+    let mut add = |kind: u8, content: &[u8]| {
+        let mut size = content.len();
+        let first = (kind << 4) | (size & 15) as u8;
+        size >>= 4;
+        pack.push(first | if size == 0 { 0 } else { 128 });
+        while size != 0 {
+            let byte = (size & 127) as u8;
+            size >>= 7;
+            pack.push(byte | if size == 0 { 0 } else { 128 });
+        }
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::none());
+        encoder.write_all(content).expect("fixture object encodes");
+        pack.extend(encoder.finish().expect("fixture stream finishes"));
+    };
+    for oid in objects {
+        let object = database.read(*oid).expect("fixture object exists");
+        add(object.kind() as u8, object.data());
+    }
+    for number in unrelated {
+        add(git2::ObjectType::Blob as u8, &number.to_be_bytes());
+    }
+    let checksum = match repository.object_format() {
+        git2::ObjectFormat::Sha1 => Sha1::digest(&pack).to_vec(),
+        git2::ObjectFormat::Sha256 => sha2::Sha256::digest(&pack).to_vec(),
+    };
+    pack.extend_from_slice(&checksum);
+    let directory = repository.path().join("objects/pack");
+    let mut indexer = git2::Indexer::new_ext(
+        Some(&database),
+        &directory,
+        0o600,
+        true,
+        repository.object_format(),
+    )
+    .expect("fixture indexer");
+    indexer.write_all(&pack).expect("fixture pack indexes");
+    let name = indexer.commit().expect("fixture pack publishes");
+    for oid in objects {
+        let hex = oid.to_string();
+        fs::remove_file(
+            repository
+                .path()
+                .join("objects")
+                .join(&hex[..2])
+                .join(&hex[2..]),
+        )
+        .expect("packed fixture object has no loose fallback");
+    }
+    directory.join(format!("pack-{name}.pack"))
+}
+
+#[tokio::test]
+async fn push_range_ignores_large_history_in_the_pack_containing_its_tip() {
+    use crate::limits::MAX_OBJECT_DATABASE_BYTES;
+    use crate::tests::support::{AUTHOR_EMAIL, AUTHOR_NAME};
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture author");
+    let archive = repository
+        .blob(&vec![b'x'; MAX_OBJECT_DATABASE_BYTES + 1])
+        .expect("large history blob");
+    let mut archive_tree = repository.treebuilder(None).expect("archive tree");
+    archive_tree
+        .insert("archive", archive, 0o100644)
+        .expect("archive entry");
+    let archive_tree = repository
+        .find_tree(archive_tree.write().expect("archive tree writes"))
+        .expect("archive tree loads");
+    let history = repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            "large history",
+            &archive_tree,
+            &[],
+        )
+        .expect("historical commit");
+    let tree = repository
+        .find_commit(fixture.initial)
+        .expect("small fixture commit")
+        .tree()
+        .expect("small tree");
+    let fence = repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            "dispatch head",
+            &tree,
+            &[&repository.find_commit(history).expect("history")],
+        )
+        .expect("fence");
+    let tip = repository
+        .commit(
+            Some(&format!("refs/heads/{FIX_BRANCH}")),
+            &signature,
+            &signature,
+            "session commit",
+            &tree,
+            &[&repository.find_commit(fence).expect("fence")],
+        )
+        .expect("tip");
+    let pack = plant_uncompressed_push_pack(&repository, &[tip, archive]);
+    assert!(fs::metadata(&pack).expect("large pack").len() > MAX_OBJECT_DATABASE_BYTES as u64);
+    let transport = RecordingPushTransport::default();
+    let mut executor = GitPushTools::try_new(
+        &LocalWorkspaceFileSystem,
+        fixture.root(),
+        ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL).expect("remote"),
+        transport.clone(),
+    )
+    .expect("push tools")
+    .into_parts()
+    .1
+    .with_commit_fence(fence.to_string());
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("small range pushes despite large shared pack");
+    assert_eq!(transport.request().commit(), tip.to_string());
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture(
+        &fixture.executor().repository_authority,
+        tip,
+        Some(fence),
+    )
+    .expect("range snapshot");
+    let objects = snapshot.repository.odb().expect("snapshot objects");
+    assert!(objects.exists(tip));
+    assert!(objects.exists(fence));
+    assert!(!objects.exists(history));
+    assert!(!objects.exists(archive));
+}
+
+#[tokio::test]
+async fn push_range_ignores_unrelated_objects_in_one_or_multiple_pack_indexes() {
+    use crate::limits::MAX_REPOSITORY_INSPECTIONS;
+    for split in [false, true] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository");
+        let blob = repository.blob(b"new pushed content").expect("new blob");
+        let tip = commit_with_push_blob(&fixture, blob);
+        repository
+            .reference(
+                &format!("refs/heads/{FIX_BRANCH}"),
+                tip,
+                false,
+                "session commit",
+            )
+            .expect("session branch");
+        let tree = repository.find_commit(tip).expect("tip").tree_id();
+        let count = MAX_REPOSITORY_INSPECTIONS + 1;
+        let start = if split {
+            plant_push_pack_with_unrelated_objects(&repository, &[], 0..count / 2);
+            count / 2
+        } else {
+            0
+        };
+        plant_push_pack_with_unrelated_objects(&repository, &[tip, tree, blob], start..count);
+        let transport = RecordingPushTransport::default();
+        let mut executor = GitPushTools::try_new(
+            &LocalWorkspaceFileSystem,
+            fixture.root(),
+            ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL).expect("remote"),
+            transport.clone(),
+        )
+        .expect("push tools")
+        .into_parts()
+        .1
+        .with_commit_fence(fixture.initial.to_string());
+        executor
+            .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+            .await
+            .expect("unrelated index population does not consume the push-range budget");
+        assert_eq!(transport.request().commit(), tip.to_string());
+    }
+}
+
+#[test]
+fn push_snapshot_rejects_an_index_hint_that_points_to_a_different_object() {
+    use sha1::{Digest, Sha1};
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let selected = repository
+        .blob(b"selected push content")
+        .expect("selected blob");
+    let other = repository.blob(b"unrelated content").expect("other blob");
+    let tip = commit_with_push_blob(&fixture, selected);
+    let pack = plant_uncompressed_push_pack(&repository, &[selected, other]);
+    let index_path = pack.with_extension("idx");
+    let mut index = fs::read(&index_path).expect("index");
+    let ids_start = 8 + 256 * 4;
+    let width = selected.as_bytes().len();
+    let offsets_start = ids_start + 2 * (width + 4);
+    let selected_position = usize::from(selected > other);
+    let other_position = 1 - selected_position;
+    let wrong_offset: [u8; 4] = index
+        [offsets_start + other_position * 4..offsets_start + other_position * 4 + 4]
+        .try_into()
+        .expect("other offset");
+    index[offsets_start + selected_position * 4..offsets_start + selected_position * 4 + 4]
+        .copy_from_slice(&wrong_offset);
+    let checksum_start = index.len() - width;
+    let checksum = Sha1::digest(&index[..checksum_start]);
+    index[checksum_start..].copy_from_slice(&checksum);
+    fs::write(index_path, index).expect("misleading index");
+    assert!(
+        crate::push_objects::PushObjectSnapshot::capture(
+            &fixture.executor().repository_authority,
+            tip,
+            Some(fixture.initial),
+        )
+        .is_err()
+    );
+}
+
+/// Creates a commit referencing the chosen blob without decoding that blob.
+fn commit_with_push_blob(fixture: &Fixture, blob: git2::Oid) -> git2::Oid {
+    use crate::tests::support::{AUTHOR_EMAIL, AUTHOR_NAME};
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let mut tree = repository.treebuilder(None).expect("tree builder");
+    tree.insert("selected", blob, 0o100644)
+        .expect("selected blob");
+    let tree = repository
+        .find_tree(tree.write().expect("tree writes"))
+        .expect("tree");
+    let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("author");
+    repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            "selected blob",
+            &tree,
+            &[&repository
+                .find_commit(fixture.initial)
+                .expect("initial commit")],
+        )
+        .expect("commit")
+}
+
+#[test]
+fn push_snapshot_decodes_bounded_offset_and_reference_delta_chains() {
+    use crate::tests::pack_reads::{DeltaEncoding, plant_delta_chain};
+    for encoding in [DeltaEncoding::Offset, DeltaEncoding::Reference] {
+        let fixture = Fixture::new();
+        let blob = plant_delta_chain(
+            fixture.root(),
+            encoding,
+            &[crate::limits::MAX_OBJECT_BYTES, 8, 1],
+        );
+        let tip = commit_with_push_blob(&fixture, blob);
+        let snapshot = crate::push_objects::PushObjectSnapshot::capture(
+            &fixture.executor().repository_authority,
+            tip,
+            Some(fixture.initial),
+        )
+        .expect("bounded selected dependencies");
+        assert_eq!(
+            snapshot
+                .repository
+                .find_blob(blob)
+                .expect("selected blob")
+                .content(),
+            b"x"
+        );
+    }
+}
+
+#[test]
+fn push_snapshot_rejects_oversized_selected_delta_dependencies() {
+    use crate::tests::pack_reads::{DeltaEncoding, plant_delta_chain};
+    for encoding in [DeltaEncoding::Offset, DeltaEncoding::Reference] {
+        let fixture = Fixture::new();
+        let blob = plant_delta_chain(
+            fixture.root(),
+            encoding,
+            &[crate::limits::MAX_OBJECT_BYTES + 1, 8, 1],
+        );
+        let tip = commit_with_push_blob(&fixture, blob);
+        assert!(
+            crate::push_objects::PushObjectSnapshot::capture(
+                &fixture.executor().repository_authority,
+                tip,
+                Some(fixture.initial)
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn push_snapshot_excludes_unchanged_oversized_fence_blobs() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let blob = repository
+        .blob(&vec![b'x'; crate::limits::MAX_OBJECT_BYTES + 1])
+        .expect("existing large blob");
+    let fence = commit_with_push_blob(&fixture, blob);
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture(
+        &fixture.executor().repository_authority,
+        fence,
+        Some(fence),
+    )
+    .expect("unchanged fence tree does not decode its blobs");
+    assert!(
+        !snapshot
+            .repository
+            .odb()
+            .expect("snapshot objects")
+            .exists(blob)
+    );
+    assert!(
+        crate::push_objects::PushObjectSnapshot::capture(
+            &fixture.executor().repository_authority,
+            fence,
+            Some(fixture.initial)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn push_snapshot_retains_captured_content_after_a_live_object_changes() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let content = b"selected content";
+    let blob = repository.blob(content).expect("selected blob");
+    let tip = commit_with_push_blob(&fixture, blob);
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture(
+        &fixture.executor().repository_authority,
+        tip,
+        Some(fixture.initial),
+    )
+    .expect("snapshot captures selected content");
+    let hex = blob.to_string();
+    let live_object = repository
+        .path()
+        .join("objects")
+        .join(&hex[..2])
+        .join(&hex[2..]);
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&live_object, fs::Permissions::from_mode(0o600))
+        .expect("fixture object becomes writable");
+    fs::write(live_object, []).expect("live object changes");
+    assert_eq!(
+        snapshot
+            .repository
+            .find_blob(blob)
+            .expect("private snapshot blob")
+            .content(),
+        content
+    );
+}
+
+#[test]
+fn sha256_push_snapshot_retains_the_fence_without_its_history() {
+    let fixture = crate::tests::support::Sha256Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("SHA-256 repository");
+    let tree = repository
+        .find_commit(fixture.initial)
+        .expect("fence")
+        .tree_id();
+    plant_uncompressed_push_pack(&repository, &[fixture.initial, tree]);
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture(
+        &fixture.executor().repository_authority,
+        fixture.initial,
+        Some(fixture.initial),
+    )
+    .expect("SHA-256 snapshot");
+    assert_eq!(
+        snapshot
+            .repository
+            .find_commit(fixture.initial)
+            .expect("SHA-256 fence")
+            .id(),
+        fixture.initial
+    );
 }

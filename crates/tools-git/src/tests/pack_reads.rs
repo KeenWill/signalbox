@@ -102,12 +102,12 @@ fn read_packed_blob(authority: &PinnedRepository, target: Oid) -> Result<Vec<u8>
 }
 
 #[derive(Clone, Copy, Debug)]
-enum DeltaEncoding {
+pub(super) enum DeltaEncoding {
     Offset,
     Reference,
 }
 
-fn plant_delta_chain(root: &Path, encoding: DeltaEncoding, sizes: &[usize]) -> Oid {
+pub(super) fn plant_delta_chain(root: &Path, encoding: DeltaEncoding, sizes: &[usize]) -> Oid {
     let repository = Repository::open(root).expect("fixture repository opens");
     let format = repository.object_format();
     let mut pack = b"PACK".to_vec();

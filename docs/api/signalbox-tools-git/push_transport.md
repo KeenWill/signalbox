@@ -40,6 +40,8 @@ pub struct GitPushRequest {/* private */}
 // derives: clone::Clone, cmp::Eq, cmp::PartialEq
 impl GitPushRequest {
     pub fn repository_root(&self) -> &path::Path;
+    pub fn git_directory(&self) -> &path::Path;
+    pub fn object_directory(&self) -> &path::Path;
     pub const fn remote(&self) -> &ConfiguredGitRemote;
     pub fn branch(&self) -> &str;
     pub fn commit(&self) -> &str;
@@ -100,6 +102,7 @@ pub trait GitPushTransport: marker::Send {
     fn push(
         &mut self,
         request: GitPushRequest,
-    ) -> result::Result<GitPushReceipt, GitPushTransportFailure>;
+    ) -> impl future::Future<Output = result::Result<GitPushReceipt, GitPushTransportFailure>>
+           + marker::Send;
 }
 ```

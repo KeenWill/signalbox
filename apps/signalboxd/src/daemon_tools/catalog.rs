@@ -62,6 +62,29 @@ impl DaemonToolCatalog {
         Ok(Self { entries })
     }
 
+    /// Registers configured push for mapped workspaces when a watched repository enables it.
+    pub fn with_repository_push(
+        self,
+        configuration: Option<&crate::RepositoryWatchConfiguration>,
+        composition: DaemonToolComposition,
+    ) -> Result<Self, DaemonToolsConstructionError> {
+        if composition == DaemonToolComposition::WithMappedFamilies
+            && configuration.is_some_and(|watch| {
+                watch
+                    .repositories()
+                    .iter()
+                    .any(|repository| repository.push_credential_file().is_some())
+            })
+        {
+            self.with_compiled_catalog(
+                signalbox_tools_git::git_push_catalog()
+                    .map_err(|_| DaemonToolsConstructionError::LocalGit)?,
+            )
+        } else {
+            Ok(self)
+        }
+    }
+
     /// Validates deployment postures against the statically selected
     /// composition before database-backed tool dependencies are constructed.
     pub fn validate_approval_postures_for_composition(
@@ -124,6 +147,7 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
                 || WORKSPACE_READ_TOOL_NAMES.contains(&name)
                 || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
                 || LOCAL_GIT_TOOL_NAMES.contains(&name)
+                || name == signalbox_tools_git::GIT_PUSH_CONFIGURED_NAME
                 || matches!(
                     name,
                     SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME

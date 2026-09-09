@@ -1,12 +1,12 @@
-# Program substrate
+# Workflows
 
-The program substrate runs a JavaScript program in a closed isolate and journals
+The workflows layer runs a JavaScript program in a closed isolate and journals
 every nondeterministic act, so a run can be re-executed to the same point.
 
 ## Overview
 
-Two parts are built: an isolate host in the program-runtime crate and a frame
-journal in the persistence crate. The host, `ProgramHost`, runs one stripped
+Two parts are built: an isolate host in the workflow-runtime crate and a frame
+journal in the persistence crate. The host, `WorkflowHost`, runs one stripped
 JavaScript module per execution attempt in a fresh embedded `deno_core` isolate.
 The module's only admitted import is the canonical SDK specifier, which the
 loader resolves to a host-supplied synthetic module. The isolate exposes no
@@ -47,7 +47,7 @@ session grant. Registration and run creation take caller-supplied identities: an
 equal retry returns the recorded value; different content or a different
 registration binding conflicts.
 
-`ProgramHost::execute_registered` loads the pinned artifact and grants;
+`WorkflowHost::execute_registered` loads the pinned artifact and grants;
 ungranted requests receive a journaled refusal before any executor acts.
 Recovery first adopts a proven durable outcome, reissues only operations
 declared idempotent, and otherwise journals an ambiguous answer. The register
@@ -106,7 +106,7 @@ and truncation of journal rows.
 The canonical SDK specifier is `@signalbox/program-sdk/v<version>`, where the
 version is a positive decimal integer with no leading zero. Frame-contract
 release one admits exactly `@signalbox/program-sdk/v1`. The module loader in the
-program-runtime crate resolves that specifier alone and rejects every other
+workflow-runtime crate resolves that specifier alone and rejects every other
 import, including relative files and the unversioned name.
 
 Every nondeterministic act a program performs crosses the typed frame protocol
@@ -132,4 +132,4 @@ authority.
 ## Planned
 
 - Payload offload to SHA-256 blobs under the `program_journal` storage class;
-  every payload is inline today ([design](../design/program-substrate.md)).
+  every payload is inline today ([design](../design/workflows.md)).
