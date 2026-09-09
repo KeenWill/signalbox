@@ -1204,6 +1204,112 @@ async fn terminal_answer_cannot_adopt_a_request_emitted_with_outstanding_work()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_answer_rejects_work_appended_and_resolved_after_its_request()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    let work = repository
+        .append_request(run, None, RequestKind::Now(payload(b"clock")))
+        .await?;
+    repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: work.ordinal(),
+                payload: payload(b"time"),
+            },
+        )
+        .await?;
+    let before = repository.load(run).await?.expect("pending terminal");
+    let error = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: terminal.ordinal(),
+                payload: InlineFramePayload::default(),
+            },
+        )
+        .await
+        .expect_err("intervening work prevents successful completion");
+    let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+        source,
+        ..
+    } = error
+    else {
+        panic!("expected database rejection, got {error:?}");
+    };
+    assert_trigger_error(
+        source,
+        "terminal answer must immediately follow its request on a running run with no other outstanding requests",
+    );
+    assert_eq!(
+        repository.load(run).await?.expect("unchanged journal"),
+        before
+    );
+    assert!(before.result().is_none());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_answer_rejects_an_intervening_scope_frame() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    repository
+        .append_request(
+            run,
+            None,
+            RequestKind::Scope(ScopeRequest::new(
+                ScopeOperation::Open,
+                ScopeOrdinal::try_from_u64(1).expect("scope"),
+                None,
+            )),
+        )
+        .await?;
+    let before = repository.load(run).await?.expect("pending terminal");
+    let error = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: terminal.ordinal(),
+                payload: InlineFramePayload::default(),
+            },
+        )
+        .await
+        .expect_err("intervening scope prevents successful completion");
+    let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+        source,
+        ..
+    } = error
+    else {
+        panic!("expected database rejection, got {error:?}");
+    };
+    assert_trigger_error(
+        source,
+        "terminal answer must immediately follow its request on a running run with no other outstanding requests",
+    );
+    assert_eq!(
+        repository.load(run).await?.expect("unchanged journal"),
+        before
+    );
+    assert!(before.result().is_none());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn cancellation_after_success_replays_the_retained_result() -> Result<(), Box<dyn Error>> {
     use signalbox_persistence::program_cancellation::{
         self, CancelProgramRun, ProgramCancellationOutcome as Outcome,

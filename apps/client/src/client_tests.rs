@@ -5978,10 +5978,10 @@ async fn program_cancellation_presents_the_retained_successful_result() -> Resul
     let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
     let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
     let retained = vec![0, 255, 128];
-    let outcome = ProgramRunCancellationOutcome::AlreadyTerminal {
-        terminal_state: ProgramRunTerminalState::Succeeded,
-        result: Some(retained.clone()),
-    };
+    let outcome =
+        ProgramRunCancellationOutcome::AlreadyTerminal(ProgramRunTerminalState::Succeeded {
+            result: retained.clone(),
+        });
     let server = tokio::spawn(async move {
         accept_request_and_reply(
             &listener,
