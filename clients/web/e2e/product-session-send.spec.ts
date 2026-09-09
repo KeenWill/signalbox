@@ -216,7 +216,7 @@ test('follows new active work after restoring an inactive session position', asy
   const api = await sessionApi(page)
   await openSession(page)
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
-  await page.getByRole('row', { name: /41 input accepted/ }).click()
+  await page.getByRole('row', { name: /41 Message accepted/ }).click()
   await expect
     .poll(() =>
       page.evaluate((id) => {
@@ -319,7 +319,7 @@ test('reports the daemon rejection reason and keeps the draft editable', async (
   await page.getByRole('textbox', { name: 'Message' }).fill('Keep the rejected draft.')
   await page.getByRole('button', { name: 'Send message', exact: true }).click()
   await expect(
-    page.getByText('Rejected: input cannot start a turn while another turn is active'),
+    page.getByText('Not accepted: input cannot start a turn while another turn is active'),
   ).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Message' })).toBeEditable()
   api.grow()
@@ -328,7 +328,7 @@ test('reports the daemon rejection reason and keeps the draft editable', async (
 test('shows when an active turn prevents starting another turn', async ({ page }) => {
   const api = await sessionApi(page, true)
   await openSession(page)
-  await expect(page.getByText('Session running')).toBeVisible()
+  await expect(page.getByText('Turn: Running')).toBeVisible()
   await page.getByRole('textbox', { name: 'Message' }).fill('A draft for later.')
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
   expect(api.state.submissions).toHaveLength(0)
@@ -411,7 +411,7 @@ test('refuses new session input at the retained-command limit while allowing exa
   const last = ids[4]
   await open(last)
   await page.getByRole('textbox', { name: 'Message' }).fill('Wait for capacity.')
-  await expect(page.getByText('Pending-message limit reached')).toBeVisible()
+  await expect(page.getByText('Too many unconfirmed messages')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
   expect(attempts).toHaveLength(4)
   await page.route(`**/api/sessions/${sessionId}/input`, (route) => {
@@ -539,7 +539,7 @@ test('resets text pagination when only the window observation changes', async ({
   await openSession(page)
   await page.getByRole('button', { name: 'Next text page' }).click()
   await expect(page.getByRole('button', { name: 'First text page' })).toBeVisible()
-  await expect(page.getByText('Reading transcript text…', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Loading transcript…', { exact: true })).toHaveCount(0)
   await expect(
     page.getByRole('region', { name: 'Transcript text' }).getByRole('alert'),
   ).toHaveCount(0)
@@ -741,11 +741,11 @@ for (const viewport of [
     }
     const api = await sessionApi(page, false, sessionId, origin)
     await openSession(page)
-    const provenance = page.getByLabel('Repository watch origin')
+    const provenance = page.getByLabel('Repository watch')
     await expect(provenance).toContainText('Repository watch · signalbox/example #81')
-    await expect(provenance).toContainText('Rule review-response v3 · review submitted')
-    await provenance.getByText('Dispatch provenance', { exact: true }).click()
-    await expect(provenance).toContainText(`Dispatch ${origin.dispatch_id} · Action 2`)
+    await expect(provenance).toContainText('Rule review-response v3 · Review submitted')
+    await provenance.getByText('Trigger details', { exact: true }).click()
+    await expect(provenance).toContainText(`Dispatch ${origin.dispatch_id} · Step 2`)
     await expect(provenance).toContainText(`Event ${origin.event_id}`)
     if (browserName === 'chromium') {
       await expect(page).toHaveScreenshot(`repository-watch-origin-${viewport.name}.png`, {
@@ -788,6 +788,6 @@ test('replaces the sent notice when followed work starts', async ({ page }) => {
   await expect(composer.getByRole('status')).toHaveText('Message sent')
   api.state.active = true
   api.grow()
-  await expect(composer.getByRole('status')).toHaveText('Session running')
+  await expect(composer.getByRole('status')).toHaveText('Turn: Running')
   await expect(composer.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
 })

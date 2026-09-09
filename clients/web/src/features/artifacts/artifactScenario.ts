@@ -355,7 +355,7 @@ export const fallbackDescriptor = decodeWebBlobDescriptor({
 
 const generatedText = Array.from(
   { length: 180 },
-  (_, index) => `line ${String(index + 1).padStart(3, '0')} — bounded incident chronology`,
+  (_, index) => `line ${String(index + 1).padStart(3, '0')} — incident timeline`,
 ).join('\n')
 
 const generatedCode = Array.from(
@@ -388,7 +388,7 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
   {
     id: 'bounded-photo',
     kind: 'image',
-    displayName: 'bounded-photo.jpg',
+    displayName: 'photo.jpg',
     source: { kind: 'signalbox_blob', descriptor: jpegDescriptor },
   },
   {
@@ -411,8 +411,8 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
     id: 'restricted-capture',
     kind: 'blocked',
     displayName: 'restricted.capture',
-    attemptedKind: 'unknown binary',
-    reason: 'The current capability projection does not authorize a content view.',
+    attemptedKind: 'Unknown binary',
+    reason: 'Preview not allowed.',
   },
 ]
 

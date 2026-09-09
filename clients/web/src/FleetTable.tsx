@@ -1,6 +1,7 @@
 import { createColumnHelper, tableFeatures, useTable } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef } from 'react'
+import { enumLabel } from './labels'
 import type { FleetRow } from './platform'
 import { actions, useAppDispatch } from './state'
 
@@ -13,7 +14,9 @@ const fleetColumns = fleetColumn.columns([
   fleetColumn.accessor('repository', { header: 'Repository / worktree' }),
   fleetColumn.accessor('state', {
     header: 'State',
-    cell: ({ getValue }) => <span className={`status status-${getValue()}`}>{getValue()}</span>,
+    cell: ({ getValue }) => (
+      <span className={`status status-${getValue()}`}>{enumLabel(getValue())}</span>
+    ),
   }),
   fleetColumn.accessor('purpose', { header: 'Current purpose' }),
   fleetColumn.accessor('age', { header: 'Age' }),
@@ -45,17 +48,17 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
       <header className="section-header table-heading">
         <div>
           <span className="eyebrow">Operator view</span>
-          <h2 id="fleet-heading">Fleet obligations</h2>
+          <h2 id="fleet-heading">Fleet work</h2>
         </div>
         <span className="window-count">
-          {totalCount.toLocaleString()} logical · {rows.length} loaded
+          {rows.length} loaded of {totalCount.toLocaleString()}
         </span>
       </header>
       {/* biome-ignore lint/a11y/useSemanticElements: The virtualized table needs a scrollable ARIA table container. */}
       <div
         className="data-table"
         role="table"
-        aria-label="Fleet obligations"
+        aria-label="Fleet work"
         aria-rowcount={totalCount + 1}
       >
         {/* biome-ignore lint/a11y: Rows in this read-only virtualized ARIA table are not interactive controls. */}

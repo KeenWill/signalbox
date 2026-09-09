@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
-import { type ReactNode, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { AttachmentReferences } from './AttachmentReferences'
 import type {
   WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
 } from './generated/web-contract.mjs'
+import { enumLabel } from './labels'
 import { readSessionTranscript, type SessionTranscriptLimits } from './product'
 
 type DetailItem = WebSessionTimelineDetailPage['items'][number]
@@ -61,14 +62,14 @@ export const isCompatibleDetailBody = (kind: DetailItem['kind'], body: DetailBod
 }
 
 const modelCallState = (state: Extract<DetailBody, { type: 'model_call' }>['state']): string =>
-  state.type === 'terminal' ? `terminal · ${state.disposition}` : state.type.replaceAll('_', ' ')
+  state.type === 'terminal' ? `Finished · ${enumLabel(state.disposition)}` : enumLabel(state.type)
 
 const modelSelection = (
   selection: { kind: 'direct'; selection_id: string } | { kind: 'alias'; alias_id: string },
 ): string =>
   selection.kind === 'direct'
-    ? `direct · ${selection.selection_id}`
-    : `alias · ${selection.alias_id}`
+    ? `Direct · ${selection.selection_id}`
+    : `Alias · ${selection.alias_id}`
 
 const effectiveSettingsFacts = (
   settings:
@@ -81,13 +82,13 @@ const effectiveSettingsFacts = (
         { type: 'session_defaults_changed' }
       >['installed_settings'],
 ): ReadonlyArray<readonly [string, ReactNode]> => [
-  ['Reasoning level', settings.effective.reasoning_level ?? 'default'],
-  ['Fast mode', settings.effective.fast_mode],
+  ['Reasoning level', enumLabel(settings.effective.reasoning_level ?? 'Default')],
+  ['Fast mode', enumLabel(settings.effective.fast_mode)],
   [
     'Service tier',
     settings.effective.service_tier
-      ? `${settings.effective.service_tier.provider} · ${settings.effective.service_tier.value}`
-      : 'default',
+      ? `${enumLabel(settings.effective.service_tier.provider)} · ${enumLabel(settings.effective.service_tier.value)}`
+      : 'Default',
   ],
 ]
 
@@ -99,7 +100,7 @@ const TextDetail = ({ label, excerpt }: { label: string; excerpt: TextExcerpt })
       <header>
         <strong>{label}</strong>
         <span>
-          offset {excerpt.offset_bytes} B · total {excerpt.total_bytes} B
+          From byte {excerpt.offset_bytes} of {excerpt.total_bytes}
         </span>
       </header>
       <pre>{excerpt.text}</pre>
@@ -122,23 +123,23 @@ const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
   <article className="session-detail-member">
     <Facts
       facts={[
-        ['Goal event', event.type.replaceAll('_', ' ')],
+        ['Goal event', enumLabel(event.type)],
         ['Generation', event.generation],
         [
           'Reason',
           event.type === 'blocked'
-            ? event.reason
+            ? enumLabel(event.reason)
             : event.type === 'session_closed'
-              ? event.outcome
-              : 'not recorded',
+              ? enumLabel(event.outcome)
+              : 'Not recorded',
         ],
       ]}
     />
     {event.type === 'user_stopped' && (
       <Facts
         facts={[
-          ['Settling turn', event.settling_turn_id ?? 'none'],
-          ['Abandoned approved actions', event.abandoned_actions ?? 'settlement pending'],
+          ['Closing turn', event.settling_turn_id ?? 'None'],
+          ['Abandoned approved actions', event.abandoned_actions ?? 'Pending'],
         ]}
       />
     )}
@@ -155,13 +156,13 @@ const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => {
       <Facts
         facts={[
           ['Request', tool.request_id],
-          ['Attempt', physical?.attempt_id ?? 'not issued'],
-          ['State', physical?.state.replaceAll('_', ' ') ?? 'requested'],
-          ['Approval', tool.approval_posture.replaceAll('_', ' ')],
-          ['Effect', physical?.effect_posture.replaceAll('_', ' ') ?? 'not recorded'],
-          ['Sandbox', physical?.sandbox_posture?.replaceAll('_', ' ') ?? 'not recorded'],
-          ['Judge escalated', tool.approval_judge_escalated ? 'yes' : 'no'],
-          ['Cause', physical?.cause ?? 'not recorded'],
+          ['Attempt', physical?.attempt_id ?? 'Not recorded'],
+          ['State', enumLabel(physical?.state ?? 'Requested')],
+          ['Approval', enumLabel(tool.approval_posture)],
+          ['Effect', enumLabel(physical?.effect_posture ?? 'Not recorded')],
+          ['Sandbox', enumLabel(physical?.sandbox_posture ?? 'Not recorded')],
+          ['Judge escalated to user', tool.approval_judge_escalated ? 'Yes' : 'No'],
+          ['Cause', enumLabel(physical?.cause ?? 'Not recorded')],
         ]}
       />
       {tool.arguments && <TextDetail label="Tool arguments" excerpt={tool.arguments} />}
@@ -182,36 +183,36 @@ const delegationProvenanceFacts = (
   switch (provenance.type) {
     case 'child_turn':
       return [
-        ['Provenance', 'child turn'],
-        ['Provenance session', provenance.session_id],
-        ['Provenance turn', provenance.turn_id],
+        ['Source', 'Child turn'],
+        ['Source session', provenance.session_id],
+        ['Source turn', provenance.turn_id],
       ]
     case 'parent_turn_command':
       return [
-        ['Provenance', 'parent turn command'],
-        ['Provenance session', provenance.session_id],
-        ['Provenance turn', provenance.turn_id],
-        ['Provenance command', provenance.command_id],
+        ['Source', 'Parent turn command'],
+        ['Source session', provenance.session_id],
+        ['Source turn', provenance.turn_id],
+        ['Source command', provenance.command_id],
       ]
     case 'parent_lifecycle_command':
       return [
-        ['Provenance', 'parent lifecycle command'],
+        ['Source', 'Parent lifecycle command'],
         ['Session', provenance.session_id],
         ['Command', provenance.command_id],
       ]
     case 'parent_goal_command':
       return [
-        ['Provenance', 'parent goal command'],
-        ['Provenance session', provenance.session_id],
+        ['Source', 'Parent goal command'],
+        ['Source session', provenance.session_id],
         ['Goal generation', provenance.goal_generation],
-        ['Provenance command', provenance.command_id],
+        ['Source command', provenance.command_id],
       ]
   }
 }
 
 const delegationFacts = (detail: DelegationDetail): ReadonlyArray<Fact> => {
   const common: ReadonlyArray<Fact> = [
-    ['Event', detail.type.replaceAll('_', ' ')],
+    ['Event', enumLabel(detail.type)],
     ['Relationship', detail.relationship_id],
   ]
   switch (detail.type) {
@@ -219,11 +220,11 @@ const delegationFacts = (detail: DelegationDetail): ReadonlyArray<Fact> => {
       return [
         ...common,
         ['Child session', detail.child_session_id],
-        ['Policy', detail.policy.type],
+        ['Policy', enumLabel(detail.policy.type)],
         ...(detail.policy.type === 'bound'
           ? ([
-              ['On parent stopped', detail.policy.on_parent_stopped.replaceAll('_', ' ')],
-              ['On parent cancelled', detail.policy.on_parent_cancelled.replaceAll('_', ' ')],
+              ['On parent stopped', enumLabel(detail.policy.on_parent_stopped)],
+              ['On parent cancelled', enumLabel(detail.policy.on_parent_cancelled)],
             ] satisfies ReadonlyArray<Fact>)
           : []),
       ]
@@ -232,23 +233,23 @@ const delegationFacts = (detail: DelegationDetail): ReadonlyArray<Fact> => {
         ...common,
         ['Child session', detail.child_session_id],
         ['Awaiting request', detail.awaiting_request_id],
-        ['Wait mode', detail.mode],
+        ['Wait mode', enumLabel(detail.mode)],
       ]
     case 'child_lifecycle_disposition':
       return [
         ...common,
         ['Child session', detail.child_session_id],
-        ['Event ordinal', detail.event_ordinal],
-        ['Outcome', detail.outcome.replaceAll('_', ' ')],
-        ['Reason', detail.reason.replaceAll('_', ' ')],
+        ['Event number', detail.event_ordinal],
+        ['Outcome', enumLabel(detail.outcome)],
+        ['Reason', enumLabel(detail.reason)],
         ...delegationProvenanceFacts(detail.provenance),
       ]
     case 'child_result':
       return [
         ...common,
         ['Child session', detail.child_session_id],
-        ['Outcome', detail.outcome.replaceAll('_', ' ')],
-        ['Reason', detail.reason.replaceAll('_', ' ')],
+        ['Outcome', enumLabel(detail.outcome)],
+        ['Reason', enumLabel(detail.reason)],
         ...delegationProvenanceFacts(detail.provenance),
       ]
     case 'session_message':
@@ -257,11 +258,11 @@ const delegationFacts = (detail: DelegationDetail): ReadonlyArray<Fact> => {
         ['Message', detail.message_id],
         ['Sender session', detail.sender_session_id],
         ['Recipient session', detail.recipient_session_id],
-        ['Message ordinal', detail.message_ordinal],
-        ['Delivery sequence', detail.delivery_sequence],
+        ['Message number', detail.message_ordinal],
+        ['Delivery order', detail.delivery_sequence],
       ]
     case 'result_wake':
-      return [...common, ['Awaiting request', detail.awaiting_request_id ?? 'not recorded']]
+      return [...common, ['Awaiting request', detail.awaiting_request_id ?? 'Not recorded']]
     case 'message_wake':
       return [...common, ['Message', detail.message_id]]
   }
@@ -274,15 +275,15 @@ const unreachableBody = (body: never): never => {
 const detailContent = (body: DetailBody): ReactNode => {
   switch (body.type) {
     case 'session_state':
-      return <Facts facts={[['State', body.state]]} />
+      return <Facts facts={[['State', enumLabel(body.state)]]} />
     case 'session_terminal':
-      return <Facts facts={[['Outcome', body.outcome.replaceAll('_', ' ')]]} />
+      return <Facts facts={[['Outcome', enumLabel(body.outcome)]]} />
     case 'command_settlement':
       return (
         <Facts
           facts={[
             ['Command', body.command_id],
-            ['Result', body.rejection ?? 'applied'],
+            ['Result', body.rejection ?? 'Applied'],
           ]}
         />
       )
@@ -291,24 +292,24 @@ const detailContent = (body: DetailBody): ReactNode => {
         <Facts
           facts={[
             ['Command', body.command_id],
-            ['Delivery', body.delivered ? 'delivered' : 'not delivered'],
-            ['Turn', body.turn_id ?? 'none'],
-            ['Rejection', body.rejection ?? 'none'],
+            ['Delivery', body.delivered ? 'Delivered' : 'Not delivered'],
+            ['Turn', body.turn_id ?? 'None'],
+            ['Rejection', body.rejection ?? 'None'],
           ]}
         />
       )
     case 'ownership':
-      return <Facts facts={[['Ownership', body.transition.replaceAll('_', ' ')]]} />
+      return <Facts facts={[['Ownership', enumLabel(body.transition)]]} />
     case 'event_fact':
-      return <p>Turn retired before activation.</p>
+      return <p>Turn retired before it started.</p>
 
     case 'session_created':
       return (
         <Facts
           facts={[
-            ['Cause', body.cause.type.replaceAll('_', ' ')],
+            ['Cause', enumLabel(body.cause.type)],
             ...(body.cause.type === 'delegated'
-              ? ([['Spawning request', body.cause.spawning_request_id]] as const)
+              ? ([['Created by request', body.cause.spawning_request_id]] as const)
               : body.cause.type === 'workflow'
                 ? ([['Program run', body.cause.program_run_id]] as const)
                 : body.cause.type === 'interactive'
@@ -316,9 +317,9 @@ const detailContent = (body: DetailBody): ReactNode => {
                   : ([['Dispatch', body.cause.dispatch_id]] as const)),
             ...(body.imported_evidence
               ? ([
-                  ['Origin', 'imported'],
+                  ['Origin', 'Imported'],
                   ['Imported conversation', body.imported_evidence.imported_conversation_id],
-                  ['Relationship', body.imported_evidence.relationship],
+                  ['Relationship', enumLabel(body.imported_evidence.relationship)],
                   ['Imported entry', body.imported_evidence.imported_entry_id],
                   ['Imported position', body.imported_evidence.imported_position],
                 ] as const)
@@ -332,23 +333,23 @@ const detailContent = (body: DetailBody): ReactNode => {
           facts={
             body.detail.type === 'session_defaults_changed'
               ? [
-                  ['Change', 'session defaults changed'],
+                  ['Change', 'Session defaults changed'],
                   ['Command', body.detail.command_id],
                   ['Prior version', body.detail.prior_defaults_version],
                   ['Installed version', body.detail.installed_defaults_version],
                   ['Prior model', modelSelection(body.detail.prior_model)],
                   ['Installed model', modelSelection(body.detail.installed_model)],
-                  ['Caller override', boundedSettingEvidence(body.detail.caller_override)],
+                  ['Override', boundedSettingEvidence(body.detail.caller_override)],
                   ['Prior settings', boundedSettingEvidence(body.detail.prior_settings)],
                   [
-                    'Installed precedence',
+                    'Setting precedence',
                     boundedSettingEvidence(body.detail.installed_settings.precedence),
                   ],
                   ['Adjustments', boundedSettingEvidence(body.detail.adjustments)],
                   ...effectiveSettingsFacts(body.detail.installed_settings),
                 ]
               : [
-                  ['Change', 'turn settings resolved'],
+                  ['Change', 'Turn settings selected'],
                   ['Turn', body.detail.turn_id],
                   ['Accepted input', body.detail.accepted_input_id],
                   ['Defaults version', body.detail.defaults_version],
@@ -356,7 +357,7 @@ const detailContent = (body: DetailBody): ReactNode => {
                   ['Selected model', body.detail.selected_direct_id],
                   [
                     'Adjusted from selection',
-                    body.detail.adjusted_from_selection_id ?? 'not adjusted',
+                    body.detail.adjusted_from_selection_id ?? 'Not adjusted',
                   ],
                   ['Per-call override', boundedSettingEvidence(body.detail.per_call_override)],
                   ['Settings precedence', boundedSettingEvidence(body.detail.settings.precedence)],
@@ -370,7 +371,7 @@ const detailContent = (body: DetailBody): ReactNode => {
       return (
         <>
           <Facts facts={[['Turn', body.turn_id]]} />
-          <TextDetail label="User input" excerpt={body.text} />
+          <TextDetail label="Accepted input" excerpt={body.text} />
           <AttachmentReferences attachments={body.attachments} />
         </>
       )
@@ -385,20 +386,20 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Model', body.model_identity_id],
               ['Request context items', body.request_context_items],
               ['State', modelCallState(body.state)],
-              ['Cause', body.provider_failure_cause ?? 'not recorded'],
-              ['Input tokens', body.usage.input_tokens ?? 'not reported'],
-              ['Output tokens', body.usage.output_tokens ?? 'not reported'],
+              ['Cause', enumLabel(body.provider_failure_cause ?? 'Not recorded')],
+              ['Input tokens', body.usage.input_tokens ?? 'Not reported'],
+              ['Output tokens', body.usage.output_tokens ?? 'Not reported'],
               [
                 'Cache creation input tokens',
-                body.usage.cache_creation_input_tokens ?? 'not reported',
+                body.usage.cache_creation_input_tokens ?? 'Not reported',
               ],
-              ['Cache read input tokens', body.usage.cache_read_input_tokens ?? 'not reported'],
+              ['Cache read input tokens', body.usage.cache_read_input_tokens ?? 'Not reported'],
             ]}
           />
           {body.response ? (
             <TextDetail label="Model response" excerpt={body.response} />
           ) : (
-            <p className="session-detail-note">No response text was recorded at this checkpoint.</p>
+            <p className="session-detail-note">No response text at this checkpoint.</p>
           )}
         </>
       )
@@ -410,21 +411,21 @@ const detailContent = (body: DetailBody): ReactNode => {
           <Facts
             facts={[
               ['Turn', body.turn_id],
-              ['Producing call', body.producing_model_call_id],
-              ['State', body.state.type.replaceAll('_', ' ')],
+              ['Model call', body.producing_model_call_id],
+              ['State', enumLabel(body.state.type)],
               [
-                body.state.type === 'recovery_required' ? 'Recovery attempt' : 'Frontier',
+                body.state.type === 'recovery_required' ? 'Recovery attempt' : 'Frontier ID',
                 body.state.type === 'recovery_required'
                   ? body.state.tool_attempt_id
                   : body.state.frontier_id,
               ],
-              ['Member index', body.projected_member_index ?? 'none'],
-              ['Tool attempts in this page', String(body.tools.length)],
-              ['Goal events in this page', String(body.goal_events.length)],
+              ['Item number', body.projected_member_index ?? 'None'],
+              ['Tool requests', String(body.tools.length)],
+              ['Goal events', String(body.goal_events.length)],
             ]}
           />
           {tools.length > 0 && (
-            <section className="session-detail-members" aria-label="Tool attempts">
+            <section className="session-detail-members" aria-label="Tool requests">
               {tools.map((tool) => (
                 <ToolAttemptDetail key={tool.request_id} tool={tool} />
               ))}
@@ -460,9 +461,9 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Tool', body.tool_name],
               ['Request', body.request_id],
               ['Turn', body.turn_id],
-              ['Decision', body.decision.replaceAll('_', ' ')],
-              ['Source', body.actor.type.replaceAll('_', ' ')],
-              ['Judge escalated', body.approval_judge_escalated ? 'yes' : 'no'],
+              ['Decision', enumLabel(body.decision)],
+              ['Source', enumLabel(body.actor.type)],
+              ['Judge escalated to user', body.approval_judge_escalated ? 'Yes' : 'No'],
               ...actorFacts,
             ]}
           />
@@ -480,8 +481,8 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Compaction', body.compaction_id],
               ['Model call', body.model_call_id],
               ['Summary entry', body.summary_entry_id],
-              ['Result frontier', body.result_frontier_id],
-              ['Through position', body.through_position],
+              ['Result ID', body.result_frontier_id],
+              ['Up to position', body.through_position],
             ]}
           />
           <TextDetail label="Compaction summary" excerpt={body.summary} />
@@ -492,8 +493,8 @@ const detailContent = (body: DetailBody): ReactNode => {
         <Facts
           facts={[
             ['Turn', body.turn_id],
-            ['Lifecycle', body.lifecycle],
-            ['Cause', body.cause_code],
+            ['Status', enumLabel(body.lifecycle)],
+            ['Cause', enumLabel(body.cause_code)],
           ]}
         />
       )
@@ -508,8 +509,8 @@ const detailContent = (body: DetailBody): ReactNode => {
                 ? body.operation.model_call_id
                 : body.operation.tool_attempt_id,
             ],
-            ['Kind', body.operation.type.replaceAll('_', ' ')],
-            ['Terminal frontier', body.terminal_frontier_id],
+            ['Kind', enumLabel(body.operation.type)],
+            ['Final ID', body.terminal_frontier_id],
           ]}
         />
       )
@@ -518,10 +519,10 @@ const detailContent = (body: DetailBody): ReactNode => {
         <Facts
           facts={[
             ['Runner', body.runner_id],
-            ['State', body.state.replaceAll('_', ' ')],
+            ['State', enumLabel(body.state)],
             ['Placement revision', body.placement_revision],
-            ['Sandbox', body.sandbox_posture.replaceAll('_', ' ')],
-            ['Working directory', body.working_directory ?? 'not recorded'],
+            ['Sandbox', enumLabel(body.sandbox_posture)],
+            ['Working directory', body.working_directory ?? 'Not recorded'],
           ]}
         />
       )
@@ -574,22 +575,20 @@ export function SessionItemDetail({
       ),
     gcTime: 0,
   })
+  useEffect(() => {
+    if (detail.error) console.error('Detail load failed', detail.error)
+  }, [detail.error])
   const record = detail.data?.items[0]
   const compatible =
     record && record.kind === item.kind && isCompatibleDetailBody(record.kind, record.body)
   const continuation = compatible ? detail.data?.continuation : null
   let content: ReactNode
-  if (detail.isError) content = <p role="alert">Detail unavailable: {detail.error.message}</p>
-  else if (!detail.data) content = <p role="status">Loading typed detail…</p>
-  else if (!compatible)
-    content = (
-      <p role="alert">
-        Detail rejected because its event kind or body did not match the selected header.
-      </p>
-    )
+  if (detail.isError) content = <p role="alert">Details couldn't be loaded.</p>
+  else if (!detail.data) content = <p role="status">Loading…</p>
+  else if (!compatible) content = <p role="alert">Details didn't match this event.</p>
   else content = detailContent(record.body)
   return (
-    <article aria-label={`${item.kind.replaceAll('_', ' ')} detail`}>
+    <article aria-label={`${enumLabel(item.kind)} detail`}>
       {content}
       {continuation || cursor ? (
         <button
@@ -604,7 +603,7 @@ export function SessionItemDetail({
             } else onComplete()
           }}
         >
-          {detail.isPending || continuation ? 'Load next detail chunk' : 'Return to event'}
+          {detail.isPending || continuation ? 'Load more' : 'Return to event'}
         </button>
       ) : null}
     </article>

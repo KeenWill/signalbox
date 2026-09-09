@@ -77,7 +77,7 @@ const errorMessage = (error: Error): string => {
     return `${error.response.error.code}: ${error.message}`
   }
   if (error instanceof ProductTransportError) return error.message
-  return 'The descriptor response did not match the generated web contract.'
+  return 'The server sent an unexpected response.'
 }
 
 export function ArtifactInspector({
@@ -163,7 +163,7 @@ export function ArtifactInspector({
       </header>
       {!available ? (
         <div className="artifact-capability" role="status">
-          Blob delivery unavailable
+          Stored content lookup unavailable
         </div>
       ) : (
         <form onSubmit={resolveDescriptor}>
@@ -181,7 +181,7 @@ export function ArtifactInspector({
             />
           </label>
           <label>
-            Declared media type
+            Media type (as declared)
             <input
               name="media-type"
               value={mediaType}
@@ -197,12 +197,12 @@ export function ArtifactInspector({
               name="display-filename"
               value={displayFilename}
               onChange={(event) => onStateChange({ ...state, displayFilename: event.target.value })}
-              placeholder="evidence.png"
+              placeholder="example.png"
               autoComplete="off"
             />
           </label>
           <button type="submit" disabled={descriptor.isFetching}>
-            {descriptor.isFetching ? 'Resolving…' : 'Resolve descriptor'}
+            {descriptor.isFetching ? 'Looking up…' : 'Look up'}
           </button>
         </form>
       )}
@@ -249,7 +249,7 @@ export function ArtifactInspector({
       {artifact !== null && (
         <>
           <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-            Resolved artifact {artifact.displayName}
+            Found {artifact.displayName}
           </span>
           <ArtifactRenderer
             key={artifact.id}

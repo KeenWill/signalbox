@@ -10,11 +10,12 @@ import type {
   WebUsageCallPage,
   WebUsageSummary,
 } from './generated/web-contract.mjs'
+import { enumLabel } from './labels'
 import type { SearchUsageSource, UsageFilters } from './search-usage/model'
 
 const SEARCH_PAGE_ITEMS = 72
 const USAGE_PAGE_ITEMS = 100
-// Tunable effective ceilings: repeated "Load next bounded page" evicts the oldest retained page
+// Tunable effective ceilings: repeated "Load more" evicts the oldest retained page
 // instead of accumulating every visited page for the lifetime of the surface, so retained browser
 // records stay bounded by pages x per-page items rather than by how long an operator paginates.
 const SEARCH_RETAINED_PAGES = 6
@@ -52,8 +53,8 @@ export const tokenSummary = (tokens: UsageCall['tokens']): string =>
 
 const costText = (cost: UsageCall['cost']): string =>
   cost.status === 'derived'
-    ? `$${cost.amount_usd} · ${cost.label.replaceAll('_', ' ')} · ${cost.rate_version}`
-    : `Unavailable · ${cost.reason.replaceAll('_', ' ')}`
+    ? `$${cost.amount_usd} · ${enumLabel(cost.label)} · ${cost.rate_version}`
+    : `Unavailable · ${enumLabel(cost.reason)}`
 
 export const searchResultIdentity = (result: SearchResult): string =>
   `${result.session_id}:${result.address.event_sequence}:${result.projection_id}`
@@ -163,7 +164,7 @@ function SearchResults({
         ref={parentRef}
         className="virtual-scroll search-results"
         role="listbox"
-        aria-label="Lexical search results"
+        aria-label="Search results"
         aria-activedescendant={selected >= 0 ? `search-result-${selected}` : undefined}
         tabIndex={0}
         onKeyDown={onKeyDown}
@@ -192,7 +193,7 @@ function SearchResults({
               >
                 <span className="result-address">@{result.address.event_sequence}</span>
                 <span className="result-copy">
-                  <strong>{result.content_class.replaceAll('_', ' ')}</strong>
+                  <strong>{enumLabel(result.content_class)}</strong>
                   <span>
                     {snippetParts(result).map((part, index) =>
                       part.highlighted ? (
@@ -205,9 +206,7 @@ function SearchResults({
                     )}
                   </span>
                 </span>
-                <span className="result-source-kind">
-                  {result.source.kind.replaceAll('_', ' ')}
-                </span>
+                <span className="result-source-kind">{enumLabel(result.source.kind)}</span>
               </div>
             )
           })}
@@ -215,7 +214,7 @@ function SearchResults({
       </div>
       {hasNextPage && (
         <button type="button" className="load-more" onClick={loadNextPage}>
-          Load next bounded page
+          Load more
         </button>
       )}
     </div>
@@ -246,12 +245,12 @@ function UsageTable({
       },
       {
         accessorKey: 'provenance',
-        header: 'Evidence',
+        header: 'Source',
         cell: ({ row }) =>
-          `${row.original.provenance} · ${row.original.call_kind.replaceAll('_', ' ')}`,
+          `${enumLabel(row.original.provenance)} · ${enumLabel(row.original.call_kind)}`,
       },
-      { id: 'tokens', header: 'Token axes', cell: ({ row }) => tokenSummary(row.original.tokens) },
-      { id: 'cost', header: 'Configured cost', cell: ({ row }) => costText(row.original.cost) },
+      { id: 'tokens', header: 'Tokens', cell: ({ row }) => tokenSummary(row.original.tokens) },
+      { id: 'cost', header: 'Cost', cell: ({ row }) => costText(row.original.cost) },
     ],
     [],
   )
@@ -321,7 +320,7 @@ function UsageTable({
       </div>
       {hasNextPage && (
         <button type="button" className="load-more" onClick={loadNextPage}>
-          Load next call page
+          Load more
         </button>
       )}
     </div>
@@ -435,7 +434,6 @@ export function SearchUsageWorkbench({
     <section className="search-usage-panel" aria-labelledby="search-usage-heading">
       <header className="search-usage-header">
         <div>
-          <span className="eyebrow">Dedicated projections</span>
           <h2 id="search-usage-heading">Search and usage</h2>
         </div>
         <div className="surface-tabs" role="tablist" aria-label="Search and usage views">
@@ -470,8 +468,8 @@ export function SearchUsageWorkbench({
             <Search aria-hidden="true" />
             <input
               id="lexical-search-input"
-              aria-label="Search canonical session evidence"
-              placeholder="Search canonical evidence"
+              aria-label="Search sessions"
+              placeholder="Search"
               value={draftQuery}
               onChange={(event) => setDraftQuery(event.target.value)}
             />
@@ -492,20 +490,18 @@ export function SearchUsageWorkbench({
               </button>
             </fieldset>
             <button type="submit" className="primary-button">
-              Run lexical search
+              Search
             </button>
           </form>
           <div className="surface-status" aria-live="polite">
             <span>{results.length} loaded</span>
-            <span>Arrow keys navigate · Enter reveals unloaded context</span>
-            {revealState === 'loading' && <span>Loading surrounding timeline window…</span>}
-            {revealState === 'failed' && (
-              <span role="alert">Match context could not be revealed.</span>
-            )}
+            <span>↑↓ to move · Enter to open</span>
+            {revealState === 'loading' && <span>Loading context…</span>}
+            {revealState === 'failed' && <span role="alert">Couldn't open this result.</span>}
           </div>
           {searchQuery.isError ? (
             <p className="surface-error" role="alert">
-              Search projection could not answer this bounded query.
+              Search failed.
             </p>
           ) : (
             <SearchResults
@@ -552,7 +548,7 @@ export function SearchUsageWorkbench({
                   onRouteChange({ modelId: undefined, provenance: undefined, callKind: undefined })
                 }
               >
-                Clear drill-down
+                Clear filters
               </button>
             )}
           </div>
@@ -571,19 +567,17 @@ export function SearchUsageWorkbench({
               >
                 <span>{shortIdentity(group.model_id)}</span>
                 <strong>
-                  {group.provenance} · {group.call_count} calls
+                  {enumLabel(group.provenance)} · {group.call_count} calls
                 </strong>
                 <small>{tokenSummary(group.tokens)}</small>
                 <small>{costText(group.cost)}</small>
               </button>
             ))}
           </section>
-          {usageSummary.data?.truncated && (
-            <p className="surface-warning">Summary reached an advertised safety ceiling.</p>
-          )}
+          {usageSummary.data?.truncated && <p className="surface-warning">Summary is truncated.</p>}
           {usageSummary.isError || usageCalls.isError ? (
             <p className="surface-error" role="alert">
-              Usage projection could not answer this bounded query.
+              Usage data failed to load.
             </p>
           ) : (
             <UsageTable
