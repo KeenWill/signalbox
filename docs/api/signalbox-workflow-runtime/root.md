@@ -156,6 +156,7 @@ impl WorkflowHost {
     pub const fn new(
         journal: signalbox_persistence::program_journal::ProgramJournalRepository,
     ) -> Self;
+    pub fn with_native_catalog(self, catalog: native::NativeCatalog) -> Self;
     pub async fn session_capability(
         &self,
         run: signalbox_domain::ProgramRunId,

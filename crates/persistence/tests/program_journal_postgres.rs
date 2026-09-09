@@ -876,9 +876,18 @@ async fn registrations_distinguish_names_and_grants_and_pin_run_authority()
         .await?;
     assert_ne!(first.id, renamed.id);
     assert_ne!(first.id, different_grants.id);
-    assert_ne!(first.content.source_digest, first.artifact_digest);
-    assert_eq!(first.artifact_digest, renamed.artifact_digest);
-    assert_eq!(first.content.source_digest, renamed.content.source_digest);
+    let signalbox_domain::program_registration::ProgramExecutable::JavaScript {
+        source_digest,
+        artifact,
+    } = &first.content.executable
+    else {
+        panic!("JavaScript registration retains its artifact");
+    };
+    assert_ne!(
+        *source_digest,
+        signalbox_domain::program_registration::ProgramContentDigest::of(artifact.as_bytes())
+    );
+    assert_eq!(first.content.executable, renamed.content.executable);
     let run = repository
         .start_run(
             signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
