@@ -5,10 +5,9 @@ reports a scorecard.
 
 ## Overview
 
-The evaluation system defines, on top of the
-[program substrate](program-substrate.md), what an evaluation is and what its
-corpus and expectations are. Its recording schema lives in the migrations. Only
-the approval-judge harness is built.
+The evaluation system defines, on top of the [workflows](workflows.md) layer,
+what an evaluation is and what its corpus and expectations are. Its recording
+schema lives in the migrations. Only the approval-judge harness is built.
 
 The harness is the `signalbox-approval-judge-eval` workspace crate, a temporary
 standalone evaluation surface for the three-disposition approval judge that the
@@ -48,7 +47,7 @@ harness, because it spends provider quota.
   [design](../design/eval-system.md).
 - Reference artifacts pinned by digest as immutable blobs under the contract
   [blob storage](blob-storage.md) owns: [design](../design/eval-system.md).
-- Judge evaluations on the program substrate, after which the judge-specific
+- Judge evaluations on the workflows layer, after which the judge-specific
   tables and their data are dropped without migration:
   [design](../design/eval-system.md).
 - The judge-specific recording surface is temporary; nothing may build on it in

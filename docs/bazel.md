@@ -78,7 +78,7 @@ Docker, run a suite by its manifest name (hyphens become underscores):
 
 ```bash
 bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:postgres_persistence
-bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:postgres_program_runtime
+bazel test --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:postgres_workflow_runtime
 ```
 
 Daemon PostgreSQL targets use Cargo's sorted JSON map feature selection; the

@@ -700,11 +700,11 @@ open and bind no implementation:
   a need because it adds invalidation and reader-retirement law without
   improving correctness.
 
-## Program substrate and evaluations
+## Workflows and evaluations
 
 The substrate and evaluation contracts are owned by
-[program-substrate](spec/program-substrate.md) and
-[eval-system](spec/eval-system.md). Two edges remain deferred:
+[workflows](spec/workflows.md) and [eval-system](spec/eval-system.md). Two edges
+remain deferred:
 
 - **Remote and out-of-process program hosts.** The frame protocol is the seam;
   only the in-daemon host is committed. Hosting programs in a separate
@@ -726,7 +726,7 @@ and ordering.
   cancellation for client-facing standing update subscriptions require a future
   foundation decision. Blocks the planned callback surface. Individual program
   event waits use the request identity committed in
-  [workflows design](design/program-substrate.md#waits).
+  [workflows design](design/workflows.md#waits).
 - **Review-workflow orchestration.** The
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
   pass, finding, external-link, and store contracts. The caller-driven
