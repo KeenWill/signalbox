@@ -504,8 +504,9 @@ pub(crate) async fn restore_module_park_in_transaction(
     {
         return Ok(false);
     }
-    lift_park_from_held(connection, held, LifecycleActor::Module { module }, true).await?;
-    Ok(true)
+    let restored =
+        lift_park_from_held(connection, held, LifecycleActor::Module { module }, true).await?;
+    Ok(!restored.is_parked())
 }
 
 async fn lift_park_in_transaction(
@@ -542,6 +543,49 @@ async fn lift_park_from_held(
         return Err(SessionLifecycleRepositoryError::Rejected(
             SessionLifecycleRejection::TransitionNotAdmitted,
         ));
+    }
+    if let SessionLifecycleState::Parked {
+        cause: SessionParkCause::ModulePark,
+        standing,
+        ..
+    } = held.state
+    {
+        let convergence_park: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM convergence_sweep_target
+                 WHERE enrolled AND state_kind = 'parked'
+                   AND parked_session_id = $1
+            )",
+        )
+        .bind(session_id_to_uuid(held.session))
+        .fetch_one(&mut *connection)
+        .await?;
+        if convergence_park {
+            let responder = SessionParkResponder::Module {
+                module: DispatchingModule::CommissionedDispatch,
+            };
+            let (kind, module, turn, request) = encode_actor(actor);
+            // The park stays in force; only its responsible module changes.
+            sqlx::query(
+                "UPDATE session_lifecycle
+                    SET parked_responder = $2, actor_kind = $3, actor_module = $4,
+                        actor_turn_id = $5, actor_tool_request_id = $6
+                  WHERE session_id = $1",
+            )
+            .bind(session_id_to_uuid(held.session))
+            .bind(park_responder_to_str(responder))
+            .bind(kind)
+            .bind(module)
+            .bind(turn)
+            .bind(request)
+            .execute(&mut *connection)
+            .await?;
+            return Ok(SessionLifecycleState::Parked {
+                cause: SessionParkCause::ModulePark,
+                responder,
+                standing,
+            });
+        }
     }
     let admission_state: Option<String> = sqlx::query_scalar(
         "SELECT CASE

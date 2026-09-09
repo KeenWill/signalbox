@@ -7,7 +7,7 @@ use crate::{
     },
     failure::LocalGitFailure,
     layout::parse_full_object_id,
-    limits::{MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_REPOSITORY_INSPECTIONS},
+    limits::{MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_REPOSITORY_INSPECTIONS, MAX_SHALLOW_ENTRIES},
     pinning::{PinnedRepository, RepositoryShell},
 };
 use flate2::read::ZlibDecoder;
@@ -51,61 +51,64 @@ impl PushObjectSnapshot {
         let database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
         let mut source = ObjectSource::open(authority, deadline)?;
         let mut excluded = BTreeSet::new();
+        let mut boundaries = BTreeSet::new();
         if let Some(fence) = fence {
-            source.capture(&database, fence)?;
-            let commit = repository
-                .find_commit(fence)
-                .map_err(|_| LocalGitFailure::Operation)?;
-            let mut trees = vec![commit.tree_id()];
-            while let Some(tree) = trees.pop() {
-                source.check_deadline()?;
-                if !excluded.insert(tree) {
-                    continue;
-                }
-                source.capture(&database, tree)?;
-                for entry in &repository
-                    .find_tree(tree)
-                    .map_err(|_| LocalGitFailure::Operation)?
-                {
-                    match entry.kind() {
-                        Some(ObjectType::Tree) => trees.push(entry.id()),
-                        Some(ObjectType::Blob) => {
-                            excluded.insert(entry.id());
-                        }
-                        Some(ObjectType::Commit) => {}
-                        _ => return Err(LocalGitFailure::Repository),
-                    }
-                }
-                if excluded.len() > MAX_REPOSITORY_INSPECTIONS {
-                    return Err(LocalGitFailure::Repository);
-                }
-            }
-            fs::write(repository.path().join("shallow"), format!("{fence}\n"))
-                .map_err(|_| LocalGitFailure::Operation)?;
+            retain_boundary(&repository, &mut source, fence, &mut excluded)?;
+            boundaries.insert(fence);
         }
         let mut commits = vec![target];
         let mut visited = BTreeSet::new();
+        let mut fence_ancestors: Option<(BTreeSet<Oid>, ObjectSource)> = None;
         let mut trees = Vec::new();
         while let Some(commit) = commits.pop() {
             source.check_deadline()?;
             if !visited.insert(commit) {
                 continue;
             }
-            if visited.len() > MAX_REPOSITORY_INSPECTIONS {
+            if visited
+                .len()
+                .saturating_add(fence_ancestors.as_ref().map_or(0, |(ancestors, _)| ancestors.len()))
+                > MAX_REPOSITORY_INSPECTIONS
+            {
                 return Err(LocalGitFailure::Repository);
             }
             if Some(commit) == fence {
+                continue;
+            }
+            if fence_ancestors
+                .as_ref()
+                .is_some_and(|(ancestors, _)| ancestors.contains(&commit))
+            {
+                boundaries.insert(commit);
+                if boundaries.len() > MAX_SHALLOW_ENTRIES {
+                    return Err(LocalGitFailure::Repository);
+                }
+                retain_boundary(&repository, &mut source, commit, &mut excluded)?;
                 continue;
             }
             source.capture(&database, commit)?;
             let commit = repository
                 .find_commit(commit)
                 .map_err(|_| LocalGitFailure::Operation)?;
+            if commit.parent_count() > 1
+                && fence_ancestors.is_none()
+                && let Some(fence) = fence
+            {
+                fence_ancestors = Some(capture_fence_ancestors(authority, deadline, fence)?);
+            }
             trees.push(commit.tree_id());
             commits.extend(commit.parent_ids());
         }
         if fence.is_some_and(|fence| !visited.contains(&fence)) {
             return Err(LocalGitFailure::Operation);
+        }
+        if !boundaries.is_empty() {
+            let shallow = boundaries
+                .iter()
+                .map(|boundary| format!("{boundary}\n"))
+                .collect::<String>();
+            fs::write(repository.path().join("shallow"), shallow)
+                .map_err(|_| LocalGitFailure::Operation)?;
         }
         while let Some(tree) = trees.pop() {
             source.check_deadline()?;
@@ -132,6 +135,9 @@ impl PushObjectSnapshot {
                 return Err(LocalGitFailure::Repository);
             }
         }
+        if let Some((_, graph_source)) = &fence_ancestors {
+            graph_source.validate(authority)?;
+        }
         source.validate(authority)?;
         source.publish_private_packs(&repository.path().join("objects/pack"))?;
         drop(database);
@@ -140,10 +146,75 @@ impl PushObjectSnapshot {
     }
 }
 
+fn capture_fence_ancestors(
+    authority: &PinnedRepository,
+    deadline: Instant,
+    fence: Oid,
+) -> Result<(BTreeSet<Oid>, ObjectSource), LocalGitFailure> {
+    let graph = authority.open_repository_shell()?;
+    let database = graph.odb().map_err(|_| LocalGitFailure::Operation)?;
+    let mut source = ObjectSource::open(authority, deadline)?;
+    let mut pending = vec![fence];
+    let mut ancestors = BTreeSet::new();
+    while let Some(oid) = pending.pop() {
+        source.check_deadline()?;
+        if !ancestors.insert(oid) {
+            continue;
+        }
+        if ancestors.len() > MAX_REPOSITORY_INSPECTIONS {
+            return Err(LocalGitFailure::Repository);
+        }
+        source.capture(&database, oid)?;
+        let commit = graph
+            .find_commit(oid)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pending.extend(commit.parent_ids());
+    }
+    Ok((ancestors, source))
+}
+
+fn retain_boundary(
+    repository: &RepositoryShell,
+    source: &mut ObjectSource,
+    boundary: Oid,
+    excluded: &mut BTreeSet<Oid>,
+) -> Result<(), LocalGitFailure> {
+    let database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
+    source.capture(&database, boundary)?;
+    let commit = repository
+        .find_commit(boundary)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let mut trees = vec![commit.tree_id()];
+    while let Some(tree) = trees.pop() {
+        source.check_deadline()?;
+        if !excluded.insert(tree) {
+            continue;
+        }
+        source.capture(&database, tree)?;
+        for entry in &repository
+            .find_tree(tree)
+            .map_err(|_| LocalGitFailure::Operation)?
+        {
+            match entry.kind() {
+                Some(ObjectType::Tree) => trees.push(entry.id()),
+                Some(ObjectType::Blob) => {
+                    excluded.insert(entry.id());
+                }
+                Some(ObjectType::Commit) => {}
+                _ => return Err(LocalGitFailure::Repository),
+            }
+        }
+        if excluded.len() > MAX_REPOSITORY_INSPECTIONS {
+            return Err(LocalGitFailure::Repository);
+        }
+    }
+    Ok(())
+}
+
 struct SourceFile {
     directory: usize,
     name: PathBuf,
-    file: File,
+    file: Option<File>,
     identity: FileSnapshotIdentity,
 }
 
@@ -363,7 +434,7 @@ impl ObjectSource {
         self.files.push(SourceFile {
             directory,
             name: PathBuf::from(path.file_name().ok_or(LocalGitFailure::Repository)?),
-            file,
+            file: Some(file),
             identity,
         });
         if self.files.len() > MAX_REPOSITORY_INSPECTIONS {
@@ -380,7 +451,12 @@ impl ObjectSource {
     ) -> Result<Vec<u8>, LocalGitFailure> {
         self.check_deadline()?;
         let entry = &self.files[source];
-        let mut file = entry.file.try_clone().map_err(rejected)?;
+        let mut file = entry
+            .file
+            .as_ref()
+            .ok_or(LocalGitFailure::Repository)?
+            .try_clone()
+            .map_err(rejected)?;
         file.seek(SeekFrom::Start(offset as u64))
             .map_err(rejected)?;
         let mut bytes = vec![0; length];
@@ -506,11 +582,13 @@ impl ObjectSource {
         let path = PathBuf::from(&hex[..2]).join(&hex[2..]);
         if open_child(&self.objects, &path).is_ok() {
             let source = self.open_file(&path)?;
-            let file = self.files[source].file.try_clone().map_err(rejected)?;
+            let file = self.files[source].file.as_ref().ok_or(LocalGitFailure::Repository)?.try_clone().map_err(rejected)?;
             let mut content = self.decode_loose(file)?;
             if self.store(database, &mut content)? != oid {
                 return Err(LocalGitFailure::Repository);
             }
+            // Keep the source identity while releasing verified loose-object descriptors.
+            self.files[source].file = None;
             return Ok(());
         }
         self.capture_pack(database, oid)
@@ -578,7 +656,12 @@ impl ObjectSource {
             if offset < 12 || offset >= pack.end {
                 return Err(LocalGitFailure::Repository);
             }
-            let mut file = self.files[pack.source].file.try_clone().map_err(rejected)?;
+            let mut file = self.files[pack.source]
+                .file
+                .as_ref()
+                .ok_or(LocalGitFailure::Repository)?
+                .try_clone()
+                .map_err(rejected)?;
             file.seek(SeekFrom::Start(offset as u64))
                 .map_err(rejected)?;
             let mut remaining = file.take((pack.end - offset) as u64);
@@ -693,9 +776,11 @@ impl ObjectSource {
                 )
                 .map_err(rejected)?,
             );
-            if file_snapshot_identity(&current.metadata().map_err(rejected)?) != entry.identity
-                || file_snapshot_identity(&entry.file.metadata().map_err(rejected)?)
-                    != entry.identity
+            if file_snapshot_identity(&current.metadata().map_err(rejected)?) != entry.identity {
+                return Err(LocalGitFailure::Repository);
+            }
+            if let Some(file) = &entry.file
+                && file_snapshot_identity(&file.metadata().map_err(rejected)?) != entry.identity
             {
                 return Err(LocalGitFailure::Repository);
             }

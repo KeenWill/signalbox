@@ -4,6 +4,62 @@ import XCTest
 @testable import SignalboxNative
 
 final class ProcessProtocolTests: XCTestCase {
+  func testProgramReadRetainsExactResultBytes() throws {
+    let json = #"{"type":"program_run_read","run_id":"11111111-1111-4111-8111-111111111111","run":{"registration_id":"22222222-2222-4222-8222-222222222222","input":[0,255],"input_extent":{"kind":"complete"},"outcome":{"state":"succeeded","result":[128,0],"result_extent":{"kind":"complete"}}}}"#
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self, from: Data(json.utf8))
+    guard case .programRunRead(let runID, let run) = message else {
+      return XCTFail("Expected a decoded program run")
+    }
+    XCTAssertEqual(runID.rawValue, "11111111-1111-4111-8111-111111111111")
+    XCTAssertEqual(run.registrationID.rawValue, "22222222-2222-4222-8222-222222222222")
+    XCTAssertEqual(run.input, [0, 255])
+    XCTAssertEqual(run.inputExtent, .complete)
+    XCTAssertEqual(run.outcome, .succeeded(result: [128, 0], resultExtent: .complete))
+  }
+
+  func testProgramSuccessRequiresResultAndRejectsUnknownFields() throws {
+    XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(
+      SignalboxProgramRunState.self, from: Data(#"{"state":"succeeded"}"#.utf8)))
+    XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(
+      SignalboxProgramRunState.self, from: Data(#"{"state":"cancelled","result":[]}"#.utf8)))
+  }
+
+  func testProgramReadDecodesTruncatedByteExtents() throws {
+    let json = #"{"registration_id":"22222222-2222-4222-8222-222222222222","input":[255],"input_extent":{"kind":"truncated","total_bytes":3000000},"outcome":{"state":"succeeded","result":[],"result_extent":{"kind":"truncated","total_bytes":5000000}}}"#
+    let run = try SignalboxJSONCoding.decoder().decode(SignalboxProgramRun.self, from: Data(json.utf8))
+    XCTAssertEqual(run.inputExtent, .truncated(totalBytes: 3000000))
+    XCTAssertEqual(run.outcome, .succeeded(result: [], resultExtent: .truncated(totalBytes: 5000000)))
+    XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(
+      SignalboxProgramByteExtent.self, from: Data(#"{"kind":"truncated"}"#.utf8)))
+    XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(
+      SignalboxProgramByteExtent.self, from: Data(#"{"kind":"complete","total_bytes":0}"#.utf8)))
+  }
+
+  func testProgramCancellationDecodesBoundedSuccess() throws {
+    let json = #"{"type":"program_run_cancellation_receipt","command_id":"33333333-3333-4333-8333-333333333333","run_id":"11111111-1111-4111-8111-111111111111","outcome":{"kind":"already_terminal","terminal_state":"succeeded","result":[0,255],"result_extent":{"kind":"truncated","total_bytes":5242880}}}"#
+    let message = try SignalboxJSONCoding.decoder().decode(SignalboxProcessServerMessage.self, from: Data(json.utf8))
+    guard case .programRunCancellationReceipt(let commandID, let runID, let outcome) = message else {
+      return XCTFail("Expected a cancellation receipt")
+    }
+    XCTAssertEqual(commandID.rawValue.rawValue, "33333333-3333-4333-8333-333333333333")
+    XCTAssertEqual(runID.rawValue, "11111111-1111-4111-8111-111111111111")
+    XCTAssertEqual(outcome, .alreadySucceeded(result: [0, 255], resultExtent: .truncated(totalBytes: 5242880)))
+  }
+
+  func testProgramCancellationRequiresTheExtentOnlyForSuccess() throws {
+    for json in [
+      #"{"kind":"already_terminal","terminal_state":"succeeded","result":[]}"#,
+      #"{"kind":"already_terminal","terminal_state":"cancelled","result":null,"result_extent":{"kind":"complete"}}"#,
+      #"{"kind":"applied","terminal_state":"cancelled"}"#,
+      #"{"kind":"already_terminal","terminal_state":"faulted","result":[0]}"#
+    ] {
+      XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(SignalboxProgramCancellationOutcome.self, from: Data(json.utf8)), json)
+    }
+    let cancelled = #"{"kind":"applied","terminal_state":"cancelled","result":null}"#
+    XCTAssertEqual(try SignalboxJSONCoding.decoder().decode(SignalboxProgramCancellationOutcome.self, from: Data(cancelled.utf8)), .applied)
+  }
+
   private let sessionID = "11111111-1111-4111-8111-111111111111"
   private let turnID = "22222222-2222-4222-8222-222222222222"
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"

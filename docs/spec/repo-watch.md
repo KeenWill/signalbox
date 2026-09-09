@@ -245,9 +245,11 @@ the last action releases. A sticky stop keeps redispatch suppressed for that
 key.
 
 Goal commissioning or resumption releases the dispatched session's held start
-gate. Goal achievement or a user-stopped goal issues a parent-only sticky stop.
-A close or merge fact with a repository event ordinal after the dispatch event
-issues a parent-only sticky stop for its live dispatched session, with
+gate. A user-stopped goal issues a parent-only sticky stop. An achieved session
+releases its singleton on terminal settlement; a later matching pull-request
+event commissions a fresh session and goal under the rule's cooldown. A close or
+merge fact with a repository event ordinal after the dispatch event issues a
+parent-only sticky stop for its live dispatched session, with
 `pull_request_closed` or `pull_request_merged` retained as the ledger reason; an
 already terminal session is left alone. Reactions check durable core terminal
 facts before recording retirement or submitting its stop, including facts still

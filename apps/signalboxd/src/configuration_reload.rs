@@ -134,6 +134,52 @@ impl ConfigurationReload {
             })
             .collect()
     }
+    pub(crate) async fn goal_github_client(
+        &self,
+        repository: &str,
+    ) -> Result<signalbox_module_repo_watch_v2::github::GitHubClient, ()> {
+        use signalbox_model_runtime::{CredentialAccess, CredentialReference};
+        let catalogs = self.catalogs();
+        if let Some(watched) = catalogs
+            .models
+            .repository_watch()
+            .into_iter()
+            .flat_map(|watch| watch.repositories())
+            .find(|watched| watched.repository().as_str() == repository)
+        {
+            return crate::repo_watch_credentials::RepositoryWatchClientLoader::new(watched)
+                .load()
+                .await
+                .map_err(|_| ());
+        }
+        let path = self.github_tool_credential.as_ref().ok_or(())?;
+        let reference =
+            CredentialReference::new(signalbox_tools_code_host::CODE_HOST_CREDENTIAL_REFERENCE);
+        let credential = crate::FileCredentialAccess::new(path.clone(), reference.clone())
+            .resolve(&reference)
+            .await
+            .map_err(|_| ())?;
+        let token = std::str::from_utf8(credential.expose_bytes()).map_err(|_| ())?;
+        signalbox_module_repo_watch_v2::github::GitHubClient::try_new(
+            "signalbox-goal-verification",
+            token,
+        )
+        .map_err(|_| ())
+    }
+
+    pub(crate) async fn goal_dispatch_authority(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> Result<
+        Option<signalbox_application::ApprovalJudgeDispatchAuthority>,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        match &self.watch {
+            Some(watch) => watch.approval_judge_authority(session).await,
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn repository_watch_origin(
         &self,
         session: signalbox_domain::SessionId,
