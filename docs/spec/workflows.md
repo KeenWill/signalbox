@@ -128,26 +128,29 @@ notifications are hints filtered to the requested source runs. The SDK's typed
 The fenced daemon owns one local workflow runner. User-authorized registration
 and start admission retain executable identity, grants and exact input before
 waking it. Startup resumes registered runs without a terminal outcome, and an
-active run has one attempt at a time. Shutdown interrupts non-yielding
-JavaScript and drops attempts; restart replays the retained requests and
-deliveries. JavaScript loading or execution errors, stalled programs, child
-registration conflicts and unavailable granted effects record a per-run
-`ProgramError` fault; other runs continue and restart retains that outcome.
-Recovery retries an unanswered unavailable effect into the same fault. A
-concurrent terminal outcome is preserved.
+active run has one attempt at a time. At a quiescent sleep or event wait, the
+host drops the JavaScript isolate or native root future; the daemon retains only
+the outstanding requests until a delivery is recorded, then reconstructs the run
+by replay. Cancellation wakes and drops blocked host operations. Shutdown
+interrupts non-yielding JavaScript and drains attempts; restart replays the
+retained requests and deliveries. JavaScript loading or execution errors,
+stalled programs, child registration conflicts and unavailable granted effects
+record a per-run `ProgramError` fault; other runs continue and restart retains
+that outcome. Recovery retries an unanswered unavailable effect into the same
+fault. A concurrent terminal outcome is preserved.
 
 The Linux compiled catalog includes `clock` revision `1`: its input is a
 big-endian u64, and its result concatenates that input and a journaled
 big-endian u64 Unix time in seconds. The runner resolves admitted JavaScript
 artifacts from their registrations without requiring a native catalog. Empty
 `Now` requests receive the SDK's typed Unix-millisecond answer. Registration
-effects and the clock are composed; other effects and durable waits are not
-composed. The process protocol and CLI expose registration, start, read and
-cancellation. `program register REGISTRATION_ID REGISTRATION_JSON` reads a
-registration description; `program start RUN_ID REGISTRATION_ID --input FILE`
-admits the program codec's exact input bytes. `program read RUN_ID` prints
-retained input, state and result as JSON after the run identity, with typed
-byte-extent markers when the process frame budget truncates input or result;
+effects and durable primitives are composed; other effects are not composed. The
+process protocol and CLI expose registration, start, read and cancellation.
+`program register REGISTRATION_ID REGISTRATION_JSON` reads a registration
+description; `program start RUN_ID REGISTRATION_ID --input FILE` admits the
+program codec's exact input bytes. `program read RUN_ID` prints retained input,
+state and result as JSON after the run identity, with typed byte-extent markers
+when the process frame budget truncates input or result;
 `program cancel RUN_ID --command-id COMMAND_ID` preserves durable cancellation
 identity. Successful cancellation receipts carry frame-bounded result prefixes
 with typed byte-extent markers; stored results remain complete. Native and
