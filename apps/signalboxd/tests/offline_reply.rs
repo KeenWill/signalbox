@@ -1091,11 +1091,22 @@ async fn adopt_session(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// Adoption queues the successor of a turn completed after ownership release.
 #[cfg(feature = "test-support")]
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), Box<dyn Error>> {
+struct UnmonitoredGoalCompletion {
+    database: TestDatabase,
+    pool: PgPool,
+    session: SessionId,
+    first_turn: GoalTurnCandidates,
+    disposition: PostgresGoalPassDisposition,
+    work_source: InProcessEligibilityWorkSource<PostgresEligibilitySweep>,
+}
+
+/// Releases an active scripted goal turn, completes it unmonitored, and consumes
+/// the initial scheduler sweep before returning the idle, pursuing goal.
+#[cfg(feature = "test-support")]
+async fn complete_released_goal_turn() -> Result<UnmonitoredGoalCompletion, Box<dyn Error>> {
+    use signalbox_application::EligibilityWorkSource;
+
     let runtime = ScriptedModel::following([goal_completion_script()]);
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
@@ -1134,8 +1145,8 @@ async fn adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), B
         .await?;
     assert_goal_command_applied(attached);
     let sweep = PostgresEligibilitySweep::new(pool.clone());
-    let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
-    let _ = nudge.nudge(session);
+    let (nudge, mut work_source) = InProcessEligibilityWorkSource::new(sweep);
+    assert_eq!(work_source.next().await?, session);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let provider =
         RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog(), None);
@@ -1203,13 +1214,45 @@ async fn adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), B
     );
     assert_eq!(goal_repository.recovery_progress(session).await?.turns(), 1);
 
+    assert!(!fatal_execution.is_triggered());
+    Ok(UnmonitoredGoalCompletion {
+        database: container,
+        pool,
+        session,
+        first_turn,
+        disposition,
+        work_source,
+    })
+}
+
+/// Adoption queues the successor of a turn completed after ownership release.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), Box<dyn Error>> {
+    use signalbox_application::{EligibilityPass, EligibilityWorkSource};
+
+    let UnmonitoredGoalCompletion {
+        database: container,
+        pool,
+        session,
+        first_turn,
+        disposition,
+        mut work_source,
+    } = complete_released_goal_turn().await?;
+    let goal_repository = GoalRepository::new(pool.clone());
     adopt_session(&pool, session).await?;
     disposition.arm_adopted_goal_resumption(session);
-    timeout(
-        Duration::from_secs(10),
-        wait_for_goal_recovery_count(&goal_repository, session, GoalRecoveryProgress::turns, 2),
-    )
-    .await??;
+    let hint = timeout(Duration::from_secs(10), work_source.next()).await??;
+    assert_eq!(hint, session, "adoption wakes the ordinary scheduler");
+    let mut pass = GoalAwareEligibilityPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        disposition.clone(),
+    );
+    pass.run(hint).await?;
     // Replaying adoption must leave the same queued successor.
     adopt_session(&pool, session).await?;
     disposition.reconcile_success(session).await?;
@@ -1222,7 +1265,71 @@ async fn adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), B
     assert_eq!(queued.len(), 1, "adoption queues exactly one successor");
     assert_ne!(queued[0], first_turn.turn().into_uuid());
     assert_eq!(goal_repository.recovery_progress(session).await?.turns(), 2);
-    assert!(!fatal_execution.is_triggered());
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Startup recovers an adoption committed before its in-process hook ran.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_recovers_adoption_committed_before_its_scheduler_nudge()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{EligibilityPass, EligibilityWorkSource};
+
+    let UnmonitoredGoalCompletion {
+        database: container,
+        pool,
+        session,
+        first_turn,
+        disposition,
+        work_source,
+    } = complete_released_goal_turn().await?;
+    adopt_session(&pool, session).await?;
+    // No adoption hook runs before the old in-process scheduler is dropped.
+    drop(disposition);
+    drop(work_source);
+    let (nudge, mut restarted_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    let restarted_disposition = PostgresGoalPassDisposition::new(
+        pool.clone(),
+        support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?,
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    );
+    let hint = timeout(Duration::from_secs(10), restarted_source.next()).await??;
+    assert_eq!(
+        hint, session,
+        "the initial sweep rediscovers the committed adoption without periodic sweeps"
+    );
+    let mut pass = GoalAwareEligibilityPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        restarted_disposition,
+    );
+    pass.run(hint).await?;
+    let queued: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'queued'",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        queued.len(),
+        1,
+        "startup queues exactly one successor after committed adoption"
+    );
+    assert_ne!(queued[0], first_turn.turn().into_uuid());
+    assert_eq!(
+        GoalRepository::new(pool.clone())
+            .recovery_progress(session)
+            .await?
+            .turns(),
+        2
+    );
     pool.close().await;
     drop(container);
     Ok(())

@@ -643,33 +643,11 @@ impl PostgresGoalPassDisposition {
         Ok(count)
     }
 
-    /// Reconciles a completed pursuing turn and arms any execution-failure block
+    /// Nudges the ordinary goal disposition and arms any execution-failure block
     /// when ownership is adopted.
     pub fn arm_adopted_goal_resumption(&self, session: SessionId) {
-        let adapter = self.clone();
-        drop(tokio::spawn(async move {
-            let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
-            loop {
-                match adapter.reconcile_success(session).await {
-                    Ok(()) => break,
-                    Err(error) => {
-                        tracing::error!(
-                            session_id = %session.into_uuid(),
-                            retries_remaining = remaining,
-                            cause_code = "goal_adoption_reconciliation_failed",
-                            cause = %error,
-                            "an adopted goal could not reconcile its completed turn"
-                        );
-                        if remaining == 0 {
-                            return;
-                        }
-                        remaining = remaining.saturating_sub(1);
-                        sleep_for_policy(adapter.numeric_bounds.base_backoff).await;
-                    }
-                }
-            }
-            adapter.arm_blocked_goal_resumption(session);
-        }));
+        let _ = self.eligibility_nudge.nudge(session);
+        self.arm_blocked_goal_resumption(session);
     }
 
     /// Arms automatic resumption for the execution-failure block an adopted session
