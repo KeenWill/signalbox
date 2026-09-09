@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn context_prefix_reports_exact_utf8_counts_within_escaped_budget() {
-        let source = "界\n\"".repeat(100);
+        let source = "𠜎\n\"".repeat(100);
         let limit = 160;
         let bounded = context_text(&source, limit);
         let marker_start = bounded.rfind("\n[tool result truncated:").expect("marker");
