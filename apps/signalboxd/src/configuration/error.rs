@@ -403,7 +403,7 @@ impl fmt::Display for HubModelConfigurationError {
             Self::DuplicateToolFamily => "model configuration repeats a daemon tool family",
             Self::MissingCompaction => "model configuration has no compaction settings",
             Self::UnknownField => "model configuration contains an unknown field",
-            Self::RetiredField { .. } => unreachable!("retired fields format above"),
+            Self::RetiredField { .. } => "model configuration contains a retired field",
             Self::InvalidField => "model configuration has a missing or mistyped field",
             Self::InvalidIdentity => "model configuration contains an invalid identity",
             Self::UnsupportedAdapter { .. } => "model configuration names an unsupported adapter",
