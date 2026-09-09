@@ -238,3 +238,179 @@ async fn every_git_tool_operates_on_a_linked_worktree() {
         Some(initial)
     );
 }
+
+#[test]
+fn branch_switch_preserves_sibling_worktree_branch_occupancy() {
+    let fixture = super::support::Fixture::new();
+    let repository = git2::Repository::open(fixture.root()).expect("main repository");
+    let main_branch = repository
+        .head()
+        .expect("main HEAD")
+        .shorthand()
+        .expect("branch")
+        .to_owned();
+    let parent = tempfile::tempdir().expect("linked parent");
+    let first = parent.path().join("first");
+    let second = parent.path().join("second");
+    repository
+        .worktree("first", &first, None)
+        .expect("first worktree");
+    repository
+        .worktree("second", &second, None)
+        .expect("second worktree");
+    let snapshot = |root: &std::path::Path| {
+        let repository = git2::Repository::open(root).expect("repository");
+        (
+            fs::read(repository.path().join("HEAD")).expect("HEAD bytes"),
+            fs::read(repository.path().join("index")).expect("index bytes"),
+            fs::read(root.join(super::support::TRACKED_PATH)).expect("tracked bytes"),
+        )
+    };
+    let initial = [
+        snapshot(fixture.root()),
+        snapshot(&first),
+        snapshot(&second),
+    ];
+    for (root, target) in [
+        (first.as_path(), main_branch.as_str()),
+        (first.as_path(), "second"),
+        (fixture.root(), "first"),
+    ] {
+        let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, root, identity())
+            .expect("tool family")
+            .into_parts();
+        assert!(
+            executor
+                .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+                    name: target.to_owned(),
+                }))
+                .is_err()
+        );
+        assert_eq!(
+            [
+                snapshot(fixture.root()),
+                snapshot(&first),
+                snapshot(&second)
+            ],
+            initial
+        );
+    }
+    let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, &first, identity())
+        .expect("tool family")
+        .into_parts();
+    execute(
+        &executor,
+        LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: "first".to_owned(),
+        }),
+    );
+    let sibling = git2::Repository::open(&second).expect("sibling");
+    sibling
+        .set_head_detached(fixture.initial)
+        .expect("release sibling branch");
+    execute(
+        &executor,
+        LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: "second".to_owned(),
+        }),
+    );
+    assert_eq!(
+        git2::Repository::open(&first)
+            .expect("first")
+            .head()
+            .expect("HEAD")
+            .shorthand()
+            .expect("branch name"),
+        "second"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linked_worktree_accepts_a_path_sized_administration_marker() {
+    let parent = tempfile::tempdir().expect("parent");
+    let mut root = parent.path().to_owned();
+    // Exceed a revision record while keeping the complete path below Linux PATH_MAX.
+    for _ in 0..12 {
+        root.push("repository-path-component-".repeat(4));
+    }
+    fs::create_dir_all(&root).expect("long repository path");
+    let repository = git2::Repository::init(&root).expect("repository");
+    fs::write(root.join("tracked"), b"content\n").expect("content");
+    super::support::commit_all(&repository, "long administration path");
+    let linked = parent.path().join("linked");
+    let result = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["worktree", "add", "-b", "linked"])
+        .arg(&linked)
+        .output()
+        .expect("native Git worktree");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        fs::metadata(linked.join(".git")).expect("marker").len()
+            > crate::limits::MAX_REVISION_BYTES as u64
+    );
+    let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, &linked, identity())
+        .expect("path-sized marker is admitted")
+        .into_parts();
+    assert_eq!(
+        execute(&executor, LocalOperation::Status)["entries"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn branch_switch_rolls_back_when_a_sibling_claims_the_target_before_head_publication() {
+    let fixture = super::support::Fixture::new();
+    let repository = git2::Repository::open(fixture.root()).expect("main repository");
+    let parent = tempfile::tempdir().expect("linked parent");
+    let linked = parent.path().join("linked");
+    repository
+        .worktree("linked", &linked, None)
+        .expect("linked worktree");
+    repository
+        .branch(
+            "target",
+            &repository.find_commit(fixture.initial).expect("commit"),
+            false,
+        )
+        .expect("target branch");
+    let (_, executor) = LocalGitTools::try_new(LocalWorkspaceFileSystem, &linked, identity())
+        .expect("tool family")
+        .into_parts();
+    let linked_repository = git2::Repository::open(&linked).expect("linked repository");
+    let head = fs::read(linked_repository.path().join("HEAD")).expect("HEAD");
+    let index = fs::read(linked_repository.path().join("index")).expect("index");
+    let outcome = executor.branch_switch_with_head_publish_hook(
+        GitBranchSwitchArguments {
+            name: "target".to_owned(),
+        },
+        || {
+            repository
+                .set_head("refs/heads/target")
+                .expect("sibling claims target")
+        },
+    );
+    assert!(outcome.is_err());
+    assert_eq!(
+        fs::read(linked_repository.path().join("HEAD")).expect("HEAD remains"),
+        head
+    );
+    assert_eq!(
+        fs::read(linked_repository.path().join("index")).expect("index restored"),
+        index
+    );
+    assert_eq!(
+        repository
+            .head()
+            .expect("sibling HEAD")
+            .shorthand()
+            .expect("branch name"),
+        "target"
+    );
+}

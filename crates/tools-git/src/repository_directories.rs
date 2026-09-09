@@ -3,10 +3,12 @@
 use crate::{
     descriptor::{FileIdentity, FileSnapshotIdentity, file_identity, file_snapshot_identity},
     failure::LocalGitFailure,
-    limits::MAX_REVISION_BYTES,
 };
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, openat, statat};
 use std::{ffi::OsStr, fs::File, io::Read, os::unix::ffi::OsStrExt, path::Path};
+
+// Linux PATH_MAX plus the Git marker prefix and newline.
+const MAX_ADMINISTRATION_MARKER_BYTES: usize = 4096 + b"gitdir: \n".len();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct AdministrationBinding {
@@ -114,13 +116,13 @@ fn read_marker(
         .map_err(rejected)?,
     );
     let before = file.metadata().map_err(rejected)?;
-    if !before.is_file() || before.len() > MAX_REVISION_BYTES as u64 {
+    if !before.is_file() || before.len() > MAX_ADMINISTRATION_MARKER_BYTES as u64 {
         return Err(LocalGitFailure::Repository);
     }
     let identity = file_snapshot_identity(&before);
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
-        .take((MAX_REVISION_BYTES + 1) as u64)
+        .take((MAX_ADMINISTRATION_MARKER_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(rejected)?;
     let current = File::from(
@@ -182,4 +184,48 @@ pub fn open_repository_administration(
         worktree: directories.worktree,
         common: directories.common,
     }))
+}
+
+pub(super) fn require_branch_unoccupied(
+    authority: &crate::pinning::PinnedRepository,
+    reference: &str,
+) -> Result<(), LocalGitFailure> {
+    let current = file_identity(&authority.worktree_directory.metadata().map_err(rejected)?);
+    let inspect = |directory: &File| -> Result<(), LocalGitFailure> {
+        if file_identity(&directory.metadata().map_err(rejected)?) == current {
+            return Ok(());
+        }
+        let (head, _) = read_marker(directory, "HEAD")?;
+        let head = head.strip_suffix(b"\n").unwrap_or(&head);
+        if head.strip_prefix(b"ref: ") == Some(reference.as_bytes()) {
+            return Err(LocalGitFailure::Operation);
+        }
+        Ok(())
+    };
+    inspect(&authority.git_directory)?;
+    let worktrees = match openat(
+        &authority.git_directory,
+        "worktrees",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(directory) => File::from(directory),
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(rejected(error)),
+    };
+    let mut entries = rustix::fs::Dir::read_from(&worktrees).map_err(rejected)?;
+    let mut inspected = 0;
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(rejected)?;
+        let name = OsStr::from_bytes(entry.file_name().to_bytes());
+        if name == OsStr::new(".") || name == OsStr::new("..") {
+            continue;
+        }
+        inspected += 1;
+        if inspected > crate::limits::MAX_REPOSITORY_INSPECTIONS {
+            return Err(LocalGitFailure::Repository);
+        }
+        inspect(&open_directory(&worktrees, Path::new(name))?)?;
+    }
+    Ok(())
 }

@@ -1347,6 +1347,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         {
             return Err(LocalGitFailure::Operation);
         }
+        crate::repository_directories::require_branch_unoccupied(
+            &self.repository_authority,
+            &reference_name,
+        )?;
         let (current_chain, initial_current) =
             resolve_pinned_reference_chain_from(&self.repository_authority, "HEAD", None)?;
         let (reference_chain, initial_target) =
@@ -1730,6 +1734,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &signature,
                 || {
                     before_head_publish();
+                    crate::repository_directories::require_branch_unoccupied(
+                        &self.repository_authority,
+                        &reference_name,
+                    )?;
                     operation_state.validate(&self.repository_authority)?;
                     published_index.validate()?;
                     let (target_chain, target_now) = resolve_pinned_reference_chain_from(
