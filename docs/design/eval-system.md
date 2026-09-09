@@ -20,10 +20,11 @@ trial executes; enumeration follows case order, then repeat order. A measured
 repeat is a new trial; crash replay consumes the same trial's journal evidence.
 Equal start retries require the same run, registration and exact input bytes.
 
-Reference artifacts are immutable blobs pinned by digest under
-[blob storage](../spec/blob-storage.md), read through the blob catalog without
-paths or aliases. Retain the manifest and its referenced corpus for evidence and
-lineage reads; there is no mutable corpus registry.
+Corpus cases and reference artifacts use immutable blob catalog entries pinned
+and read by digest under [blob storage](../spec/blob-storage.md), without paths
+or aliases. Corpus retention and deletion remain undecided under
+[Corpus governance](../open-questions.md#graded-approval-judging). There is no
+mutable corpus registry.
 
 An evaluation session creation effect verifies the calling run and trial
 membership against that run's retained immutable manifest, then records an
