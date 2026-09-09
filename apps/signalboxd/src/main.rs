@@ -78,7 +78,8 @@ use signalboxd::{
     run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
-        WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
+        WEB_BIND_ENVIRONMENT, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
+        WebHttpRuntimeError,
     },
 };
 use tracing_subscriber::prelude::*;
@@ -1253,6 +1254,7 @@ async fn run_hub(
             SanitizedStartupCause::WebHttpConfiguration(&error),
         )
     })?;
+    report_non_loopback_web_bind(&web_configuration);
     let on_disk = fs::read_to_string(configuration.model_configuration_file()).map_err(|_| {
         erase_startup_cause(
             RuntimePhase::Configuration,
@@ -2730,6 +2732,16 @@ async fn run_hub(
     Ok(outcome)
 }
 
+fn report_non_loopback_web_bind(configuration: &WebHttpConfiguration) {
+    if !configuration.bind_address().ip().is_loopback() {
+        tracing::warn!(
+            setting = WEB_BIND_ENVIRONMENT,
+            bind_address = %configuration.bind_address(),
+            "explicit non-loopback web bind was admitted"
+        );
+    }
+}
+
 /// Whether an operator filter setting was admitted or rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperatorFilterDisposition {
@@ -3056,14 +3068,14 @@ mod tests {
         ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure,
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
         RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
-        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, ambient_database_environment,
-        ambient_otlp_environment, combine_runtime_stop_cause, completed_runtime_outcome,
-        credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
-        erase_startup_cause, fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
-        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
-        report_database_close_failure, run_scheduler_until_shutdown,
-        runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
-        validate_fenced_pool_min_connections,
+        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, WebHttpConfiguration,
+        ambient_database_environment, ambient_otlp_environment, combine_runtime_stop_cause,
+        completed_runtime_outcome, credential_files_conflict, database_close_failure_outcome,
+        drain_runtime_tasks, erase_startup_cause, fenced_pool_floor_reconciliation_policy,
+        graceful_shutdown_window, migrate_scan_then_schedule, operator_filter,
+        process_runtime_failure_class, report_database_close_failure, report_non_loopback_web_bind,
+        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
+        staging_sweep_failure_outcome, validate_fenced_pool_min_connections,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
@@ -3234,6 +3246,24 @@ mod tests {
         capture_operator_telemetry(|| {
             report_database_close_failure(error);
         })
+    }
+
+    #[test]
+    fn explicit_non_loopback_web_bind_emits_an_operator_warning() {
+        let non_loopback = WebHttpConfiguration::new(
+            "0.0.0.0:37231"
+                .parse()
+                .expect("fixture bind address is valid"),
+            None,
+        )
+        .expect("explicit non-loopback configuration is admitted");
+
+        let warning = capture_operator_telemetry(|| {
+            report_non_loopback_web_bind(&non_loopback);
+        });
+
+        assert!(warning.contains("explicit non-loopback web bind was admitted"));
+        assert!(warning.contains("0.0.0.0:37231"));
     }
 
     #[test]

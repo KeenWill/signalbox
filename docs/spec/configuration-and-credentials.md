@@ -30,8 +30,9 @@ Whatever TLS mode the URL states, the production connection verifies the server
 certificate and hostname in full. Model-provider credential paths come from
 `file` profiles in the catalog; `ANTHROPIC_API_KEY_FILE` and
 `OPENAI_API_KEY_FILE` are not read. An absent `SIGNALBOX_WEB_BIND` binds a
-loopback default, and an explicit socket may use any IP address. The daemon's
-browser listener serves the `/api` routes on that bind and, when
+loopback default, and an explicit socket may use any IP address; the daemon logs
+a warning before admitting an explicit non-loopback bind. The daemon's browser
+listener serves the `/api` routes on that bind and, when
 `SIGNALBOX_WEB_ASSET_ROOT` names a production web build, the static files under
 that root; an empty root fails configuration and an absent one answers every
 other path 404. The DTOs and schemas under `crates/web-contract` are the
