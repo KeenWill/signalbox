@@ -151,7 +151,24 @@ pub struct GoalReportRef {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl GoalReportRef {
     pub const fn turn(self) -> TurnId;
-    pub const fn tool_request(self) -> ToolRequestId;
+    pub const fn tool_request(self) -> option::Option<ToolRequestId>;
+}
+```
+
+## GoalAchievementProvenance
+
+```rust
+pub enum GoalAchievementProvenance {
+    Model(GoalModelProvenance),
+    Verified {
+        turn: TurnId,
+        head_sha: CommitSha,
+        resolved_thread_ids: boxed::Box<[ReviewThreadId]>,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl GoalAchievementProvenance {
+    pub fn report_ref(&self) -> GoalReportRef;
 }
 ```
 
@@ -276,7 +293,7 @@ pub enum GoalEventKind {
     },
     Achieved {
         report: GoalReport,
-        provenance: GoalModelProvenance,
+        provenance: GoalAchievementProvenance,
     },
     UserStopped {
         provenance: GoalUserProvenance,
@@ -338,6 +355,11 @@ impl Goal {
         self,
         report: GoalReport,
         provenance: GoalModelProvenance,
+    ) -> result::Result<Self, GoalTransitionError>;
+    pub fn achieve(
+        self,
+        report: GoalReport,
+        provenance: GoalAchievementProvenance,
     ) -> result::Result<Self, GoalTransitionError>;
     pub fn stop(self, provenance: GoalUserProvenance) -> result::Result<Self, GoalTransitionError>;
     pub fn close_with_session(
