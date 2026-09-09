@@ -112,6 +112,11 @@ pub enum RejectionDetail {
         session_id: CanonicalUuid,
         active_turn_id: CanonicalUuid,
     },
+    GoalStopAwaitingApproval {
+        session_id: CanonicalUuid,
+        active_turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+    },
     SafePointUnavailableWhileStopping {
         session_id: CanonicalUuid,
         active_turn_id: CanonicalUuid,
