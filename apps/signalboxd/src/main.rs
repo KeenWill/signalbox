@@ -1601,6 +1601,10 @@ async fn run_hub(
     let image_derivative_supervisor = daemon_tool_configuration
         .as_ref()
         .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
+    let tool_composition = match daemon_tool_configuration {
+        Some(_) => signalboxd::DaemonToolComposition::WithMappedFamilies,
+        None => signalboxd::DaemonToolComposition::Base,
+    };
     let tools = match daemon_tool_configuration {
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
@@ -1806,20 +1810,6 @@ async fn run_hub(
         };
         blob_executor = Some(executor);
     }
-    tool_catalog =
-        match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
-            Ok(catalog) => catalog,
-            Err(error) => {
-                let failure = erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
-                );
-                drop(blob_executor);
-                drop(blob_store_registry);
-                let _ = database.close().await;
-                return Err(failure);
-            }
-        };
     let runner_listener = match LocalProcessListener::bind(configuration.runner_socket_path()) {
         Ok(listener) => listener,
         Err(error) => {
@@ -1991,7 +1981,9 @@ async fn run_hub(
             }
         }
     };
-    tool_executor = tool_executor.with_blob_executor(blob_executor);
+    tool_executor = tool_executor
+        .with_blob_executor(blob_executor)
+        .with_repository_watch(repository_watch_runtime.clone());
     let configuration_reload = signalboxd::configuration_reload::ConfigurationReload::new(
         scheduler_pool.clone(),
         model_configuration.clone(),
@@ -2055,6 +2047,40 @@ async fn run_hub(
     let recovered_catalogs = configuration_reload.catalogs();
     let model_configuration = (*recovered_catalogs.models).clone();
     let template_configuration = (*recovered_catalogs.templates).clone();
+    let startup_tool_catalog = tool_catalog
+        .with_repository_push(model_configuration.repository_watch(), tool_composition)
+        .map_err(|error| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Tools(&error),
+            )
+        })
+        .and_then(|catalog| {
+            catalog
+                .with_approval_postures(model_configuration.tool_approval_postures())
+                .map_err(|error| {
+                    erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
+                    )
+                })
+        });
+    let tool_catalog = match startup_tool_catalog {
+        Ok(catalog) => catalog,
+        Err(failure) => {
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            let _ = repository_watch_shutdown.send(true);
+            if let Some(worker) = repository_watch_worker {
+                let _ = worker.await;
+            }
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            drop(tool_executor);
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         signalboxd::model_catalog_runtime::CatalogContextCompactionModel::new(
             configuration_reload.catalogs().models,

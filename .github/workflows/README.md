@@ -5,19 +5,27 @@ file in the same pull request.
 
 ## Pools
 
-| Label              | What it is                                          | Use it for                                                     |
-| ------------------ | --------------------------------------------------- | -------------------------------------------------------------- |
-| `signalbox`        | Self-hosted ARC scale set (Linux, no Docker daemon) | Ordinary Rust/lint/check jobs                                  |
-| `signalbox-docker` | Self-hosted ARC scale set with a DinD sidecar       | Jobs needing Docker or testcontainers                          |
-| `ubuntu-latest`    | GitHub-hosted                                       | Untrusted code, and jobs the runner image cannot serve (below) |
-| `macos-latest`     | GitHub-hosted                                       | All macOS jobs (no self-hosted Macs exist)                     |
+| Label                         | Use it for                                                                                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `signalbox-orchestration`     | Change scope, eligibility, matrix generation, and result-only aggregation; no compilation                                 |
+| `signalbox-builds`            | Required Rust builds/tests, documentation, formatting, web checks, supply-chain checks, and provider compatibility smokes |
+| `signalbox-integration-tests` | Required PostgreSQL suites needing Docker/testcontainers                                                                  |
+| `signalbox-reports`           | Non-Docker API digest, instruction-count, and web-smoke reports                                                           |
+| `signalbox-coverage`          | Docker coverage, live tool smokes, and report-only tool-eval families                                                     |
+| `ubuntu-latest`               | GitHub-hosted fallbacks and host-dependent jobs below                                                                     |
+| `macos-latest`                | macOS jobs                                                                                                                |
 
-Both self-hosted scale sets are managed outside of this repo.
+The self-hosted ARC scale sets are managed outside this repository. Only
+`signalbox-integration-tests` and `signalbox-coverage` provide Docker.
 
-`rust.yml` calls `bazel.yml` for ordinary Rust tests on `signalbox` and all
-manifest PostgreSQL suites on `signalbox-docker`, using the routing expression
-below. `validate` requires the reusable workflow to succeed. The web job uses
-`signalbox` with the same routing rule and declared browser runtimes and fonts.
+`rust.yml` calls `bazel.yml` for ordinary Rust tests on `signalbox-builds` and
+manifest PostgreSQL suites on `signalbox-integration-tests`. Its
+`validate-checks` aggregation uses orchestration; final `validate` stays on
+builds because it also executes two Cargo contract checks. The web job uses
+builds with declared browser runtimes and fonts. Report-tier jobs and Docker
+live smokes limit Cargo compilation to two jobs; the API digest also limits
+Bazel to two jobs. Docker sidecar CPU allowances are separate from runner
+compilation budgets.
 
 ## The routing rule
 
@@ -57,11 +65,14 @@ expression, each with its own gate. The provider smokes merge-gate the pull
 requests they apply to — each `required` aggregate is a binding check — while
 the tool-eval and tool-smoke jobs are report-only:
 
-| Jobs                                                                                                           | Pool                             | Gate on proposed code                                                                                                                                                                |
-| -------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `anthropic-smoke.yml`, `claude-smoke.yml`, `codex-smoke.yml`, `openai-smoke.yml` — `gate`, `smoke`, `required` | `signalbox`                      | `smoke` skips fork pull requests (same-repo check only), so bot-authored same-repo pull requests still run here; `gate` checks out the head for path inspection without executing it |
-| `tool-evals.yml` — `eligibility`, and the git/workspace/web `eval` families                                    | `signalbox` / `signalbox-docker` | `eval` requires same-repository pull requests whose author is neither Dependabot nor Renovate; eligibility applies the same author check                                             |
-| `tool-smokes.yml` — `live-smokes`, `web-smoke`                                                                 | `signalbox`                      | Both jobs require same-repository pull requests whose author is neither Dependabot nor Renovate; `web-smoke` is additionally disabled                                                |
+| Jobs                                                 | Pool                      | Gate on proposed code                                                                                      |
+| ---------------------------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Provider smoke workflows — `gate`, `required`        | `signalbox-orchestration` | `gate` checks out the head for path inspection without executing it; `required` reports the binding result |
+| Provider smoke workflows — `smoke`                   | `signalbox-builds`        | Skips fork pull requests using the same-repository check only; same-repository bot pull requests still run |
+| `tool-evals.yml` — `eligibility`                     | `signalbox-orchestration` | Excludes fork pull requests and Dependabot/Renovate authors                                                |
+| `tool-evals.yml` — git/workspace/web `eval` families | `signalbox-coverage`      | Requires same-repository pull requests whose author is neither Dependabot nor Renovate                     |
+| `tool-smokes.yml` — `live-smokes`                    | `signalbox-coverage`      | Requires same-repository pull requests whose author is neither Dependabot nor Renovate                     |
+| `tool-smokes.yml` — `web-smoke`                      | `signalbox-reports`       | Disabled; retains the same-repository and Dependabot/Renovate author gate                                  |
 
 ## Jobs pinned to GitHub-hosted runners
 
@@ -79,4 +90,5 @@ facilities stay hosted for now, although this may change over time.
 | `swift.yml` `swift-validate`, `swift-real-daemon` | macOS                                                         |
 
 The `bazel-postgres` job uses the canonical routing expression with
-`signalbox-docker`, or `ubuntu-latest` for fork and named bot pull requests.
+`signalbox-integration-tests`, or `ubuntu-latest` for fork and named bot pull
+requests.

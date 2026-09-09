@@ -73,10 +73,10 @@ pub enum ProgramExecutionOutcome {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
-## ProgramHostError
+## WorkflowHostError
 
 ```rust
-pub enum ProgramHostError {
+pub enum WorkflowHostError {
     Journal(signalbox_persistence::program_journal::ProgramJournalRepositoryError),
     Registration(signalbox_persistence::program_registration::ProgramRegistrationError),
     JournalMissing(signalbox_domain::ProgramRunId),
@@ -87,40 +87,40 @@ pub enum ProgramHostError {
         observed: boxed::Box<signalbox_domain::RequestFrame>,
         fault: signalbox_domain::DeliveryFrame,
     },
-    Protocol(ProgramHostProtocolError),
+    Protocol(WorkflowHostProtocolError),
 }
 // derives: fmt::Debug
-impl fmt::Display for ProgramHostError {
+impl fmt::Display for WorkflowHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ProgramHostError {
+impl error::Error for WorkflowHostError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
 }
 impl convert::From<signalbox_persistence::program_registration::ProgramRegistrationError>
-    for ProgramHostError
+    for WorkflowHostError
 {
     fn from(error: signalbox_persistence::program_registration::ProgramRegistrationError) -> Self;
 }
 impl convert::From<signalbox_persistence::program_journal::ProgramJournalRepositoryError>
-    for ProgramHostError
+    for WorkflowHostError
 {
     fn from(error: signalbox_persistence::program_journal::ProgramJournalRepositoryError) -> Self;
 }
-impl convert::From<error::CoreError> for ProgramHostError {
+impl convert::From<error::CoreError> for WorkflowHostError {
     fn from(error: error::CoreError) -> Self;
 }
-impl convert::From<LiveDeliveryFailure> for ProgramHostError {
+impl convert::From<LiveDeliveryFailure> for WorkflowHostError {
     fn from(error: LiveDeliveryFailure) -> Self;
 }
-impl convert::From<ProgramHostProtocolError> for ProgramHostError {
-    fn from(error: ProgramHostProtocolError) -> Self;
+impl convert::From<WorkflowHostProtocolError> for WorkflowHostError {
+    fn from(error: WorkflowHostProtocolError) -> Self;
 }
 ```
 
-## ProgramHostProtocolError
+## WorkflowHostProtocolError
 
 ```rust
-pub enum ProgramHostProtocolError {
+pub enum WorkflowHostProtocolError {
     RequestOrdinalExhausted,
     DeliveryPending,
     DuplicateOutstandingRequest,
@@ -133,26 +133,26 @@ pub enum ProgramHostProtocolError {
     Stalled,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl fmt::Display for ProgramHostProtocolError {
+impl fmt::Display for WorkflowHostProtocolError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
-impl error::Error for ProgramHostProtocolError {}
+impl error::Error for WorkflowHostProtocolError {}
 ```
 
-## ProgramHost
+## WorkflowHost
 
 ```rust
-pub struct ProgramHost {/* private */}
+pub struct WorkflowHost {/* private */}
 // derives: clone::Clone, fmt::Debug
-impl ProgramHost {
+impl WorkflowHost {
     pub async fn execute_registered(
         &self,
         run: signalbox_domain::ProgramRunId,
         primitives: &mut impl LiveDeliverySource,
         effects: &mut impl effects::EffectExecutor,
-    ) -> result::Result<ProgramExecutionOutcome, ProgramHostError>;
+    ) -> result::Result<ProgramExecutionOutcome, WorkflowHostError>;
 }
-impl ProgramHost {
+impl WorkflowHost {
     pub const fn new(
         journal: signalbox_persistence::program_journal::ProgramJournalRepository,
     ) -> Self;
@@ -169,6 +169,6 @@ impl ProgramHost {
         run: signalbox_domain::ProgramRunId,
         artifact: &ProgramArtifact,
         live_deliveries: &mut impl LiveDeliverySource,
-    ) -> result::Result<ProgramExecutionOutcome, ProgramHostError>;
+    ) -> result::Result<ProgramExecutionOutcome, WorkflowHostError>;
 }
 ```

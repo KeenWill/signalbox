@@ -176,6 +176,62 @@ impl RepositoryWatchRuntime {
             .ok_or(signalbox_module_repo_watch_v2::StoreError::InvalidRetainedCommand)
     }
 
+    pub(crate) async fn git_push_authority(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> Result<
+        Option<(
+            crate::WatchedRepositoryConfiguration,
+            signalbox_domain::BranchName,
+            signalbox_domain::CommitSha,
+        )>,
+        signalbox_module_repo_watch_v2::StoreError,
+    > {
+        let (store, core, configuration) = {
+            let state = self.state.lock().await;
+            (
+                state.store.clone(),
+                state.core_pool.clone(),
+                state.configuration.clone(),
+            )
+        };
+        let command: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT creation.command_id FROM session
+             JOIN create_session_command AS creation ON creation.created_session_id = session.session_id
+             WHERE session.session_id = $1 AND session.creation_cause = 'module_dispatched'
+               AND session.dispatching_module = 'repo_watch'"
+        ).bind(session.into_uuid()).fetch_optional(&core).await?;
+        let Some(command) = command else {
+            return Ok(None);
+        };
+        let checkout = store
+            .dispatch_checkout(signalbox_domain::DurableCommandId::from_uuid(command))
+            .await?
+            .ok_or(signalbox_module_repo_watch_v2::StoreError::InvalidRetainedCommand)?;
+        let signalbox_domain::RepoWatchEventTarget::PullRequest(context) = checkout.event.target()
+        else {
+            return Ok(None);
+        };
+        let Some(configuration) = configuration else {
+            return Ok(None);
+        };
+        Ok(configuration
+            .repositories()
+            .iter()
+            .find(|repository| {
+                repository.repository() == checkout.event.repository()
+                    && repository.repository() == context.head_repository()
+                    && repository.push_credential_file().is_some()
+            })
+            .map(|repository| {
+                (
+                    repository.clone(),
+                    context.head_branch().clone(),
+                    context.head_sha().clone(),
+                )
+            }))
+    }
+
     /// Reconciles the configured revision set before starting repository tasks.
     pub async fn new(
         module_pool: PgPool,

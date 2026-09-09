@@ -51,6 +51,14 @@ impl RepositoryWatchClientLoader {
         }
     }
 
+    pub(crate) fn for_git_push(path: PathBuf) -> Self {
+        let reference = CredentialReference::new("repository-watch-git-push");
+        Self {
+            credentials: FileCredentialAccess::new(path, reference.clone()),
+            reference,
+        }
+    }
+
     /// Rereads the credential and returns only an authenticated client handle.
     pub async fn load(&self) -> Result<GitHubClient, RepositoryWatchClientLoadError> {
         let credential = self

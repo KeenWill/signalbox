@@ -580,9 +580,9 @@ is `applied { terminal_state: "cancelled", result: null }`, `not_found`, or
 and result the command found. An identical request bearing the same `command_id`
 replays its stored receipt even if the run's standing state later changes; the
 same identity with a different payload is conflicting reuse. Run-state semantics
-belong to [program-substrate.md](../spec/program-substrate.md); this pair, its
-version-1 encoding, and the closed receipt algebra belong here, and a later
-incompatible shape requires a new protocol version.
+belong to [workflows.md](../spec/workflows.md); this pair, its version-1
+encoding, and the closed receipt algebra belong here, and a later incompatible
+shape requires a new protocol version.
 
 Transcript snapshot starts include nullable `repository_watch` provenance
 resolved from the retained dispatch ledger.

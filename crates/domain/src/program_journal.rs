@@ -1,6 +1,6 @@
 //! Typed frames and deterministic replay for the program execution journal.
 //!
-//! The normative cross-component contract is `docs/spec/program-substrate.md`.
+//! The normative cross-component contract is `docs/spec/workflows.md`.
 
 use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64};
 
