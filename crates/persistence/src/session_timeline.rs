@@ -958,6 +958,13 @@ async fn project_detail_event(
                     .await?;
                     (
                         SessionTimelineDetailBody::SessionCreated {
+                            workspace_root_kind: crate::session_workspace::read_binding(
+                                transaction,
+                                event
+                                    .session()
+                                    .ok_or(SessionTimelineCorruption::Missing("event session"))?,
+                            )
+                            .await?,
                             cause: creation.cause,
                             imported_evidence,
                         },
@@ -3020,7 +3027,8 @@ fn optional_nonnegative(
 }
 
 const DESCRIPTOR_SQL: &str = r#"
-SELECT session.session_id, facts.session_id IS NOT NULL AS facts_present,
+SELECT session.session_id, session.workspace_root_kind,
+       facts.session_id IS NOT NULL AS facts_present,
        facts.item_count, facts.first_sequence,
        facts.latest_sequence,
        facts.item_count * $2 + facts.event_kind_bytes AS structured_bytes,
@@ -3133,6 +3141,7 @@ async fn load_descriptor(
         return Err(SessionTimelineCorruption::InvalidOrdinal("projected structured bytes").into());
     }
     Ok(Some(SessionTimelineDescriptor {
+        workspace_root_kind: crate::session_workspace::decode(row.try_get("workspace_root_kind")?)?,
         session,
         sizes: SessionTimelineSizeFacts {
             item_count,

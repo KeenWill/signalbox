@@ -175,6 +175,7 @@ const useDeterministicSession = async (
       json: {
         session_id: requestedSessionId,
         repository_watch: null,
+        workspace_root_kind: null,
         sizes: {
           item_count: sessionWorkspaceFixture.itemCount,
           projected_text_bytes: '0',

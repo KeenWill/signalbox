@@ -523,6 +523,7 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
+        workspace_root_kind: descriptor.workspace_root_kind.map(workspace_root_kind_dto),
         repository_watch: None,
         session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
@@ -643,9 +644,11 @@ fn detail_body_dto(
             kind: event_kind_dto(kind),
         },
         SessionTimelineDetailBody::SessionCreated {
+            workspace_root_kind,
             cause,
             imported_evidence,
         } => WebSessionTimelineDetailBody::SessionCreated {
+            workspace_root_kind: workspace_root_kind.map(workspace_root_kind_dto),
             cause: match cause {
                 signalbox_domain::SessionCreationCause::Interactive => {
                     signalbox_web_contract::WebTimelineCreationCause::Interactive {}
@@ -1760,12 +1763,14 @@ mod tests {
             ),
         ] {
             let dto = detail_body_dto(SessionTimelineDetailBody::SessionCreated {
+                workspace_root_kind: Some(signalbox_domain::SessionWorkspaceRootKind::Configured),
                 cause,
                 imported_evidence: None,
             })
             .expect("creation detail converts");
             let json = serde_json::to_value(dto).expect("creation detail serializes");
             assert_eq!(json["cause"], expected);
+            assert_eq!(json["workspace_root_kind"], "configured");
         }
     }
 
@@ -1795,5 +1800,21 @@ mod tests {
                 ..
             }
         ));
+    }
+}
+
+fn workspace_root_kind_dto(
+    kind: signalbox_domain::SessionWorkspaceRootKind,
+) -> signalbox_web_contract::WebSessionWorkspaceRootKind {
+    match kind {
+        signalbox_domain::SessionWorkspaceRootKind::Derived => {
+            signalbox_web_contract::WebSessionWorkspaceRootKind::Derived
+        }
+        signalbox_domain::SessionWorkspaceRootKind::Configured => {
+            signalbox_web_contract::WebSessionWorkspaceRootKind::Configured
+        }
+        signalbox_domain::SessionWorkspaceRootKind::Provisioned => {
+            signalbox_web_contract::WebSessionWorkspaceRootKind::Provisioned
+        }
     }
 }

@@ -271,6 +271,32 @@ where
     type Error = RepositoryAttemptError<Loader::Error>;
 
     async fn poll(&mut self, producer: EventProducer) -> Result<(), Self::Error> {
+        let attempt = (producer == EventProducer::Poll).then(|| {
+            crate::measurements::AttemptGuard::start(
+                self.store.measurements.clone(),
+                self.repository.clone(),
+            )
+        });
+        let result = self.observe(producer).await;
+        if let Some(attempt) = attempt {
+            use crate::measurements::PollOutcome;
+            attempt.finish(match &result {
+                Ok(()) => PollOutcome::Succeeded,
+                Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
+                Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
+                Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
+                Err(RepositoryAttemptError::FrontierConflict) => PollOutcome::FrontierConflict,
+            });
+        }
+        result
+    }
+}
+
+impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
+    async fn observe(
+        &mut self,
+        producer: EventProducer,
+    ) -> Result<(), RepositoryAttemptError<Loader::Error>> {
         let client = self
             .clients
             .load_client()
@@ -873,6 +899,49 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    struct UnavailableClient;
+    impl RepositoryClientLoader for UnavailableClient {
+        type Error = &'static str;
+        async fn load_client(&self) -> Result<GitHubClient, Self::Error> {
+            Err("unavailable")
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_periodic_client_load_is_visible_without_advancing_ingestion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::measurements::PollOutcome;
+        let repository = RepositorySlug::try_new("poll-evidence/project".to_owned())?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")?;
+        let store = RepoWatchStore::new(pool);
+        let mut task = GitHubRepositoryTask {
+            repository: repository.clone(),
+            signal_reviewers: Vec::new(),
+            subject_retention: std::time::Duration::ZERO,
+            clients: UnavailableClient,
+            store: store.clone(),
+        };
+        assert!(matches!(
+            task.poll(EventProducer::Poll).await,
+            Err(RepositoryAttemptError::Client(_))
+        ));
+        let evidence = store.ingestion_measurements(&repository);
+        assert_eq!(
+            evidence.last_poll.expect("attempt recorded").outcome,
+            PollOutcome::ClientFailed
+        );
+        assert_eq!(evidence.last_successful_observation, None);
+        assert_eq!(evidence.events_recorded, 0);
+        assert!(task.poll(EventProducer::Webhook).await.is_err());
+        assert_eq!(
+            store.ingestion_measurements(&repository),
+            evidence,
+            "webhook wakes do not replace periodic poll evidence"
+        );
+        Ok(())
+    }
 
     // Distinct provider identities and revisions are arbitrary fixture data.
     const HEAD: &str = "1111111111111111111111111111111111111111";

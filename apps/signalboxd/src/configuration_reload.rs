@@ -111,6 +111,28 @@ impl std::fmt::Debug for ConfigurationReload {
 }
 
 impl ConfigurationReload {
+    pub(crate) fn repository_ingestion_measurements(
+        &self,
+    ) -> Vec<(
+        signalbox_domain::RepositorySlug,
+        signalbox_module_repo_watch_v2::measurements::IngestionMeasurements,
+    )> {
+        let catalogs = self.catalogs();
+        catalogs
+            .models
+            .repository_watch()
+            .into_iter()
+            .flat_map(|configuration| configuration.repositories())
+            .map(|repository| {
+                let measurements = self
+                    .watch
+                    .as_ref()
+                    .map(|watch| watch.ingestion_measurements(repository.repository()))
+                    .unwrap_or_default();
+                (repository.repository().clone(), measurements)
+            })
+            .collect()
+    }
     pub(crate) async fn repository_watch_origin(
         &self,
         session: signalbox_domain::SessionId,

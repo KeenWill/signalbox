@@ -2834,3 +2834,14 @@ mod tests {
         ]));
     }
 }
+
+/// The daemon-local workspace selected when a session binds its tools.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionWorkspaceRootKind {
+    /// A directory supplied at the session's derived location.
+    Derived,
+    /// The shared deployment-configured root.
+    Configured,
+    /// A checkout provisioned for this session's repository dispatch.
+    Provisioned,
+}

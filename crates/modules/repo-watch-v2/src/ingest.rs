@@ -247,15 +247,39 @@ impl RepoWatchStore {
                 content_identity: occurrence.content_identity(),
             })
             .collect::<Vec<_>>();
-        self.commit_frontier_candidate(
-            &projection,
-            baseline.generation,
-            &frontier.entries().collect::<Vec<_>>(),
-            &events,
-            producer,
-            observed.observed_at,
-        )
-        .await
+        let admission = self
+            .commit_frontier_candidate(
+                &projection,
+                baseline.generation,
+                &frontier.entries().collect::<Vec<_>>(),
+                &events,
+                producer,
+                observed.observed_at,
+            )
+            .await?;
+        let recorded = match &admission {
+            FrontierEventAdmission::Committed { events, .. } => Some(
+                events
+                    .iter()
+                    .filter(|event| **event == crate::EventAdmission::Inserted)
+                    .count() as u64,
+            ),
+            FrontierEventAdmission::Unchanged => Some(0),
+            FrontierEventAdmission::Stale | FrontierEventAdmission::ConflictingReuse => None,
+        };
+        if let Some(recorded) = recorded {
+            self.measurements.update(&observed.repository, |value| {
+                value.last_successful_observation = Some(
+                    value
+                        .last_successful_observation
+                        .map_or(observed.observed_at, |prior| {
+                            prior.max(observed.observed_at)
+                        }),
+                );
+                value.events_recorded += recorded;
+            });
+        }
+        Ok(admission)
     }
 }
 

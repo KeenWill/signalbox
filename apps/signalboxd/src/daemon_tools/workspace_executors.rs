@@ -40,6 +40,8 @@ pub(super) struct SessionWorkspaceExecutors<
     FileSystem: WorkspaceMutationFileSystem,
     ExecRunner: ProcessRunner,
 > {
+    binding_evidence: Arc<Mutex<std::collections::BTreeSet<SessionId>>>,
+    pub(super) binding_pool: Option<sqlx::PgPool>,
     roots: SessionWorkspaceRoots,
     git_identity: GitIdentity,
     exec_runner: ExecRunner,
@@ -55,6 +57,8 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
 {
     fn clone(&self) -> Self {
         Self {
+            binding_evidence: self.binding_evidence.clone(),
+            binding_pool: self.binding_pool.clone(),
             roots: self.roots.clone(),
             git_identity: self.git_identity.clone(),
             exec_runner: self.exec_runner.clone(),
@@ -95,6 +99,8 @@ where
         } = composition;
         let failure_details = SessionWorkspaceFailureDetails::try_new()?;
         Ok(Self {
+            binding_evidence: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+            binding_pool: None,
             roots,
             git_identity,
             exec_runner,
@@ -131,6 +137,47 @@ where
     }
 
     async fn resolve(
+        &mut self,
+        session: SessionId,
+    ) -> Result<WorkspaceBoundExecutors<FileSystem, ExecRunner>, SessionWorkspaceFailure> {
+        let executors = self.resolve_binding(session).await?;
+        let mut evidence = self.binding_evidence.lock().await;
+        if evidence.contains(&session) {
+            return Ok(executors);
+        }
+        use signalbox_domain::SessionWorkspaceRootKind;
+        use signalbox_persistence::session_workspace::WorkspaceRootBinding;
+        let binding = match self.state.lock().await.bindings.get(&session) {
+            Some(RecordedSessionBinding::ConfiguredRoot) => WorkspaceRootBinding::Configured,
+            Some(RecordedSessionBinding::DerivedRoot { .. }) => WorkspaceRootBinding::Derived {
+                dispatch_marker: std::fs::read_to_string(
+                    self.roots
+                        .derived_path(session)
+                        .join(super::session_workspace_roots::GIT_ADMINISTRATION_DIRECTORY)
+                        .join(crate::repo_watch_checkout::DISPATCH_MARKER),
+                )
+                .ok()
+                .and_then(|marker| uuid::Uuid::parse_str(marker.trim()).ok())
+                .map(signalbox_domain::RepoWatchDispatchId::from_uuid),
+            },
+            None => return Err(SessionWorkspaceFailure::UnresolvableRoot),
+        };
+        let kind = if let Some(pool) = &self.binding_pool {
+            signalbox_persistence::session_workspace::record_binding(pool, session, binding)
+                .await
+                .map_err(|_| SessionWorkspaceFailure::UnresolvableRoot)?
+        } else {
+            match binding {
+                WorkspaceRootBinding::Configured => SessionWorkspaceRootKind::Configured,
+                WorkspaceRootBinding::Derived { .. } => SessionWorkspaceRootKind::Derived,
+            }
+        };
+        evidence.insert(session);
+        tracing::info!(session_id = %session.as_uuid(), workspace_root_kind = match kind { SessionWorkspaceRootKind::Derived => "derived", SessionWorkspaceRootKind::Configured => "configured", SessionWorkspaceRootKind::Provisioned => "provisioned" }, "session workspace guard bound root");
+        Ok(executors)
+    }
+
+    async fn resolve_binding(
         &mut self,
         session: SessionId,
     ) -> Result<WorkspaceBoundExecutors<FileSystem, ExecRunner>, SessionWorkspaceFailure> {

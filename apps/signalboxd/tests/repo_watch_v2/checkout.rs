@@ -2343,6 +2343,34 @@ async fn assert_projected_origin(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tower::ServiceExt;
 
+    use signalbox_domain::SessionWorkspaceRootKind;
+    use signalbox_persistence::session_workspace::{WorkspaceRootBinding, record_binding};
+    assert_eq!(
+        record_binding(&fixture.core, session, WorkspaceRootBinding::Configured).await?,
+        SessionWorkspaceRootKind::Configured
+    );
+    assert_eq!(
+        record_binding(
+            &fixture.core,
+            session,
+            WorkspaceRootBinding::Derived {
+                dispatch_marker: None
+            }
+        )
+        .await?,
+        SessionWorkspaceRootKind::Derived
+    );
+    assert_eq!(
+        record_binding(
+            &fixture.core,
+            session,
+            WorkspaceRootBinding::Derived {
+                dispatch_marker: Some(planned.dispatch())
+            }
+        )
+        .await?,
+        SessionWorkspaceRootKind::Provisioned
+    );
     let models = (*fixture.sink.models).clone();
     let templates = signalboxd::SessionTemplateConfiguration::default();
     let watch = RepositoryWatchRuntime::unstarted(
@@ -2387,6 +2415,10 @@ async fn assert_projected_origin(
     assert_eq!(response.status(), axum::http::StatusCode::OK);
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let descriptor: WebSessionTimelineDescriptor = serde_json::from_slice(&bytes)?;
+    assert_eq!(
+        descriptor.workspace_root_kind,
+        Some(signalbox_web_contract::WebSessionWorkspaceRootKind::Provisioned)
+    );
     let web = descriptor.repository_watch.expect("browser origin");
     assert_eq!(
         serde_json::to_value(&web.dispatch_id)?,
@@ -2436,6 +2468,7 @@ async fn assert_projected_origin(
     tokio::time::timeout(Duration::from_secs(30), reader.read_until(b'\n', &mut line)).await??;
     let frame = decode_server_line(&line)?;
     let ServerMessage::TranscriptSnapshotStart {
+        workspace_root_kind: Some(signalbox_process_protocol::SessionWorkspaceRootKind::Provisioned),
         repository_watch: Some(wire),
         ..
     } = frame.message()

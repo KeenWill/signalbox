@@ -342,7 +342,7 @@ fn create_directory(
     openat(parent, name, DIRECTORY_FLAGS, Mode::empty())
 }
 
-const DISPATCH_MARKER: &str = "signalbox-dispatch";
+pub(crate) const DISPATCH_MARKER: &str = "signalbox-dispatch";
 #[cfg(target_os = "linux")]
 const PUBLICATION_MARKER: &str = "user.signalbox.dispatch";
 
