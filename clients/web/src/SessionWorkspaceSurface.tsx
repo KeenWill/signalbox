@@ -12,6 +12,7 @@ import {
 } from 'react'
 import { invokeCommand } from './commands'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import { enumLabel } from './labels'
 import type { SessionTranscriptLimits } from './product'
 import { SessionComposer } from './SessionComposer'
 import { SessionItemDetail } from './SessionItemDetail'
@@ -443,6 +444,10 @@ export function SessionWorkspaceSurface({
     invokeTimelineCommand(command, control)
   }
 
+  useEffect(() => {
+    if (session.error) console.error('Session load failed', session.error)
+  }, [session.error])
+
   return (
     <div className="surface-body session-workspace-surface">
       <form className="session-open-form" onSubmit={submitSession}>
@@ -482,7 +487,7 @@ export function SessionWorkspaceSurface({
         </p>
       ) : session.isError ? (
         <p className="session-load-state" role="alert">
-          Session unavailable: {session.error.message}
+          Session couldn't be loaded.
         </p>
       ) : displayedSession === undefined ? (
         <p className="session-load-state" role="status">
@@ -491,7 +496,7 @@ export function SessionWorkspaceSurface({
       ) : (
         <section className="session-workspace" aria-labelledby="session-workspace-heading">
           <p className="sr-only" role="status">
-            Session workspace loaded for {sessionId}.
+            Session {sessionId} loaded.
           </p>
           <header className="session-workspace-header">
             <div>
@@ -512,13 +517,13 @@ export function SessionWorkspaceSurface({
                 <dd>{displayedSession.descriptor.work.queued_turn_count}</dd>
               </div>
               <div>
-                <dt>Observed</dt>
+                <dt>Latest event</dt>
                 <dd>{displayedSession.descriptor.observed_through}</dd>
               </div>
             </dl>
           </header>
           {displayedSession.descriptor.repository_watch && (
-            <section className="session-provenance" aria-label="Repository watch origin">
+            <section className="session-provenance" aria-label="Repository watch">
               Repository watch · {displayedSession.descriptor.repository_watch.repository}
               {displayedSession.descriptor.repository_watch.pull_request !== null &&
                 ` #${displayedSession.descriptor.repository_watch.pull_request}`}
@@ -527,19 +532,19 @@ export function SessionWorkspaceSurface({
               {' v'}
               {displayedSession.descriptor.repository_watch.rule_revision}
               {' · '}
-              {displayedSession.descriptor.repository_watch.event_kind.replaceAll('_', ' ')}
+              {enumLabel(displayedSession.descriptor.repository_watch.event_kind)}
               <details>
-                <summary>Dispatch provenance</summary>
+                <summary>Trigger details</summary>
                 <p>
                   Dispatch {displayedSession.descriptor.repository_watch.dispatch_id}
-                  {' · Action '}
+                  {' · Step '}
                   {displayedSession.descriptor.repository_watch.action_ordinal}
                 </p>
                 <p>Event {displayedSession.descriptor.repository_watch.event_id}</p>
               </details>
             </section>
           )}
-          <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
+          <div className="session-window-controls" role="toolbar" aria-label="Timeline">
             <button
               type="button"
               onClick={(event) => invokeBoundaryCommand('selection.first', event.currentTarget)}
@@ -595,24 +600,25 @@ export function SessionWorkspaceSurface({
                 </button>
               </>
             ) : synchronization.sessionId === sessionId && synchronization.phase === 'resyncing' ? (
-              'Resynchronizing live session…'
+              'Reconnecting…'
             ) : live ? (
-              'Following live session'
+              'Live'
             ) : (
-              'Connecting live session…'
+              'Connecting…'
             )}
           </p>
           {(live?.reconciliation || live?.runner) && (
             <div className="session-live-facts">
               {live.reconciliation && (
                 <span className="availability-tag">
-                  Awaiting reconciliation · {live.reconciliation.kind.replaceAll('_', ' ')}
+                  Recovery needed · {enumLabel(live.reconciliation.kind)}
                 </span>
               )}
               {live.runner && (
                 <span className="availability-tag">
-                  Runner · {live.runner.state.replaceAll('_', ' ')}
-                  {live.runner.state === 'pinned' && ` · ${live.runner.connection_health}`}
+                  Runner: {enumLabel(live.runner.state)}
+                  {live.runner.state === 'pinned' &&
+                    `, ${enumLabel(live.runner.connection_health)}`}
                 </span>
               )}
             </div>
@@ -641,8 +647,8 @@ export function SessionWorkspaceSurface({
             )}
           </section>
           {synchronization.sessionId === sessionId && synchronization.drafts.length > 0 && (
-            <section className="provider-drafts" aria-label="Provider draft">
-              <span>Assistant · streaming</span>
+            <section className="provider-drafts" aria-label="Assistant draft">
+              <span>Assistant is typing…</span>
               {synchronization.drafts.map((draft) => (
                 <p key={draft.key}>{draft.content}</p>
               ))}
@@ -722,7 +728,7 @@ export function SessionWorkspaceSurface({
                         <ChevronRight aria-hidden="true" />
                       )}
                       <span className="session-address">{id}</span>
-                      <strong>{item.kind.replaceAll('_', ' ')}</strong>
+                      <strong>{enumLabel(item.kind)}</strong>
                       <small>{item.projected_structured_bytes} B</small>
                     </div>
                     {isExpanded && sessionId !== null && (

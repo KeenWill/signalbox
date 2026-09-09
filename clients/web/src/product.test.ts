@@ -412,14 +412,14 @@ describe('SameOriginProductTransport', () => {
         digest: imageArtifact.digest,
         mediaType: 'x'.repeat(MAX_DECLARED_MEDIA_TYPE_BYTES + 1),
       }),
-    ).rejects.toThrow('255-byte limit')
+    ).rejects.toThrow('max 255 bytes')
     await expect(
       transport.readBlobDescriptor({
         digest: imageArtifact.digest,
         mediaType: imageArtifact.declared_media_type,
         displayFilename: 'é'.repeat(MAX_DISPLAY_FILENAME_BYTES / 2 + 1),
       }),
-    ).rejects.toThrow('1024-byte limit')
+    ).rejects.toThrow('max 1024 bytes')
     expect(fetchRequest).not.toHaveBeenCalled()
   })
 

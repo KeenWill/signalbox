@@ -5,6 +5,7 @@ import type {
   WebImportContinuationReference,
   WebImportedEntry,
 } from '../generated/web-contract.mjs'
+import { enumLabel } from '../labels'
 
 // Tunable effective ceiling: imported evidence rows keep a small viewport-adjacent overscan.
 const IMPORT_ENTRY_OVERSCAN_ROWS = 6
@@ -12,23 +13,23 @@ const IMPORT_ENTRY_OVERSCAN_ROWS = 6
 const sourceLabel = (entry: WebImportedEntry): string => {
   switch (entry.source_speaker) {
     case 'not_attested':
-      return 'speaker not attested'
+      return 'Speaker unknown'
     case 'attested_absent':
-      return 'speaker attested absent'
+      return 'No speaker'
     case 'user':
-      return 'source user role'
+      return 'User'
     case 'assistant':
-      return 'source assistant role'
+      return 'Assistant'
   }
 }
 
 const entryText = (entry: WebImportedEntry): string => {
-  if (!entry.text) return entry.content_kind.replaceAll('_', ' ')
+  if (!entry.text) return enumLabel(entry.content_kind)
   switch (entry.text.kind) {
     case 'not_attested':
-      return 'Text not attested by source'
+      return 'No text recorded'
     case 'attested_absent':
-      return 'Text explicitly absent in source'
+      return 'No text'
     case 'attested':
       return `${entry.text.leading_text}${entry.text.completeness === 'truncated' ? '…' : ''}`
   }

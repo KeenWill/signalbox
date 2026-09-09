@@ -3,6 +3,7 @@ import { ArrowUp } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { invokeCommand } from './commands'
 import type { WebSubmitInputRequest } from './generated/web-contract.mjs'
+import { enumLabel } from './labels'
 import {
   MAX_SESSION_MESSAGE_LENGTH,
   ProductInputError,
@@ -35,7 +36,7 @@ export function SessionComposer({
   const pending = useAppSelector((state) => selectPendingSessionInput(state, sessionId))
   const retained = pending?.input ?? null
   const capacityReached = useAppSelector(selectSessionInputCapacityReached)
-  const capacityNotice = 'Pending-message limit reached'
+  const capacityNotice = 'Too many unsent messages'
   const newInputBlocked = retained === null && capacityReached
   const [text, setText] = useState('')
   const [notice, setNotice] = useState('')
@@ -61,7 +62,7 @@ export function SessionComposer({
           actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: true }),
         )
         setText(input.message)
-        setNotice(`Rejected: ${error.message}`)
+        setNotice(`Not sent: ${error.message}`)
       } else {
         dispatch(
           actions.sessionInputSettled({ sessionId, commandId: input.command_id, confirmed: false }),
@@ -147,7 +148,7 @@ export function SessionComposer({
                       ? 'Connecting…'
                       : activeState === null
                         ? ''
-                        : `Session ${activeState.replaceAll('_', ' ')}`)}
+                        : `Session: ${enumLabel(activeState)}`)}
         </span>
       </div>
     </form>

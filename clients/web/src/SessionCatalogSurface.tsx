@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type { WebSessionCatalogSnapshot } from './generated/web-contract.mjs'
+import { enumLabel } from './labels'
 import {
   admittedSessionSearch,
   ProductRequestError,
@@ -13,8 +14,6 @@ import {
 import { actions, useAppDispatch, useAppSelector } from './state'
 
 type SessionSummary = WebSessionCatalogSnapshot['summaries'][number]
-
-const label = (value: string) => value.replaceAll('_', ' ')
 
 const activityTime = (unixMicroseconds: string) => {
   const value = Number(BigInt(unixMicroseconds) / BigInt(1000))
@@ -149,7 +148,7 @@ export function SessionCatalogSurface({
     const form = new FormData(event.currentTarget)
     const q = String(form.get('q') ?? '')
     if (q.length > 0 && admittedSessionSearch(q) === undefined) {
-      setSearchError('Search must be NUL-free and no more than 1,024 UTF-8 bytes.')
+      setSearchError('Search must fit 1,024 UTF-8 bytes and contain no null characters.')
       return
     }
     setSearchError(null)
@@ -222,14 +221,14 @@ export function SessionCatalogSurface({
         <section className="surface-empty" role="alert">
           <div>
             <h2 ref={errorHeading} tabIndex={-1}>
-              Sessions could not be read
+              Couldn't load sessions
             </h2>
             <p>
               {sessions.error instanceof ProductRequestError
                 ? `${sessions.error.response.error.code}: ${sessions.error.message}`
                 : sessions.error instanceof ProductTransportError
                   ? sessions.error.message
-                  : 'The response did not match the generated web contract.'}
+                  : 'The server sent an unexpected response.'}
             </p>
             <button
               type="button"
@@ -245,7 +244,7 @@ export function SessionCatalogSurface({
       )}
 
       {sessions.data && (
-        <section className="catalog-rates" aria-label="Listed session rates">
+        <section className="catalog-rates" aria-label="Session outcomes">
           <div className="catalog-rate-controls">
             <label>
               State{' '}
@@ -265,7 +264,7 @@ export function SessionCatalogSurface({
                   'terminal',
                 ].map((state) => (
                   <option key={state} value={state}>
-                    {label(state)}
+                    {enumLabel(state)}
                   </option>
                 ))}
               </select>
@@ -273,13 +272,13 @@ export function SessionCatalogSurface({
             <label>
               Page order{' '}
               <select value={pageOrder} onChange={(event) => onPageOrderChange(event.target.value)}>
-                <option value="activity">Catalog order</option>
+                <option value="activity">Default</option>
                 <option value="failure">Last failure</option>
               </select>
             </label>
           </div>
           {rates.isPending ? (
-            <p>Reading session outcomes…</p>
+            <p>Loading outcomes…</p>
           ) : rates.isError ? (
             <p role="alert">
               Session outcomes unavailable.{' '}
@@ -328,17 +327,20 @@ export function SessionCatalogSurface({
                           <SessionTitle summary={summary} />
                         </strong>
                         <code>{summary.session_id}</code>
-                        {summary.action && <small>{label(summary.action)}</small>}
+                        {summary.action && <small>{enumLabel(summary.action)}</small>}
                         {summary.goal_block && (
                           <small>
-                            {label(summary.goal_block.reason)} · {summary.goal_block.need_summary}
+                            Blocked: {enumLabel(summary.goal_block.reason)} —{' '}
+                            {summary.goal_block.need_summary}
                           </small>
                         )}
                       </span>
                       <span
                         className={`state-chip state-${rateById.get(summary.session_id)?.lifecycle_state ?? 'unavailable'}`}
                       >
-                        {label(rateById.get(summary.session_id)?.lifecycle_state ?? 'unavailable')}
+                        {enumLabel(
+                          rateById.get(summary.session_id)?.lifecycle_state ?? 'unavailable',
+                        )}
                       </span>
                       <span>
                         {rateById.has(summary.session_id) ? (
@@ -346,17 +348,19 @@ export function SessionCatalogSurface({
                             {rateById.get(summary.session_id)?.turn_count} turns ·{' '}
                             {rateById.get(summary.session_id)?.failed_turn_count} failed
                             <small>
-                              {label(
+                              {enumLabel(
                                 rateById.get(summary.session_id)?.last_provider_cause ??
                                   (rateById.get(summary.session_id)?.last_failure_sequence
-                                    ? 'no provider cause recorded'
-                                    : 'no failures'),
+                                    ? 'No cause recorded'
+                                    : 'No failures'),
                               )}
                             </small>
                             {rateById.get(summary.session_id)?.goal_disposition && (
                               <small>
                                 Goal:{' '}
-                                {label(rateById.get(summary.session_id)?.goal_disposition ?? '')}
+                                {enumLabel(
+                                  rateById.get(summary.session_id)?.goal_disposition ?? '',
+                                )}
                               </small>
                             )}
                           </>

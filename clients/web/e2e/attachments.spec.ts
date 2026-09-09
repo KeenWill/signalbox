@@ -99,9 +99,7 @@ test('selects an admitted derivative without loading original bytes', async ({ p
   await derivative.focus()
   await page.keyboard.press('Enter')
   await expect(derivative).toHaveAttribute('aria-pressed', 'true')
-  await expect(
-    page.getByRole('img', { name: 'Derived preview of orbital-map.preview.png' }),
-  ).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Preview of orbital-map.preview.png' })).toBeVisible()
   await previewResponse
   await expect(page.getByText('image.preview v1')).toBeVisible()
   expect(
@@ -122,10 +120,8 @@ test('fails closed when an admitted derivative cannot load', async ({ page }) =>
     .getByRole('button', { name: /orbital-map\.preview\.png/ })
     .click()
 
-  await expect(page.getByRole('status').getByText('Derivative unavailable')).toBeVisible()
-  await expect(
-    page.getByRole('img', { name: 'Derived preview of orbital-map.preview.png' }),
-  ).toHaveCount(0)
+  await expect(page.getByRole('status').getByText('Preview unavailable')).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Preview of orbital-map.preview.png' })).toHaveCount(0)
 })
 
 test('renders media placeholders and removes a composer attachment by keyboard', async ({

@@ -18,6 +18,7 @@ import type {
   WebImportedSessionRelationship,
   WebImportFormat,
 } from '../generated/web-contract.mjs'
+import { enumLabel } from '../labels'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
 import { selectApp, store, useAppSelector } from '../state'
@@ -46,9 +47,9 @@ type ModelKind = 'direct' | 'alias'
 
 const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
   { value: EMPTY_FILTER, label: 'All source formats' },
-  { value: 'claude_code_session_jsonl_v2', label: 'Claude Code · converter 2' },
-  { value: 'claude_code_session_jsonl_v1', label: 'Claude Code · converter 1' },
-  { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout · converter 1' },
+  { value: 'claude_code_session_jsonl_v2', label: 'Claude Code (v2)' },
+  { value: 'claude_code_session_jsonl_v1', label: 'Claude Code (v1)' },
+  { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout (v1)' },
 ]
 
 const DEFINITIVE_CONTINUATION_ERRORS = new Set([
@@ -692,7 +693,7 @@ export function ImportsWorkspace({
                       </div>
                       <div>
                         <dt>Format</dt>
-                        <dd>{descriptor.source.format}</dd>
+                        <dd>{enumLabel(descriptor.source.format)}</dd>
                       </div>
                       <div>
                         <dt>Source session</dt>
@@ -703,7 +704,7 @@ export function ImportsWorkspace({
                                   ? '…'
                                   : ''
                               }`
-                            : 'Not attested'}
+                            : 'Not recorded'}
                         </dd>
                       </div>
                       <div>
@@ -723,11 +724,11 @@ export function ImportsWorkspace({
                         <dd>{byteLabel(descriptor.sizes.raw_source_bytes)}</dd>
                       </div>
                       <div>
-                        <dt>Normalized records</dt>
+                        <dt>Processed records</dt>
                         <dd>{byteLabel(descriptor.sizes.normalized_source_record_bytes)}</dd>
                       </div>
                       <div>
-                        <dt>Normalized entries</dt>
+                        <dt>Processed entries</dt>
                         <dd>{byteLabel(descriptor.sizes.normalized_entry_bytes)}</dd>
                       </div>
                       <div>
@@ -745,7 +746,7 @@ export function ImportsWorkspace({
                     <span className="eyebrow">New session</span>
                     <div className="model-selection">
                       <select
-                        aria-label="Initial model selection kind"
+                        aria-label="Model type"
                         value={modelKind}
                         disabled={hasRetainedCommand}
                         onChange={(event) => {
@@ -756,7 +757,7 @@ export function ImportsWorkspace({
                         <option value="alias">Model alias</option>
                       </select>
                       <input
-                        aria-label="Initial model selection UUID"
+                        aria-label="Model ID"
                         placeholder="Model ID"
                         value={modelSelectionId}
                         disabled={hasRetainedCommand}
@@ -801,7 +802,7 @@ export function ImportsWorkspace({
                       )}
                     </div>
                     {retainedStorageFailed && (
-                      <p role="alert">Command storage unavailable. Request not sent.</p>
+                      <p role="alert">Couldn't save the request. Nothing was sent.</p>
                     )}
                     {retainedCommandNeedsAction && pendingCommand && (
                       <p role="alert">
@@ -830,12 +831,12 @@ export function ImportsWorkspace({
                     <span>Entries</span>
                     <small>
                       {windowQuery.isError
-                        ? 'Entry window unavailable'
+                        ? 'Entries unavailable'
                         : entryWindow
                           ? `${entryWindow.first_position.toLocaleString()}–${entryWindow.last_position.toLocaleString()} · ${entryWindow.items.length} loaded`
                           : selectedImport === null
                             ? 'No import selected'
-                            : 'Loading window…'}
+                            : 'Loading entries…'}
                     </small>
                   </div>
                   {windowQuery.isError && (

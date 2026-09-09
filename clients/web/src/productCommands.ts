@@ -11,7 +11,7 @@ const productNavigationCommands = [
   {
     id: 'navigation.open',
     title: 'Open product navigation',
-    description: 'Choose a Signalbox product surface.',
+    description: 'Choose a page.',
     category: 'Surface',
     bindings: [],
     run: (context: ProductCommandContext) => context.openNavigation(),
@@ -19,7 +19,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.attention',
     title: 'Go to Attention',
-    description: 'Open the operator intervention queue.',
+    description: 'Open Attention.',
     category: 'Navigate',
     bindings: [
       {
@@ -33,7 +33,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.sessions',
     title: 'Go to Sessions',
-    description: 'Open the bounded session workspace.',
+    description: 'Open Sessions.',
     category: 'Navigate',
     bindings: [
       {
@@ -47,7 +47,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.imports',
     title: 'Go to Imports',
-    description: 'Open conversation import operations.',
+    description: 'Open Imports.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,
@@ -92,7 +92,7 @@ const productNavigationCommands = [
   {
     id: 'navigate.settings',
     title: 'Go to Settings',
-    description: 'Open browser-local workstation preferences.',
+    description: 'Open Settings.',
     category: 'Navigate',
     bindings: [
       {
@@ -105,8 +105,8 @@ const productNavigationCommands = [
   },
   {
     id: 'navigate.scenario',
-    title: 'Go to Scenario Studio',
-    description: 'Open the streaming interaction scenario.',
+    title: 'Go to Scenario studio',
+    description: 'Open Scenario studio.',
     category: 'Navigate',
     bindings: [],
     available: (context: ProductCommandContext) => !context.navigationLocked,

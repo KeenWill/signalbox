@@ -39,18 +39,18 @@ const sessionFoundationFixture = {
 } as const
 
 const streamingFixture = {
-  timelineHeading: 'Bounded timeline',
+  timelineHeading: 'Timeline',
   firstLoadedItemId: 'event-0',
   secondLoadedItemId: 'event-1',
   lastLoadedItemId: 'event-239',
 } as const
 
 const cachedScenarioFixture = {
-  streamingFleetSummary: '180 logical · 180 loaded',
-  approvalFleetSummary: '240 logical · 240 loaded',
+  streamingFleetSummary: '180 loaded of 180',
+  approvalFleetSummary: '240 loaded of 240',
   firstFleetRowTestId: 'fleet-obligation-0',
-  initialQueryCacheSummary: '2 bounded entries',
-  retainedQueryCacheSummary: '4 bounded entries',
+  initialQueryCacheSummary: '2 entries',
+  retainedQueryCacheSummary: '4 entries',
 } as const
 
 const searchUsageFixture = {
@@ -176,7 +176,7 @@ test('exposes logical positions for virtualized fleet rows', async ({ page }) =>
   const problems = watchBrowser(page)
   await page.goto(largeFleetFixture.path)
 
-  await expect(page.getByRole('table', { name: 'Fleet obligations' })).toHaveAttribute(
+  await expect(page.getByRole('table', { name: 'Fleet work' })).toHaveAttribute(
     'aria-rowcount',
     largeFleetFixture.ariaRowCount,
   )
@@ -354,7 +354,7 @@ test('results detail preserves an eligible selected record', async ({ page }) =>
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
   await timeline.focus()
   await timeline.press('End')
-  await page.getByRole('button', { name: 'results' }).click()
+  await page.getByRole('button', { name: 'Results' }).click()
   await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
     'id',
     streamingFixture.lastLoadedItemId,
@@ -477,7 +477,7 @@ test('keeps the fleet surface reachable on a short mobile viewport', async ({ pa
   await page.setViewportSize({ width: 667, height: 320 })
   await page.goto('/scenario/responsive')
 
-  await expect(page.getByRole('heading', { name: 'Fleet obligations' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Fleet work' })).toBeVisible()
   await expect(page.getByTestId(cachedScenarioFixture.firstFleetRowTestId)).toBeInViewport({
     ratio: 1,
   })
@@ -489,7 +489,7 @@ test('keeps the fleet surface reachable on a short wide viewport', async ({ page
   await page.setViewportSize({ width: 800, height: 320 })
   await page.goto('/scenario/responsive')
 
-  await expect(page.getByRole('heading', { name: 'Fleet obligations' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Fleet work' })).toBeVisible()
   await expect(page.getByTestId(cachedScenarioFixture.firstFleetRowTestId)).toBeInViewport({
     ratio: 1,
   })
@@ -568,7 +568,7 @@ test('reveals a lexical hit far outside the loaded timeline window', async ({ pa
   const problems = watchBrowser(page)
   await page.goto(searchUsageFixture.searchPath)
 
-  const results = page.getByRole('listbox', { name: 'Lexical search results' })
+  const results = page.getByRole('listbox', { name: 'Search results' })
   await expect(results).toHaveAttribute('data-total-loaded', searchUsageFixture.searchLoadedItems)
   await results.focus()
   await results.press('Enter')
@@ -590,12 +590,12 @@ test('keeps a derived-artifact search projection virtualized', async ({ page }) 
   const problems = watchBrowser(page)
   await page.goto(searchUsageFixture.searchPath)
 
-  const results = page.getByRole('listbox', { name: 'Lexical search results' })
+  const results = page.getByRole('listbox', { name: 'Search results' })
   await expect(results).toHaveAttribute('data-total-loaded', searchUsageFixture.searchLoadedItems)
   expect(Number(await results.getAttribute('data-mounted-rows'))).toBeLessThan(
     searchUsageFixture.mountedRowsCeiling,
   )
-  await expect(results.getByRole('option').first()).toContainText('derived text artifact')
+  await expect(results.getByRole('option').first()).toContainText('Extracted text')
   await expect(
     results.getByRole('option').first().getByText('needle', { exact: true }),
   ).toBeVisible()
@@ -607,11 +607,11 @@ test('renders mixed usage evidence without scanning the transcript', async ({ pa
   await page.goto(searchUsageFixture.usagePath)
 
   const summaries = page.getByRole('region', { name: 'Usage summary groups' })
-  await expect(summaries).toContainText('reported')
-  await expect(summaries).toContainText('estimated')
+  await expect(summaries).toContainText('Reported')
+  await expect(summaries).toContainText('Estimated')
   await expect(summaries).toContainText('rates-2026-08-a')
   await expect(summaries).toContainText('rates-2026-08-b')
-  await expect(summaries).toContainText('metered equivalent')
+  await expect(summaries).toContainText('Equivalent metered cost')
   await expect(summaries).toContainText('out —')
   const rows = page.getByRole('rowgroup', { name: 'Usage call rows' })
   await expect(rows).toHaveAttribute('data-total-loaded', searchUsageFixture.usageLoadedCalls)
@@ -637,7 +637,7 @@ test('keeps usage drill-down filters in typed URL state', async ({ page }) => {
   await expect(page).toHaveURL(/modelId=00000000-0000-0000-0000-000000001001/)
   await expect(page).toHaveURL(/provenance=reported/)
   await expect(page).toHaveURL(/callKind=model_call/)
-  await expect(page.getByRole('button', { name: 'Clear drill-down' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Clear filters' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -646,7 +646,7 @@ test('focuses lexical search with its registered hotkey', async ({ page }) => {
   await page.goto(searchUsageFixture.searchPath)
   // The scenario workspace is lazy-loaded; wait for the search surface before
   // pressing so the hotkey lands on registered handlers, not the loading shell.
-  const searchInput = page.getByRole('textbox', { name: 'Search canonical session evidence' })
+  const searchInput = page.getByRole('textbox', { name: 'Search sessions' })
   await expect(searchInput).toBeVisible()
 
   const modifier = await platformModifier(page)
@@ -659,7 +659,7 @@ test('captures bounded search evidence', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await page.goto(searchUsageFixture.searchPath)
-  await expect(page.getByRole('listbox', { name: 'Lexical search results' })).toHaveAttribute(
+  await expect(page.getByRole('listbox', { name: 'Search results' })).toHaveAttribute(
     'data-total-loaded',
     searchUsageFixture.searchLoadedItems,
   )
@@ -763,7 +763,7 @@ test('discovers imported navigation bindings through the command palette', async
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   const palette = page.getByRole('dialog', { name: 'Command palette' })
-  await expect(palette.getByText('Select next imported frontier', { exact: true })).toBeVisible()
+  await expect(palette.getByText('Next entry', { exact: true })).toBeVisible()
   await expect(palette.getByText('j', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -811,7 +811,7 @@ test('captures the pinned dark workbench', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await page.goto('/scenario/approval')
-  await expect(page.getByRole('heading', { name: 'Bounded timeline' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Timeline' })).toBeVisible()
   await expect.soft(page).toHaveScreenshot('workbench-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -822,7 +822,7 @@ test('captures the pinned light focus layout', async ({ page }, testInfo) => {
   await page.goto('/scenario/huge-source')
   await page.getByRole('button', { name: 'Switch to focus layout' }).click()
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await expect(page.getByRole('heading', { name: 'Fleet obligations' })).toBeHidden()
+  await expect(page.getByRole('heading', { name: 'Fleet work' })).toBeHidden()
   await expect.soft(page).toHaveScreenshot('focus-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -842,11 +842,11 @@ test('clears selection when its search page is evicted and preserves shared-addr
 }) => {
   const problems = watchBrowser(page)
   await page.goto(searchUsageFixture.searchPath)
-  const results = page.getByRole('listbox', { name: 'Lexical search results' })
+  const results = page.getByRole('listbox', { name: 'Search results' })
   await expect(results).toHaveAttribute('aria-activedescendant', 'search-result-0')
   const firstAddress = await results.getByRole('option').first().textContent()
   for (let read = 2; read <= 7; read += 1) {
-    await page.getByRole('button', { name: 'Load next bounded page' }).click()
+    await page.getByRole('button', { name: 'Load more' }).click()
     await expect
       .poll(() =>
         page.evaluate(() => window.__SIGNALBOX_SEARCH_USAGE_DIAGNOSTICS__?.()?.searchReads),
@@ -868,7 +868,7 @@ test('clears selection when its search page is evicted and preserves shared-addr
 test('does not advertise search focus while the usage view owns the surface', async ({ page }) => {
   await page.goto(searchUsageFixture.usagePath)
   await page.getByRole('button', { name: 'Open command palette' }).click()
-  await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Focus search/ })).toHaveCount(0)
 })
 
 test('retains an ambiguous import continuation and accepts only its exact replay', async ({

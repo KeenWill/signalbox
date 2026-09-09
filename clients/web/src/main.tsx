@@ -92,7 +92,7 @@ class ScenarioChunkBoundary extends Component<
     if (this.state.failed) {
       return (
         <main className="loading">
-          <p>Scenario studio could not be loaded.</p>
+          <p>Couldn't load Scenario studio.</p>
           <button type="button" onClick={this.props.onRetry}>
             Retry scenario studio
           </button>

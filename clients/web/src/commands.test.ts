@@ -197,7 +197,7 @@ describe('command registry', () => {
       },
     })
 
-    expect(commandById('navigate.scenario').title).toBe('Go to Scenario Studio')
+    expect(commandById('navigate.scenario').title).toBe('Go to Scenario studio')
     expect(destination).toBe('/scenario/streaming')
   })
 

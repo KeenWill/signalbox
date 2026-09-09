@@ -218,7 +218,7 @@ function CommandPalette({
             <div>
               <Dialog.Title>Command palette</Dialog.Title>
               <Dialog.Description id="product-palette-description" className="sr-only">
-                Navigate and adjust the workstation from one command registry.
+                Search and run commands.
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>
@@ -299,7 +299,7 @@ function KeyboardHelp({
             <div>
               <Dialog.Title>Keyboard help</Dialog.Title>
               <Dialog.Description id="keyboard-help-description" className="sr-only">
-                Available workstation commands and bindings.
+                Keyboard shortcuts.
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>
@@ -542,10 +542,10 @@ export function ProductApp({
   const artifactAvailable = bootstrap.data?.capabilities.immutable_blob_content === true
   const bootstrapFailure = bootstrap.error
     ? bootstrap.error instanceof ProductTransportError
-      ? 'Transport unavailable'
+      ? "Can't reach the server"
       : bootstrap.error instanceof ProductContractError
-        ? 'Contract rejected'
-        : 'Bootstrap unavailable'
+        ? 'Unexpected server response'
+        : "Couldn't connect"
     : null
   const inspectorInSheet = app.layout === 'focus' || narrowInspector
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.
@@ -1004,7 +1004,7 @@ export function ProductApp({
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
-              Choose a Signalbox surface.
+              Choose a page.
             </Dialog.Description>
             <Dialog.Close asChild>
               <button
@@ -1045,7 +1045,7 @@ export function ProductApp({
           >
             <Dialog.Title className="sr-only">Artifact inspector</Dialog.Title>
             <Dialog.Description id="artifact-sheet-description" className="sr-only">
-              Resolve and inspect an immutable Signalbox blob.
+              Look up a stored file by digest.
             </Dialog.Description>
             <ArtifactInspector
               available={artifactAvailable}

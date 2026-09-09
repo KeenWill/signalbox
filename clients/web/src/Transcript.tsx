@@ -66,7 +66,7 @@ const renderers: Record<TimelineKind, (props: RendererProps) => React.JSX.Elemen
       <AlertTriangle aria-hidden="true" />
       <div>
         <strong>{item.label}</strong>
-        <p>Safe generic renderer · {item.body}</p>
+        <p>{item.body}</p>
       </div>
     </>
   ),
@@ -167,7 +167,7 @@ export function Transcript({
       <header className="section-header">
         <div>
           <span className="eyebrow">Current session</span>
-          <h1 id="timeline-heading">Bounded timeline</h1>
+          <h1 id="timeline-heading">Timeline</h1>
         </div>
         <span className="window-count">{visibleItems.length} loaded</span>
       </header>
