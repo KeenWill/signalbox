@@ -5,7 +5,7 @@
     reason = "filesystem conformance tests use explicit fixture expectations"
 )]
 
-use std::{num::NonZeroU64, path::Path};
+use std::num::NonZeroU64;
 
 use signalbox_blob_store::{BlobObjectKey, BlobStore, BlobStoreFailureKind};
 use signalbox_blob_store_filesystem::FilesystemBlobStore;
@@ -15,22 +15,13 @@ use tokio::io::AsyncReadExt as _;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
-fn try_fixture_in(parent: &Path) -> Option<(TempDir, FilesystemBlobStore)> {
-    let root = tempfile::Builder::new()
-        .prefix("signalbox-blob-store-")
-        .tempdir_in(parent)
-        .ok()?;
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).ok()?;
-    let store = FilesystemBlobStore::try_new_for_conformance(root.path().to_path_buf()).ok()?;
-    Some((root, store))
-}
-
 fn fixture() -> (TempDir, FilesystemBlobStore) {
-    let working_directory = std::env::current_dir().expect("the test working directory resolves");
-    try_fixture_in(&working_directory)
-        .or_else(|| try_fixture_in(Path::new("/var/tmp")))
-        .or_else(|| try_fixture_in(&std::env::temp_dir()))
-        .expect("one test location is positively classified durable local storage")
+    let root = TempDir::new().expect("temporary mounted filesystem root");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture root");
+    let store = FilesystemBlobStore::try_new(root.path().to_path_buf())
+        .expect("the production constructor admits the mounted filesystem");
+    (root, store)
 }
 
 #[tokio::test]
@@ -127,7 +118,7 @@ fn filesystem_sweeps_owned_crash_publication_files() {
         .expect("the fixture makes the publication orphan private");
     drop(store);
 
-    let _store = FilesystemBlobStore::try_new_for_conformance(root.path().to_path_buf())
+    let _store = FilesystemBlobStore::try_new(root.path().to_path_buf())
         .expect("the store sweeps a provably owned publication orphan");
 
     assert!(!orphan.exists());
@@ -313,7 +304,7 @@ async fn filesystem_pins_the_validated_root_namespace() {
     std::fs::create_dir(&configured_root).expect("a replacement root is created");
     std::fs::set_permissions(&configured_root, std::fs::Permissions::from_mode(0o700))
         .expect("the replacement root is private");
-    let replacement_store = FilesystemBlobStore::try_new_for_conformance(configured_root.clone())
+    let replacement_store = FilesystemBlobStore::try_new(configured_root.clone())
         .expect("the replacement root is independently usable");
     let expected = signalbox_blob_store::conformance::expected_fixture();
     let key = BlobObjectKey::for_digest(expected.digest());
