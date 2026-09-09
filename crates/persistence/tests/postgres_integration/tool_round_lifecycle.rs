@@ -4,6 +4,82 @@ use crate::*;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn failure_context_migration_preserves_populated_attempts() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _) = migrated_postgres().await?;
+    // Supplies distinct identities for the pre-migration tool attempt.
+    const FIXTURE_SEED: u128 = 0x410_0000;
+    const DETAIL: &str = "retained failure detail";
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, FIXTURE_SEED, "current_time", "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    repository
+        .commit_preflight_error(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolExecutionError::new(
+                ToolExecutionErrorKind::InvalidArguments,
+                Some(ToolExecutionErrorDetail::try_new(DETAIL.to_owned()).unwrap()),
+            ),
+        )
+        .await?;
+    // Restore the installed column shape while retaining real deferred triggers.
+    sqlx::raw_sql("ALTER TABLE tool_attempt DROP COLUMN context_error_detail")
+        .execute(&pool)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/202609090410_tool_error_context_bound.sql"
+    ))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let retained: (String, String, String) = sqlx::query_as(
+        "SELECT error_detail, context_error_detail, error_kind
+           FROM tool_attempt WHERE attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        retained,
+        (
+            DETAIL.to_owned(),
+            DETAIL.to_owned(),
+            "invalid_arguments".to_owned()
+        )
+    );
+    let guarded: bool = sqlx::query_scalar(
+        "SELECT tgenabled = 'O' FROM pg_trigger
+          WHERE tgrelid = 'tool_attempt'::regclass AND tgname = 'tool_attempt_changes_are_guarded'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(guarded, "the terminal-attempt guard is restored");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn null_result_failure_survives_commit_and_batch_reload() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     // Supplies distinct identities for the tool-round fixture.
