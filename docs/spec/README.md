@@ -99,7 +99,7 @@ anchor, unless the anchor is a heading on the linking page.
 - [Git authority threat model](git-authority-threat-model.md)
 - [Web egress threat model](web-egress-threat-model.md)
 - [Workspace instructions and skills](workspace-instructions.md)
-- [Program substrate](program-substrate.md)
+- [Workflows](workflows.md)
 - [Evaluation system](eval-system.md)
 
 ## Design documents
@@ -120,5 +120,5 @@ anchor, unless the anchor is a heading on the linking page.
 - [Review workflows design](../design/review-workflows.md)
 - [Git authority threat model design](../design/git-authority-threat-model.md)
 - [Workspace instructions design](../design/workspace-instructions.md)
-- [Program substrate design](../design/program-substrate.md)
+- [Workflows design](../design/workflows.md)
 - [Evaluation system design](../design/eval-system.md)

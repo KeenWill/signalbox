@@ -105,6 +105,7 @@ pub struct WatchedRepositoryConfiguration {
     repository: RepositorySlug,
     poll_interval: Duration,
     credential_file: PathBuf,
+    push_credential_file: Option<PathBuf>,
     webhook: Option<WatchedRepositoryWebhookConfiguration>,
     convergence_pull_requests: Box<[PullRequestNumber]>,
 }
@@ -123,6 +124,11 @@ impl WatchedRepositoryConfiguration {
     /// Returns the deployment-owned credential-file reference.
     pub fn credential_file(&self) -> &Path {
         &self.credential_file
+    }
+
+    /// Returns the optional deployment-owned credential file for configured pushes.
+    pub fn push_credential_file(&self) -> Option<&Path> {
+        self.push_credential_file.as_deref()
     }
 
     /// Returns the non-secret request credential reference for this repository.
@@ -159,6 +165,13 @@ impl fmt::Debug for WatchedRepositoryConfiguration {
             .field("repository", &self.repository)
             .field("poll_interval", &self.poll_interval)
             .field("credential_file", &"[REDACTED REFERENCE]")
+            .field(
+                "push_credential_file",
+                &self
+                    .push_credential_file
+                    .as_ref()
+                    .map(|_| "[REDACTED REFERENCE]"),
+            )
             .field("webhook", &self.webhook)
             .field("convergence_pull_requests", &self.convergence_pull_requests)
             .finish()
@@ -346,6 +359,7 @@ pub(super) fn parse_repository_watch_configuration(
                 "repository",
                 "poll_interval_seconds",
                 "credential_file",
+                "push_credential_file",
                 "webhook_hook_id",
                 "webhook_secret_file",
                 "webhook_mode",
@@ -380,6 +394,23 @@ pub(super) fn parse_repository_watch_configuration(
         {
             return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
         }
+        let push_credential_file = repository
+            .get("push_credential_file")
+            .map(|_| {
+                let value = required_string(repository, "push_credential_file")
+                    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+                let path = PathBuf::from(value);
+                if !path.is_absolute()
+                    || value.contains('\0')
+                    || path
+                        .components()
+                        .any(|part| matches!(part, Component::ParentDir))
+                {
+                    return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+                }
+                Ok(path)
+            })
+            .transpose()?;
         let resolved_credential_file = resolved_credential_file_reference(&credential_file)?;
         if credential_file_references.iter().any(|existing| {
             credential_file_references_conflict(existing, &resolved_credential_file)
@@ -387,6 +418,15 @@ pub(super) fn parse_repository_watch_configuration(
             return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
         }
         credential_file_references.push(resolved_credential_file);
+        if let Some(path) = &push_credential_file {
+            let resolved_push_credential_file = resolved_credential_file_reference(path)?;
+            if credential_file_references.iter().any(|existing| {
+                credential_file_references_conflict(existing, &resolved_push_credential_file)
+            }) {
+                return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
+            }
+            credential_file_references.push(resolved_push_credential_file);
+        }
         let repository_webhook = match (
             repository.get("webhook_hook_id"),
             repository.get("webhook_secret_file"),
@@ -453,6 +493,7 @@ pub(super) fn parse_repository_watch_configuration(
             repository: repository_slug,
             poll_interval: interval,
             credential_file,
+            push_credential_file,
             webhook: repository_webhook,
             convergence_pull_requests: convergence_pull_requests.into_boxed_slice(),
         });

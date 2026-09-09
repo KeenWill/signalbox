@@ -76,6 +76,8 @@ pub struct InvalidConfiguredGitRemote;
 pub struct GitPushRequest {
     repository_root: PathBuf,
     remote: ConfiguredGitRemote,
+    git_directory: PathBuf,
+    object_directory: PathBuf,
     branch: String,
     commit: String,
 }
@@ -84,12 +86,16 @@ impl GitPushRequest {
     pub(super) fn new(
         repository_root: PathBuf,
         remote: ConfiguredGitRemote,
+        git_directory: PathBuf,
+        object_directory: PathBuf,
         branch: String,
         commit: String,
     ) -> Self {
         Self {
             repository_root,
             remote,
+            git_directory,
+            object_directory,
             branch,
             commit,
         }
@@ -98,6 +104,16 @@ impl GitPushRequest {
     /// Borrows the descriptor-pinned direct repository root.
     pub fn repository_root(&self) -> &Path {
         &self.repository_root
+    }
+
+    /// Borrows the private Git administration directory, free of checkout configuration.
+    pub fn git_directory(&self) -> &Path {
+        &self.git_directory
+    }
+
+    /// Borrows the captured object database retained through this invocation.
+    pub fn object_directory(&self) -> &Path {
+        &self.object_directory
     }
 
     /// Borrows the immutable deployment remote.
@@ -182,5 +198,8 @@ pub enum GitPushTransportFailure {
 /// the model never supplies or modifies a destination.
 pub trait GitPushTransport: Send {
     /// Pushes one non-forced branch refspec and acknowledges the remote commit.
-    fn push(&mut self, request: GitPushRequest) -> Result<GitPushReceipt, GitPushTransportFailure>;
+    fn push(
+        &mut self,
+        request: GitPushRequest,
+    ) -> impl std::future::Future<Output = Result<GitPushReceipt, GitPushTransportFailure>> + Send;
 }

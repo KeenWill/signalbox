@@ -83,6 +83,41 @@ where
     FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
     ExecRunner: ProcessRunner,
 {
+    pub(super) fn git_push(
+        root: &Path,
+        repository: &crate::WatchedRepositoryConfiguration,
+        branch: signalbox_domain::BranchName,
+        commit: signalbox_domain::CommitSha,
+        runner: ExecRunner,
+        filesystem: &FileSystem,
+    ) -> Result<
+        signalbox_tools_git::GitPushExecutor<super::git_push::ProcessGitPushTransport<ExecRunner>>,
+        DaemonToolsConstructionError,
+    > {
+        let remote = signalbox_tools_git::ConfiguredGitRemote::try_new(
+            "origin",
+            format!(
+                "https://github.com/{}.git",
+                repository.repository().as_str()
+            ),
+        )
+        .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
+        let transport = super::git_push::ProcessGitPushTransport {
+            runner,
+            credential_file: repository
+                .push_credential_file()
+                .ok_or(DaemonToolsConstructionError::LocalGit)?
+                .to_owned(),
+        };
+        let (_, executor) =
+            signalbox_tools_git::GitPushTools::try_new(filesystem, root, remote, transport)
+                .map_err(|_| DaemonToolsConstructionError::LocalGit)?
+                .into_parts();
+        Ok(executor
+            .with_branch_fence(branch.as_str().to_owned())
+            .with_commit_fence(commit.as_str().to_owned()))
+    }
+
     /// Composes every workspace-root-bound family around one root.
     ///
     /// The root stays construction input for each family exactly as before:
