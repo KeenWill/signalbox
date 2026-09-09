@@ -49,6 +49,9 @@
 //!   on that same key to retain it across commit. `AdvancedHubFence::connect_pool` takes
 //!   `pg_advisory_lock_shared` on the pool generation for each connection's lifetime;
 //!   `retire_hub_fence_generation` takes exclusive `pg_advisory_lock` on it.
+//! - `test_support::postgres::clone_database`: exclusive session advisory lock on the first
+//!   eight migration-digest bytes, interpreted as a big-endian signed integer, while preparing
+//!   the migrated template; released before cloning the test database.
 //! - The following use exclusive `pg_advisory_xact_lock` with `hashtextextended(key, 0)`:
 //!   - `model_execution::reserve_frontier_write_identities`: candidate identity keys
 //!     in sorted lock-key order, before the frontier writer's ordering guard.
@@ -1062,6 +1065,9 @@ pub(crate) const HUB_FENCE_PRIOR_GENERATION: &str = "SELECT pg_advisory_xact_loc
 pub(crate) const HUB_FENCE_RETAIN_PRIOR_GENERATION: &str = "SELECT pg_try_advisory_lock($1)";
 
 pub(crate) const HUB_FENCE_RETIRE_GENERATION: &str = "SELECT pg_advisory_lock($1)";
+
+#[cfg(feature = "test-support")]
+pub(crate) const TEST_DATABASE_TEMPLATE: &str = "SELECT pg_advisory_lock($1)";
 
 pub(crate) const HASHED_TRANSACTION_ADVISORY_LOCK: &str =
     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))";

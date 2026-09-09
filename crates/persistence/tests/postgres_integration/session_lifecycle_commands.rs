@@ -1655,6 +1655,7 @@ async fn a_park_closure_settles_its_turn_and_preserves_failure_evidence()
         .start_run(
             signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
             registration.id,
+            &[],
         )
         .await?;
     let program_interrupt = SubmitInput::new_program(

@@ -2422,6 +2422,7 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
   assert.throws(
     () =>
       decodeWebSessionTimelineDescriptor({
+        workspace_root_kind: null,
         session_id: "00000000-0000-0000-0000-000000000991",
         repository_watch: null,
         sizes: {
@@ -3079,6 +3080,7 @@ test("generated descriptor decoder rejects an invalid session ID", () => {
   assert.throws(
     () =>
       decodeWebSessionTimelineDescriptor({
+        workspace_root_kind: null,
         session_id: "not-a-uuid",
         repository_watch: null,
         sizes: {
@@ -3351,6 +3353,7 @@ test("delegation messages require distinct sender and recipient sessions", () =>
 
 test("repository watch provenance preserves exact ledger identities and rejects unknown events", () => {
   const descriptor = {
+    workspace_root_kind: null,
     session_id: "00000000-0000-0000-0000-000000000001",
     repository_watch: {
       dispatch_id: "00000000-0000-0000-0000-000000000063",

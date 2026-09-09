@@ -22,6 +22,8 @@ pub struct NumericBoundsConfiguration {
 }
 
 const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
+    ("client_frame_deadline", NumericBoundKind::Duration),
+    ("client_write_progress_deadline", NumericBoundKind::Duration),
     (
         "repository_watch_webhook_retention",
         NumericBoundKind::Duration,

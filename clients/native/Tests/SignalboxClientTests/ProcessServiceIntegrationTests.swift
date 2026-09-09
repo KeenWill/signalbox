@@ -314,7 +314,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let requester = SequencedProcessRequester(pages: [frames, [
       try frame(#"{"type":"model_aliases_start"}"#),
       try frame(aliasesFail
-        ? #"{"type":"error","code":"unavailable","message":"Alias catalog unavailable.","detail":null}"#
+        ? #"{"type":"error","code":"unavailable","message":"Alias catalog unavailable."}"#
         : #"{"type":"model_aliases_end","alias_count":"0"}"#),
     ]])
     let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
@@ -3263,7 +3263,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
-  func testArchiveCommitWinsOverRacingStaleRefresh() async throws {
+  func testNewerRefreshKeepsItsRowsWhenArchiveCompletes() async throws {
     let backingService = makeService()
     let fixtures = try await backingService.listConversations(includeArchived: true).conversations
     let conversation = try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
@@ -3284,7 +3284,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await service.completeMutation()
     await mutation.value
 
-    XCTAssertEqual(viewModel.conversations, [archived])
+    XCTAssertEqual(viewModel.conversations, [conversation])
     XCTAssertFalse(viewModel.isLoading)
   }
 
@@ -7297,6 +7297,7 @@ private enum ProcessDriverFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "workspace_root_kind":null,
         "repository_watch":null,
         "session_id":"\(session)",
         "cursor":"\(cursor)",
@@ -8104,6 +8105,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -8198,6 +8200,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -8319,6 +8322,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"\(cursor)",
@@ -8394,6 +8398,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"\(cursor)",
@@ -8479,6 +8484,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"\(cursor)",
@@ -8542,6 +8548,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -8577,6 +8584,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -8623,6 +8631,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -8674,6 +8683,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -8717,6 +8727,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -8857,6 +8868,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"\(cursor)",
@@ -8902,6 +8914,7 @@ private enum ProcessProjectionFixture {
           """
           {
             "type":"transcript_snapshot_start",
+            "workspace_root_kind":null,
             "repository_watch":null,
             "session_id":"\(ProcessDriverFixture.session)",
             "cursor":"1",
@@ -9033,6 +9046,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -9081,6 +9095,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -9200,6 +9215,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"2",
@@ -9281,6 +9297,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -9484,6 +9501,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -9554,6 +9572,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -9612,6 +9631,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"2",
@@ -9673,6 +9693,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -9767,6 +9788,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -9825,6 +9847,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10055,6 +10078,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10135,6 +10159,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10215,6 +10240,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10395,6 +10421,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10456,6 +10483,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10567,6 +10595,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10616,6 +10645,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10708,6 +10738,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10772,6 +10803,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -10808,6 +10840,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"2",
@@ -11632,6 +11665,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -11910,6 +11944,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -12022,6 +12057,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -12100,6 +12136,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -12173,6 +12210,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -12263,6 +12301,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -12303,6 +12342,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -12365,6 +12405,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
@@ -12467,6 +12508,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_snapshot_start",
+          "workspace_root_kind":null,
           "repository_watch":null,
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"\(cursor)",

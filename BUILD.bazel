@@ -496,6 +496,7 @@ filegroup(
     name = "api_json",
     srcs = [
         "//crates/application:api_json",
+        "//crates/approval-judge-eval:api_json",
         "//crates/blob-store:api_json",
         "//crates/blob-store-filesystem:api_json",
         "//crates/blob-store-s3:api_json",

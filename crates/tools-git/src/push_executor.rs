@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+//! Configured push preparation and transport execution; see git-authority-threat-model.md.
+
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use serde::Serialize;
 use signalbox_application::{
@@ -26,7 +28,7 @@ pub struct GitPushExecutor<Transport> {
     root: WorkspaceRoot,
     root_path: PathBuf,
     repository_identity: RepositoryIdentity,
-    repository_authority: PinnedRepository,
+    repository_authority: Arc<PinnedRepository>,
     remote: ConfiguredGitRemote,
     branch_fence: Option<String>,
     commit_fence: Option<String>,
@@ -53,7 +55,7 @@ impl<Transport> GitPushExecutor<Transport> {
             root,
             root_path,
             repository_identity,
-            repository_authority,
+            repository_authority: Arc::new(repository_authority),
             remote,
             branch_fence: None,
             commit_fence: None,
@@ -162,27 +164,38 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
         {
             return Err(GitPushFailure::Repository);
         }
-        let repository_identity = validate_repository_layout(&self.root_path, self.root.identity())
-            .map_err(|_| GitPushFailure::Repository)?;
-        if repository_identity != self.repository_identity {
-            return Err(GitPushFailure::Repository);
-        }
-
+        let root_path = self.root_path.clone();
+        let root_identity = self.root.identity();
+        let expected_identity = self.repository_identity;
+        let authority = Arc::clone(&self.repository_authority);
+        let commit_fence = self.commit_fence.clone();
         let reference = format!("refs/heads/{}", arguments.branch);
-        let (_, target) =
-            resolve_pinned_reference_chain_from(&self.repository_authority, &reference, None)
-                .map_err(|_| GitPushFailure::Unresolved)?;
-        let target = target.ok_or(GitPushFailure::Unresolved)?;
-        let fence = self
-            .commit_fence
-            .as_ref()
-            .map(|commit| {
-                crate::layout::parse_full_object_id(commit, self.repository_authority.object_format)
-                    .ok_or(GitPushFailure::Repository)
-            })
-            .transpose()?;
-        let snapshot = PushObjectSnapshot::capture(&self.repository_authority, target, fence)
-            .map_err(|_| GitPushFailure::Repository)?;
+        let (snapshot, target) = prepare_before_deadline(
+            move |deadline| {
+                let repository_identity = validate_repository_layout(&root_path, root_identity)
+                    .map_err(|_| GitPushFailure::Repository)?;
+                if repository_identity != expected_identity {
+                    return Err(GitPushFailure::Repository);
+                }
+                let (_, target) = resolve_pinned_reference_chain_from(&authority, &reference, None)
+                    .map_err(|_| GitPushFailure::Unresolved)?;
+                let target = target.ok_or(GitPushFailure::Unresolved)?;
+                let fence = commit_fence
+                    .as_ref()
+                    .map(|commit| {
+                        crate::layout::parse_full_object_id(commit, authority.object_format)
+                            .ok_or(GitPushFailure::Repository)
+                    })
+                    .transpose()?;
+                let snapshot = PushObjectSnapshot::capture_before_deadline(
+                    &authority, target, fence, deadline,
+                )
+                .map_err(|_| GitPushFailure::Repository)?;
+                Ok((snapshot, target))
+            },
+            PUSH_PREPARATION_TIMEOUT,
+        )
+        .await?;
         let commit = target.to_string();
         let git_directory = snapshot.repository.path().to_owned();
         let request = GitPushRequest::new(
@@ -216,6 +229,33 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
         ToolResultText::try_new(encoded)
             .map(ToolResultText::into_string)
             .map_err(|_| GitPushFailure::PostDispatchInvalid)
+    }
+}
+
+/// Matches the daemon's per-process Git timeout for the in-process preparation phase.
+pub(super) const PUSH_PREPARATION_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Keeps repository I/O and object decoding off the async worker and bounds its wait.
+pub(super) async fn prepare_before_deadline<Prepared: Send + 'static>(
+    prepare: impl FnOnce(std::time::Instant) -> Result<Prepared, GitPushFailure> + Send + 'static,
+    timeout: Duration,
+) -> Result<Prepared, GitPushFailure> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut task = tokio::task::spawn_blocking(move || {
+        let result = prepare(deadline.into_std());
+        if std::time::Instant::now() >= deadline.into_std() {
+            Err(GitPushFailure::PreDispatchInfrastructure)
+        } else {
+            result
+        }
+    });
+    match tokio::time::timeout_at(deadline, &mut task).await {
+        Ok(result) => result.map_err(|_| GitPushFailure::PreDispatchInfrastructure)?,
+        Err(_) => {
+            // Abort prevents queued work from starting; running work owns only its snapshot.
+            task.abort();
+            Err(GitPushFailure::PreDispatchInfrastructure)
+        }
     }
 }
 

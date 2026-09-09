@@ -1094,8 +1094,6 @@ fn operation_home(selected: Option<PathBuf>) -> std::io::Result<OperationHome> {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-    #[cfg(unix)]
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -1110,12 +1108,16 @@ mod tests {
     fn version_fixture(script: &str) -> (tempfile::TempDir, PathBuf) {
         let directory = tempfile::tempdir().expect("temporary version fixture directory");
         let executable = directory.path().join("codex");
-        std::fs::write(&executable, script).expect("version fixture is written");
-        let mut permissions = std::fs::metadata(&executable)
-            .expect("version fixture metadata exists")
-            .permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&executable, permissions).expect("version fixture is executable");
+        std::fs::write(directory.path().join("version.sh"), script)
+            .expect("version fixture is written");
+        // Execute an immutable launcher so concurrent forks cannot inherit a
+        // writable descriptor for its executable and cause ETXTBSY.
+        let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/support/version_probe.sh")
+            .canonicalize()
+            .expect("version fixture launcher exists");
+        std::os::unix::fs::symlink(launcher, &executable)
+            .expect("version fixture launcher is linked");
         (directory, executable)
     }
 

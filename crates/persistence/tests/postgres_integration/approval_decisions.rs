@@ -12,6 +12,79 @@ const FAILURE_ENTRY_ID_OFFSET: u128 = 0x1_000;
 const TERMINAL_FRONTIER_ID_OFFSET: u128 = 0x1_001;
 const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_loads_creation_dispatch_from_core_session_records()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::session::{RepositoryWatchCreationDispatch, SessionRepository};
+
+    let (container, pool, _) = migrated_postgres().await?;
+    let dispatch = signalbox_domain::RepoWatchDispatchId::from_uuid(next_test_submit_uuid());
+    let command = DurableCommandId::from_uuid(next_test_submit_uuid());
+    let session = SessionId::from_uuid(next_test_submit_uuid());
+    const ARBITRARY_MODEL_SELECTION: u128 = 0x7f91;
+    let creation = CreateSession::new(
+        command,
+        signalbox_domain::SessionCreationProvenance::module_dispatched(
+            signalbox_domain::ModuleDispatch::RepositoryWatch { dispatch },
+        ),
+        SessionConfigurationDefaults::new(direct(ARBITRARY_MODEL_SELECTION)),
+    )
+    .prepare(session)
+    .expect("repository-watch creation is preparable");
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+
+    assert_eq!(
+        SessionRepository::new(pool.clone())
+            .repository_watch_creation_dispatch(session)
+            .await?,
+        Some(RepositoryWatchCreationDispatch { dispatch, command }),
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_has_no_dispatch_authority_for_an_interactive_session()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    const ARBITRARY_SEED: u128 = 0x7f90;
+    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        ARBITRARY_SEED,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+
+    let prepared = ready_approval_judge(
+        model_repository
+            .approval_judge_repository()
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(next_test_submit_uuid()),
+                None,
+            )
+            .await?,
+    );
+
+    assert_eq!(prepared.session_context().dispatch(), None);
+    assert_eq!(
+        signalbox_persistence::session::SessionRepository::new(pool.clone())
+            .repository_watch_creation_dispatch(fixture.session)
+            .await?,
+        None,
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 fn approval_judge_completion_identities(
     fresh_seed: u128,
     attempt_seed: u128,
@@ -752,27 +825,23 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     Ok(())
 }
 
-/// A judge decides under the goal statement it read while being prepared, and
-/// the session is unlocked for the whole provider round-trip that follows, so a
-/// user stop lands between the read and the commit. Completion resolves the
-/// statement again under its own lock and finds nothing, which withdraws the
-/// authority the recommendation was formed under: the approval the judge
-/// returned never becomes a decision, and the request stays parked for the
-/// human who now owns it.
+/// Superseding the judged generation withdraws its authority even when the
+/// replacement statement has identical text. Completion leaves the request
+/// pending for a human decision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
+async fn approval_judge_completion_escalates_after_the_judged_goal_is_superseded()
 -> Result<(), Box<dyn Error>> {
-    assert_judge_escalation_after_goal_stop(false).await
+    assert_judge_escalation_after_goal_supersession(false).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn headless_escalation_preserves_a_placement_loss_result() -> Result<(), Box<dyn Error>> {
-    assert_judge_escalation_after_goal_stop(true).await
+    assert_judge_escalation_after_goal_supersession(true).await
 }
 
-async fn assert_judge_escalation_after_goal_stop(
+async fn assert_judge_escalation_after_goal_supersession(
     headless_loss: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
@@ -839,7 +908,21 @@ async fn assert_judge_escalation_after_goal_stop(
     );
 
     repository.authorize(&prepared).await?;
-    stop_fixture_session_goal(&pool, fixture.session, seed + 0xf4).await?;
+    let superseded = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf4)),
+                fixture.session,
+                GoalUserAction::Supersede(statement.clone()),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0xf5)),
+                TurnId::from_uuid(Uuid::from_u128(seed + 0xf6)),
+            )),
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(superseded);
     let outcome = repository
         .complete(
             &prepared,
