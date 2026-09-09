@@ -3220,3 +3220,21 @@ kbd {
 .session-composer label {
   font-weight: 600;
 }
+
+.session-transcript-text button,
+.session-item-detail button {
+  font-size: 0.75rem;
+}
+.session-telemetry[hidden] {
+  display: none;
+}
+
+.session-detail-attachments {
+  padding-left: 1.25rem;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+.session-detail-attachments span {
+  display: block;
+  color: var(--text-muted);
+}
