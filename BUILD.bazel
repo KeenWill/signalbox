@@ -19,6 +19,7 @@ exports_files([
     "config/signalbox-runner.example.toml",
     "tooling/codex-cli/release.json",
     "tooling/postgres_test_image.rs",
+    "tooling/generate-git-scale.py",
     "tooling/postgres_test_container.py",
     ".github/postgres-integration-suites.toml",
     "tooling/requirements-mdformat.txt",
