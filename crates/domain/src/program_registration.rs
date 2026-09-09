@@ -82,6 +82,32 @@ impl ProgramRegistrationRequest {
     }
 }
 
+/// Registration input for a compiled native program, with no JavaScript content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeProgramRegistrationRequest {
+    pub name: String,
+    pub revision: String,
+    pub entry: String,
+    pub native_revision: String,
+    pub binary_digest: ProgramContentDigest,
+    pub grants: ProgramGrants,
+}
+
+impl NativeProgramRegistrationRequest {
+    pub fn into_content(self) -> ProgramRegistrationContent {
+        ProgramRegistrationContent {
+            name: self.name,
+            revision: self.revision,
+            executable: ProgramExecutable::Native {
+                entry: self.entry,
+                revision: self.native_revision,
+                binary_digest: self.binary_digest,
+            },
+            grants: self.grants,
+        }
+    }
+}
+
 /// The exact code selected by an immutable registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProgramExecutable {

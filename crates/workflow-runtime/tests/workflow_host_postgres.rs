@@ -768,6 +768,40 @@ async fn registration_fixture(
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn javascript_registration_hashes_exact_source_bytes_before_persistence()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::program_registration::ProgramRegistrationRequest;
+    use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramRegistrationRepository::new(pool.clone());
+    let registration = repository
+        .register_user(
+            signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            ProgramRegistrationRequest {
+                name: Uuid::now_v7().to_string(),
+                revision: "fixture-revision".into(),
+                source: b"// exact source\nexport {};\n".to_vec(),
+                artifact: "export {};".into(),
+                grants: ProgramGrants::new([]),
+            },
+        )
+        .await?;
+    let stored_digest: String = sqlx::query_scalar(
+        "SELECT encode(source_digest, 'hex') FROM program_registration WHERE registration_id = $1",
+    )
+    .bind(registration.id.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored_digest, "9877bc113c535557e69aa1ec2adce73b6ba7a95cf5ed745405e9f1a28706971c",
+        "source hashing must retain the submitted comment and trailing newline"
+    );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn session_capability_requires_a_registered_run_with_the_session_grant()
 -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{ProgramCapability, program_registration::ProgramGrants};
@@ -1872,7 +1906,9 @@ async fn retained_success_loads_without_executable_code_or_live_work() -> Result
     Ok(())
 }
 
-use signalbox_domain::program_registration::{ProgramExecutable, ProgramGrants};
+use signalbox_domain::program_registration::{
+    NativeProgramRegistrationRequest, ProgramExecutable, ProgramGrants,
+};
 use signalbox_workflow_runtime::native::{
     NativeCatalog, NativeProgram, NativeProgramError, NativeValue, WorkflowContext,
 };
@@ -1941,17 +1977,27 @@ async fn native_fixture<P: NativeProgram>(
     let entry = std::any::type_name::<P>();
     catalog.insert::<P>(entry.into(), "one".into())?;
     let executable = catalog.executable(entry, "one").expect("compiled entry");
+    let ProgramExecutable::Native {
+        entry,
+        revision: native_revision,
+        binary_digest,
+    } = executable
+    else {
+        panic!("native catalog entry")
+    };
     let repository =
         signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
             pool.clone(),
         );
     let registration = repository
-        .register_executable_user(
+        .register_native_user(
             signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
-            signalbox_domain::program_registration::ProgramRegistrationContent {
+            NativeProgramRegistrationRequest {
                 name: "fixture".into(),
                 revision: "one".into(),
-                executable,
+                entry,
+                native_revision,
+                binary_digest,
                 grants,
             },
         )
@@ -2261,25 +2307,32 @@ async fn unavailable_native_binary_faults_even_when_entry_and_revision_match()
     let (_container, pool) = migrated_postgres().await?;
     let mut catalog = NativeCatalog::new()?;
     catalog.insert::<ClockProgram>("fixture".into(), "one".into())?;
-    let mut executable = catalog
+    let executable = catalog
         .executable("fixture", "one")
         .expect("compiled entry");
-    let ProgramExecutable::Native { binary_digest, .. } = &mut executable else {
+    let ProgramExecutable::Native {
+        entry,
+        revision: native_revision,
+        ..
+    } = executable
+    else {
         panic!("native entry")
     };
-    *binary_digest =
-        signalbox_domain::program_registration::ProgramContentDigest::of(b"different executable");
     let repository =
         signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
             pool.clone(),
         );
     let registration = repository
-        .register_executable_user(
+        .register_native_user(
             signalbox_domain::ProgramRegistrationId::from_uuid(Uuid::now_v7()),
-            signalbox_domain::program_registration::ProgramRegistrationContent {
+            NativeProgramRegistrationRequest {
                 name: "fixture".into(),
                 revision: "one".into(),
-                executable,
+                entry,
+                native_revision,
+                binary_digest: signalbox_domain::program_registration::ProgramContentDigest::of(
+                    b"different executable",
+                ),
                 grants: ProgramGrants::new([signalbox_domain::ProgramCapability::Time]),
             },
         )
@@ -2468,18 +2521,31 @@ async fn native_registration_adopts_equal_retries_and_refuses_changed_executable
             pool.clone(),
         );
     let original = repository.for_run(run).await?.expect("native registration");
+    let ProgramExecutable::Native {
+        entry,
+        revision: native_revision,
+        binary_digest,
+    } = original.content.executable.clone()
+    else {
+        panic!("native registration")
+    };
+    let request = NativeProgramRegistrationRequest {
+        name: original.content.name.clone(),
+        revision: original.content.revision.clone(),
+        entry,
+        native_revision,
+        binary_digest,
+        grants: original.content.grants.clone(),
+    };
     assert_eq!(
         repository
-            .register_executable_user(original.id, original.content.clone())
+            .register_native_user(original.id, request.clone())
             .await?,
         original
     );
-    let mut changed = original.content.clone();
-    let ProgramExecutable::Native { revision, .. } = &mut changed.executable else {
-        panic!("native registration")
-    };
-    *revision = "different-revision".into();
-    assert!(matches!(repository.register_executable_user(original.id, changed).await, Err(signalbox_persistence::program_registration::ProgramRegistrationError::RegistrationConflict { .. })));
+    let mut changed = request;
+    changed.native_revision = "different-revision".into();
+    assert!(matches!(repository.register_native_user(original.id, changed).await, Err(signalbox_persistence::program_registration::ProgramRegistrationError::RegistrationConflict { .. })));
     assert_eq!(repository.for_run(run).await?, Some(original));
     let invalid = sqlx::query("INSERT INTO program_registration (registration_id, name, revision, executable_kind, artifact, native_entry, native_revision, binary_digest, grants) SELECT $1, 'mixed', revision, executable_kind, '', native_entry, native_revision, binary_digest, grants FROM program_registration")
         .bind(Uuid::now_v7()).execute(&pool).await.expect_err("native and JavaScript columns cannot coexist");

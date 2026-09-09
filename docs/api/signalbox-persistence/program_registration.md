@@ -56,10 +56,10 @@ impl program_registration::ProgramRegistrationRepository {
         signalbox_domain::program_registration::ProgramRegistration,
         program_registration::ProgramRegistrationError,
     >;
-    pub async fn register_executable_user(
+    pub async fn register_native_user(
         &self,
-        id: signalbox_domain::ProgramRegistrationId,
-        content: signalbox_domain::program_registration::ProgramRegistrationContent,
+        registration: signalbox_domain::ProgramRegistrationId,
+        request: signalbox_domain::program_registration::NativeProgramRegistrationRequest,
     ) -> result::Result<
         signalbox_domain::program_registration::ProgramRegistration,
         program_registration::ProgramRegistrationError,

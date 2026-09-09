@@ -38,10 +38,12 @@ effects reach host-side `EffectExecutor` implementations.
 `ProgramRegistrationRepository` stores immutable registrations keyed by name and
 revision. Its executable is either JavaScript with SHA-256 digests of exact
 source and stripped artifact bytes, or a compiled native catalog entry/revision
-and SHA-256 digest of the exact executing binary. Each registration carries
-explicit grants from `ProgramCapability`; identical bytes under distinct names
-or grant lists remain distinct programs. A run pins its registration and
-immutable exact input bytes; the registration records its executable and grants.
+and SHA-256 digest of the exact executing binary. JavaScript registration
+requires source bytes and computes their digest; native registration accepts
+only `NativeProgramRegistrationRequest`. Each registration carries explicit
+grants from `ProgramCapability`; identical bytes under distinct names or grant
+lists remain distinct programs. A run pins its registration and immutable exact
+input bytes; the registration records its executable and grants.
 Program-initiated registration requires `register` and admits only a subset of
 the registrant's grants; user registration may widen grants under a new key. The
 host resolves the executable bound to the run, and session capability issuance

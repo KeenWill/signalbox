@@ -3,8 +3,8 @@
 use signalbox_domain::{
     ProgramRegistrationId, ProgramRunId,
     program_registration::{
-        ProgramContentDigest, ProgramExecutable, ProgramGrants, ProgramRegistration,
-        ProgramRegistrationContent, ProgramRegistrationRequest,
+        NativeProgramRegistrationRequest, ProgramContentDigest, ProgramExecutable, ProgramGrants,
+        ProgramRegistration, ProgramRegistrationContent, ProgramRegistrationRequest,
     },
 };
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -45,6 +45,20 @@ impl From<sqlx::Error> for ProgramRegistrationError {
     }
 }
 
+/// Registration content cannot be inserted directly through the public API.
+///
+/// ```compile_fail
+/// use signalbox_domain::{ProgramRegistrationId, program_registration::ProgramRegistrationContent};
+/// use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+///
+/// async fn insert_unchecked(
+///     repository: &ProgramRegistrationRepository,
+///     id: ProgramRegistrationId,
+///     content: ProgramRegistrationContent,
+/// ) {
+///     repository.register_executable_user(id, content).await;
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct ProgramRegistrationRepository {
     pool: PgPool,
@@ -83,8 +97,30 @@ impl ProgramRegistrationRepository {
         self.register_executable_user(registration, content).await
     }
 
-    /// Stores an executable identity admitted at the user boundary.
-    pub async fn register_executable_user(
+    /// Registers a compiled native identity without admitting JavaScript content.
+    ///
+    /// ```compile_fail
+    /// use signalbox_domain::{ProgramRegistrationId, program_registration::ProgramRegistrationContent};
+    /// use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+    ///
+    /// async fn insert_javascript_content(
+    ///     repository: &ProgramRegistrationRepository,
+    ///     id: ProgramRegistrationId,
+    ///     content: ProgramRegistrationContent,
+    /// ) {
+    ///     repository.register_native_user(id, content).await;
+    /// }
+    /// ```
+    pub async fn register_native_user(
+        &self,
+        registration: ProgramRegistrationId,
+        request: NativeProgramRegistrationRequest,
+    ) -> Result<ProgramRegistration, ProgramRegistrationError> {
+        self.register_executable_user(registration, request.into_content())
+            .await
+    }
+
+    async fn register_executable_user(
         &self,
         id: ProgramRegistrationId,
         content: ProgramRegistrationContent,

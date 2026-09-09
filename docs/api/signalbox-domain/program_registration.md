@@ -46,6 +46,23 @@ impl program_registration::ProgramRegistrationRequest {
 }
 ```
 
+## NativeProgramRegistrationRequest
+
+```rust
+pub struct NativeProgramRegistrationRequest {
+    pub name: string::String,
+    pub revision: string::String,
+    pub entry: string::String,
+    pub native_revision: string::String,
+    pub binary_digest: program_registration::ProgramContentDigest,
+    pub grants: program_registration::ProgramGrants,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl program_registration::NativeProgramRegistrationRequest {
+    pub fn into_content(self) -> program_registration::ProgramRegistrationContent;
+}
+```
+
 ## ProgramExecutable
 
 ```rust
