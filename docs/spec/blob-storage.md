@@ -97,7 +97,9 @@ registration.
 
 The browser renderer loads the preview view, then the thumbnail view, in
 capability order, and loads a browser-native original only after an explicit
-action.
+action. Derived image views have a client-owned 16 MiB byte ceiling. The client
+rejects a larger advertised length before fetching and verifies the bounded
+response against that length before image decoding.
 
 Content responses send an exact content length, advertise byte ranges, forbid
 media-type sniffing, and use the quoted digest as the ETag with immutable
