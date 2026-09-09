@@ -89,8 +89,8 @@ describe('imported artifact projection', () => {
       id: documentEntry.frontier.imported_entry_id,
       displayName: 'Imported entry 8',
       kind: 'blocked',
-      attemptedKind: 'imported document',
-      reason: 'Content unavailable.',
+      attemptedKind: 'Imported document',
+      reason: 'No preview for this content.',
     })
   })
 
@@ -106,8 +106,8 @@ describe('imported artifact projection', () => {
       id: unattestedEntry.frontier.imported_entry_id,
       displayName: 'Imported entry 8',
       kind: 'blocked',
-      attemptedKind: 'imported text',
-      reason: 'Text not attested.',
+      attemptedKind: 'Imported text',
+      reason: 'Text unknown.',
     })
   })
 
