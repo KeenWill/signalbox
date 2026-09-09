@@ -24,7 +24,9 @@ On Linux, nextest PostgreSQL fixtures clone isolated databases from a migrated
 template in a run-owned container. Cargo and Bazel fixtures own their
 containers. Migration digests and advisory locks coordinate template
 initialization across test processes. Fixtures that exercise server shutdown,
-cluster settings, or historical migrations use dedicated containers.
+cluster settings, or historical migrations use dedicated containers. Each
+nextest slot's clone tablespace has its own tmpfs capped by the checked-in
+disposable database ceiling. The shared catalog and WAL mount has the same cap.
 
 Coverage runs through Bazel for the workspace and the persistence, daemon, and
 terminal-client PostgreSQL selections. It is report-only, with no threshold.

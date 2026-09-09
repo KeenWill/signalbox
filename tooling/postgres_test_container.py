@@ -27,7 +27,13 @@ def main():
         container = docker("ps", "-q", "--filter", f"label={label}")
         if not container:
             ceiling = int(re.search(r"^disposable_postgres_state_ceiling_bytes = (\d+)$", config, re.M)[1])
-            threads = int(os.environ.get("NEXTEST_TEST_THREADS", len(os.sched_getaffinity(0))))
+            try:
+                slots = max(1, int(os.environ.get("NEXTEST_TEST_THREADS", len(os.sched_getaffinity(0)))))
+            except ValueError:
+                slots = len(os.sched_getaffinity(0))
+            mounts = []
+            for slot in range(slots):
+                mounts += ["--tmpfs", f"/sbx-tablespaces/{slot}:rw,size={ceiling}"]
             labels = ["--label", label]
             keep = os.environ.get("TESTCONTAINERS_COMMAND") == "keep"
             if not keep:
@@ -36,10 +42,13 @@ def main():
                 "run", "-d", *labels,
                 "-e", "POSTGRES_USER=signalbox", "-e", "POSTGRES_PASSWORD=signalbox-test-only",
                 "-e", "POSTGRES_DB=postgres", "-p", "127.0.0.1::5432",
-                "--tmpfs", f"/var/lib/postgresql:rw,size={ceiling * threads}",
+                "--tmpfs", f"/var/lib/postgresql:rw,size={ceiling}",
+                *mounts,
                 f"postgres:{image}", "-c", "max_connections=512", "-c", "fsync=off",
                 "-c", "synchronous_commit=off", "-c", "full_page_writes=off",
                 "-c", "shared_buffers=1GB",
+                # Leave room for catalogs and WAL bursts within the fixed server mount.
+                "-c", f"max_wal_size={ceiling // 4 // (1024 * 1024)}MB",
             )
             if not keep:
                 # The guardian owns only this container and outlives test subprocesses.
@@ -65,9 +74,24 @@ def main():
                 time.sleep(0.25)
             else:
                 raise RuntimeError("test PostgreSQL server did not become ready")
+            docker("exec", container, "sh", "-c", "chown postgres:postgres /sbx-tablespaces/*")
+            subprocess.run(
+                ["docker", "exec", "-i", container, "psql", "-X", "-U", "signalbox",
+                 "-d", "postgres", "-v", "ON_ERROR_STOP=1"],
+                input="\n".join(
+                    f"CREATE TABLESPACE sbx_slot_{slot} LOCATION '/sbx-tablespaces/{slot}';"
+                    for slot in range(slots)
+                ),
+                text=True, stdout=subprocess.DEVNULL, check=True,
+            )
         bindings = json.loads(docker("inspect", "--format", "{{json .NetworkSettings.Ports}}", container))
         port = bindings["5432/tcp"][0]["HostPort"]
-        print(f"postgres://signalbox:signalbox-test-only@127.0.0.1:{port}/postgres")
+        mounts = json.loads(docker("inspect", "--format", "{{json .HostConfig.Tmpfs}}", container))
+        slots = sum(path.startswith("/sbx-tablespaces/") for path in mounts)
+        # Older nextest versions may omit the resolved thread count. Sharing a
+        # bounded slot under oversubscription still preserves each database's cap.
+        slot = int(os.environ.get("NEXTEST_TEST_GLOBAL_SLOT", 0)) % slots
+        print(json.dumps({"url": f"postgres://signalbox:signalbox-test-only@127.0.0.1:{port}/postgres", "slot": slot}))
 
 
 if __name__ == "__main__":

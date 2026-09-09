@@ -62,14 +62,15 @@ impl Drop for TestDatabase {
 pub async fn migrated_postgres(
     max_connections: u32,
 ) -> Result<(TestDatabase, PgPool, String), Box<dyn Error>> {
-    let (admin_url, container) =
+    let (admin_url, container, slot) =
         if cfg!(target_os = "linux") && std::env::var_os("NEXTEST_RUN_ID").is_some() {
-            (tokio::task::spawn_blocking(shared_server).await??, None)
+            let server = tokio::task::spawn_blocking(shared_server).await??;
+            (server.url, None, Some(server.slot))
         } else {
             let (url, container) = dedicated_server().await?;
-            (url, Some(container))
+            (url, Some(container), None)
         };
-    clone_database(admin_url, max_connections, container).await
+    clone_database(admin_url, max_connections, container, slot).await
 }
 
 async fn dedicated_server() -> Result<(String, ContainerAsync<Postgres>), Box<dyn Error>> {
@@ -95,6 +96,7 @@ async fn clone_database(
     admin_url: String,
     max_connections: u32,
     container: Option<ContainerAsync<Postgres>>,
+    slot: Option<u32>,
 ) -> Result<(TestDatabase, PgPool, String), Box<dyn Error>> {
     let mut admin =
         PgConnection::connect_with(&crate::local_test_connection_options(&admin_url)?).await?;
@@ -158,8 +160,11 @@ async fn clone_database(
         .execute(&mut admin)
         .await?;
     let name = format!("sbx_{}", uuid::Uuid::now_v7().simple());
+    let tablespace_clause = slot
+        .map(|slot| format!(" TABLESPACE sbx_slot_{slot}"))
+        .unwrap_or_default();
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        "CREATE DATABASE \"{name}\" TEMPLATE \"{template}\""
+        "CREATE DATABASE \"{name}\" TEMPLATE \"{template}\"{tablespace_clause}"
     )))
     .execute(&mut admin)
     .await?;
@@ -179,7 +184,13 @@ async fn clone_database(
     Ok((database, pool, database_url))
 }
 
-fn shared_server() -> std::io::Result<String> {
+#[derive(serde::Deserialize)]
+struct SharedServer {
+    url: String,
+    slot: u32,
+}
+
+fn shared_server() -> std::io::Result<SharedServer> {
     let executable = std::env::current_exe()?;
     let target = executable
         .parent()
@@ -195,12 +206,77 @@ fn shared_server() -> std::io::Result<String> {
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    serde_json::from_slice(&output.stdout).map_err(std::io::Error::other)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_full_clone_tablespace_does_not_consume_another_slots_allowance()
+    -> Result<(), Box<dyn Error>> {
+        // The intermediate process makes this test the container's guardian owner,
+        // isolating the deliberate storage exhaustion from the suite's server.
+        let output = tokio::task::spawn_blocking(|| -> std::io::Result<_> {
+            let executable = std::env::current_exe()?;
+            Command::new("python3")
+                .args([
+                    "-c",
+                    "import subprocess,sys; subprocess.run([sys.executable, '-c', *sys.argv[1:]], check=True)",
+                    CONTAINER_HELPER,
+                ])
+                .arg(executable.parent().expect("test executable directory").join("postgres-fixtures"))
+                .arg(POSTGRES_IMAGE_TAG)
+                .arg(include_str!("../../../../config/signalboxd.example.toml"))
+                .env("NEXTEST_RUN_ID", uuid::Uuid::now_v7().to_string())
+                .env("NEXTEST_TEST_THREADS", "2")
+                .env("NEXTEST_TEST_GLOBAL_SLOT", "0")
+                .output()
+        }).await??;
+        assert!(output.status.success(), "shared server failed: {output:?}");
+        let server: SharedServer = serde_json::from_slice(&output.stdout)?;
+        let (left_database, left_pool, _) =
+            clone_database(server.url.clone(), 1, None, Some(0)).await?;
+        let (right_database, right_pool, _) = clone_database(server.url, 1, None, Some(1)).await?;
+        sqlx::raw_sql(
+            "CREATE UNLOGGED TABLE fixture_limit_probe (payload text); \
+             ALTER TABLE fixture_limit_probe ALTER COLUMN payload SET STORAGE EXTERNAL",
+        )
+        .execute(&left_pool)
+        .await?;
+        // Uncompressed rows exceed the checked-in 512 MiB database ceiling;
+        // UNLOGGED keeps this probe focused on relation storage rather than WAL.
+        let error = sqlx::query(
+            "INSERT INTO fixture_limit_probe SELECT repeat('x', 65536) FROM generate_series(1, 8193)",
+        ).execute(&left_pool).await.expect_err("the database storage ceiling must reject this write");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("53100")
+        );
+        sqlx::raw_sql(
+            "CREATE TABLE fixture_limit_probe (value integer); INSERT INTO fixture_limit_probe VALUES (11)",
+        ).execute(&right_pool).await?;
+        let value: i32 = sqlx::query_scalar("SELECT value FROM fixture_limit_probe")
+            .fetch_one(&right_pool)
+            .await?;
+        assert_eq!(value, 11);
+        // Release the failed relation and its dirty buffers before database-drop
+        // checkpoints; its sparse file length can exceed its retained tmpfs pages.
+        sqlx::query("DROP TABLE fixture_limit_probe")
+            .execute(&left_pool)
+            .await?;
+        left_pool.close().await;
+        right_pool.close().await;
+        drop(left_database);
+        drop(right_database);
+        Ok(())
+    }
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
@@ -210,7 +286,7 @@ mod tests {
         const CHILD_TEST: &str = "test_support::postgres::tests::keep_mode_preserves_the_cloned_database_after_guard_drop";
         const CHILD_EVIDENCE: &str = "kept database remains queryable";
         if let Ok(admin_url) = std::env::var(ADMIN_URL_VARIABLE) {
-            let (database, pool, _) = clone_database(admin_url, 1, None).await?;
+            let (database, pool, _) = clone_database(admin_url, 1, None, None).await?;
             sqlx::raw_sql(
                 "CREATE TABLE fixture_keep_probe (value integer); INSERT INTO fixture_keep_probe VALUES (11)",
             )
@@ -254,8 +330,8 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let (admin_url, _container) = dedicated_server().await?;
         let (left, right) = tokio::join!(
-            clone_database(admin_url.clone(), 2, None),
-            clone_database(admin_url, 2, None)
+            clone_database(admin_url.clone(), 2, None, None),
+            clone_database(admin_url, 2, None, None)
         );
         let (left_database, left_pool, _) = left?;
         let (right_database, right_pool, _) = right?;
