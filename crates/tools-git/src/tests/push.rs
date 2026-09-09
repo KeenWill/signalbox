@@ -2265,3 +2265,38 @@ async fn push_refuses_restoring_the_deleted_source_of_a_branch_rename() {
     ));
     assert!(!transport.has_request());
 }
+
+#[tokio::test]
+async fn push_refuses_unsupported_merge_shape_before_an_oversized_parent_snapshot() {
+    use crate::limits::MAX_OBJECT_BYTES;
+
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(&repository, &[], &[]);
+    let branch = merge_test_commit_files(&repository, &[], &[ancestor]);
+    let oversized_content = "x".repeat(MAX_OBJECT_BYTES + 1);
+    let base = merge_test_commit_files(
+        &repository,
+        &[(b"oversized.txt", &oversized_content)],
+        &[ancestor],
+    );
+    let other_base = merge_test_commit(&repository, "other\n", &[ancestor]);
+    let merge = merge_test_commit_files(&repository, &[], &[branch, base, other_base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+    let authority = fixture.executor().repository_authority;
+    assert!(
+        crate::push_objects::PushObjectSnapshot::capture(&authority, merge, Some(branch)).is_err(),
+        "parent content exceeds the snapshot's object ceiling"
+    );
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert_eq!(
+        result,
+        Err(GitPushFailure::UnsupportedMergeShape { parents: 3 })
+    );
+    assert!(!transport.has_request());
+}

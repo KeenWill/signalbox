@@ -220,19 +220,11 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
                             .ok_or(GitPushFailure::Repository)
                     })
                     .transpose()?;
+                crate::push_merge::verify_merge(&authority, target, fence, deadline)?;
                 let snapshot = PushObjectSnapshot::capture_before_deadline(
                     &authority, target, fence, deadline,
                 )
                 .map_err(|_| GitPushFailure::Repository)?;
-                if snapshot
-                    .repository
-                    .find_commit(target)
-                    .map_err(|_| GitPushFailure::Repository)?
-                    .parent_count()
-                    > 1
-                {
-                    crate::push_merge::verify_merge(&authority, target, fence, deadline)?;
-                }
                 Ok((snapshot, target))
             },
             PUSH_PREPARATION_TIMEOUT,
