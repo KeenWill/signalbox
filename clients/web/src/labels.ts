@@ -81,7 +81,7 @@ const labels = new Map<string, string>(
     delegation_wake: 'Delegated session resumed',
     deny: 'Deny',
     derivative: 'Preview',
-    derived_artifact: 'Converted file',
+    derived_artifact: 'Generated content',
     derived_text_artifact: 'Derived text',
     direct: 'Direct',
     disabled: 'Disabled',

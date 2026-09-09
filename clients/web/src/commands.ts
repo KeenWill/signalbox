@@ -505,7 +505,7 @@ export const commandRegistry = [
   {
     id: 'imports.continue.abandon',
     title: 'Abandon',
-    description: 'Discard the pending request.',
+    description: 'Forget the saved retry.',
     category: 'Imports',
     bindings: [],
     available: (context) =>

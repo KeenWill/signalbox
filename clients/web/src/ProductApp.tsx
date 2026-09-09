@@ -545,7 +545,7 @@ export function ProductApp({
       ? "Can't reach the server"
       : bootstrap.error instanceof ProductContractError
         ? 'Unexpected server response'
-        : "Couldn't connect"
+        : 'Server unavailable'
     : null
   const inspectorInSheet = app.layout === 'focus' || narrowInspector
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.

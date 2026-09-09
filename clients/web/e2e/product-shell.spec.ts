@@ -350,7 +350,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
   const scenario = await useRecoveringBootstrap(page)
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText("Couldn't connect")).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   scenario.recover()
   await page.getByRole('button', { name: 'Retry connection' }).click()
 
@@ -966,7 +966,7 @@ test('retries an initial bootstrap failure', async ({ page }) => {
 
   // A refused admission answers with a status, so `readBootstrap` raises a plain error and the
   // shell classifies it as an unavailable bootstrap rather than an unreachable transport.
-  await expect(page.getByText("Couldn't connect")).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry connection' }).click()
   await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.getByRole('main')).toBeFocused()
@@ -1152,7 +1152,7 @@ test('retries a transient Attention bootstrap failure in place', async ({ page }
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
-  await expect(page.getByText("Couldn't connect")).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: /^Retry/ })).toHaveCount(1)
   await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
 
@@ -1238,7 +1238,7 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
   ).toBeVisible()
   // A refused admission answers with a status, so the shell classifies it as an unavailable
   // bootstrap rather than as an unreachable transport or a rejected contract.
-  await expect(page.getByText("Couldn't connect")).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   await expect(page.locator('.imports-shell-product')).toHaveCount(0)
   expect(importRequests).toBe(0)
   expect(problems.pageErrors).toEqual([])
@@ -1319,7 +1319,7 @@ test('mounts Imports after the daemon contract recovers', async ({ page }) => {
   await useDeterministicImportApi(page)
   await page.goto(importsProductFixture.path)
 
-  await expect(page.getByText("Couldn't connect")).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry connection' }).click()
 
   await expect(page.locator('.product-connection')).toHaveCount(0)
@@ -1683,7 +1683,7 @@ test('retries a transient bootstrap failure without reloading', async ({ page })
   await useDeterministicAttention(page)
   await page.goto('/attention')
 
-  await expect(page.getByText("Couldn't connect")).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   scenario.recover()
   await page.getByRole('button', { name: 'Retry connection' }).click()
   await expect(page.locator('.product-connection')).toHaveCount(0)
