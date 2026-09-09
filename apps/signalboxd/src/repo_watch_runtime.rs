@@ -183,6 +183,7 @@ impl RepositoryWatchRuntime {
         Option<(
             crate::WatchedRepositoryConfiguration,
             signalbox_domain::BranchName,
+            signalbox_domain::CommitSha,
         )>,
         signalbox_module_repo_watch_v2::StoreError,
     > {
@@ -222,7 +223,13 @@ impl RepositoryWatchRuntime {
                     && repository.repository() == context.head_repository()
                     && repository.push_credential_file().is_some()
             })
-            .map(|repository| (repository.clone(), context.head_branch().clone())))
+            .map(|repository| {
+                (
+                    repository.clone(),
+                    context.head_branch().clone(),
+                    context.head_sha().clone(),
+                )
+            }))
     }
 
     /// Reconciles the configured revision set before starting repository tasks.

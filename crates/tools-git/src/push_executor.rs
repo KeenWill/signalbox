@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use git2::Odb;
 use serde::Serialize;
 use signalbox_application::{
     ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, OperatorFailureClass,
@@ -10,12 +9,12 @@ use signalbox_domain::{ToolExecutionErrorDetail, ToolResultText};
 use signalbox_tools_workspace::{WorkspaceRoot, WorkspaceRootIdentity};
 
 use crate::GIT_PUSH_CONFIGURED_NAME;
-use crate::bounded::find_bounded_commit;
 use crate::descriptor::{RepositoryIdentity, descriptor_path};
 use crate::layout::validate_repository_layout;
-use crate::pinning::{PinnedObjectDatabase, PinnedRepository};
+use crate::pinning::PinnedRepository;
 use crate::push_arguments::GitPushArguments;
 use crate::push_catalog::decode_push;
+use crate::push_objects::PushObjectSnapshot;
 use crate::push_transport::{
     ConfiguredGitRemote, GitPushRequest, GitPushTransport, GitPushTransportFailure,
 };
@@ -30,6 +29,7 @@ pub struct GitPushExecutor<Transport> {
     repository_authority: PinnedRepository,
     remote: ConfiguredGitRemote,
     branch_fence: Option<String>,
+    commit_fence: Option<String>,
     transport: Transport,
     repository_detail: ToolExecutionErrorDetail,
     unresolved_detail: ToolExecutionErrorDetail,
@@ -56,11 +56,18 @@ impl<Transport> GitPushExecutor<Transport> {
             repository_authority,
             remote,
             branch_fence: None,
+            commit_fence: None,
             transport,
             repository_detail,
             unresolved_detail,
             rejected_detail,
         }
+    }
+
+    /// Bounds object capture to commits after the retained dispatch head commit.
+    pub fn with_commit_fence(mut self, commit: String) -> Self {
+        self.commit_fence = Some(commit);
+        self
     }
 
     /// Restricts pushes to the retained dispatch head branch.
@@ -161,39 +168,28 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
             return Err(GitPushFailure::Repository);
         }
 
-        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)
+        let reference = format!("refs/heads/{}", arguments.branch);
+        let (_, target) =
+            resolve_pinned_reference_chain_from(&self.repository_authority, &reference, None)
+                .map_err(|_| GitPushFailure::Unresolved)?;
+        let target = target.ok_or(GitPushFailure::Unresolved)?;
+        let fence = self
+            .commit_fence
+            .as_ref()
+            .map(|commit| {
+                crate::layout::parse_full_object_id(commit, self.repository_authority.object_format)
+                    .ok_or(GitPushFailure::Repository)
+            })
+            .transpose()?;
+        let snapshot = PushObjectSnapshot::capture(&self.repository_authority, target, fence)
             .map_err(|_| GitPushFailure::Repository)?;
-        let (commit, git_directory) = {
-            let repository = self
-                .repository_authority
-                .repository()
-                .map_err(|_| GitPushFailure::Repository)?;
-            let object_database = Odb::new().map_err(|_| GitPushFailure::Repository)?;
-            pinned_objects
-                .add_to(&object_database)
-                .map_err(|_| GitPushFailure::Repository)?;
-            repository
-                .set_odb(&object_database, &pinned_objects)
-                .map_err(|_| GitPushFailure::Repository)?;
-            let reference = format!("refs/heads/{}", arguments.branch);
-            let (_, target) =
-                resolve_pinned_reference_chain_from(&self.repository_authority, &reference, None)
-                    .map_err(|_| GitPushFailure::Unresolved)?;
-            let target = target.ok_or(GitPushFailure::Unresolved)?;
-            let commit = find_bounded_commit(&repository, target)
-                .map_err(|_| GitPushFailure::Unresolved)?
-                .id()
-                .to_string();
-            (commit, repository.path().to_owned())
-        };
-        pinned_objects
-            .validate_live(&self.repository_authority)
-            .map_err(|_| GitPushFailure::Repository)?;
+        let commit = target.to_string();
+        let git_directory = snapshot.repository.path().to_owned();
         let request = GitPushRequest::new(
             descriptor_path(&self.repository_authority.root),
             self.remote.clone(),
-            git_directory,
-            pinned_objects.directory.path().to_owned(),
+            git_directory.clone(),
+            git_directory.join("objects"),
             arguments.branch.clone(),
             commit.clone(),
         );

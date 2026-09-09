@@ -390,7 +390,7 @@ where
                     .map_err(|_| DaemonToolExecutorError::pre_dispatch())?,
                 None => None,
             };
-            let Some((repository, branch)) = authority else {
+            let Some((repository, branch, commit)) = authority else {
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                     detail: signalbox_domain::ToolExecutionErrorDetail::try_new(
                         "configured Git push is unavailable for this session".to_owned(),
@@ -411,6 +411,7 @@ where
                 &root,
                 &repository,
                 branch,
+                commit,
                 self.exec_runner.clone(),
                 &filesystem,
             )
