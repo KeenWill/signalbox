@@ -564,6 +564,100 @@ async fn push_range_ignores_large_history_in_the_pack_containing_its_tip() {
     assert!(!objects.exists(archive));
 }
 
+#[test]
+fn merge_push_omits_history_shared_with_the_dispatch_fence() {
+    use crate::tests::support::{AUTHOR_EMAIL, AUTHOR_NAME, commit_with_parents};
+
+    // These labels distinguish graph nodes; their spelling is arbitrary.
+    const ARCHIVE_BYTE: u8 = b'x';
+    const ARCHIVE_PATH: &str = "archive";
+    const HISTORY_LABEL: &str = "old archive";
+    const SHARED_LABEL: &str = "shared history without archive";
+    const FENCE_LABEL: &str = "dispatch fence";
+    const SIDE_LABEL: &str = "base branch advances";
+    const MERGE_LABEL: &str = "merge base into dispatched branch";
+
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture author");
+    let archive = repository
+        .blob(&vec![ARCHIVE_BYTE; crate::limits::MAX_OBJECT_BYTES + 1])
+        .expect("historical blob exceeds the selected-object ceiling");
+    let mut builder = repository.treebuilder(None).expect("archive tree builder");
+    builder
+        .insert(ARCHIVE_PATH, archive, 0o100644)
+        .expect("archive entry");
+    let archive_tree = repository
+        .find_tree(builder.write().expect("archive tree writes"))
+        .expect("archive tree");
+    let history = repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            HISTORY_LABEL,
+            &archive_tree,
+            &[],
+        )
+        .expect("history commit");
+    let retained_tree = repository
+        .find_commit(fixture.initial)
+        .expect("fixture commit")
+        .tree()
+        .expect("small retained tree");
+    let shared = repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            SHARED_LABEL,
+            &retained_tree,
+            &[&repository.find_commit(history).expect("history parent")],
+        )
+        .expect("shared ancestor removes the archive");
+    let fence = commit_with_parents(&repository, &[shared], FENCE_LABEL);
+    let side = commit_with_parents(&repository, &[shared], SIDE_LABEL);
+    let merged = commit_with_parents(&repository, &[fence, side], MERGE_LABEL);
+
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture(
+        &fixture.executor().repository_authority,
+        merged,
+        Some(fence),
+    )
+    .expect("a merge must not capture history already reachable from the dispatch fence");
+    let objects = snapshot.repository.odb().expect("captured object database");
+    assert!(
+        objects.exists(merged),
+        "the merge is part of the push range"
+    );
+    assert!(
+        objects.exists(side),
+        "the new side of the merge is retained"
+    );
+    assert!(
+        objects.exists(fence),
+        "the dispatch fence is retained for negotiation"
+    );
+    assert!(
+        !objects.exists(history),
+        "shared earlier history is omitted"
+    );
+    assert!(
+        !objects.exists(archive),
+        "historical blobs do not consume push allowance"
+    );
+    let shallow = fs::read_to_string(snapshot.repository.path().join("shallow"))
+        .expect("captured merge has negotiation boundaries");
+    assert_eq!(
+        shallow
+            .lines()
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([fence.to_string(), shared.to_string()]),
+        "each retained boundary closes its omitted parent history"
+    );
+}
+
 #[tokio::test]
 async fn push_range_ignores_unrelated_objects_in_one_or_multiple_pack_indexes() {
     use crate::limits::MAX_REPOSITORY_INSPECTIONS;

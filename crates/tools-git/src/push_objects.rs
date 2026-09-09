@@ -55,61 +55,61 @@ impl PushObjectSnapshot {
         let database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
         let mut source = ObjectSource::open(authority, deadline)?;
         let mut excluded = BTreeSet::new();
+        let mut boundaries = BTreeSet::new();
         if let Some(fence) = fence {
-            source.capture(&database, fence)?;
-            let commit = repository
-                .find_commit(fence)
-                .map_err(|_| LocalGitFailure::Operation)?;
-            let mut trees = vec![commit.tree_id()];
-            while let Some(tree) = trees.pop() {
-                source.check_deadline()?;
-                if !excluded.insert(tree) {
-                    continue;
-                }
-                source.capture(&database, tree)?;
-                for entry in &repository
-                    .find_tree(tree)
-                    .map_err(|_| LocalGitFailure::Operation)?
-                {
-                    match entry.kind() {
-                        Some(ObjectType::Tree) => trees.push(entry.id()),
-                        Some(ObjectType::Blob) => {
-                            excluded.insert(entry.id());
-                        }
-                        Some(ObjectType::Commit) => {}
-                        _ => return Err(LocalGitFailure::Repository),
-                    }
-                }
-                if excluded.len() > MAX_REPOSITORY_INSPECTIONS {
-                    return Err(LocalGitFailure::Repository);
-                }
-            }
-            fs::write(repository.path().join("shallow"), format!("{fence}\n"))
-                .map_err(|_| LocalGitFailure::Operation)?;
+            retain_boundary(&repository, &mut source, fence, &mut excluded)?;
+            boundaries.insert(fence);
         }
         let mut commits = vec![target];
         let mut visited = BTreeSet::new();
+        let mut fence_ancestors: Option<BTreeSet<Oid>> = None;
         let mut trees = Vec::new();
         while let Some(commit) = commits.pop() {
             source.check_deadline()?;
             if !visited.insert(commit) {
                 continue;
             }
-            if visited.len() > MAX_REPOSITORY_INSPECTIONS {
+            if visited
+                .len()
+                .saturating_add(fence_ancestors.as_ref().map_or(0, BTreeSet::len))
+                > MAX_REPOSITORY_INSPECTIONS
+            {
                 return Err(LocalGitFailure::Repository);
             }
             if Some(commit) == fence {
+                continue;
+            }
+            if fence_ancestors
+                .as_ref()
+                .is_some_and(|ancestors| ancestors.contains(&commit))
+            {
+                retain_boundary(&repository, &mut source, commit, &mut excluded)?;
+                boundaries.insert(commit);
                 continue;
             }
             source.capture(&database, commit)?;
             let commit = repository
                 .find_commit(commit)
                 .map_err(|_| LocalGitFailure::Operation)?;
+            if commit.parent_count() > 1
+                && fence_ancestors.is_none()
+                && let Some(fence) = fence
+            {
+                fence_ancestors = Some(capture_fence_ancestors(authority, &mut source, fence)?);
+            }
             trees.push(commit.tree_id());
             commits.extend(commit.parent_ids());
         }
         if fence.is_some_and(|fence| !visited.contains(&fence)) {
             return Err(LocalGitFailure::Operation);
+        }
+        if !boundaries.is_empty() {
+            let shallow = boundaries
+                .iter()
+                .map(|boundary| format!("{boundary}\n"))
+                .collect::<String>();
+            fs::write(repository.path().join("shallow"), shallow)
+                .map_err(|_| LocalGitFailure::Operation)?;
         }
         while let Some(tree) = trees.pop() {
             source.check_deadline()?;
@@ -140,6 +140,70 @@ impl PushObjectSnapshot {
         drop(database);
         Ok(Self { repository })
     }
+}
+
+fn capture_fence_ancestors(
+    authority: &PinnedRepository,
+    source: &mut ObjectSource,
+    fence: Oid,
+) -> Result<BTreeSet<Oid>, LocalGitFailure> {
+    let mut pending = vec![fence];
+    let mut ancestors = BTreeSet::new();
+    while let Some(oid) = pending.pop() {
+        source.check_deadline()?;
+        if !ancestors.insert(oid) {
+            continue;
+        }
+        if ancestors.len() > MAX_REPOSITORY_INSPECTIONS {
+            return Err(LocalGitFailure::Repository);
+        }
+        let graph = authority.open_repository_shell()?;
+        let database = graph.odb().map_err(|_| LocalGitFailure::Operation)?;
+        source.capture(&database, oid)?;
+        let commit = graph
+            .find_commit(oid)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pending.extend(commit.parent_ids());
+    }
+    Ok(ancestors)
+}
+
+fn retain_boundary(
+    repository: &RepositoryShell,
+    source: &mut ObjectSource,
+    boundary: Oid,
+    excluded: &mut BTreeSet<Oid>,
+) -> Result<(), LocalGitFailure> {
+    let database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
+    source.capture(&database, boundary)?;
+    let commit = repository
+        .find_commit(boundary)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let mut trees = vec![commit.tree_id()];
+    while let Some(tree) = trees.pop() {
+        source.check_deadline()?;
+        if !excluded.insert(tree) {
+            continue;
+        }
+        source.capture(&database, tree)?;
+        for entry in &repository
+            .find_tree(tree)
+            .map_err(|_| LocalGitFailure::Operation)?
+        {
+            match entry.kind() {
+                Some(ObjectType::Tree) => trees.push(entry.id()),
+                Some(ObjectType::Blob) => {
+                    excluded.insert(entry.id());
+                }
+                Some(ObjectType::Commit) => {}
+                _ => return Err(LocalGitFailure::Repository),
+            }
+        }
+        if excluded.len() > MAX_REPOSITORY_INSPECTIONS {
+            return Err(LocalGitFailure::Repository);
+        }
+    }
+    Ok(())
 }
 
 struct SourceFile {
