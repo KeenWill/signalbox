@@ -307,6 +307,10 @@ impl GitHubCodeHostTransport {
     pub fn try_new(
         configured_bounds: CodeHostNumericBounds,
     ) -> result::Result<Self, GitHubCodeHostConstructionError>;
+    pub fn with_app(
+        self,
+        app: option::Option<sync::Arc<signalbox_github_transport::AppAuthentication>>,
+    ) -> Self;
     pub fn with_convergence_policy(
         self,
         policy: option::Option<signalbox_convergence::ConvergencePolicy>,

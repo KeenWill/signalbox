@@ -193,6 +193,16 @@ private_key_file = "{}"
     );
     let reference = CredentialReference::new("github-primary");
     let access = FileCredentialAccess::from_github(profile, reference.clone());
+    assert_eq!(access.credential_reference(), Some(reference.clone()));
+    let foreign = CredentialReference::new("unmapped-github-profile");
+    assert_eq!(
+        access
+            .resolve(&foreign)
+            .await
+            .expect_err("App access retains its reference boundary")
+            .failure,
+        CredentialAccessFailure::Unmapped
+    );
     assert!(access.validate().is_ok());
     assert_eq!(
         access

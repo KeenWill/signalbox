@@ -69,7 +69,7 @@ impl RepositoryWatchClientLoader {
         Ok(url.into())
     }
 
-    /// Binds a repository's file reference without reading its credential.
+    /// Binds a repository's configured delivery without reading credentials.
     pub fn new(repository: &WatchedRepositoryConfiguration) -> Self {
         let reference = repository.credential_reference();
         Self {
@@ -96,7 +96,7 @@ impl RepositoryWatchClientLoader {
         }
     }
 
-    /// Rereads the credential and returns only an authenticated client handle.
+    /// Resolves the credential and returns only an authenticated client handle.
     pub async fn load(&self) -> Result<GitHubClient, RepositoryWatchClientLoadError> {
         let credential = self
             .credentials

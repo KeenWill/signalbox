@@ -259,8 +259,8 @@ pub(super) fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
     &file_bytes[..end]
 }
 
-/// Credential source that rereads one deployment-owned secret file for every
-/// request preparation so rotation is visible without restarting signalboxd.
+/// Resolves deployment-owned token files and GitHub installation profiles.
+/// Files are reread at use; App profiles share their installation-token cache.
 #[derive(Clone)]
 pub struct FileCredentialAccess {
     paths: Arc<HashMap<CredentialReference, PathBuf>>,
@@ -315,6 +315,9 @@ impl FileCredentialAccess {
 
     /// Returns the non-secret reference accepted by this source.
     pub fn credential_reference(&self) -> Option<CredentialReference> {
+        if let Some((reference, _)) = &self.app {
+            return Some(reference.clone());
+        }
         (self.paths.len() == 1)
             .then(|| self.paths.keys().next().cloned())
             .flatten()
@@ -383,7 +386,7 @@ impl super::HubModelConfiguration {
         })
     }
 
-    /// Admits all model-provider and repository-watch credential files.
+    /// Admits model-provider, token, and webhook files; App keys are admitted at use.
     pub fn validate_credential_files(&self) -> Result<(), CredentialAccessError> {
         for profile in self.credential_profiles.values() {
             use crate::credential_pools::CredentialDelivery;

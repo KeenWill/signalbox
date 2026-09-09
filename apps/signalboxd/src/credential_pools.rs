@@ -744,7 +744,7 @@ impl CredentialPool {
     }
 }
 
-/// Parses the complete `[[credential_profiles]]` array.
+/// Parses model-provider entries in the `[[credential_profiles]]` array.
 pub(crate) fn parse_credential_profiles(
     item: Option<&Item>,
 ) -> Result<HashMap<Arc<str>, CredentialProfile>, HubModelConfigurationError> {

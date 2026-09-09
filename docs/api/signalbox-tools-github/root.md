@@ -452,6 +452,10 @@ pub struct GitHubApiTransport {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl GitHubApiTransport {
     pub fn try_new() -> result::Result<Self, GitHubApiTransportConstructionError>;
+    pub fn with_app(
+        self,
+        app: option::Option<sync::Arc<signalbox_github_transport::AppAuthentication>>,
+    ) -> Self;
 }
 impl GitHubTransport for GitHubApiTransport {
     async fn execute(

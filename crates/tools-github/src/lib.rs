@@ -1812,16 +1812,32 @@ fn longest_trailing_prefix(text: &str, secret: &str) -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn sanitize_error_body(
     bytes: &[u8],
     source: ResponseExtent,
     scrubber: &CredentialScrubber,
 ) -> Option<SanitizedGitHubError> {
+    sanitize_error_body_with_app(bytes, source, scrubber, None)
+}
+
+fn sanitize_error_body_with_app(
+    bytes: &[u8],
+    source: ResponseExtent,
+    scrubber: &CredentialScrubber,
+    app_scrubber: Option<&CredentialScrubber>,
+) -> Option<SanitizedGitHubError> {
     let bytes = match source {
         ResponseExtent::Complete => bytes,
         ResponseExtent::Truncated => discard_incomplete_utf8_suffix(bytes),
     };
-    let redacted = scrubber.redact_text(String::from_utf8_lossy(bytes).into_owned());
+    let mut redacted = scrubber.redact_text(String::from_utf8_lossy(bytes).into_owned());
+    if let Some(app_scrubber) = app_scrubber {
+        redacted = app_scrubber.redact_text(redacted);
+        if source == ResponseExtent::Truncated {
+            redacted = app_scrubber.redact_trailing_prefix(redacted);
+        }
+    }
     let redacted = match source {
         ResponseExtent::Complete => redacted,
         ResponseExtent::Truncated => scrubber.redact_trailing_prefix(redacted),
@@ -1887,7 +1903,7 @@ fn truncate_sanitized(mut text: String) -> String {
     text
 }
 
-/// Production REST/GraphQL transport with no ambient proxy, redirect, or retry.
+/// Production REST/GraphQL transport with request-scoped authentication.
 #[derive(Clone, Debug)]
 pub struct GitHubApiTransport {
     app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
@@ -2198,10 +2214,7 @@ impl GitHubApiTransport {
             Ok(body) => body,
             Err(failure) => return Err(classify_error_body_failure(status, failure)),
         };
-        let mut detail = sanitize_error_body(&body, extent, &scrubber);
-        if let (Some(detail), Some(app_scrubber)) = (&mut detail, app_scrubber) {
-            detail.0 = app_scrubber.redact_text(std::mem::take(&mut detail.0));
-        }
+        let detail = sanitize_error_body_with_app(&body, extent, &scrubber, app_scrubber.as_ref());
         Err(GitHubTransportFailure::Rejected {
             status: status_code,
             detail,
@@ -2229,11 +2242,12 @@ impl GitHubApiTransport {
         let scrubber = CredentialScrubber::try_new(credential)
             .ok_or(GitHubTransportFailure::InvalidCredential)?;
         let mut value = serde_json::from_slice::<serde_json::Value>(&body).map_err(|_| {
-            let mut detail = sanitize_error_body(&body, ResponseExtent::Complete, &scrubber);
-            if let (Some(detail), Some(app_scrubber)) = (&mut detail, &app_scrubber) {
-                detail.0 = app_scrubber.redact_text(std::mem::take(&mut detail.0));
-            }
-            invalid_response(detail)
+            invalid_response(sanitize_error_body_with_app(
+                &body,
+                ResponseExtent::Complete,
+                &scrubber,
+                app_scrubber.as_ref(),
+            ))
         })?;
         scrubber.redact_value(&mut value);
         if let Some(app_scrubber) = app_scrubber {
@@ -3193,6 +3207,35 @@ mod tests {
                 "pageInfo": {"hasNextPage": THREADS_TRUNCATED}
             }}}}
         })
+    }
+
+    #[test]
+    fn refreshed_token_prefixes_are_redacted_before_error_text_is_shortened() {
+        let initial = CredentialValue::new(b"synthetic-initial-token".as_slice());
+        let refreshed = CredentialValue::new(b"synthetic-refreshed-token".as_slice());
+        let initial = CredentialScrubber::try_new(&initial).expect("initial fixture scrubber");
+        let refreshed =
+            CredentialScrubber::try_new(&refreshed).expect("refreshed fixture scrubber");
+        let detail = sanitize_error_body_with_app(
+            b"rejected synthetic-refreshed",
+            ResponseExtent::Truncated,
+            &initial,
+            Some(&refreshed),
+        )
+        .expect("sanitized detail");
+        assert_eq!(detail.0, "rejected [redacted]");
+        let body = format!(
+            "{}synthetic-refreshed-token",
+            "x".repeat(MAX_ERROR_DETAIL_BYTES - ERROR_TRUNCATION_SUFFIX.len() - 4)
+        );
+        let detail = sanitize_error_body_with_app(
+            body.as_bytes(),
+            ResponseExtent::Complete,
+            &initial,
+            Some(&refreshed),
+        )
+        .expect("bounded detail");
+        assert!(!detail.0.contains("synt"));
     }
 
     #[test]
