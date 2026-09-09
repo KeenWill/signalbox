@@ -17,6 +17,9 @@ use crate::{
     push_objects::ObjectSource,
 };
 
+// Use DiffFindOptions::rename_limit's documented default independently of repository config.
+pub(super) const MAX_MERGE_RENAME_SOURCES: usize = 200;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct DroppedBaseChanges {
     pub(super) file: String,
@@ -156,7 +159,12 @@ pub(super) fn verify_merge(
             .path()
             .or_else(|| delta.old_file().path())
             .ok_or(GitPushFailure::Repository)?;
-        let path = base_renames.get(path).copied().unwrap_or(path);
+        let source_path = if delta.status() == Delta::Renamed {
+            delta.old_file().path().ok_or(GitPushFailure::Repository)?
+        } else {
+            path
+        };
+        let path = base_renames.get(source_path).copied().unwrap_or(path);
         own_by_path.entry(path).or_insert(index);
     }
     for (index, delta) in carried.deltas().enumerate() {
@@ -244,8 +252,12 @@ fn detect_renames(
             }
         }
     }
-    diff.find_similar(Some(DiffFindOptions::new().renames(true)))
-        .map_err(repository_failure)
+    diff.find_similar(Some(
+        DiffFindOptions::new()
+            .renames(true)
+            .rename_limit(MAX_MERGE_RENAME_SOURCES),
+    ))
+    .map_err(repository_failure)
 }
 
 fn diff_options() -> DiffOptions {

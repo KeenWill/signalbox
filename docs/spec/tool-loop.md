@@ -170,19 +170,21 @@ base, ignoring line offsets and consuming each matching effect once. A carried
 addition does not require the branch patch's obsolete preimage to remain;
 carried removals must also occur in the branch diff. Rename detection correlates
 source and destination paths in both diffs and maps the base parent's renames
-onto the branch's paths before comparing hunks. An effect absent from the branch
-diff refuses the push with `MergeDroppedBaseChanges`. Collected dropped-hunk
-previews share a 4 KiB budget, and collection truncation remains explicit in the
-detail. Its bounded JSON detail lists filenames before hunk previews, marks each
-shortened preview with `truncated`, and counts omitted filenames and previews
-explicitly when they cannot fit. Filenames use bytewise Git path quoting.
-Verification supports two-parent merges and refuses larger merges with
-`UnsupportedMergeShape` naming the parent count before traversing ancestry. It
-retains only the first dropped hunk per file. Non-merge pushes are unaffected.
+onto the branch's paths through their source paths before comparing hunks. An
+effect absent from the branch diff refuses the push with
+`MergeDroppedBaseChanges`. Collected dropped-hunk previews share a 4 KiB budget,
+and collection truncation remains explicit in the detail. Its bounded JSON
+detail lists filenames before hunk previews, marks each shortened preview with
+`truncated`, and counts omitted filenames and previews explicitly when they
+cannot fit. Filenames use bytewise Git path quoting. Verification supports
+two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
+the parent count before traversing ancestry. It retains only the first dropped
+hunk per file. Non-merge pushes are unaffected.
 
 Before constructing merge diffs, verification counts tree-entry occurrences
 across the four compared trees against `MAX_REPOSITORY_INSPECTIONS`, including
-reused subtrees.
+reused subtrees. Rename detection sets `MAX_MERGE_RENAME_SOURCES` explicitly;
+repository configuration cannot raise the search limit.
 
 The seven local Git tools perform no remote operation.
 
