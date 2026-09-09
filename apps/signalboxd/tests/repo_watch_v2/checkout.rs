@@ -749,6 +749,10 @@ async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposit
     );
     let credential = fixture._files.path().join("push-token");
     std::fs::write(&credential, "push-fixture-token")?;
+    std::fs::set_permissions(
+        &credential,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )?;
     let catalog_text = fixture.catalog.replace(
         "credential_file =",
         &format!(

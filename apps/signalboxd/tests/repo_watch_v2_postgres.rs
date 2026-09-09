@@ -2789,21 +2789,7 @@ fn runtime_configuration(
 fn runtime_configuration_source(hook: &RuntimeHookFixture<'_>) -> Result<String, Box<dyn Error>> {
     let poll_credential = hook.secret.with_extension("poll-token");
     write_private_credential(&poll_credential, b"")?;
-    let model_credential = hook
-        .secret
-        .parent()
-        .expect("fixture directory")
-        .join("model-token");
-    write_private_credential(&model_credential, b"")?;
-    let catalog = include_str!("../../../config/signalboxd.example.toml")
-        .replace(
-            "/run/secrets/anthropic-primary",
-            model_credential.to_str().expect("fixture credential path"),
-        )
-        .replace(
-            "/run/secrets/anthropic-overflow",
-            model_credential.to_str().expect("fixture credential path"),
-        )
+    let mut catalog = include_str!("../../../config/signalboxd.example.toml")
         .replace(
             "/usr/local/bin/signalbox-exec-supervisor",
             std::env::current_exe()?.to_string_lossy().as_ref(),
@@ -2812,6 +2798,18 @@ fn runtime_configuration_source(hook: &RuntimeHookFixture<'_>) -> Result<String,
             "repository_watch_webhook_retention = \"604800s\"",
             &format!("repository_watch_webhook_retention = {:?}", hook.retention),
         );
+    for profile in ["anthropic-primary", "anthropic-overflow"] {
+        let model_credential = hook
+            .secret
+            .parent()
+            .expect("fixture directory")
+            .join(profile);
+        write_private_credential(&model_credential, b"")?;
+        catalog = catalog.replace(
+            &format!("/run/secrets/{profile}"),
+            model_credential.to_str().expect("fixture credential path"),
+        );
+    }
     Ok(format!(
         r#"{catalog}
 [repository_watch]
@@ -3759,6 +3757,7 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     .with_repository_watch(runtime.clone());
     hook.enabled = true;
     let push_credential = files.path().join("push-token");
+    write_private_credential(&push_credential, b"")?;
     let replacement_source = runtime_configuration_source(&hook)?.replace(
         "credential_file =",
         &format!(

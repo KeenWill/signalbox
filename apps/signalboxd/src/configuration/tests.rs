@@ -667,8 +667,12 @@ path = "{WATCH_WEBHOOK_PATH}"
 
 #[test]
 fn credential_admission_checks_every_configured_file_kind() {
+    const PUSH_CREDENTIAL_FILE: &str = "/run/credentials/push-token";
     let directory = tempfile::tempdir().expect("credential fixture directory");
-    let mut source = configuration_with_repository_watch_webhook();
+    let mut source = configuration_with_repository_watch_webhook().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\"\npush_credential_file = \"{PUSH_CREDENTIAL_FILE}\""),
+    );
     let mut files = Vec::new();
     for configured_path in [
         "/run/secrets/anthropic-primary",
@@ -676,6 +680,7 @@ fn credential_admission_checks_every_configured_file_kind() {
         WATCH_CREDENTIAL_FILE,
         SECOND_WATCH_CREDENTIAL_FILE,
         WATCH_WEBHOOK_SECRET_FILE,
+        PUSH_CREDENTIAL_FILE,
     ] {
         let file = tempfile::NamedTempFile::new_in(directory.path()).expect("private credential");
         source = source.replace(configured_path, file.path().to_str().expect("fixture path"));

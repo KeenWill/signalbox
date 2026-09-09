@@ -12,6 +12,9 @@ use signalbox_module_repo_watch_v2::github::{GitHubClient, GitHubClientError};
 
 use crate::{FileCredentialAccess, WatchedRepositoryConfiguration};
 
+/// Non-secret reference for the repository-scoped push transport.
+pub(crate) const GIT_PUSH_CREDENTIAL_REFERENCE: &str = "repository-watch-git-push";
+
 /// Resolves only the credential assigned to one configured repository.
 #[derive(Clone, Debug)]
 pub struct RepositoryWatchClientLoader {
@@ -52,7 +55,7 @@ impl RepositoryWatchClientLoader {
     }
 
     pub(crate) fn for_git_push(path: PathBuf) -> Self {
-        let reference = CredentialReference::new("repository-watch-git-push");
+        let reference = CredentialReference::new(GIT_PUSH_CREDENTIAL_REFERENCE);
         Self {
             credentials: FileCredentialAccess::new(path, reference.clone()),
             reference,

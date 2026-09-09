@@ -343,6 +343,14 @@ impl super::HubModelConfiguration {
                     repository.credential_file(),
                     repository.credential_reference(),
                 )?;
+                if let Some(path) = repository.push_credential_file() {
+                    validate_credential_file(
+                        path,
+                        CredentialReference::new(
+                            crate::repo_watch_credentials::GIT_PUSH_CREDENTIAL_REFERENCE,
+                        ),
+                    )?;
+                }
                 if let Some(webhook) = repository.webhook()
                     && let Some(reference) = repository.webhook_secret_reference()
                 {
