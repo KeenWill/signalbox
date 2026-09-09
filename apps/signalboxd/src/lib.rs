@@ -4754,7 +4754,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_dispatch_authority_reaches_the_judge_as_structured_evidence() {
+    fn approval_judge_renders_repo_watch_pull_request_dispatch_authority() {
         const FIXTURE_DISPATCH_ID: u128 = 4;
         let fixture =
             ApprovalJudgePullRequestAuthority::new(ApprovalJudgePullRequestAuthorityInput {
@@ -4781,6 +4781,10 @@ mod tests {
             serde_json::from_str(&dispatch_json).expect("the dispatch authority is JSON");
         let rendered = render_session_authority_context(&context);
 
+        assert_eq!(
+            decoded["dispatch_id"],
+            fixture.dispatch().into_uuid().to_string()
+        );
         assert_eq!(decoded["repository"], fixture.repository().as_str());
         assert_eq!(decoded["pull_request"], fixture.pull_request().get());
         assert_eq!(decoded["head_sha"], fixture.head_sha().as_str());
