@@ -185,7 +185,7 @@ jobs:
       - name: Test checkers and check generated files and Markdown
         run: |
           bazel test --keep_going --jobs=4 --local_test_jobs=1 //:python_checker_tests //:markdown_format //:generated_artifact_tests //:rust_format_tests
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24'
       - name: Check and compile typed programs
