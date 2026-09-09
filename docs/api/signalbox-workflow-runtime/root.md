@@ -153,9 +153,9 @@ impl WorkflowHost {
     ) -> result::Result<ProgramExecutionOutcome, WorkflowHostError>;
 }
 impl WorkflowHost {
-    pub const fn new(
-        journal: signalbox_persistence::program_journal::ProgramJournalRepository,
-    ) -> Self;
+    pub fn new(journal: signalbox_persistence::program_journal::ProgramJournalRepository) -> Self;
+    pub fn interrupt(&self);
+    pub fn is_interrupted(&self) -> bool;
     pub fn with_native_catalog(self, catalog: native::NativeCatalog) -> Self;
     pub async fn session_capability(
         &self,
