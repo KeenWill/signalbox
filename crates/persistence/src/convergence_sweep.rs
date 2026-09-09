@@ -421,7 +421,7 @@ impl PostgresConvergenceSweepStore {
         Ok(())
     }
 
-    /// Restores a configured target's session and retains its durable nudge handoff.
+    /// Lifts a configured target's park authority and retains its durable nudge handoff.
     ///
     /// A returned session remains pending until its scheduler nudge is acknowledged.
     pub async fn reenroll_target(
@@ -432,15 +432,18 @@ impl PostgresConvergenceSweepStore {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
         let parked_session = sqlx::query_scalar::<_, Option<Uuid>>(
-            "SELECT parked_session_id
-               FROM convergence_sweep_target
+            "UPDATE convergence_sweep_target
+                SET state_kind = $3, failure_kind = NULL,
+                    consecutive_failures = 0, retry_not_before = NULL,
+                    parked_at = NULL, operator_need = NULL
               WHERE repository = $1 AND pull_request_number = $2
-                AND state_kind = $3",
+                AND parked_session_id IS NOT NULL
+              RETURNING parked_session_id",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
         .bind(convergence_sweep_state_to_str(
-            ConvergenceSweepStateStorageKind::Parked,
+            ConvergenceSweepStateStorageKind::Observed,
         ))
         .fetch_optional(&mut *transaction)
         .await?
@@ -1245,16 +1248,13 @@ async fn clear_reenrollment_park(
                     parked_dispatch_id = NULL, parked_session_id = NULL,
                     parked_dispatched_at = NULL
               WHERE repository = $1 AND pull_request_number = $2
-                AND state_kind = $4
-                AND parked_session_id IS NOT DISTINCT FROM $5",
+                AND parked_session_id IS NOT DISTINCT FROM $4
+                AND (parked_session_id IS NULL OR state_kind = $3)",
     )
     .bind(repository.as_str())
     .bind(Decimal::from(pull_request.get()))
     .bind(convergence_sweep_state_to_str(
         ConvergenceSweepStateStorageKind::Observed,
-    ))
-    .bind(convergence_sweep_state_to_str(
-        ConvergenceSweepStateStorageKind::Parked,
     ))
     .bind(expected_session)
     .execute(&mut **transaction)
