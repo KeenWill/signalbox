@@ -409,6 +409,7 @@ pub(super) fn update_signals_child_result(update: &ProcessUpdate, wait: Delegati
             | ProcessUpdateEvent::RunnerStateTransition { .. }
             | ProcessUpdateEvent::ContextCompacted { .. }
             | ProcessUpdateEvent::TurnCompleted { .. }
+            | ProcessUpdateEvent::AutomaticReconciliationExhausted(_)
             | ProcessUpdateEvent::CredentialPoolExhausted(_)
             | ProcessUpdateEvent::TurnFailed { .. }
             | ProcessUpdateEvent::TurnRefused { .. }

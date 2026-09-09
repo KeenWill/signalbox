@@ -2798,7 +2798,7 @@ async fn application_service_completes_scripted_reply() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// a restart-parked ambiguous model call wedges the session — the scan classifies nothing, the wait
+/// a restart-parked ambiguous model call retains the slot — the scan counts its recovery, the wait
 /// stays visible across a second restart, and ordinary input is refused — and the user
 /// reconciliation decision then terminalizes the exact ambiguity without inventing an outcome,
 /// releases the slot, and lets the session activate the accepted successor.
@@ -2840,8 +2840,8 @@ async fn user_reconciliation_releases_a_restart_parked_ambiguous_turn() -> Resul
     let first_restart = scan.execute().await?;
     assert_eq!(
         first_restart.recovered_turn_count(),
-        0,
-        "an unobserved issued call parks its turn instead of terminalizing it"
+        1,
+        "a newly parked lost call counts as recovered"
     );
     assert_eq!(
         first_restart.awaiting_recovery_decision_sessions(),
@@ -3766,6 +3766,54 @@ async fn exhausted_automatic_reconciliation_is_visible_to_the_operator()
         AutomaticReconciliationOperation::ModelCall(parked.call)
     );
     assert_eq!(automatic_recovery_status(&snapshot), (5, true));
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let mut exhausted_events = Vec::new();
+    loop {
+        let outcome = dispatcher
+            .dispatch_next(|event| {
+                if let DispatchedOutboxEventKind::AutomaticReconciliationExhausted(evidence) =
+                    event.kind()
+                {
+                    exhausted_events.push(*evidence);
+                }
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?;
+        if matches!(outcome, OutboxDispatchOutcome::Idle) {
+            break;
+        }
+    }
+    assert_eq!(exhausted_events, exhaustion.exhausted());
+    assert!(repository.claim_due().await?.exhausted().is_empty());
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM automatic_reconciliation_exhausted_outbox_event WHERE turn_id = $1",
+    )
+    .bind(parked.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(event_count, 1, "repeated scans do not duplicate exhaustion");
+    let sequence: Decimal = sqlx::query_scalar("SELECT event_sequence FROM automatic_reconciliation_exhausted_outbox_event WHERE turn_id = $1")
+        .bind(parked.turn.into_uuid()).fetch_one(&pool).await?;
+    let address = signalbox_application::TimelineAddress::new(
+        std::num::NonZeroU64::new(u64::try_from(sequence)?).expect("positive outbox sequence"),
+    );
+    let details =
+        signalbox_persistence::session_timeline::SessionTimelineRepository::new(pool.clone())
+            .read_item_details(
+                parked.session,
+                address,
+                None,
+                signalbox_application::TimelineDetailLimits::new(1, 256)?,
+            )
+            .await?
+            .expect("exhaustion has a browser detail");
+    assert_eq!(
+        details.items[0].body,
+        signalbox_application::SessionTimelineDetailBody::EventFact {
+            kind: signalbox_application::SessionTimelineEventKind::AutomaticReconciliationExhausted,
+        }
+    );
+
     assert_eq!(
         attempt_history,
         ExhaustedAttempts {
@@ -4062,7 +4110,7 @@ async fn startup_recovery_leaves_zero_failed_turns() -> Result<(), Box<dyn Error
     );
 
     let first = scan.execute().await?;
-    assert_eq!(first.recovered_turn_count(), 1);
+    assert_eq!(first.recovered_turn_count(), 2);
     let startup_recovery_failed_turns: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM turn_lifecycle

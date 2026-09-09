@@ -26,6 +26,7 @@ const labels = new Map<string, string>(
     attachment: 'Attachment',
     attachment_filename: 'Attachment filename',
     attachment_media_metadata: 'Attachment details',
+    automatic_reconciliation_exhausted: 'Automatic reconciliation exhausted',
     audio: 'Audio',
     authorization_required: 'Needs authorization',
     auto: 'Auto',

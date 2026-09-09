@@ -39,7 +39,7 @@ const compatibleKinds = {
   reconciliation: ['turn_reconciliation_required'],
   runner: ['runner_state_transition'],
   delegation: ['delegation_update', 'delegation_wake'],
-  event_fact: ['goal_turn_retired'],
+  event_fact: ['goal_turn_retired', 'automatic_reconciliation_exhausted'],
 } as const satisfies Record<DetailBody['type'], readonly DetailItem['kind'][]>
 
 export const isCompatibleDetailBody = (kind: DetailItem['kind'], body: DetailBody): boolean => {
@@ -301,7 +301,11 @@ const detailContent = (body: DetailBody): ReactNode => {
     case 'ownership':
       return <Facts facts={[['Ownership', enumLabel(body.transition)]]} />
     case 'event_fact':
-      return <p>Turn retired before it started.</p>
+      return body.kind === 'automatic_reconciliation_exhausted' ? (
+        <p>Automatic reconciliation exhausted. Waiting for an operator decision.</p>
+      ) : (
+        <p>Turn retired before it started.</p>
+      )
 
     case 'session_created':
       return (
