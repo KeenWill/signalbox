@@ -174,6 +174,118 @@ await sdk.defineProgram({ input: codec, output: codec, run: () => 1 })(codec.enc
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn json_codec_serializes_checked_proxy_descriptors() {
+    let (result, requests) = sdk_script(
+        r#"
+const object = new Proxy({ correct: true }, {
+  get(target, key) { return key === "correct" ? false : Reflect.get(target, key); }
+});
+const array = new Proxy([true], {
+  get(target, key) { return key === "0" ? false : Reflect.get(target, key); }
+});
+const child = { correct: true };
+const moving = new Proxy({ child, later: true }, {
+  getOwnPropertyDescriptor(target, key) {
+    if (key === "later") child.correct = false;
+    return Object.getOwnPropertyDescriptor(target, key);
+  }
+});
+const encoded = sdk.jsonCodec(value => value).encode({ object, array, moving });
+if (String.fromCharCode(...encoded) !== '{"object":{"correct":true},"array":[true],"moving":{"child":{"correct":true},"later":true}}') {
+  throw new Error("serialization must use checked descriptors without rereading proxy properties");
+}
+"#,
+        [],
+    )
+    .await;
+    result.expect("proxy property reads must not replace the checked data");
+    assert!(requests.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn json_codec_preserves_its_contract_when_all_codec_globals_are_replaced() {
+    let (result, requests) = sdk_script(
+        r#"
+const descriptor = Object.getOwnPropertyDescriptor;
+const define = Object.defineProperty;
+const remove = Reflect.deleteProperty;
+const fromCode = String.fromCharCode;
+const TestError = Error;
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+const byteLength = Function.prototype.call.bind(descriptor(typedArrayPrototype, "length").get);
+const input = new Uint8Array([34, 233, 155, 170, 240, 159, 152, 128, 34]);
+const invalidInputs = [new Uint8Array([255]), new Uint8Array([123]), new Uint16Array([49]), { 0: 49, length: 1 }];
+const cyclic = {}; cyclic.self = cyclic;
+const invalid = [NaN, -0, { missing: undefined }, [undefined], new Array(1), cyclic];
+const targets = [
+  [JSON, "parse"], [JSON, "stringify"],
+  [globalThis, "TextEncoder"], [globalThis, "TextDecoder"],
+  [globalThis, "decodeURIComponent"], [Uint8Array, "from"],
+  [Uint8Array, Symbol.hasInstance],
+  [typedArrayPrototype, "length"], [typedArrayPrototype, Symbol.toStringTag],
+  [typedArrayPrototype, Symbol.iterator],
+  [String.prototype, "replace"], [String.prototype, "charCodeAt"],
+  [String.prototype, "padStart"], [String.prototype, Symbol.iterator],
+  [Number.prototype, "toString"], [Number, "isFinite"], [Number, "isInteger"],
+  [Array, "from"], [Array, "isArray"], [Array.prototype, "join"],
+  [Array.prototype, "every"], [Array.prototype, Symbol.iterator],
+  [Object.prototype, "toJSON"], [Array.prototype, "toJSON"],
+  [Object, "freeze"], [Object, "create"], [Object, "defineProperty"],
+  [Object, "getPrototypeOf"], [Object, "setPrototypeOf"],
+  [Object, "getOwnPropertyDescriptor"], [Object, "hasOwn"], [Object, "is"],
+  [Reflect, "ownKeys"], [Set.prototype, "has"], [Set.prototype, "add"],
+  [Set.prototype, "delete"], [Function.prototype, "call"], [Function.prototype, "bind"],
+  [globalThis, "JSON"], [globalThis, "Uint8Array"], [globalThis, "Object"],
+  [globalThis, "Array"], [globalThis, "String"], [globalThis, "Number"],
+  [globalThis, "Set"], [globalThis, "TypeError"],
+];
+const saved = [];
+for (let index = 0; index < targets.length; index++) {
+  saved[index] = descriptor(targets[index][0], targets[index][1]);
+}
+try {
+  for (let index = 0; index < targets.length; index++) {
+    define(targets[index][0], targets[index][1], {
+      value: () => "null", writable: true, configurable: true
+    });
+  }
+  const codec = sdk.jsonCodec(value => value);
+  const encoded = codec.encode({ correct: "雪😀", values: [true, 1.5, null] });
+  let text = "";
+  for (let index = 0; index < byteLength(encoded); index++) text += fromCode(encoded[index]);
+  if (text !== '{"correct":"\\u96ea\\ud83d\\ude00","values":[true,1.5,null]}') {
+    throw new TestError("replaced globals must not change checked JSON bytes");
+  }
+  if (codec.decode(input) !== "雪😀") {
+    throw new TestError("replaced globals must not change UTF-8 input decoding");
+  }
+  for (let index = 0; index < invalid.length; index++) {
+    let rejected = false;
+    try { codec.encode(invalid[index]); } catch { rejected = true; }
+    if (!rejected) throw new TestError("replaced globals bypassed JSON validation for case " + index);
+  }
+  for (let index = 0; index < invalidInputs.length; index++) {
+    let rejected = false;
+    try { codec.decode(invalidInputs[index]); } catch { rejected = true; }
+    if (!rejected) throw new TestError("replaced globals bypassed input validation for case " + index);
+  }
+} finally {
+  for (let index = 0; index < targets.length; index++) {
+    if (saved[index] === undefined) remove(targets[index][0], targets[index][1]);
+    else define(targets[index][0], targets[index][1], saved[index]);
+  }
+}
+"#,
+        [],
+    )
+    .await;
+    result.expect(
+        "simultaneous intrinsic replacement must preserve codec encoding, decoding and rejection",
+    );
+    assert!(requests.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn json_codec_encoding_uses_the_preloaded_stringifier() {
     let (result, requests) = sdk_script(
         r#"
@@ -212,34 +324,36 @@ if (decoded.correct !== true || Object.hasOwn(decoded, "corrupted")) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn json_codec_refuses_inherited_serialization_hooks() {
-    for (setup, value) in [
+async fn json_codec_ignores_inherited_serialization_hooks() {
+    for (setup, value, expected) in [
         (
             "Object.prototype.toJSON = () => null;",
             "({ correct: true })",
+            r#"{"correct":true}"#,
         ),
-        ("Object.prototype.toJSON = () => null;", "[true]"),
+        ("Object.prototype.toJSON = () => null;", "[true]", "[true]"),
         (
             "Array.prototype.toJSON = () => null;",
             "({ nested: [true] })",
+            r#"{"nested":[true]}"#,
         ),
         (
             "Object.defineProperty(Object.prototype, 'toJSON', { get() { throw new Error('hook was invoked'); } });",
             "({ correct: true })",
+            r#"{"correct":true}"#,
         ),
     ] {
         let (result, requests) = sdk_script(
-            &format!("{setup}\nsdk.jsonCodec(value => value).encode({value});"),
+            &format!(
+                "{setup}\nconst encoded = sdk.jsonCodec(value => value).encode({value});\n\
+                 if (String.fromCharCode(...encoded) !== {expected:?}) throw new Error('inherited hook changed encoded data');"
+            ),
             [],
         )
         .await;
-        let error = result.expect_err("inherited serialization hooks must fail encoding");
-        assert!(
-            error
-                .to_string()
-                .contains("inherited JSON serialization hook"),
-            "{setup} must be refused before serializing {value} or invoking the hook: {error}"
-        );
+        result.unwrap_or_else(|error| {
+            panic!("{setup} must not change {value} or invoke the hook: {error}")
+        });
         assert!(requests.is_empty());
     }
 }

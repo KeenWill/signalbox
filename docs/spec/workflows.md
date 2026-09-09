@@ -111,11 +111,12 @@ import, including relative files and the unversioned name.
 
 The SDK's `defineProgram` decodes input bytes before calling the program body
 and encodes its result through explicit runtime codecs. `jsonCodec` checks JSON
-values during decoding and encoding. Typed `register`, `session.create`, and
-`session.turn` wrappers validate method inputs and answer records; refusals and
-cancellation remain typed deliveries. Session defaults versions are decimal
-strings in TypeScript and encode as exact JSON integers without conversion
-through `Number`.
+values during decoding and encoding. Encoding serializes a frozen snapshot of
+validated own data properties; codec intrinsics are captured before program
+evaluation. Typed `register`, `session.create`, and `session.turn` wrappers
+validate method inputs and answer records; refusals and cancellation remain
+typed deliveries. Session defaults versions are decimal strings in TypeScript
+and encode as exact JSON integers without conversion through `Number`.
 
 [`tooling/programs`](../../tooling/programs/package.json) owns SDK declarations
 and strict TypeScript examples. `pnpm --dir tooling/programs run check` checks

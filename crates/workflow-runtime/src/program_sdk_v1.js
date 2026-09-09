@@ -3,6 +3,21 @@
   Reflect.deleteProperty(globalThis, "__signalboxProgramRequest");
   const { stringify: jsonStringify, parse: jsonParse } = JSON;
   const decodeUriComponent = decodeURIComponent;
+  const { defineProperty, freeze, getOwnPropertyDescriptor, getPrototypeOf,
+    setPrototypeOf, hasOwn, is: sameValue } = Object;
+  const objectPrototype = Object.prototype;
+  const arrayPrototype = Array.prototype;
+  const isArray = Array.isArray;
+  const ownKeys = Reflect.ownKeys;
+  const { isFinite, isInteger } = Number;
+  const ByteArray = Uint8Array;
+  const CodecTypeError = TypeError;
+  const charCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
+  const typedArrayPrototype = getPrototypeOf(ByteArray.prototype);
+  const typedArrayKind = Function.prototype.call.bind(
+    getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag).get);
+  const typedArrayLength = Function.prototype.call.bind(
+    getOwnPropertyDescriptor(typedArrayPrototype, "length").get);
 
   const call = (kind, payload) => {
     if (!(payload instanceof Uint8Array)) {
@@ -12,8 +27,8 @@
   };
 
   const bytes = (value) => {
-    if (!(value instanceof Uint8Array)) {
-      throw new TypeError("program codec must produce a Uint8Array");
+    if (typedArrayKind(value) !== "Uint8Array") {
+      throw new CodecTypeError("program codec must produce a Uint8Array");
     }
     return value;
   };
@@ -39,48 +54,69 @@
     }
     return value;
   };
-  const checkJson = (value, ancestors = new Set()) => {
-    if (value === null || typeof value === "string" || typeof value === "boolean") return;
-    if (typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0)) return;
-    if (typeof value !== "object" || ancestors.has(value)) throw new TypeError("expected a lossless JSON value");
-    const array = Array.isArray(value);
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) {
-      throw new TypeError("expected a JSON record or array");
+  const snapshotJson = (value, ancestors = null) => {
+    if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+    if (typeof value === "number" && isFinite(value) && !sameValue(value, -0)) return value;
+    if (typeof value !== "object") throw new CodecTypeError("expected a lossless JSON value");
+    for (let ancestor = ancestors; ancestor !== null; ancestor = ancestor.parent) {
+      if (ancestor.value === value) throw new CodecTypeError("expected acyclic JSON data");
     }
-    if (!Object.hasOwn(value, "toJSON") && "toJSON" in value) {
-      throw new TypeError("inherited JSON serialization hook is not supported");
+    const array = isArray(value);
+    const prototype = getPrototypeOf(value);
+    if (prototype !== (array ? arrayPrototype : objectPrototype) && prototype !== null) {
+      throw new CodecTypeError("expected a JSON record or array");
     }
-    const keys = Reflect.ownKeys(value);
+    const keys = ownKeys(value);
+    const length = array ? getOwnPropertyDescriptor(value, "length").value : 0;
     if (array) {
-      if (keys.length !== value.length + 1) throw new TypeError("expected a dense JSON array without extra properties");
-      for (let index = 0; index < value.length; index++) {
-        if (!Object.hasOwn(value, index)) throw new TypeError("expected a dense JSON array");
+      if (!isInteger(length) || length < 0 || keys.length !== length + 1) {
+        throw new CodecTypeError("expected a dense JSON array without extra properties");
       }
     }
-    ancestors.add(value);
-    for (const key of keys) {
+    const snapshot = array ? setPrototypeOf([], null) : { __proto__: null };
+    const path = { __proto__: null, value, parent: ancestors };
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index];
       if (array && key === "length") continue;
-      const property = Object.getOwnPropertyDescriptor(value, key);
-      if (typeof key !== "string" || !property.enumerable || !Object.hasOwn(property, "value")) {
-        throw new TypeError("expected an enumerable JSON data property");
+      const property = getOwnPropertyDescriptor(value, key);
+      if (typeof key !== "string" || property === undefined || !property.enumerable || !hasOwn(property, "value")) {
+        throw new CodecTypeError("expected an enumerable JSON data property");
       }
-      checkJson(property.value, ancestors);
+      defineProperty(snapshot, key, { __proto__: null,
+        value: snapshotJson(property.value, path), enumerable: true });
     }
-    ancestors.delete(value);
+    if (array) {
+      for (let index = 0; index < length; index++) {
+        if (!hasOwn(snapshot, index)) throw new CodecTypeError("expected a dense JSON array");
+      }
+    }
+    return freeze(snapshot);
   };
+  const hex = "0123456789abcdef";
   const encodeJson = (value) => {
-    checkJson(value);
+    const text = jsonStringify(snapshotJson(value));
     // ASCII JSON preserves UTF-16 strings without requiring ambient text codecs.
-    const text = jsonStringify(value);
-    if (text === undefined) throw new TypeError("expected a JSON value");
-    return Uint8Array.from(text.replace(/[\u007f-\uffff]/g,
-      (character) => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0")),
-      (character) => character.charCodeAt(0));
+    let ascii = "";
+    for (let index = 0; index < text.length; index++) {
+      const code = charCodeAt(text, index);
+      ascii += code < 0x7f ? text[index]
+        : "\\u" + hex[code >>> 12] + hex[(code >>> 8) & 15] + hex[(code >>> 4) & 15] + hex[code & 15];
+    }
+    const payload = new ByteArray(ascii.length);
+    for (let index = 0; index < ascii.length; index++) payload[index] = charCodeAt(ascii, index);
+    return payload;
   };
-  const decodeJson = (value) => jsonParse(decodeUriComponent(Array.from(bytes(value),
-    (byte) => "%" + byte.toString(16).padStart(2, "0")).join("")));
-  const jsonCodec = (decode) => Object.freeze({
+  const decodeJson = (value) => {
+    const payload = bytes(value);
+    const length = typedArrayLength(payload);
+    let escaped = "";
+    for (let index = 0; index < length; index++) {
+      const byte = payload[index];
+      escaped += "%" + hex[byte >>> 4] + hex[byte & 15];
+    }
+    return jsonParse(decodeUriComponent(escaped));
+  };
+  const jsonCodec = (decode) => freeze({
     decode(value) { return decode(decodeJson(value)); },
     encode(value) { return encodeJson(decode(value)); },
   });
