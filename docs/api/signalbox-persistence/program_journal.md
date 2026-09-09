@@ -64,6 +64,26 @@ pub struct ProgramJournalRepository {/* private */}
 impl program_journal::ProgramJournalRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
     pub fn registrations(&self) -> program_registration::ProgramRegistrationRepository;
+    pub async fn listen(
+        &self,
+    ) -> result::Result<
+        program_journal::ProgramJournalWake,
+        program_journal::ProgramJournalRepositoryError,
+    >;
+    pub async fn next_event(
+        &self,
+        wait: signalbox_domain::program_primitives::AwaitProgramEvent,
+    ) -> result::Result<
+        option::Option<signalbox_domain::program_primitives::ProgramEvent>,
+        program_journal::ProgramJournalRepositoryError,
+    >;
+    pub async fn outstanding_waits(
+        &self,
+        run: signalbox_domain::ProgramRunId,
+    ) -> result::Result<
+        vec::Vec<signalbox_domain::RequestFrame>,
+        program_journal::ProgramJournalRepositoryError,
+    >;
     pub async fn create_stream(
         &self,
         run: signalbox_domain::ProgramRunId,
@@ -180,5 +200,16 @@ impl fmt::Display for program_journal::ProgramSessionCapabilityError {
 }
 impl error::Error for program_journal::ProgramSessionCapabilityError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+```
+
+## ProgramJournalWake
+
+```rust
+pub struct ProgramJournalWake(/* private */);
+impl program_journal::ProgramJournalWake {
+    pub async fn changed(
+        &mut self,
+    ) -> result::Result<(), program_journal::ProgramJournalRepositoryError>;
 }
 ```
