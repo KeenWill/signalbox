@@ -8,15 +8,15 @@ use crate::{
         MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
         MAX_REPOSITORY_INSPECTIONS,
     },
-    pinning::{PinnedRepository, RepositoryShell, parse_pack_index},
+    pinning::{PinnedRepository, RepositoryShell},
 };
-use flate2::read::ZlibDecoder;
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use git2::{ObjectFormat, ObjectType, Odb, Oid};
 use rustix::fs::{Mode, OFlags, openat};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
     os::fd::AsFd,
@@ -129,8 +129,13 @@ struct SourceFile {
 
 struct Pack {
     source: usize,
-    entries: BTreeMap<Oid, (usize, usize)>,
-    offsets: BTreeMap<usize, Oid>,
+    index: usize,
+    count: usize,
+    width: usize,
+    offsets_start: usize,
+    large_offsets_start: usize,
+    index_end: usize,
+    end: usize,
 }
 
 struct ObjectSource {
@@ -198,8 +203,6 @@ impl ObjectSource {
             captured_bytes: 0,
         };
         let mut scanned = 0usize;
-        let mut index_bytes = 0usize;
-        let mut object_count = 0usize;
         for entry in fs::read_dir(descriptor_path(&pack_directory)).map_err(rejected)? {
             scanned += 1;
             if scanned > MAX_REPOSITORY_INSPECTIONS {
@@ -214,53 +217,53 @@ impl ObjectSource {
                 .and_then(|name| parse_full_object_id(name, source.format))
                 .ok_or(LocalGitFailure::Repository)?;
             let index = source.open_file(&PathBuf::from("pack").join(format!("{name}.idx")))?;
-            let length = usize::try_from(source.files[index].identity.length).map_err(rejected)?;
-            index_bytes = index_bytes
-                .checked_add(length)
-                .filter(|n| *n <= MAX_OBJECT_DATABASE_BYTES)
+            let width = checksum.as_bytes().len();
+            let index_length =
+                usize::try_from(source.files[index].identity.length).map_err(rejected)?;
+            let index_end = index_length
+                .checked_sub(width * 2)
                 .ok_or(LocalGitFailure::Repository)?;
-            let indexed =
-                parse_pack_index(&source.read(index, 0, length)?, checksum, source.format)?;
-            object_count += indexed.len();
-            if object_count > MAX_REPOSITORY_INSPECTIONS {
+            if source.read(index, 0, 8)? != b"\xfftOc\0\0\0\x02" {
+                return Err(LocalGitFailure::Repository);
+            }
+            let count = source.read_u32(index, 8 + 255 * 4)? as usize;
+            let offsets_start = count
+                .checked_mul(width + 4)
+                .and_then(|bytes| bytes.checked_add(8 + 256 * 4))
+                .ok_or(LocalGitFailure::Repository)?;
+            let large_offsets_start = count
+                .checked_mul(4)
+                .and_then(|bytes| offsets_start.checked_add(bytes))
+                .ok_or(LocalGitFailure::Repository)?;
+            if large_offsets_start > index_end
+                || (index_end - large_offsets_start) % 8 != 0
+                || source.read(index, index_end, width)? != checksum.as_bytes()
+            {
                 return Err(LocalGitFailure::Repository);
             }
             let pack = source.open_file(&PathBuf::from("pack").join(format!("{name}.pack")))?;
             let length = usize::try_from(source.files[pack].identity.length).map_err(rejected)?;
             let end = length
-                .checked_sub(checksum.as_bytes().len())
+                .checked_sub(width)
                 .ok_or(LocalGitFailure::Repository)?;
             let header = source.read(pack, 0, 12)?;
-            if &header[..4] != b"PACK"
+            if end < 12
+                || &header[..4] != b"PACK"
                 || !matches!(&header[4..8], [0, 0, 0, 2] | [0, 0, 0, 3])
-                || u32::from_be_bytes(header[8..12].try_into().map_err(rejected)?) as usize
-                    != indexed.len()
-                || source.read(pack, end, checksum.as_bytes().len())? != checksum.as_bytes()
+                || u32::from_be_bytes(header[8..12].try_into().map_err(rejected)?) as usize != count
+                || source.read(pack, end, width)? != checksum.as_bytes()
             {
                 return Err(LocalGitFailure::Repository);
             }
-            let offsets: BTreeMap<_, _> = indexed
-                .iter()
-                .map(|(oid, offset)| (*offset, *oid))
-                .collect();
-            if offsets.len() != indexed.len() {
-                return Err(LocalGitFailure::Repository);
-            }
-            let mut entries = BTreeMap::new();
-            let ordered: Vec<_> = offsets.iter().collect();
-            for (position, &(&offset, &oid)) in ordered.iter().enumerate() {
-                let next = ordered
-                    .get(position + 1)
-                    .map_or(end, |&(&offset, _)| offset);
-                if offset < 12 || next <= offset || next > end {
-                    return Err(LocalGitFailure::Repository);
-                }
-                entries.insert(oid, (offset, next - offset));
-            }
             source.packs.push(Pack {
                 source: pack,
-                entries,
-                offsets,
+                index,
+                count,
+                width,
+                offsets_start,
+                large_offsets_start,
+                index_end,
+                end,
             });
         }
         Ok(source)
@@ -371,29 +374,72 @@ impl ObjectSource {
         Ok(())
     }
 
-    fn capture_pack(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
-        let pack_index = self
-            .packs
-            .iter()
-            .position(|pack| pack.entries.contains_key(&oid))
-            .ok_or(LocalGitFailure::Repository)?;
-        let mut pending = vec![oid];
-        let mut selected = HashSet::new();
-        let mut data = Vec::new();
-        while let Some(oid) = pending.pop() {
-            if !selected.insert(oid) {
-                continue;
+    fn read_u32(&self, source: usize, offset: usize) -> Result<u32, LocalGitFailure> {
+        Ok(u32::from_be_bytes(
+            self.read(source, offset, 4)?.try_into().map_err(rejected)?,
+        ))
+    }
+
+    fn packed_offset(&self, pack: &Pack, oid: Oid) -> Result<Option<usize>, LocalGitFailure> {
+        // Index entries are lookup hints; the captured object's computed ID is authoritative.
+        let mut low = 0;
+        let mut high = pack.count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let candidate = self.read(pack.index, 8 + 256 * 4 + middle * pack.width, pack.width)?;
+            match candidate.as_slice().cmp(oid.as_bytes()) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => {
+                    let offset = self.read_u32(pack.index, pack.offsets_start + middle * 4)?;
+                    let offset = if offset & 0x8000_0000 == 0 {
+                        u64::from(offset)
+                    } else {
+                        let position = (offset & 0x7fff_ffff) as usize;
+                        if position >= (pack.index_end - pack.large_offsets_start) / 8 {
+                            return Err(LocalGitFailure::Repository);
+                        }
+                        u64::from_be_bytes(
+                            self.read(pack.index, pack.large_offsets_start + position * 8, 8)?
+                                .try_into()
+                                .map_err(rejected)?,
+                        )
+                    };
+                    let offset = usize::try_from(offset).map_err(rejected)?;
+                    if offset < 12 || offset >= pack.end {
+                        return Err(LocalGitFailure::Repository);
+                    }
+                    return Ok(Some(offset));
+                }
             }
-            if selected.len() > MAX_REPOSITORY_INSPECTIONS {
+        }
+        Ok(None)
+    }
+
+    fn capture_pack(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
+        let mut location = None;
+        for (index, pack) in self.packs.iter().enumerate() {
+            if let Some(offset) = self.packed_offset(pack, oid)? {
+                location = Some((index, offset));
+                break;
+            }
+        }
+        let (pack_index, mut offset) = location.ok_or(LocalGitFailure::Repository)?;
+        let mut selected = HashSet::new();
+        let mut entries = Vec::new();
+        loop {
+            if !selected.insert(offset) || selected.len() > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitFailure::Repository);
             }
             let pack = &self.packs[pack_index];
-            let &(offset, length) = pack.entries.get(&oid).ok_or(LocalGitFailure::Repository)?;
-            let source = pack.source;
-            self.charge(length)?;
-            let bytes = self.read(source, offset, length)?;
-            let pack = &self.packs[pack_index];
-            let mut remaining = bytes.as_slice();
+            if offset < 12 || offset >= pack.end {
+                return Err(LocalGitFailure::Repository);
+            }
+            let mut file = self.files[pack.source].file.try_clone().map_err(rejected)?;
+            file.seek(SeekFrom::Start(offset as u64))
+                .map_err(rejected)?;
+            let remaining_budget = MAX_OBJECT_DATABASE_BYTES - self.captured_bytes;
+            let mut remaining = file.take((pack.end - offset).min(remaining_budget) as u64);
             let first = byte(&mut remaining)?;
             let kind = (first >> 4) & 7;
             let size = if first & 0x80 == 0 {
@@ -407,7 +453,6 @@ impl ObjectSource {
             if size > MAX_OBJECT_BYTES {
                 return Err(LocalGitFailure::Repository);
             }
-            let header_end = bytes.len() - remaining.len();
             let base = match kind {
                 1..=4 => None,
                 6 => {
@@ -421,45 +466,79 @@ impl ObjectSource {
                             .and_then(|n| n.checked_add(usize::from(part & 127)))
                             .ok_or(LocalGitFailure::Repository)?;
                     }
-                    let base = offset
-                        .checked_sub(distance)
-                        .filter(|n| *n < offset)
-                        .ok_or(LocalGitFailure::Repository)?;
-                    Some(*pack.offsets.get(&base).ok_or(LocalGitFailure::Repository)?)
+                    Some(
+                        offset
+                            .checked_sub(distance)
+                            .filter(|n| *n < offset)
+                            .ok_or(LocalGitFailure::Repository)?,
+                    )
                 }
                 7 => {
-                    let width = oid.as_bytes().len();
-                    let base =
-                        Oid::from_bytes(remaining.get(..width).ok_or(LocalGitFailure::Repository)?)
-                            .map_err(rejected)?;
-                    remaining = &remaining[width..];
-                    Some(base)
+                    let mut bytes = vec![0; pack.width];
+                    remaining.read_exact(&mut bytes).map_err(rejected)?;
+                    let base = Oid::from_bytes(&bytes).map_err(rejected)?;
+                    Some(
+                        self.packed_offset(pack, base)?
+                            .ok_or(LocalGitFailure::Repository)?,
+                    )
                 }
                 _ => return Err(LocalGitFailure::Repository),
             };
-            if let Some(base) = base {
-                let mut header = ZlibDecoder::new(remaining).take(size as u64);
+            let mut decoder = ZlibDecoder::new(remaining);
+            let mut content = Vec::new();
+            Read::by_ref(&mut decoder)
+                .take(size as u64 + 1)
+                .read_to_end(&mut content)
+                .map_err(rejected)?;
+            if content.len() != size {
+                return Err(LocalGitFailure::Repository);
+            }
+            self.charge(decoder.total_in() as usize)?;
+            self.charge(size)?;
+            if base.is_some() {
+                let mut header = content.as_slice();
                 let base_size = variable_size(&mut header)?;
                 let target_size = variable_size(&mut header)?;
                 if base_size > MAX_OBJECT_BYTES || target_size > MAX_OBJECT_BYTES {
                     return Err(LocalGitFailure::Repository);
                 }
                 self.charge(target_size)?;
-                pending.push(base);
-                data.push((first & !0x70) | 0x70);
-                data.extend_from_slice(&bytes[1..header_end]);
-                data.extend_from_slice(base.as_bytes());
-                data.extend_from_slice(remaining);
-            } else {
-                data.extend_from_slice(&bytes);
             }
-            self.charge(size)?;
+            entries.push((kind, content));
+            match base {
+                Some(base) => offset = base,
+                None => break,
+            }
         }
-        // Git pack-format: selected delta dependencies form a self-contained pack.
-        // OFS_DELTA is emitted as REF_DELTA so source offsets need not be retained.
+        // Emit the selected dependency chain base-first with new OFS_DELTA offsets.
         let mut pack = b"PACK\0\0\0\x02".to_vec();
-        pack.extend_from_slice(&(selected.len() as u32).to_be_bytes());
-        pack.extend_from_slice(&data);
+        pack.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        let mut previous_offset = 0;
+        for (kind, content) in entries.into_iter().rev() {
+            let offset = pack.len();
+            let mut size = content.len();
+            let first = ((if kind >= 6 { 6 } else { kind }) << 4) | (size & 15) as u8;
+            size >>= 4;
+            pack.push(first | if size == 0 { 0 } else { 128 });
+            while size != 0 {
+                let part = (size & 127) as u8;
+                size >>= 7;
+                pack.push(part | if size == 0 { 0 } else { 128 });
+            }
+            if kind >= 6 {
+                let mut distance = offset - previous_offset;
+                let mut encoded = vec![(distance & 127) as u8];
+                while distance > 127 {
+                    distance = (distance >> 7) - 1;
+                    encoded.push(128 | (distance & 127) as u8);
+                }
+                pack.extend(encoded.into_iter().rev());
+            }
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&content).map_err(rejected)?;
+            pack.extend(encoder.finish().map_err(rejected)?);
+            previous_offset = offset;
+        }
         let checksum = match self.format {
             ObjectFormat::Sha1 => Sha1::digest(&pack).to_vec(),
             ObjectFormat::Sha256 => Sha256::digest(&pack).to_vec(),
@@ -468,10 +547,8 @@ impl ObjectSource {
         let mut writer = database.packwriter().map_err(rejected)?;
         writer.write_all(&pack).map_err(rejected)?;
         writer.commit().map_err(rejected)?;
-        for oid in selected {
-            if !database.exists(oid) {
-                return Err(LocalGitFailure::Repository);
-            }
+        if !database.exists(oid) {
+            return Err(LocalGitFailure::Repository);
         }
         Ok(())
     }
