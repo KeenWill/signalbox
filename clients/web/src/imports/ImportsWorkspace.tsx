@@ -141,7 +141,6 @@ export function ImportsWorkspace({
 
   useEffect(() => {
     onNavigationDisabledChange?.(hasRetainedCommand)
-    return () => onNavigationDisabledChange?.(false)
   }, [hasRetainedCommand, onNavigationDisabledChange])
 
   const listRequest = useMemo(

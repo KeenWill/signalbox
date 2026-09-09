@@ -1954,3 +1954,60 @@ for (const outcome of ['success', 'rejection'] as const) {
     expect(problems.pageErrors).toEqual([])
   })
 }
+
+test('retained continuation availability locks navigation before bootstrap and through failure', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.addInitScript(() => {
+    sessionStorage.setItem(
+      'signalbox.import-continuation.production',
+      JSON.stringify({
+        command_id: '00000000-0000-7000-8000-000000000001',
+        frontier: {
+          imported_conversation_id: '00000000-0000-7000-8000-000000000002',
+          imported_entry_id: '00000000-0000-7000-8000-000000000003',
+          position: 7,
+        },
+        relationship: 'resume',
+        initial_model_selection: {
+          kind: 'direct',
+          selection_id: '00000000-0000-7000-8000-000000000004',
+        },
+      }),
+    )
+  })
+  let releaseBootstrap: (() => void) | undefined
+  const pendingBootstrap = new Promise<void>((resolve) => {
+    releaseBootstrap = resolve
+  })
+  await page.route('**/api/bootstrap', async (route) => {
+    await pendingBootstrap
+    await route.abort()
+  })
+  await page.goto('/imports')
+  const settings = page.getByRole('link', { name: 'Settings', exact: true })
+  await expect(settings).toHaveAttribute('aria-disabled', 'true')
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette.getByRole('button', { name: /Go to Settings/ })).toHaveCount(0)
+  if (testInfo.project.name === 'chromium')
+    await expect(page).toHaveScreenshot('retained-continuation-pending-desktop.png')
+  await page.keyboard.press('Escape')
+  releaseBootstrap?.()
+  await expect(page.getByRole('button', { name: 'Retry connection', exact: true })).toBeVisible()
+  await expect(settings).toHaveAttribute('aria-disabled', 'true')
+  await settings.click({ force: true })
+  await expect(page).toHaveURL(/\/imports$/)
+  await page.keyboard.press('g')
+  await page.keyboard.press(',')
+  await expect(page).toHaveURL(/\/imports$/)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Abandon', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Abandon', exact: true }).click()
+  await expect(settings).not.toHaveAttribute('aria-disabled', 'true')
+  await settings.click()
+  await expect(page).toHaveURL(/\/settings$/)
+})
