@@ -40,11 +40,12 @@ async fn emitted_typescript_entry_returns_checked_session_result() -> Result<(),
     loop {
         let status = poll_runtime_once(&mut runtime).await;
         while let Ok(request) = receiver.try_recv() {
-            effect_requests.push(request.kind.into_domain());
+            effect_requests.push(request.kind);
             request
                 .reply
-                .send(IsolateDelivery::Answer {
-                    payload: answer.clone(),
+                .send(DeliveryKind::Answer {
+                    resolves: RequestOrdinal::try_from_u64(1).expect("fixture ordinal"),
+                    payload: InlineFramePayload::new(answer.clone()),
                 })
                 .unwrap_or_else(|_| panic!("entrypoint must await its effect"));
         }
@@ -101,10 +102,12 @@ async fn sdk_script(
         loop {
             let status = poll_runtime_once(&mut runtime).await;
             while let Ok(request) = receiver.try_recv() {
-                observed.push(request.kind.into_domain());
+                observed.push(request.kind);
                 request
                     .reply
-                    .send(answers.next().expect("scripted answer for every request"))
+                    .send(host_answer(
+                        answers.next().expect("scripted answer for every request"),
+                    ))
                     .unwrap_or_else(|_| panic!("isolate must retain the request receiver"));
             }
             if let Poll::Ready(result) = status {
@@ -755,4 +758,78 @@ if (result.kind !== "reject" || result.reason !== "capability_denied") throw new
     assert_eq!(wire["artifact"], "export {}; // 雪");
     assert_eq!(wire["grants"], serde_json::json!(["session"]));
     assert_eq!(request.method(), "register");
+}
+
+fn host_answer(delivery: IsolateDelivery) -> DeliveryKind {
+    let resolves = RequestOrdinal::try_from_u64(1).expect("fixture ordinal");
+    match delivery {
+        IsolateDelivery::Answer { payload } => DeliveryKind::Answer {
+            resolves,
+            payload: InlineFramePayload::new(payload),
+        },
+        IsolateDelivery::Wake { payload } => DeliveryKind::Wake {
+            resolves,
+            payload: InlineFramePayload::new(payload),
+        },
+        IsolateDelivery::Cancel { payload } => DeliveryKind::Cancel {
+            resolves,
+            payload: InlineFramePayload::new(payload),
+        },
+        IsolateDelivery::Reject { reason } => DeliveryKind::Reject {
+            resolves,
+            reason: match reason {
+                IsolateRejectReason::OutstandingRequests => RejectReason::OutstandingRequests,
+                IsolateRejectReason::CapabilityDenied => RejectReason::CapabilityDenied,
+                IsolateRejectReason::UnsupportedOperation => RejectReason::UnsupportedOperation,
+            },
+        },
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn typed_primitives_preserve_full_width_values_and_exact_event_bytes()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::program_primitives::{
+        AwaitProgramEvent, ProgramEvent, ProgramEventSource, RandomValue, SleepUntil, UnixMillis,
+    };
+    const SOURCE_RUN: &str = "12345678-1234-1234-1234-123456789abc";
+    let now = UnixMillis(9_007_199_254_740_993);
+    let random = RandomValue(u64::MAX);
+    let deadline = SleepUntil(UnixMillis(9_007_199_254_740_994));
+    let event = ProgramEvent {
+        position: u64::MAX,
+        payload: InlineFramePayload::new(vec![0, 128, 255]),
+    };
+    let (result, requests) = sdk_script(
+        r#"
+const now = await sdk.primitives.now();
+const random = await sdk.primitives.random();
+const wake = await sdk.primitives.sleepUntil("9007199254740994");
+const event = await sdk.primitives.awaitEvent({ source: { kind: "program_answers", run: "12345678-1234-1234-1234-123456789abc" }, after: "9007199254740993" });
+if (now.value !== "9007199254740993" || random.value !== "18446744073709551615" || wake.value !== "9007199254740994" || event.value.position !== "18446744073709551615" || event.value.payload.join() !== "0,128,255") throw new Error("primitive precision lost");
+"#,
+        [
+            IsolateDelivery::Answer { payload: now.encode().as_bytes().to_vec() },
+            IsolateDelivery::Answer { payload: random.encode().as_bytes().to_vec() },
+            IsolateDelivery::Wake { payload: deadline.0.encode().as_bytes().to_vec() },
+            IsolateDelivery::Answer { payload: event.encode().as_bytes().to_vec() },
+        ],
+    ).await;
+    result?;
+    let wait = AwaitProgramEvent {
+        source: ProgramEventSource::ProgramAnswers(ProgramRunId::from_uuid(uuid::Uuid::parse_str(
+            SOURCE_RUN,
+        )?)),
+        after: now.0,
+    };
+    assert_eq!(
+        requests,
+        vec![
+            RequestKind::Now(InlineFramePayload::default()),
+            RequestKind::Random(InlineFramePayload::default()),
+            RequestKind::Sleep(deadline.encode()),
+            RequestKind::AwaitEvent(wait.encode())
+        ]
+    );
+    Ok(())
 }

@@ -38,3 +38,13 @@ async function typedAnswer(): Promise<string | undefined> {
   return undefined;
 }
 void typedAnswer;
+
+import { primitives } from "@signalbox/program-sdk/v1";
+void primitives.now();
+void primitives.random();
+void primitives.sleepUntil("9007199254740993");
+void primitives.awaitEvent({ source: { kind: "program_answers", run: "12345678-1234-1234-1234-123456789abc" }, after: "0" });
+// @ts-expect-error full-width deadline integers must be decimal strings
+void primitives.sleepUntil(9007199254740993);
+// @ts-expect-error sources are a closed typed vocabulary
+void primitives.awaitEvent({ source: { kind: "remote_bus", run: "unused" }, after: "0" });

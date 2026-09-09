@@ -95,6 +95,23 @@ completion prevents success; after accepted success it records
 Cancelled and faulted receipts carry a null result. Equal cancellation retries
 replay their recorded outcome without appending frames.
 
+## Durable primitives
+
+`DurablePrimitives` answers empty `Now` and `Random` requests with Unix
+milliseconds and a uniformly sampled operating-system u64 respectively. Values
+use decimal strings in checked JSON payloads; recorded answers replay without
+reading the clock or drawing randomness. `Sleep` carries an absolute
+`deadline_unix_ms` at request admission and receives `Wake` with that deadline
+once wall time reaches it, including after restart.
+
+`AwaitEvent` carries a typed `program_answers` source run and an exclusive
+journal position (`after`, zero for the beginning). It receives the next
+retained `Answer` delivery's exact payload bytes and position. The outstanding
+request's run and ordinal identify each wait. Source reads occur before
+listening, after subscription and after every wake; PostgreSQL notifications are
+hints. The SDK's typed `primitives` wrappers preserve full-width values as
+decimal strings.
+
 ## Native programs
 
 `NativeCatalog` selects compiled `NativeProgram` implementations with checked

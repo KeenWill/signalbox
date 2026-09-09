@@ -1,0 +1,365 @@
+use super::*;
+use signalbox_domain::program_primitives::{
+    AwaitProgramEvent, ProgramEvent, ProgramEventSource, RandomValue, SleepUntil, UnixMillis,
+};
+use signalbox_domain::{ProgramCapability, program_registration::ProgramGrants};
+use signalbox_workflow_runtime::primitives::{DurablePrimitives, PrimitiveClock};
+use std::{cell::Cell, rc::Rc};
+
+struct FixedClock {
+    now: UnixMillis,
+    draws: Rc<Cell<usize>>,
+}
+
+impl PrimitiveClock for FixedClock {
+    fn now(&mut self) -> Result<UnixMillis, LiveDeliveryFailure> {
+        Ok(self.now)
+    }
+    fn random(&mut self) -> Result<RandomValue, LiveDeliveryFailure> {
+        self.draws.set(self.draws.get() + 1);
+        Ok(RandomValue(u64::MAX))
+    }
+}
+
+fn no_effects() -> EffectProbe {
+    EffectProbe {
+        policy: signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn partial_replay_reuses_clock_and_random_answers_without_drawing_again()
+-> Result<(), Box<dyn Error>> {
+    let (_database, pool) = migrated_postgres().await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let artifact = ProgramArtifact::new(
+        r#"
+import { primitives } from "@signalbox/program-sdk/v1";
+const time = await primitives.now();
+const random = await primitives.random();
+if (time.kind !== "answer" || time.value !== "9007199254740993") throw new Error("clock precision");
+if (random.kind !== "answer" || random.value !== "18446744073709551615") throw new Error("random precision");
+await primitives.sleepUntil("9007199254740994");
+"#,
+    );
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([
+            ProgramCapability::Time,
+            ProgramCapability::Random,
+            ProgramCapability::Sleep,
+        ]),
+    )
+    .await?;
+    let draws = Rc::new(Cell::new(0));
+    let clock = FixedClock {
+        now: UnixMillis(9_007_199_254_740_993),
+        draws: draws.clone(),
+    };
+    let mut primitives = DurablePrimitives::new(journal.clone(), clock);
+    let host = WorkflowHost::new(journal.clone());
+    let mut effects = no_effects();
+    // Interrupt only after the random answer is durable and the sleep is admitted.
+    let execute = host.execute_registered(run, &mut primitives, &mut effects);
+    let observe = async {
+        loop {
+            if !journal.outstanding_waits(run).await?.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, Box<dyn Error>>(())
+    };
+    tokio::select! { result = execute => panic!("attempt should wait: {result:?}"), result = observe => result? }
+    assert_eq!(draws.get(), 1);
+    let restarted = WorkflowHost::new(ProgramJournalRepository::new(pool.clone()));
+    let clock = FixedClock {
+        now: UnixMillis(9_007_199_254_740_994),
+        draws: draws.clone(),
+    };
+    let mut resumed = DurablePrimitives::new(journal.clone(), clock);
+    assert_eq!(
+        restarted
+            .execute_registered(run, &mut resumed, &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
+    assert_eq!(
+        draws.get(),
+        1,
+        "partial replay must consume no new randomness"
+    );
+    assert!(journal.outstanding_waits(run).await?.is_empty());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn admitted_deadline_fires_after_restarting_the_host() -> Result<(), Box<dyn Error>> {
+    let (_database, pool) = migrated_postgres().await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let artifact = ProgramArtifact::new(
+        r#"
+import { primitives } from "@signalbox/program-sdk/v1";
+const wake = await primitives.sleepUntil("2000");
+if (wake.kind !== "wake" || wake.value !== "2000") throw new Error("deadline moved");
+"#,
+    );
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Sleep]),
+    )
+    .await?;
+    let deadline = SleepUntil(UnixMillis(2000));
+    let admitted = journal
+        .append_request(run, None, RequestKind::Sleep(deadline.encode()))
+        .await?;
+    drop(journal);
+    let restarted = ProgramJournalRepository::new(pool.clone());
+    assert_eq!(restarted.outstanding_waits(run).await?, vec![admitted]);
+    let mut primitives = DurablePrimitives::new(
+        restarted.clone(),
+        FixedClock {
+            now: UnixMillis(3000),
+            draws: Rc::default(),
+        },
+    );
+    let outcome = WorkflowHost::new(restarted.clone())
+        .execute_registered(run, &mut primitives, &mut no_effects())
+        .await?;
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
+    assert!(restarted.outstanding_waits(run).await?.is_empty());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn event_wait_replays_its_source_position_and_retained_answer() -> Result<(), Box<dyn Error>>
+{
+    let (_database, pool) = migrated_postgres().await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let source_run = run_id();
+    journal.create_stream(source_run).await?;
+    let source_request = journal
+        .append_request(
+            source_run,
+            None,
+            RequestKind::Now(InlineFramePayload::default()),
+        )
+        .await?;
+    journal
+        .append_delivery(
+            source_run,
+            DeliveryKind::Answer {
+                resolves: source_request.ordinal(),
+                payload: payload(b"first"),
+            },
+        )
+        .await?;
+    let next_request = journal
+        .append_request(
+            source_run,
+            None,
+            RequestKind::Random(InlineFramePayload::default()),
+        )
+        .await?;
+    journal
+        .append_delivery(
+            source_run,
+            DeliveryKind::Answer {
+                resolves: next_request.ordinal(),
+                payload: payload(b"next"),
+            },
+        )
+        .await?;
+    let wait = AwaitProgramEvent {
+        source: ProgramEventSource::ProgramAnswers(source_run),
+        after: 2,
+    };
+    let artifact = ProgramArtifact::new(format!(
+        r#"
+import {{ primitives }} from "@signalbox/program-sdk/v1";
+const event = await primitives.awaitEvent({{ source: {{ kind: "program_answers", run: "{}" }}, after: "2" }});
+if (event.kind !== "answer" || event.value.position !== "4" || event.value.payload[0] !== 110) throw new Error("wrong event");
+"#,
+        source_run.into_uuid()
+    ));
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Subscribe]),
+    )
+    .await?;
+    journal
+        .append_request(run, None, RequestKind::AwaitEvent(wait.encode()))
+        .await?;
+    let mut primitives = DurablePrimitives::new(
+        journal.clone(),
+        FixedClock {
+            now: UnixMillis(0),
+            draws: Rc::default(),
+        },
+    );
+    assert_eq!(
+        WorkflowHost::new(journal.clone())
+            .execute_registered(run, &mut primitives, &mut no_effects())
+            .await?,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
+    assert_eq!(
+        journal.next_event(wait).await?,
+        Some(ProgramEvent {
+            position: 4,
+            payload: payload(b"next")
+        })
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// Commits the source answer after the initial empty read but before LISTEN is established.
+struct CommitDuringSubscribe {
+    journal: ProgramJournalRepository,
+    source: ProgramRunId,
+    resolves: RequestOrdinal,
+}
+
+impl signalbox_workflow_runtime::primitives::PrimitiveEvents for CommitDuringSubscribe {
+    type Wake = signalbox_persistence::program_journal::ProgramJournalWake;
+
+    async fn next_event(
+        &mut self,
+        wait: AwaitProgramEvent,
+    ) -> Result<Option<ProgramEvent>, LiveDeliveryFailure> {
+        self.journal
+            .next_event(wait)
+            .await
+            .map_err(|error| LiveDeliveryFailure::new(error.to_string()))
+    }
+
+    async fn listen(&mut self) -> Result<Self::Wake, LiveDeliveryFailure> {
+        self.journal
+            .append_delivery(
+                self.source,
+                DeliveryKind::Answer {
+                    resolves: self.resolves,
+                    payload: payload(b"racing event"),
+                },
+            )
+            .await
+            .map_err(|error| LiveDeliveryFailure::new(error.to_string()))?;
+        self.journal
+            .listen()
+            .await
+            .map_err(|error| LiveDeliveryFailure::new(error.to_string()))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn event_committed_between_empty_read_and_subscribe_is_delivered_without_a_notification()
+-> Result<(), Box<dyn Error>> {
+    const CATCH_UP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let (_database, pool) = migrated_postgres().await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let source = run_id();
+    journal.create_stream(source).await?;
+    let source_request = journal
+        .append_request(
+            source,
+            None,
+            RequestKind::Now(InlineFramePayload::default()),
+        )
+        .await?;
+    let artifact = ProgramArtifact::new(format!(
+        r#"
+import {{ primitives }} from "@signalbox/program-sdk/v1";
+const event = await primitives.awaitEvent({{ source: {{ kind: "program_answers", run: "{}" }}, after: "0" }});
+if (event.kind !== "answer" || event.value.position !== "2" || event.value.payload[0] !== 114) throw new Error("lost racing event");
+"#,
+        source.into_uuid()
+    ));
+    let run = registered_run(
+        &pool,
+        &artifact,
+        ProgramGrants::new([ProgramCapability::Subscribe]),
+    )
+    .await?;
+    let events = CommitDuringSubscribe {
+        journal: journal.clone(),
+        source,
+        resolves: source_request.ordinal(),
+    };
+    let mut primitives = DurablePrimitives::new(
+        events,
+        FixedClock {
+            now: UnixMillis(0),
+            draws: Rc::default(),
+        },
+    );
+    let outcome = tokio::time::timeout(
+        CATCH_UP_TIMEOUT,
+        WorkflowHost::new(journal).execute_registered(run, &mut primitives, &mut no_effects()),
+    )
+    .await??;
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn committed_source_answer_wakes_a_listener_for_catch_up() -> Result<(), Box<dyn Error>> {
+    const NOTIFICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let (_database, pool) = migrated_postgres().await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let source = run_id();
+    journal.create_stream(source).await?;
+    let request = journal
+        .append_request(
+            source,
+            None,
+            RequestKind::Now(InlineFramePayload::default()),
+        )
+        .await?;
+    let wait = AwaitProgramEvent {
+        source: ProgramEventSource::ProgramAnswers(source),
+        after: 0,
+    };
+    assert_eq!(journal.next_event(wait).await?, None);
+    let mut listener = journal.listen().await?;
+    journal
+        .append_delivery(
+            source,
+            DeliveryKind::Answer {
+                resolves: request.ordinal(),
+                payload: payload(b"committed"),
+            },
+        )
+        .await?;
+    tokio::time::timeout(NOTIFICATION_TIMEOUT, listener.changed()).await??;
+    assert_eq!(
+        journal.next_event(wait).await?,
+        Some(ProgramEvent {
+            position: 2,
+            payload: payload(b"committed")
+        })
+    );
+    drop(listener);
+    pool.close().await;
+    Ok(())
+}

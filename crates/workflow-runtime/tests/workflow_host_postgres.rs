@@ -2558,3 +2558,6 @@ async fn native_registration_adopts_equal_retries_and_refuses_changed_executable
     pool.close().await;
     Ok(())
 }
+
+#[path = "workflow_host_postgres/durable_primitives.rs"]
+mod durable_primitives;

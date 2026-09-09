@@ -28,6 +28,22 @@ declare module "@signalbox/program-sdk/v1" {
   export function sleep(payload: Uint8Array): Promise<Delivery>;
   export function awaitEvent(payload: Uint8Array): Promise<Delivery>;
 
+  export interface ProgramEventWait {
+    source: { kind: "program_answers"; run: string };
+    /** Journal position, zero to start at the beginning. */
+    after: string;
+  }
+  export const primitives: {
+    /** Unix milliseconds, represented as a u64 decimal string. */
+    now(): Promise<EffectResult<string>>;
+    /** Uniform full-width u64, represented as a decimal string. */
+    random(): Promise<EffectResult<string>>;
+    sleepUntil(deadlineUnixMs: string): Promise<
+      { kind: "wake"; value: string } | Exclude<Delivery, { kind: "wake" }>
+    >;
+    awaitEvent(input: ProgramEventWait): Promise<EffectResult<{ position: string; payload: number[] }>>;
+  };
+
   export interface RegisterInput {
     id: string;
     name: string;
