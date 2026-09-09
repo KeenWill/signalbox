@@ -187,6 +187,7 @@ impl FileMediaProvider for VideoProvider {
                 {
                     Ok(ProcessorValidationOutput::NoMatch)
                 }
+                Err(VideoIssue::UnsupportedWindow) => Err(FileMediaProviderFailure::Failed),
                 Err(VideoIssue::Encrypted) => Ok(ProcessorValidationOutput::EncryptedOrLocked {
                     media_type: String::from(kind.media_type()),
                 }),

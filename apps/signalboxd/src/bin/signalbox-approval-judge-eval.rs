@@ -502,8 +502,8 @@ mod approval_judge_tests {
                 "notes": "synthetic label", "repeats": expected_repeats}]
         });
         assert_eq!(
-            rendered,
-            serde_json::to_string_pretty(&expected).expect("expected scorecard renders")
+            serde_json::from_str::<serde_json::Value>(&rendered).expect("scorecard is valid JSON"),
+            expected
         );
     }
 }
