@@ -51,9 +51,9 @@ impl GitObjectFormat {
     }
 }
 
-/// The two directories one pinned repository authority holds.
+/// The worktree and administration directories one pinned repository authority holds.
 ///
-/// Both identities were accepted by the layout validation on either side of the
+/// These identities were accepted by the layout validation on either side of the
 /// repository open, so they name the directories this suite is bound to rather
 /// than whatever a later independent resolution of the same pathname finds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +62,8 @@ pub struct PinnedRepositoryDirectories {
     pub root: WorkspaceRootIdentity,
     /// The worktree administration directory resolved from that root.
     pub administration: WorkspaceRootIdentity,
+    /// Common administration directory containing shared references and objects.
+    pub common_administration: WorkspaceRootIdentity,
 }
 
 /// Seven local Git declarations and their injected-root executor.
@@ -148,13 +150,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
 
     /// Returns the worktree and administration directories this suite pinned.
     ///
-    /// Both were accepted by the layout validation on either side of the
+    /// These were accepted by the layout validation on either side of the
     /// repository open, so they name the directories this executor is bound to
     /// rather than whatever the pathname resolves to afterwards: a `.git`
     /// replaced between the repository open and a later resolution stands there
     /// while this executor remains bound to the repository it opened. See
     /// `docs/spec/git-authority-threat-model.md` for directory pinning and
-    /// `docs/spec/tool-loop.md` for how a daemon composition uses the pair.
+    /// `docs/spec/tool-loop.md` for how a daemon composition uses these identities.
     pub const fn pinned_directories(&self) -> PinnedRepositoryDirectories {
         PinnedRepositoryDirectories {
             root: WorkspaceRootIdentity {
@@ -173,6 +175,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
                     .repository_identity
                     .administration
                     .worktree
+                    .inode,
+            },
+            common_administration: WorkspaceRootIdentity {
+                device: self
+                    .executor
+                    .repository_identity
+                    .administration
+                    .common
+                    .device,
+                inode: self
+                    .executor
+                    .repository_identity
+                    .administration
+                    .common
                     .inode,
             },
         }

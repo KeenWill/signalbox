@@ -64,4 +64,6 @@ pub use push_transport::{
     ConfiguredGitRemote, GitPushReceipt, GitPushRequest, GitPushTransport, GitPushTransportFailure,
     InvalidConfiguredGitRemote, InvalidGitPushReceipt,
 };
-pub use repository_directories::open_repository_administration;
+pub use repository_directories::{
+    RepositoryAdministrationDirectories, open_repository_administration,
+};

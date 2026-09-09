@@ -48,6 +48,12 @@ pub(super) fn read_dispatch_marker(
         return None;
     }
     let administration = signalbox_tools_git::open_repository_administration(path).ok()??;
+    let common = fstat(&administration.common).ok()?;
+    let expected_common = identity.common_administration?;
+    if (common.st_dev as u64, common.st_ino) != (expected_common.device, expected_common.inode) {
+        return None;
+    }
+    let administration = administration.worktree;
     let expected_administration = identity.administration?;
     let administration_stat = fstat(&administration).ok()?;
     if (
