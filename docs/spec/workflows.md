@@ -102,7 +102,8 @@ milliseconds and a uniformly sampled operating-system u64 respectively. Values
 use decimal strings in checked JSON payloads; recorded answers replay without
 reading the clock or drawing randomness. `Sleep` carries an absolute
 `deadline_unix_ms` at request admission and receives `Wake` with that deadline
-once wall time reaches it, including after restart.
+once wall time reaches it, including after restart. Sleep-only waits use timers
+without opening journal listeners.
 
 `AwaitEvent` carries a typed `program_answers` source run and an exclusive
 journal position (`after`, zero for the beginning). It receives the next

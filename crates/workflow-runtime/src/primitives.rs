@@ -163,18 +163,27 @@ impl<C: PrimitiveClock, E: PrimitiveEvents> LiveDeliverySource for DurablePrimit
             if let Some(delivery) = self.ready(outstanding).await? {
                 return Ok(delivery);
             }
-            let mut wake = self.journal.listen().await.map_err(failure)?;
+            let mut wake = if outstanding
+                .iter()
+                .any(|frame| matches!(frame.kind(), RequestKind::AwaitEvent(_)))
+            {
+                Some(self.journal.listen().await.map_err(failure)?)
+            } else {
+                None
+            };
             loop {
-                // LISTEN is established before catch-up, covering commits during subscription.
+                // Event LISTEN precedes catch-up, covering commits during subscription.
                 if let Some(delivery) = self.ready(outstanding).await? {
                     return Ok(delivery);
                 }
-                match self.delay(outstanding)? {
-                    Some(delay) => tokio::select! {
+                match (self.delay(outstanding)?, wake.as_mut()) {
+                    (Some(delay), Some(wake)) => tokio::select! {
                         _ = tokio::time::sleep(delay) => {},
                         result = wake.changed() => { result.map_err(failure)?; },
                     },
-                    None => wake.changed().await.map_err(failure)?,
+                    (Some(delay), None) => tokio::time::sleep(delay).await,
+                    (None, Some(wake)) => wake.changed().await.map_err(failure)?,
+                    (None, None) => std::future::pending().await,
                 }
             }
         })
@@ -190,4 +199,77 @@ fn refuse(frame: &RequestFrame) -> DeliveryKind {
 
 fn failure(error: impl std::fmt::Display) -> LiveDeliveryFailure {
     LiveDeliveryFailure::new(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use signalbox_domain::RequestOrdinal;
+    use std::{
+        cell::Cell,
+        rc::Rc,
+        task::{Context, Waker},
+    };
+
+    struct ControlledClock(Rc<Cell<UnixMillis>>);
+
+    impl PrimitiveClock for ControlledClock {
+        fn now(&mut self) -> Result<UnixMillis, LiveDeliveryFailure> {
+            Ok(self.0.get())
+        }
+
+        fn random(&mut self) -> Result<RandomValue, LiveDeliveryFailure> {
+            panic!("sleep must not draw randomness")
+        }
+    }
+
+    struct NoEventSource;
+
+    impl PrimitiveEvents for NoEventSource {
+        type Wake = Self;
+
+        async fn next_event(
+            &mut self,
+            _: AwaitProgramEvent,
+        ) -> Result<Option<ProgramEvent>, LiveDeliveryFailure> {
+            panic!("sleep must not query events")
+        }
+
+        async fn listen(&mut self) -> Result<Self::Wake, LiveDeliveryFailure> {
+            panic!("sleep must not open a listener")
+        }
+    }
+
+    impl PrimitiveWake for NoEventSource {
+        async fn changed(&mut self) -> Result<(), LiveDeliveryFailure> {
+            panic!("sleep must not wait for notifications")
+        }
+    }
+
+    #[tokio::test]
+    async fn sleep_wait_fires_without_accessing_an_event_source() {
+        let now = Rc::new(Cell::new(UnixMillis(0)));
+        let deadline = SleepUntil(UnixMillis(10));
+        let frame = RequestFrame::new(
+            RequestOrdinal::try_from_u64(1).unwrap(),
+            None,
+            RequestKind::Sleep(deadline.encode()),
+        );
+        let mut primitives = DurablePrimitives::new(NoEventSource, ControlledClock(now.clone()));
+        let mut delivery = primitives.next_delivery(std::slice::from_ref(&frame));
+        assert!(
+            delivery
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        now.set(deadline.0);
+        assert_eq!(
+            delivery.await.unwrap(),
+            DeliveryKind::Wake {
+                resolves: frame.ordinal(),
+                payload: deadline.0.encode(),
+            }
+        );
+    }
 }
