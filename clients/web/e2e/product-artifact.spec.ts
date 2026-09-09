@@ -395,3 +395,30 @@ test('captures desktop and responsive artifact evidence', async ({ page }, testI
   })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
+
+test('refuses advertised oversized derived views before any content request', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const oversized = decodeWebBlobDescriptor({
+    ...imageArtifact,
+    available_views: imageArtifact.available_views.map((view) =>
+      view.kind === 'preview' || view.kind === 'thumbnail'
+        ? { ...view, byte_length: '16777217' }
+        : view,
+    ),
+  })
+  await useArtifactScenario(page, oversized)
+  const contentRequests: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/content/')) contentRequests.push(request.url())
+  })
+  await page.goto('/sessions?workspace=true')
+  await submitArtifactWithoutMouse(page, oversized)
+  const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
+  await expect(artifact.getByText('Details only', { exact: true })).toBeVisible()
+  await expect(artifact.locator('img')).toHaveCount(0)
+  expect(contentRequests).toEqual([])
+  if (testInfo.project.name === 'chromium')
+    await expect(page).toHaveScreenshot('derived-byte-bound-desktop.png')
+})

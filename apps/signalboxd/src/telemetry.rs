@@ -1075,6 +1075,7 @@ pub struct TelemetryMetrics {
     model_cancelled: IntCounter,
     model_ambiguous: IntCounter,
     scheduler_occupancy: IntGauge,
+    client_connections: IntGauge,
     scheduler_oldest_age_seconds: IntGauge,
     scheduler_oldest_info: IntGaugeVec,
     scheduler_oldest: Arc<Mutex<Option<SchedulerOldestInFlightPass>>>,
@@ -1087,6 +1088,14 @@ impl TelemetryMetrics {
     /// Builds every bounded label series before the daemon begins work.
     pub fn new() -> Result<Self, TelemetryConfigurationError> {
         let registry = Registry::new();
+        let client_connections = IntGauge::with_opts(Opts::new(
+            "signalbox_client_connections_active",
+            "Active local process-protocol connections.",
+        ))
+        .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(client_connections.clone()))
+            .map_err(|_| metrics_error())?;
         let turns_started = IntCounter::with_opts(Opts::new(
             "signalbox_turns_started_total",
             "Durably activated turns observed by the daemon outbox.",
@@ -1196,6 +1205,7 @@ impl TelemetryMetrics {
             model_cancelled,
             model_ambiguous,
             scheduler_occupancy,
+            client_connections,
             scheduler_oldest_age_seconds,
             scheduler_oldest_info,
             scheduler_oldest: Arc::new(Mutex::new(None)),
@@ -1203,6 +1213,11 @@ impl TelemetryMetrics {
             lifecycle_nonterminal_past_deadline,
             lifecycle_export_fresh,
         })
+    }
+
+    pub(crate) fn observe_client_connections(&self, active: usize) {
+        self.client_connections
+            .set(i64::try_from(active).unwrap_or(i64::MAX));
     }
 
     /// Publishes one lifecycle-metrics report onto the exported gauges.

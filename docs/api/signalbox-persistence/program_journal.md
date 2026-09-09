@@ -87,6 +87,15 @@ impl program_journal::ProgramJournalRepository {
         option::Option<signalbox_domain::RequestFrame>,
         program_journal::ProgramJournalRepositoryError,
     >;
+    pub async fn complete_if_tail(
+        &self,
+        run: signalbox_domain::ProgramRunId,
+        expected_last_position: u64,
+        result: signalbox_domain::InlineFramePayload,
+    ) -> result::Result<
+        option::Option<signalbox_domain::DeliveryFrame>,
+        program_journal::ProgramJournalRepositoryError,
+    >;
     pub async fn append_delivery(
         &self,
         run: signalbox_domain::ProgramRunId,

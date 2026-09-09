@@ -66,7 +66,7 @@ impl error::Error for LiveDeliveryFailure {}
 
 ```rust
 pub enum ProgramExecutionOutcome {
-    Completed,
+    Completed(signalbox_domain::InlineFramePayload),
     RunCancelled(signalbox_domain::InlineFramePayload),
     Faulted(signalbox_domain::ProgramFault),
 }

@@ -883,6 +883,7 @@ async fn registrations_distinguish_names_and_grants_and_pin_run_authority()
         .start_run(
             signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
             first.id,
+            &[],
         )
         .await?;
     assert_eq!(repository.for_run(run).await?, Some(first.clone()));
@@ -930,6 +931,7 @@ async fn child_registration_refuses_widening_without_creating_a_registration()
         .start_run(
             signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
             parent.id,
+            &[],
         )
         .await?;
     let mut child_request = registration_request("child");
@@ -956,6 +958,7 @@ async fn child_registration_refuses_widening_without_creating_a_registration()
         .start_run(
             signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
             child.id,
+            &[],
         )
         .await?;
     let grandchild = registration_request("grandchild");
@@ -995,13 +998,29 @@ async fn run_creation_retries_preserve_the_binding_and_journal() -> Result<(), B
         )
         .await?;
     let run = ProgramRunId::from_uuid(Uuid::now_v7());
-    assert_eq!(registrations.start_run(run, first.id).await?, run);
+    assert_eq!(registrations.start_run(run, first.id, b"input").await?, run);
     journal
         .append_request(run, None, RequestKind::Now(payload(b"retained request")))
         .await?;
-    assert_eq!(registrations.start_run(run, first.id).await?, run);
+    assert_eq!(registrations.start_run(run, first.id, b"input").await?, run);
     assert!(
-        matches!(registrations.start_run(run, other.id).await, Err(ProgramRegistrationError::RunConflict { run: conflict }) if conflict == run)
+        matches!(registrations.start_run(run, other.id, b"input").await, Err(ProgramRegistrationError::RunConflict { run: conflict }) if conflict == run)
+    );
+    assert!(matches!(
+        registrations.start_run(run, first.id, b"changed").await,
+        Err(ProgramRegistrationError::RunConflict { .. })
+    ));
+    assert_eq!(
+        registrations.input_for_run(run).await?,
+        Some(payload(b"input"))
+    );
+    assert!(
+        sqlx::query("UPDATE program_run_registration SET input = $2 WHERE run_id = $1")
+            .bind(run.into_uuid())
+            .bind(b"changed".as_slice())
+            .execute(&pool)
+            .await
+            .is_err()
     );
     assert_eq!(registrations.for_run(run).await?, Some(first.clone()));
     assert_eq!(
@@ -1016,7 +1035,7 @@ async fn run_creation_retries_preserve_the_binding_and_journal() -> Result<(), B
     let bare = ProgramRunId::from_uuid(Uuid::now_v7());
     journal.create_stream(bare).await?;
     assert!(
-        matches!(registrations.start_run(bare, first.id).await, Err(ProgramRegistrationError::RunConflict { run: conflict }) if conflict == bare)
+        matches!(registrations.start_run(bare, first.id, b"input").await, Err(ProgramRegistrationError::RunConflict { run: conflict }) if conflict == bare)
     );
     assert!(registrations.for_run(bare).await?.is_none());
     pool.close().await;
@@ -1051,6 +1070,478 @@ async fn registration_creation_reconciles_equal_retries_and_refuses_changed_cont
         .fetch_one(&pool)
         .await?;
     assert_eq!(count, 1);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_refusal_preserves_outstanding_work_then_accepts_a_new_result()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let work = repository
+        .append_request(run, None, RequestKind::Now(payload(b"clock")))
+        .await?;
+    let refused = repository
+        .complete_if_tail(run, 1, payload(b"premature"))
+        .await?
+        .expect("terminal refusal");
+    assert!(matches!(
+        refused.kind(),
+        DeliveryKind::Reject {
+            reason: signalbox_domain::RejectReason::OutstandingRequests,
+            ..
+        }
+    ));
+    assert!(
+        repository
+            .load(run)
+            .await?
+            .expect("journal")
+            .result()
+            .is_none()
+    );
+    repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: work.ordinal(),
+                payload: payload(b"time"),
+            },
+        )
+        .await?;
+    let result = payload(b"retained result");
+    repository
+        .complete_if_tail(run, 4, result.clone())
+        .await?
+        .expect("completion");
+    let loaded = repository.load(run).await?.expect("journal");
+    assert_eq!(loaded.result(), Some(&result));
+    assert!(!loaded.has_outstanding_requests());
+    assert!(
+        repository
+            .complete_if_tail(run, 6, payload(b"replacement"))
+            .await?
+            .is_none()
+    );
+    assert!(
+        repository
+            .append_request(run, None, RequestKind::Now(payload(b"late")))
+            .await
+            .is_err()
+    );
+    assert!(
+        repository
+            .append_delivery(run, DeliveryKind::RunCancel(payload(b"late")))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        repository.load(run).await?.expect("retained journal"),
+        loaded
+    );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_answer_cannot_adopt_a_request_emitted_with_outstanding_work()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let work = repository
+        .append_request(run, None, RequestKind::Now(payload(b"clock")))
+        .await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"premature")))
+        .await?;
+    let acceptance = DeliveryKind::Answer {
+        resolves: terminal.ordinal(),
+        payload: InlineFramePayload::default(),
+    };
+    assert!(
+        repository
+            .append_delivery(run, acceptance.clone())
+            .await
+            .is_err()
+    );
+    repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: work.ordinal(),
+                payload: payload(b"time"),
+            },
+        )
+        .await?;
+    assert!(repository.append_delivery(run, acceptance).await.is_err());
+    repository
+        .append_delivery(
+            run,
+            DeliveryKind::Reject {
+                resolves: terminal.ordinal(),
+                reason: signalbox_domain::RejectReason::OutstandingRequests,
+            },
+        )
+        .await?;
+    assert!(
+        repository
+            .load(run)
+            .await?
+            .expect("journal")
+            .result()
+            .is_none()
+    );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_answer_rejects_work_appended_and_resolved_after_its_request()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    let work = repository
+        .append_request(run, None, RequestKind::Now(payload(b"clock")))
+        .await?;
+    repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: work.ordinal(),
+                payload: payload(b"time"),
+            },
+        )
+        .await?;
+    let before = repository.load(run).await?.expect("pending terminal");
+    let error = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: terminal.ordinal(),
+                payload: InlineFramePayload::default(),
+            },
+        )
+        .await
+        .expect_err("intervening work prevents successful completion");
+    let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+        source,
+        ..
+    } = error
+    else {
+        panic!("expected database rejection, got {error:?}");
+    };
+    assert_trigger_error(
+        source,
+        "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection",
+    );
+    assert_eq!(
+        repository.load(run).await?.expect("unchanged journal"),
+        before
+    );
+    assert!(before.result().is_none());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_request_rejects_non_contract_resolutions() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::RejectReason;
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    let ordinal = terminal.ordinal();
+    let before = repository.load(run).await?.expect("unresolved terminal");
+    for kind in [
+        DeliveryKind::Wake {
+            resolves: ordinal,
+            payload: InlineFramePayload::default(),
+        },
+        DeliveryKind::Cancel {
+            resolves: ordinal,
+            payload: InlineFramePayload::default(),
+        },
+        DeliveryKind::Reject {
+            resolves: ordinal,
+            reason: RejectReason::OutstandingRequests,
+        },
+        DeliveryKind::Reject {
+            resolves: ordinal,
+            reason: RejectReason::CapabilityDenied,
+        },
+        DeliveryKind::Reject {
+            resolves: ordinal,
+            reason: RejectReason::UnsupportedOperation,
+        },
+    ] {
+        let error = repository
+            .append_delivery(run, kind.clone())
+            .await
+            .expect_err("invalid terminal resolution");
+        let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+            source,
+            ..
+        } = error
+        else {
+            panic!("expected database rejection for {kind:?}, got {error:?}");
+        };
+        assert_trigger_error(
+            source,
+            "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection",
+        );
+        assert_eq!(
+            repository.load(run).await?.expect("unchanged journal"),
+            before,
+            "{kind:?}"
+        );
+    }
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_rejection_cannot_count_work_appended_after_emission() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    repository
+        .append_request(run, None, RequestKind::Now(payload(b"late work")))
+        .await?;
+    let before = repository.load(run).await?.expect("unresolved terminal");
+    let error = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Reject {
+                resolves: terminal.ordinal(),
+                reason: signalbox_domain::RejectReason::OutstandingRequests,
+            },
+        )
+        .await
+        .expect_err("late work does not justify terminal rejection");
+    let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+        source,
+        ..
+    } = error
+    else {
+        panic!("expected database rejection, got {error:?}");
+    };
+    assert_trigger_error(
+        source,
+        "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection",
+    );
+    assert_eq!(
+        repository.load(run).await?.expect("unchanged journal"),
+        before
+    );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_answer_rejects_an_intervening_scope_frame() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    repository
+        .append_request(
+            run,
+            None,
+            RequestKind::Scope(ScopeRequest::new(
+                ScopeOperation::Open,
+                ScopeOrdinal::try_from_u64(1).expect("scope"),
+                None,
+            )),
+        )
+        .await?;
+    let before = repository.load(run).await?.expect("pending terminal");
+    let error = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: terminal.ordinal(),
+                payload: InlineFramePayload::default(),
+            },
+        )
+        .await
+        .expect_err("intervening scope prevents successful completion");
+    let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+        source,
+        ..
+    } = error
+    else {
+        panic!("expected database rejection, got {error:?}");
+    };
+    assert_trigger_error(
+        source,
+        "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection",
+    );
+    assert_eq!(
+        repository.load(run).await?.expect("unchanged journal"),
+        before
+    );
+    assert!(before.result().is_none());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cancellation_after_success_replays_the_retained_result() -> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::program_cancellation::{
+        self, CancelProgramRun, ProgramCancellationOutcome as Outcome,
+        ProgramCancellationResult as Result, ProgramTerminalState as State,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let result = payload(b"durable result");
+    repository
+        .complete_if_tail(run, 0, result.clone())
+        .await?
+        .expect("success");
+    let before = repository.load(run).await?.expect("journal");
+    let command = CancelProgramRun {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+        run_id: run,
+    };
+    let receipt = program_cancellation::cancel(&pool, command.clone()).await?;
+    assert_eq!(
+        receipt,
+        Result::Recorded(Outcome::AlreadyTerminal(State::Succeeded(result)))
+    );
+    assert_eq!(program_cancellation::cancel(&pool, command).await?, receipt);
+    assert_eq!(repository.load(run).await?.expect("journal"), before);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cancel_and_success_race_settles_one_durable_outcome() -> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::program_cancellation::{
+        self, CancelProgramRun, ProgramCancellationOutcome as Outcome,
+        ProgramCancellationResult as Result, ProgramTerminalState as State,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let result = payload(b"race result");
+    let command = CancelProgramRun {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+        run_id: run,
+    };
+    let (completed, cancelled) = tokio::join!(
+        repository.complete_if_tail(run, 0, result.clone()),
+        program_cancellation::cancel(&pool, command.clone())
+    );
+    let completed = completed?;
+    let cancelled = cancelled?;
+    let journal = repository.load(run).await?.expect("journal");
+    if completed.is_some() {
+        assert_eq!(
+            cancelled,
+            Result::Recorded(Outcome::AlreadyTerminal(State::Succeeded(result.clone())))
+        );
+        assert_eq!(journal.result(), Some(&result));
+        assert_eq!(journal.entries().len(), 2);
+    } else {
+        assert_eq!(cancelled, Result::Recorded(Outcome::Applied));
+        assert!(matches!(
+            journal.terminal_delivery().expect("terminal").kind(),
+            DeliveryKind::RunCancel(_)
+        ));
+        assert!(journal.result().is_none());
+        assert_eq!(journal.entries().len(), 1);
+    }
+    assert_eq!(
+        program_cancellation::cancel(&pool, command).await?,
+        cancelled
+    );
+    assert_eq!(repository.load(run).await?.expect("journal"), journal);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cancellation_prevents_accepting_a_pending_terminal_request() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_persistence::program_cancellation::{
+        self, CancelProgramRun, ProgramCancellationOutcome, ProgramCancellationResult,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(
+            run,
+            None,
+            RequestKind::Terminal(payload(b"unaccepted result")),
+        )
+        .await?;
+    let command = CancelProgramRun {
+        command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::now_v7()),
+        run_id: run,
+    };
+    assert_eq!(
+        program_cancellation::cancel(&pool, command).await?,
+        ProgramCancellationResult::Recorded(ProgramCancellationOutcome::Applied)
+    );
+    assert!(
+        repository
+            .append_delivery(
+                run,
+                DeliveryKind::Answer {
+                    resolves: terminal.ordinal(),
+                    payload: InlineFramePayload::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        repository
+            .complete_if_tail(run, 2, payload(b"late success"))
+            .await?
+            .is_none()
+    );
+    let journal = repository.load(run).await?.expect("cancelled journal");
+    assert!(matches!(
+        journal.terminal_delivery().expect("terminal").kind(),
+        DeliveryKind::RunCancel(_)
+    ));
+    assert!(journal.result().is_none());
     pool.close().await;
     Ok(())
 }

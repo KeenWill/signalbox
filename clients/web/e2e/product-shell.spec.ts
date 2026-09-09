@@ -1800,9 +1800,9 @@ test('starts the settled exact import filter without the previous page cursor', 
       },
     })
   })
+  await page.clock.install()
   await page.goto('/imports')
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
-  await page.clock.install()
   await page.clock.pauseAt(new Date(Date.now() + 1_000))
   const input = page.getByRole('textbox', {
     name: 'Source session',

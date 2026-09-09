@@ -98,6 +98,9 @@ test('selects an admitted derivative without loading original bytes', async ({ p
     .getByRole('button', { name: /orbital-map\.preview\.png/ })
   await derivative.focus()
   await page.keyboard.press('Enter')
+  await expect(
+    page.getByRole('img', { name: 'Preview of orbital-map.preview.png' }),
+  ).toHaveAttribute('src', /^blob:/)
   await expect(derivative).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByRole('img', { name: 'Preview of orbital-map.preview.png' })).toBeVisible()
   await previewResponse
@@ -181,4 +184,22 @@ test('captures mobile attachment evidence', async ({ page }, testInfo) => {
     'attachments-mobile-dark.png',
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('refuses excess derived bytes before the attachment reaches the image decoder', async ({
+  page,
+}) => {
+  await page.route(`**${previewPath}`, (route) =>
+    route.fulfill({
+      body: Buffer.concat([previewFixture, Buffer.from([0])]),
+      contentType: 'image/png',
+    }),
+  )
+  await page.goto('/scenario/attachments')
+  await page
+    .getByRole('region', { name: 'Transcript attachments' })
+    .getByRole('button', { name: /orbital-map\.preview\.png/ })
+    .click()
+  await expect(page.getByText('Preview unavailable', { exact: true })).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Preview of orbital-map.preview.png' })).toHaveCount(0)
 })
