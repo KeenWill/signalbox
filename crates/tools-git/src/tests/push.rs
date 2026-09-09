@@ -664,6 +664,31 @@ fn merge_push_enforces_the_shallow_boundary_ceiling() {
     use crate::limits::{MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES};
     use crate::tests::support::commit_with_parents;
 
+    // The child alone receives a descriptor ceiling equal to the admitted boundary count.
+    const CHILD_ENVIRONMENT: &str = "SIGNALBOX_SHALLOW_BOUNDARY_DESCRIPTOR_CHILD";
+    const CHILD_EVIDENCE: &str = "shallow boundary probe completed";
+    if std::env::var_os(CHILD_ENVIRONMENT).is_none() {
+        let output = std::process::Command::new("sh")
+            .args(["-c", "ulimit -n \"$1\" && shift && exec \"$@\"", "sh"])
+            .arg(MAX_SHALLOW_ENTRIES.to_string())
+            .arg(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "tests::push::merge_push_enforces_the_shallow_boundary_ceiling",
+                "--nocapture",
+            ])
+            .env(CHILD_ENVIRONMENT, "1")
+            .output()
+            .expect("run the bounded-descriptor child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(CHILD_EVIDENCE),
+            "bounded-descriptor probe must execute and pass: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     for boundary_count in [MAX_SHALLOW_ENTRIES, MAX_SHALLOW_ENTRIES + 1] {
         let fixture = Fixture::new();
         let repository = Repository::open(fixture.root()).expect("fixture repository");
@@ -693,6 +718,7 @@ fn merge_push_enforces_the_shallow_boundary_ceiling() {
             );
         }
     }
+    println!("{CHILD_EVIDENCE}");
 }
 
 #[tokio::test]

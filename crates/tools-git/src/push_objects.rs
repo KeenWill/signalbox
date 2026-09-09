@@ -212,7 +212,7 @@ fn retain_boundary(
 struct SourceFile {
     directory: usize,
     name: PathBuf,
-    file: File,
+    file: Option<File>,
     identity: FileSnapshotIdentity,
 }
 
@@ -432,7 +432,7 @@ impl ObjectSource {
         self.files.push(SourceFile {
             directory,
             name: PathBuf::from(path.file_name().ok_or(LocalGitFailure::Repository)?),
-            file,
+            file: Some(file),
             identity,
         });
         if self.files.len() > MAX_REPOSITORY_INSPECTIONS {
@@ -452,7 +452,12 @@ impl ObjectSource {
             return Err(LocalGitFailure::Repository);
         }
         let entry = &self.files[source];
-        let mut file = entry.file.try_clone().map_err(rejected)?;
+        let mut file = entry
+            .file
+            .as_ref()
+            .ok_or(LocalGitFailure::Repository)?
+            .try_clone()
+            .map_err(rejected)?;
         file.seek(SeekFrom::Start(offset as u64))
             .map_err(rejected)?;
         let mut bytes = vec![0; length];
@@ -527,6 +532,9 @@ impl ObjectSource {
             {
                 return Err(LocalGitFailure::Repository);
             }
+            // Verified loose bytes are private now; retain their identity for final
+            // path validation without exhausting descriptors across long histories.
+            self.files[file].file = None;
         } else {
             self.capture_pack(database, oid)?;
         }
@@ -595,7 +603,12 @@ impl ObjectSource {
             if offset < 12 || offset >= pack.end {
                 return Err(LocalGitFailure::Repository);
             }
-            let mut file = self.files[pack.source].file.try_clone().map_err(rejected)?;
+            let mut file = self.files[pack.source]
+                .file
+                .as_ref()
+                .ok_or(LocalGitFailure::Repository)?
+                .try_clone()
+                .map_err(rejected)?;
             file.seek(SeekFrom::Start(offset as u64))
                 .map_err(rejected)?;
             let remaining_budget = MAX_OBJECT_DATABASE_BYTES - self.captured_bytes;
@@ -758,9 +771,11 @@ impl ObjectSource {
                 )
                 .map_err(rejected)?,
             );
-            if file_snapshot_identity(&current.metadata().map_err(rejected)?) != entry.identity
-                || file_snapshot_identity(&entry.file.metadata().map_err(rejected)?)
-                    != entry.identity
+            if file_snapshot_identity(&current.metadata().map_err(rejected)?) != entry.identity {
+                return Err(LocalGitFailure::Repository);
+            }
+            if let Some(file) = &entry.file
+                && file_snapshot_identity(&file.metadata().map_err(rejected)?) != entry.identity
             {
                 return Err(LocalGitFailure::Repository);
             }
