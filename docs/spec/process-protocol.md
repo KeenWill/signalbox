@@ -687,4 +687,5 @@ event is `turn_failed`; it emits no pool-exhaustion event.
 
 ## Planned
 
-None.
+- Listener probing before stale socket identity-pin cleanup; see
+  [daemon survival design](../design/daemon-survival.md).
