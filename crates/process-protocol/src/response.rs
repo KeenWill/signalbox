@@ -646,11 +646,21 @@ pub enum ServerMessage {
     ConversationImportInserted {
         /// Newly durable imported-conversation identity.
         imported_conversation_id: CanonicalUuid,
+        /// Number of malformed physical records dropped during conversion.
+        dropped_record_count: CanonicalU64,
+        /// One-based position of the first dropped record, when any were dropped.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        first_dropped_record_position: Option<CanonicalU64>,
     },
     /// The exact imported snapshot was already durable.
     ConversationImportAlreadyImported {
         /// Existing durable imported-conversation identity.
         imported_conversation_id: CanonicalUuid,
+        /// Number of malformed physical records dropped during this conversion.
+        dropped_record_count: CanonicalU64,
+        /// One-based position of the first dropped record, when any were dropped.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        first_dropped_record_position: Option<CanonicalU64>,
     },
     /// One per-connection chunked import was initialized.
     ConversationImportBegun {
@@ -702,6 +712,11 @@ pub enum ServerMessage {
     ImportedConversationStart {
         /// Inspected imported conversation.
         imported_conversation_id: CanonicalUuid,
+        /// Number of malformed physical records dropped from the stored import.
+        dropped_record_count: CanonicalU64,
+        /// One-based position of the first dropped record, when any were dropped.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        first_dropped_record_position: Option<CanonicalU64>,
     },
     /// One imported entry as the inspection projection presents it.
     ImportedConversationEntry {
@@ -1286,6 +1301,27 @@ impl ServerMessage {
                         return Err(FrameValidationError::ImportedConversationEntryShape);
                     }
                     preview.validate()?;
+                }
+            }
+            Self::ConversationImportInserted {
+                dropped_record_count,
+                first_dropped_record_position,
+                ..
+            }
+            | Self::ConversationImportAlreadyImported {
+                dropped_record_count,
+                first_dropped_record_position,
+                ..
+            }
+            | Self::ImportedConversationStart {
+                dropped_record_count,
+                first_dropped_record_position,
+                ..
+            } => {
+                if (dropped_record_count.value() == 0) != first_dropped_record_position.is_none()
+                    || first_dropped_record_position.is_some_and(|position| position.value() == 0)
+                {
+                    return Err(FrameValidationError::ConversationImportShape);
                 }
             }
             Self::ConversationImportAppended {

@@ -170,6 +170,71 @@ pub trait ImportedConversationStore {
         &mut self,
         conversation: ImportedConversation,
     ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send;
+
+    /// Inserts with the durable summary of records dropped during conversion.
+    fn resolve_or_insert_with_drop_facts(
+        &mut self,
+        conversation: ImportedConversation,
+        _dropped_records: ImportedConversationDropFacts,
+    ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send {
+        self.resolve_or_insert(conversation)
+    }
+}
+
+/// Durable summary of source records dropped during conversion.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ImportedConversationDropFacts {
+    count: u64,
+    first_source_line: Option<u64>,
+}
+
+impl ImportedConversationDropFacts {
+    /// Reports that conversion dropped no source records.
+    pub const fn none() -> Self {
+        Self {
+            count: 0,
+            first_source_line: None,
+        }
+    }
+
+    /// Validates an exact dropped-record count and first position.
+    pub const fn try_new(count: u64, first_source_line: Option<u64>) -> Option<Self> {
+        if (count == 0) == first_source_line.is_none()
+            && match first_source_line {
+                Some(position) => position > 0,
+                None => true,
+            }
+        {
+            Some(Self {
+                count,
+                first_source_line,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Summarizes an ordered skipped-record report.
+    fn from_skipped<Failure>(
+        skipped: &[ImportedConversationSkippedRecord<Failure>],
+    ) -> Option<Self> {
+        Self::try_new(
+            u64::try_from(skipped.len()).ok()?,
+            skipped
+                .first()
+                .map(ImportedConversationSkippedRecord::source_line),
+        )
+    }
+
+    /// Returns the number of dropped physical records.
+    pub const fn count(self) -> u64 {
+        self.count
+    }
+
+    /// Returns the first dropped physical source line, when any record was dropped.
+    pub const fn first_source_line(self) -> Option<u64> {
+        self.first_source_line
+    }
 }
 
 /// Successful pure-ingestion outcome.
@@ -201,18 +266,11 @@ impl ImportConversationOutcome {
 /// Record-resilient import outcome and every rejected physical source record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImportConversationReport<Failure> {
-    /// At least one record converted, but rejected source evidence prevents storage.
-    Converted {
-        /// Checked aggregate containing the accepted records.
-        conversation: ImportedConversation,
-        /// Every rejected record in physical source order.
-        skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
-    },
-    /// Every record converted and the complete source was durably resolved or inserted.
+    /// At least one record converted and the accepted aggregate was durably resolved or inserted.
     Imported {
-        /// Durable outcome for the complete checked aggregate.
+        /// Durable outcome for the accepted checked aggregate.
         outcome: ImportConversationOutcome,
-        /// Empty rejected-record set, retained for one uniform report shape.
+        /// Every rejected record in physical source order.
         skipped_records: Box<[ImportedConversationSkippedRecord<Failure>]>,
     },
     /// Every physical source record failed record-local validation.
@@ -332,13 +390,14 @@ async fn store_validated<ConverterError, Store>(
     store: &mut Store,
     candidate: ImportedConversationId,
     converted: ImportedConversation,
+    dropped_records: ImportedConversationDropFacts,
 ) -> Result<ImportConversationOutcome, ImportConversationError<ConverterError, Store::Error>>
 where
     Store: ImportedConversationStore,
 {
     let expected_digest = converted.source_digest();
     let stored = store
-        .resolve_or_insert(converted)
+        .resolve_or_insert_with_drop_facts(converted, dropped_records)
         .await
         .map_err(ImportConversationError::Store)?;
     if stored.source_digest() != expected_digest {
@@ -400,7 +459,13 @@ where
             &issued_entries,
             &converted,
         )?;
-        store_validated::<Converter::Error, _>(store, candidate, converted).await
+        store_validated::<Converter::Error, _>(
+            store,
+            candidate,
+            converted,
+            ImportedConversationDropFacts::none(),
+        )
+        .await
     }
 }
 
@@ -451,13 +516,11 @@ where
             &issued_entries,
             &converted,
         )?;
-        if !skipped_records.is_empty() {
-            return Ok(ImportConversationReport::Converted {
-                conversation: converted,
-                skipped_records,
-            });
-        }
-        let outcome = store_validated::<Converter::Error, _>(store, candidate, converted).await?;
+        let dropped_records = ImportedConversationDropFacts::from_skipped(&skipped_records)
+            .ok_or(ImportConversationError::ConverterEntryIdentitySequenceMismatch)?;
+        let outcome =
+            store_validated::<Converter::Error, _>(store, candidate, converted, dropped_records)
+                .await?;
         Ok(ImportConversationReport::Imported {
             outcome,
             skipped_records,
@@ -487,10 +550,10 @@ mod tests {
     use super::{
         ImportConversationError, ImportConversationOutcome, ImportConversationReport,
         ImportConversationService, ImportedConversationConversionReport,
-        ImportedConversationConverter, ImportedConversationIdGenerator,
-        ImportedConversationSkippedRecord, ImportedConversationStore,
-        ImportedConversationStoreOutcome, ResilientImportedConversationConverter,
-        UuidV7ImportedConversationIdGenerator,
+        ImportedConversationConverter, ImportedConversationDropFacts,
+        ImportedConversationIdGenerator, ImportedConversationSkippedRecord,
+        ImportedConversationStore, ImportedConversationStoreOutcome,
+        ResilientImportedConversationConverter, UuidV7ImportedConversationIdGenerator,
     };
 
     fn conversation(value: u128) -> ImportedConversationId {
@@ -744,6 +807,7 @@ mod tests {
     struct FakeStore {
         response: Result<ImportedConversationStoreOutcome, FakeStoreError>,
         observed: Vec<ImportedConversation>,
+        observed_drop_facts: Vec<ImportedConversationDropFacts>,
     }
 
     impl ImportedConversationStore for FakeStore {
@@ -755,6 +819,17 @@ mod tests {
         ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send
         {
             self.observed.push(imported);
+            ready(self.response)
+        }
+
+        fn resolve_or_insert_with_drop_facts(
+            &mut self,
+            imported: ImportedConversation,
+            dropped_records: ImportedConversationDropFacts,
+        ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send
+        {
+            self.observed.push(imported);
+            self.observed_drop_facts.push(dropped_records);
             ready(self.response)
         }
     }
@@ -778,6 +853,7 @@ mod tests {
             FakeStore {
                 response: store_response,
                 observed: Vec::new(),
+                observed_drop_facts: Vec::new(),
             },
         )
     }
@@ -828,10 +904,9 @@ mod tests {
         assert_eq!(store.observed[0].id(), candidate);
     }
 
-    /// partial ingestion returns the checked accepted aggregate and every loss without claiming the
-    /// incomplete source is durable.
+    /// partial ingestion stores the checked accepted aggregate and reports every dropped record.
     #[tokio::test]
-    async fn resilient_ingestion_reports_exact_skips_without_storage() {
+    async fn resilient_ingestion_stores_accepted_records_with_exact_drop_facts() {
         let candidate = conversation(1);
         let entries = [entry(2), entry(3)];
         let mut service = service(
@@ -847,15 +922,20 @@ mod tests {
             .execute_resilient(b"partial source")
             .await
             .expect("accepted records should be returned with exact skips");
-        let ImportConversationReport::Converted {
-            conversation,
+        let ImportConversationReport::Imported {
+            outcome,
             skipped_records,
         } = report
         else {
-            panic!("fixture converter returns a partial checked aggregate")
+            panic!("fixture converter returns an imported checked aggregate")
         };
 
-        assert_eq!(conversation.id(), candidate);
+        assert_eq!(
+            outcome,
+            ImportConversationOutcome::Inserted {
+                conversation: candidate,
+            }
+        );
         assert_eq!(skipped_records.len(), 1);
         assert_eq!(skipped_records[0].source_line(), 2);
         assert_eq!(skipped_records[0].failure(), &FakeConversionError::Rejected);
@@ -866,7 +946,14 @@ mod tests {
             converter.observed,
             vec![(candidate, b"partial source".to_vec())]
         );
-        assert!(store.observed.is_empty());
+        assert_eq!(store.observed.len(), 1);
+        assert_eq!(
+            store.observed_drop_facts,
+            vec![
+                ImportedConversationDropFacts::try_new(1, Some(2))
+                    .expect("the fixture facts are valid")
+            ]
+        );
     }
 
     /// a resilient conversion with no losses may use the same exact-source durable resolution as

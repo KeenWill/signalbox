@@ -84,7 +84,6 @@ pub(crate) fn router(
         Arc::new(ImportedSourceBlobStorage::new(
             pool.clone(),
             blob_store_registry,
-            model_configuration.conversation_import_max_source_bytes(),
         )),
     );
     let state = WebImportState {
@@ -138,10 +137,12 @@ async fn search_imports(
         Some(_) => return invalid_request("imports search correlation is not a UUID"),
         None => return invalid_request("imports search correlation is required"),
     };
-    let maximum_bytes = state
-        .model_configuration
-        .conversation_import_max_source_bytes();
-    let source_session_id = match decode_bounded_utf8(request, maximum_bytes).await {
+    let source_session_id = match decode_bounded_utf8(
+        request,
+        usize::try_from(MAX_IMPORT_SOURCE_SESSION_BYTES).unwrap_or(usize::MAX),
+    )
+    .await
+    {
         Ok(source_session_id) => source_session_id,
         Err(response) => return response,
     };

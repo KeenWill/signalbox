@@ -28,15 +28,10 @@ pub(crate) struct ImportedSourceBlobStorage {
     registry: Option<Arc<BlobStoreRegistry>>,
     catalog: BlobCatalogRepository,
     read_budget: Arc<Semaphore>,
-    maximum_source_bytes: u64,
 }
 
 impl ImportedSourceBlobStorage {
-    pub(crate) fn new(
-        pool: PgPool,
-        registry: Option<Arc<BlobStoreRegistry>>,
-        maximum_source_bytes: usize,
-    ) -> Self {
+    pub(crate) fn new(pool: PgPool, registry: Option<Arc<BlobStoreRegistry>>) -> Self {
         let read_budget = registry.as_ref().map_or_else(
             || Arc::new(Semaphore::new(0)),
             |registry| registry.read_budget(),
@@ -45,7 +40,6 @@ impl ImportedSourceBlobStorage {
             registry,
             catalog: BlobCatalogRepository::new(pool),
             read_budget,
-            maximum_source_bytes: u64::try_from(maximum_source_bytes).unwrap_or(u64::MAX),
         }
     }
 }
@@ -55,7 +49,6 @@ impl fmt::Debug for ImportedSourceBlobStorage {
         formatter
             .debug_struct("ImportedSourceBlobStorage")
             .field("configured", &self.registry.is_some())
-            .field("maximum_source_bytes", &self.maximum_source_bytes)
             .finish_non_exhaustive()
     }
 }
@@ -67,10 +60,6 @@ impl ImportedRawBlobStorage for ImportedSourceBlobStorage {
                 .registry
                 .as_deref()
                 .ok_or(ImportedRawBlobStorageError::Unavailable)?;
-            enforce_cumulative_bound(
-                blobs.iter().map(|blob| blob.expected()),
-                self.maximum_source_bytes,
-            )?;
             let mut publications = Vec::with_capacity(blobs.len());
             for blob in &blobs {
                 publications.push(self.publish_one(registry, blob).await?);
@@ -79,20 +68,12 @@ impl ImportedRawBlobStorage for ImportedSourceBlobStorage {
         })
     }
 
-    fn read(
-        &self,
-        blobs: Box<[ExpectedBlob]>,
-        total_source_bytes: u64,
-    ) -> ImportedRawBlobReadFuture<'_> {
+    fn read(&self, blobs: Box<[ExpectedBlob]>) -> ImportedRawBlobReadFuture<'_> {
         Box::pin(async move {
             let registry = self
                 .registry
                 .as_deref()
                 .ok_or(ImportedRawBlobStorageError::Unavailable)?;
-            if total_source_bytes > self.maximum_source_bytes {
-                return Err(ImportedRawBlobStorageError::Integrity);
-            }
-            enforce_cumulative_bound(blobs.iter().copied(), self.maximum_source_bytes)?;
             let permit = Arc::clone(&self.read_budget)
                 .try_acquire_owned()
                 .map_err(|_| ImportedRawBlobStorageError::Unavailable)?;
@@ -188,22 +169,6 @@ impl ImportedSourceBlobStorage {
     }
 }
 
-fn enforce_cumulative_bound(
-    blobs: impl IntoIterator<Item = ExpectedBlob>,
-    maximum_source_bytes: u64,
-) -> Result<(), ImportedRawBlobStorageError> {
-    let mut total = 0_u64;
-    for blob in blobs {
-        total = total
-            .checked_add(blob.byte_length())
-            .ok_or(ImportedRawBlobStorageError::Integrity)?;
-        if total > maximum_source_bytes {
-            return Err(ImportedRawBlobStorageError::Integrity);
-        }
-    }
-    Ok(())
-}
-
 fn publication_facts(
     registry: &BlobStoreRegistry,
     store_name: &signalbox_blob_store::BlobStoreName,
@@ -297,32 +262,7 @@ fn map_catalog_error(error: BlobCatalogRepositoryError) -> ImportedRawBlobStorag
 
 #[cfg(test)]
 mod tests {
-    use signalbox_blob_store::ExpectedBlob;
-    use signalbox_domain::BlobDigest;
-
-    use super::{ImportedRawBlobStorageError, allocate_blob_buffer, enforce_cumulative_bound};
-
-    fn expected(byte: u8, length: u64) -> ExpectedBlob {
-        ExpectedBlob::try_new(BlobDigest::from_bytes([byte; 32]), length)
-            .expect("the fixture length is positive")
-    }
-
-    #[test]
-    fn cumulative_import_bound_accepts_its_exact_limit() {
-        let blobs = [expected(1, 2), expected(2, 3)];
-
-        assert_eq!(enforce_cumulative_bound(blobs, 5), Ok(()));
-    }
-
-    #[test]
-    fn cumulative_import_bound_rejects_one_excess_byte() {
-        let blobs = [expected(1, 2), expected(2, 3)];
-
-        assert_eq!(
-            enforce_cumulative_bound(blobs, 4),
-            Err(ImportedRawBlobStorageError::Integrity),
-        );
-    }
+    use super::{ImportedRawBlobStorageError, allocate_blob_buffer};
 
     #[test]
     fn imported_blob_buffer_reports_reservation_failure() {

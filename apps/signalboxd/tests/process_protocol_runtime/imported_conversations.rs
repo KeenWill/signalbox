@@ -140,6 +140,8 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         concat!(
             "{\"sessionId\":\"operational-claude\",\"type\":\"user\",",
             "\"message\":{\"role\":\"user\",\"content\":\"question\"}}\n",
+            "{\"sessionId\":\"operational-claude\",\"type\":\"user\",",
+            "\"message\":{\"role\":\"user\",\"content\":7}}\n",
             "{\"sessionId\":\"operational-claude\",\"type\":\"assistant\",",
             "\"message\":{\"role\":\"assistant\",\"content\":\"answer\"}}"
         )
@@ -166,6 +168,8 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         inserted.message(),
         &ServerMessage::ConversationImportInserted {
             imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            dropped_record_count: CanonicalU64::new(1),
+            first_dropped_record_position: Some(CanonicalU64::new(2)),
         }
     );
 
@@ -213,8 +217,38 @@ async fn single_shot_and_chunked_import_resolve_the_same_snapshot() -> Result<()
         already_imported.message(),
         &ServerMessage::ConversationImportAlreadyImported {
             imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            dropped_record_count: CanonicalU64::new(1),
+            first_dropped_record_position: Some(CanonicalU64::new(2)),
         }
     );
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            5,
+            ClientRequest::ReadImportedConversation {
+                imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            },
+        )
+        .await?;
+    assert_eq!(
+        response_within(&mut connection).await?.message(),
+        &ServerMessage::ImportedConversationStart {
+            imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            dropped_record_count: CanonicalU64::new(1),
+            first_dropped_record_position: Some(CanonicalU64::new(2)),
+        }
+    );
+    for _ in 0..2 {
+        assert!(matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::ImportedConversationEntry { .. }
+        ));
+    }
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::ImportedConversationEnd { .. }
+    ));
 
     drop(connection);
     runtime.stop().await
@@ -373,6 +407,8 @@ async fn reads_every_selectable_imported_position() -> Result<(), Box<dyn Error>
         start.message(),
         &ServerMessage::ImportedConversationStart {
             imported_conversation_id: fixture.conversation,
+            dropped_record_count: CanonicalU64::new(0),
+            first_dropped_record_position: None,
         }
     );
     let first = response_within(&mut connection).await?;
@@ -634,6 +670,8 @@ async fn selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>> {
         inserted.message(),
         &ServerMessage::ConversationImportInserted {
             imported_conversation_id: CanonicalUuid::from_uuid(stored_id),
+            dropped_record_count: CanonicalU64::new(0),
+            first_dropped_record_position: None,
         }
     );
     let stored = ImportedConversationRepository::new(runtime.pool.clone())
@@ -657,6 +695,7 @@ pub(crate) async fn require_inserted_import_receipt(
     match response_within(connection).await?.message() {
         ServerMessage::ConversationImportInserted {
             imported_conversation_id,
+            ..
         } => Ok(*imported_conversation_id),
         message => Err(io::Error::other(format!("unexpected import receipt: {message:?}")).into()),
     }

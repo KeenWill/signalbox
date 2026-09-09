@@ -9,7 +9,9 @@ use std::{
 };
 
 use rust_decimal::Decimal;
-use signalbox_application::{ImportedConversationStore, ImportedConversationStoreOutcome};
+use signalbox_application::{
+    ImportedConversationDropFacts, ImportedConversationStore, ImportedConversationStoreOutcome,
+};
 use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob};
 use signalbox_domain::{
     BlobDigest, ImportedConversation, ImportedConversationDisplayTitle, ImportedConversationFormat,
@@ -156,13 +158,8 @@ pub trait ImportedRawBlobStorage: fmt::Debug + Send + Sync {
     /// Publishes or verifies each distinct source record in supplied order.
     fn publish(&self, blobs: Box<[ImportedRawBlobInput]>) -> ImportedRawBlobPublicationFuture<'_>;
 
-    /// Reads and verifies each distinct source record in supplied order after
-    /// enforcing the complete occurrence-expanded source size.
-    fn read(
-        &self,
-        blobs: Box<[ExpectedBlob]>,
-        total_source_bytes: u64,
-    ) -> ImportedRawBlobReadFuture<'_>;
+    /// Reads and verifies each distinct source record in supplied order.
+    fn read(&self, blobs: Box<[ExpectedBlob]>) -> ImportedRawBlobReadFuture<'_>;
 }
 
 #[cfg(feature = "postgres-integration")]
@@ -228,11 +225,7 @@ impl ImportedRawBlobStorage for IntegrationImportedRawBlobStorage {
         })
     }
 
-    fn read(
-        &self,
-        blobs: Box<[ExpectedBlob]>,
-        _total_source_bytes: u64,
-    ) -> ImportedRawBlobReadFuture<'_> {
+    fn read(&self, blobs: Box<[ExpectedBlob]>) -> ImportedRawBlobReadFuture<'_> {
         Box::pin(async move {
             let retained = integration_imported_blobs()
                 .lock()
@@ -434,6 +427,16 @@ impl ImportedConversationRepository {
         &self,
         conversation: ImportedConversation,
     ) -> Result<ImportedConversationStoreOutcome, ImportedConversationRepositoryError> {
+        self.resolve_or_insert_with_drop_facts(conversation, ImportedConversationDropFacts::none())
+            .await
+    }
+
+    /// Inserts one complete snapshot with its record-drop summary.
+    pub async fn resolve_or_insert_with_drop_facts(
+        &self,
+        conversation: ImportedConversation,
+        dropped_records: ImportedConversationDropFacts,
+    ) -> Result<ImportedConversationStoreOutcome, ImportedConversationRepositoryError> {
         let encoded = EncodedConversation::from_domain(&conversation)?;
         let candidate_id = conversation.id();
         let source_digest = conversation.source_digest();
@@ -476,8 +479,9 @@ impl ImportedConversationRepository {
                 (imported_conversation_id, storage_version, source_format,
                  converter_version, source_digest, source_session_id,
                  declared_raw_record_count, declared_entry_count,
-                 display_title, display_title_state)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 display_title, display_title_state, dropped_record_count,
+                 first_dropped_record_position)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              ON CONFLICT DO NOTHING",
         )
         .bind(candidate_id.into_uuid())
@@ -492,6 +496,8 @@ impl ImportedConversationRepository {
         .bind(resolved_display_title_state(
             encoded.display_title.as_deref(),
         ))
+        .bind(Decimal::from(dropped_records.count()))
+        .bind(dropped_records.first_source_line().map(Decimal::from))
         .execute(&mut *transaction)
         .await?
         .rows_affected()
@@ -601,6 +607,49 @@ impl ImportedConversationStore for ImportedConversationRepository {
     ) -> Result<ImportedConversationStoreOutcome, Self::Error> {
         ImportedConversationRepository::resolve_or_insert(self, conversation).await
     }
+
+    async fn resolve_or_insert_with_drop_facts(
+        &mut self,
+        conversation: ImportedConversation,
+        dropped_records: ImportedConversationDropFacts,
+    ) -> Result<ImportedConversationStoreOutcome, Self::Error> {
+        ImportedConversationRepository::resolve_or_insert_with_drop_facts(
+            self,
+            conversation,
+            dropped_records,
+        )
+        .await
+    }
+}
+
+/// Loads the immutable record-drop summary for one import.
+pub async fn load_import_drop_facts(
+    pool: &PgPool,
+    conversation: ImportedConversationId,
+) -> Result<Option<ImportedConversationDropFacts>, ImportedConversationRepositoryError> {
+    let row = sqlx::query(
+        "SELECT dropped_record_count, first_dropped_record_position
+           FROM imported_conversation
+          WHERE imported_conversation_id = $1",
+    )
+    .bind(conversation.into_uuid())
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
+        let count = u64::try_from(row.try_get::<Decimal, _>("dropped_record_count")?)
+            .map_err(|_| invalid_ordinal("dropped record count"))?;
+        let first = row
+            .try_get::<Option<Decimal>, _>("first_dropped_record_position")?
+            .map(|position| {
+                positive_u64(position).map_err(|reason| {
+                    invalid_ordinal_with_reason("first dropped record position", reason)
+                })
+            })
+            .transpose()?;
+        ImportedConversationDropFacts::try_new(count, first)
+            .ok_or_else(|| invalid_ordinal("dropped record facts"))
+    })
+    .transpose()
 }
 
 struct EncodedConversation {
@@ -1287,16 +1336,6 @@ async fn decode_projection(
     })
 }
 
-fn total_expected_bytes(
-    blobs: impl IntoIterator<Item = ExpectedBlob>,
-) -> Result<u64, ImportedRawBlobStorageError> {
-    blobs.into_iter().try_fold(0_u64, |total, blob| {
-        total
-            .checked_add(blob.byte_length())
-            .ok_or(ImportedRawBlobStorageError::Integrity)
-    })
-}
-
 fn distinct_expected_blobs(
     blobs: impl IntoIterator<Item = ExpectedBlob>,
 ) -> Result<BTreeMap<BlobDigest, ExpectedBlob>, ImportedConversationRepositoryError> {
@@ -1319,11 +1358,10 @@ pub(crate) async fn finish_projection(
     storage: &dyn ImportedRawBlobStorage,
     projection: StoredConversationProjection,
 ) -> Result<ImportedConversation, ImportedConversationRepositoryError> {
-    let total_source_bytes = total_expected_bytes(projection.raws.iter().map(|raw| raw.expected))?;
     let expected_by_digest =
         distinct_expected_blobs(projection.raws.iter().map(|raw| raw.expected))?;
     let expected = expected_by_digest.values().copied().collect::<Box<[_]>>();
-    let distinct_bytes = storage.read(expected, total_source_bytes).await?;
+    let distinct_bytes = storage.read(expected).await?;
     if distinct_bytes.len() != expected_by_digest.len() {
         return Err(ImportedConversationCorruption::Missing("raw blob bytes").into());
     }
@@ -1735,14 +1773,6 @@ mod tests {
 
         assert_eq!(distinct.len(), 1);
         assert_eq!(distinct.get(&expected.digest()), Some(&expected));
-    }
-
-    #[test]
-    fn imported_blob_source_size_counts_equal_occurrences() {
-        let expected = ExpectedBlob::try_new(BlobDigest::from_bytes([1; 32]), 3)
-            .expect("fixture length is positive");
-
-        assert_eq!(super::total_expected_bytes([expected, expected]), Ok(6));
     }
 
     /// globally unique entry keys are emitted in one deterministic acquisition order independent of

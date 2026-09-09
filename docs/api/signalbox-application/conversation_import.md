@@ -125,6 +125,34 @@ pub trait ImportedConversationStore {
             <Self as ImportedConversationStore>::Error,
         >,
     > + marker::Send;
+    fn resolve_or_insert_with_drop_facts(
+        &mut self,
+        conversation: signalbox_domain::ImportedConversation,
+        _dropped_records: ImportedConversationDropFacts,
+    ) -> impl future::Future<
+        Output = result::Result<
+            ImportedConversationStoreOutcome,
+            <Self as ImportedConversationStore>::Error,
+        >,
+    > + marker::Send {
+        /* provided */
+    }
+}
+```
+
+## ImportedConversationDropFacts
+
+```rust
+pub struct ImportedConversationDropFacts {/* private */}
+// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
+impl ImportedConversationDropFacts {
+    pub const fn none() -> Self;
+    pub const fn try_new(
+        count: u64,
+        first_source_line: option::Option<u64>,
+    ) -> option::Option<Self>;
+    pub const fn count(self) -> u64;
+    pub const fn first_source_line(self) -> option::Option<u64>;
 }
 ```
 
@@ -149,10 +177,6 @@ impl ImportConversationOutcome {
 
 ```rust
 pub enum ImportConversationReport<Failure> {
-    Converted {
-        conversation: signalbox_domain::ImportedConversation,
-        skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,
-    },
     Imported {
         outcome: ImportConversationOutcome,
         skipped_records: boxed::Box<[ImportedConversationSkippedRecord<Failure>]>,

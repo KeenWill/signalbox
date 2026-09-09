@@ -98,7 +98,6 @@ pub trait ImportedRawBlobStorage: fmt::Debug + marker::Send + marker::Sync {
     fn read(
         &self,
         blobs: boxed::Box<[signalbox_blob_store::ExpectedBlob]>,
-        total_source_bytes: u64,
     ) -> conversation_import::ImportedRawBlobReadFuture<'_>;
 }
 ```
@@ -234,6 +233,14 @@ impl conversation_import::ImportedConversationRepository {
         signalbox_application::ImportedConversationStoreOutcome,
         conversation_import::ImportedConversationRepositoryError,
     >;
+    pub async fn resolve_or_insert_with_drop_facts(
+        &self,
+        conversation: signalbox_domain::ImportedConversation,
+        dropped_records: signalbox_application::ImportedConversationDropFacts,
+    ) -> result::Result<
+        signalbox_application::ImportedConversationStoreOutcome,
+        conversation_import::ImportedConversationRepositoryError,
+    >;
     pub async fn load(
         &self,
         conversation: signalbox_domain::ImportedConversationId,
@@ -253,7 +260,27 @@ impl signalbox_application::ImportedConversationStore
         signalbox_application::ImportedConversationStoreOutcome,
         <Self as signalbox_application::ImportedConversationStore>::Error,
     >;
+    async fn resolve_or_insert_with_drop_facts(
+        &mut self,
+        conversation: signalbox_domain::ImportedConversation,
+        dropped_records: signalbox_application::ImportedConversationDropFacts,
+    ) -> result::Result<
+        signalbox_application::ImportedConversationStoreOutcome,
+        <Self as signalbox_application::ImportedConversationStore>::Error,
+    >;
 }
+```
+
+## load_import_drop_facts
+
+```rust
+pub async fn load_import_drop_facts(
+    pool: &sqlx_postgres::PgPool,
+    conversation: signalbox_domain::ImportedConversationId,
+) -> result::Result<
+    option::Option<signalbox_application::ImportedConversationDropFacts>,
+    conversation_import::ImportedConversationRepositoryError,
+>;
 ```
 
 ## load_normalized_entries

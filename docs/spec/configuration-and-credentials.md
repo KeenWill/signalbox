@@ -97,6 +97,8 @@ duration policies use Jiff's friendly unsigned-duration syntax.
 `max_review_findings_per_run` must be finite and no greater than its domain
 bound. A finite `max_blob_replica_count` must admit the durable catalog's full
 store bound. Disabling reconciliation requires an unbounded nudge buffer.
+Conversation import admits no source-size setting; a document naming
+`conversation_import.max_source_bytes` is invalid and reports that exact key.
 `repository_watch_webhook_retention` must be positive and finite and governs
 authenticated webhook `expires_at` and merged-pull-request baseline retention as
 described in [repository watch](repo-watch.md). `codex_cli_version_probe_bound`

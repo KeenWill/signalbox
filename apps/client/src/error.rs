@@ -713,28 +713,6 @@ impl fmt::Display for RejectionDisplay {
             RejectionDetail::ConversationImportNotInProgress {} => {
                 formatter.write_str("conversation_import_not_in_progress")
             }
-            RejectionDetail::ConversationImportSourceTooLarge {
-                limit_bytes,
-                declared_size_bytes,
-                actual_size_bytes: None,
-            } => write!(
-                formatter,
-                "conversation_import_source_too_large limit_bytes={} declared_size_bytes={}",
-                limit_bytes.value(),
-                declared_size_bytes.value()
-            ),
-            RejectionDetail::ConversationImportSourceTooLarge {
-                limit_bytes,
-                declared_size_bytes,
-                actual_size_bytes: Some(actual_size_bytes),
-            } => write!(
-                formatter,
-                "conversation_import_source_too_large limit_bytes={} declared_size_bytes={} \
-                 actual_size_bytes={}",
-                limit_bytes.value(),
-                declared_size_bytes.value(),
-                actual_size_bytes.value()
-            ),
             RejectionDetail::ConversationImportSourceSizeMismatch {
                 declared_size_bytes,
                 actual_size_bytes,
@@ -920,23 +898,6 @@ mod tests {
 
         expect![[r#"
             invalid_request: conversation import was rejected (conversation_import_conversion_failed class=invalid_tool_result record_ordinal=17)"#]]
-        .assert_eq(&error.to_string());
-    }
-
-    #[test]
-    fn conversation_import_bound_evidence_names_limit_and_both_sizes() {
-        let error = ClientError::remote(
-            ErrorCode::InvalidRequest,
-            "conversation import was rejected".to_owned(),
-            ErrorDetail::invalid_request(RejectionDetail::ConversationImportSourceTooLarge {
-                limit_bytes: CanonicalU64::new(8),
-                declared_size_bytes: CanonicalU64::new(7),
-                actual_size_bytes: Some(CanonicalU64::new(9)),
-            }),
-        );
-
-        expect![[r#"
-            invalid_request: conversation import was rejected (conversation_import_source_too_large limit_bytes=8 declared_size_bytes=7 actual_size_bytes=9)"#]]
         .assert_eq(&error.to_string());
     }
 

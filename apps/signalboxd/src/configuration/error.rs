@@ -160,6 +160,11 @@ pub enum HubModelConfigurationError {
     MissingCompaction,
     /// An unrecognized root or table field was present.
     UnknownField,
+    /// A removed configuration field was still present.
+    RetiredField {
+        /// Exact dotted field name.
+        field: &'static str,
+    },
     /// A required field had the wrong TOML type or was absent.
     InvalidField,
     /// A configured identity was not a UUID.
@@ -201,8 +206,6 @@ pub enum HubModelConfigurationError {
     InvalidLimit,
     /// The compaction prompt was empty, oversized, or contained NUL.
     InvalidCompactionPrompt,
-    /// The optional conversation-import byte bound was absent, zero, or invalid.
-    InvalidConversationImportLimit,
     /// The optional blob-store registry or its routes were malformed.
     InvalidBlobStorageConfiguration,
     /// The optional web-fetch table was malformed or named an invalid origin.
@@ -265,6 +268,12 @@ impl fmt::Display for HubModelConfigurationError {
             return write!(
                 formatter,
                 "model configuration contains invalid numeric bound `{field}`"
+            );
+        }
+        if let Self::RetiredField { field } = self {
+            return write!(
+                formatter,
+                "model configuration contains retired field `{field}`"
             );
         }
         if let Self::InvalidRepositoryWatchRule { rule, reason } = self {
@@ -394,6 +403,7 @@ impl fmt::Display for HubModelConfigurationError {
             Self::DuplicateToolFamily => "model configuration repeats a daemon tool family",
             Self::MissingCompaction => "model configuration has no compaction settings",
             Self::UnknownField => "model configuration contains an unknown field",
+            Self::RetiredField { .. } => unreachable!("retired fields format above"),
             Self::InvalidField => "model configuration has a missing or mistyped field",
             Self::InvalidIdentity => "model configuration contains an invalid identity",
             Self::UnsupportedAdapter { .. } => "model configuration names an unsupported adapter",
@@ -431,9 +441,6 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidLimit => "model configuration contains an invalid token limit",
             Self::InvalidCompactionPrompt => {
                 "model configuration contains an invalid compaction prompt"
-            }
-            Self::InvalidConversationImportLimit => {
-                "model configuration contains an invalid conversation import byte limit"
             }
             Self::InvalidBlobStorageConfiguration => {
                 "model configuration contains invalid blob-storage settings"

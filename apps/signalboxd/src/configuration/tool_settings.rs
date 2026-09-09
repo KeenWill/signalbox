@@ -76,9 +76,6 @@ impl DaemonToolConfiguration {
 /// Maximum exact deployment compaction-prompt bytes.
 pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
 
-/// Default maximum assembled source bytes for one conversation import.
-pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
-
 pub(super) fn parse_workspace_instruction_configuration(
     item: Option<&Item>,
 ) -> Result<WorkspaceInstructionConfiguration, HubModelConfigurationError> {

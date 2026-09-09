@@ -211,9 +211,10 @@ async fn insert_imported_source_scaffolding(
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(facts.conversation)
     .bind(vec![0x22_u8; 32])
@@ -1697,9 +1698,10 @@ async fn late_entry_identity_constraint_is_typed_collision() -> Result<(), Box<d
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0xa10))
     .bind(vec![0x10_u8; 32])
@@ -1765,9 +1767,10 @@ async fn incomplete_import_header_cannot_commit() -> Result<(), Box<dyn Error>> 
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x400))
     .bind(vec![0_u8; 32])
@@ -1846,9 +1849,10 @@ async fn unsupported_format_version_pair_is_schema_rejected() -> Result<(), Box<
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4ff))
     .bind(vec![0_u8; 32])
@@ -1865,9 +1869,10 @@ async fn unsupported_format_version_pair_is_schema_rejected() -> Result<(), Box<
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, display_title, display_title_state)
+             declared_entry_count, dropped_record_count,
+             first_dropped_record_position, display_title, display_title_state)
          VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1,
-                 NULL, 'underivable')",
+                 0, NULL, NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4fe))
     .bind(vec![1_u8; 32])

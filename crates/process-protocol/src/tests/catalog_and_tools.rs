@@ -168,16 +168,38 @@ fn import_outcomes_have_distinct_closed_shapes() -> Result<(), Box<dyn std::erro
         request(1)?,
         ServerMessage::ConversationImportInserted {
             imported_conversation_id: uuid(2),
+            dropped_record_count: CanonicalU64::new(0),
+            first_dropped_record_position: None,
         },
-        r#"{"type":"conversation_import_inserted","imported_conversation_id":"00000000-0000-0000-0000-000000000002"}"#,
+        r#"{"type":"conversation_import_inserted","imported_conversation_id":"00000000-0000-0000-0000-000000000002","dropped_record_count":"0","first_dropped_record_position":null}"#,
     )?;
     assert_server_message_round_trip(
         request(2)?,
         ServerMessage::ConversationImportAlreadyImported {
             imported_conversation_id: uuid(3),
+            dropped_record_count: CanonicalU64::new(2),
+            first_dropped_record_position: Some(CanonicalU64::new(4)),
         },
-        r#"{"type":"conversation_import_already_imported","imported_conversation_id":"00000000-0000-0000-0000-000000000003"}"#,
+        r#"{"type":"conversation_import_already_imported","imported_conversation_id":"00000000-0000-0000-0000-000000000003","dropped_record_count":"2","first_dropped_record_position":"4"}"#,
     )?;
+    let missing_first_position = ServerMessage::ConversationImportInserted {
+        imported_conversation_id: uuid(4),
+        dropped_record_count: CanonicalU64::new(1),
+        first_dropped_record_position: None,
+    };
+    assert_eq!(
+        ServerFrame::try_new_for_version(ProtocolVersion::One, request(3)?, missing_first_position,),
+        Err(FrameValidationError::ConversationImportShape)
+    );
+    let position_without_drops = ServerMessage::ImportedConversationStart {
+        imported_conversation_id: uuid(5),
+        dropped_record_count: CanonicalU64::new(0),
+        first_dropped_record_position: Some(CanonicalU64::new(1)),
+    };
+    assert_eq!(
+        ServerFrame::try_new_for_version(ProtocolVersion::One, request(4)?, position_without_drops,),
+        Err(FrameValidationError::ConversationImportShape)
+    );
     Ok(())
 }
 
