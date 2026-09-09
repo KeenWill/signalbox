@@ -38,22 +38,31 @@ async fn partial_replay_reuses_clock_and_random_answers_without_drawing_again()
     let journal = ProgramJournalRepository::new(pool.clone());
     let artifact = ProgramArtifact::new(
         r#"
-import { primitives } from "@signalbox/program-sdk/v1";
+import { defineProgram, jsonCodec, primitives } from "@signalbox/program-sdk/v1";
+const string = jsonCodec((value) => {
+  if (typeof value !== "string") throw new TypeError("expected a string");
+  return value;
+});
+export default defineProgram({ input: string, output: string, async run(deadline) {
 const time = await primitives.now();
 const random = await primitives.random();
 if (time.kind !== "answer" || time.value !== "9007199254740993") throw new Error("clock precision");
 if (random.kind !== "answer" || random.value !== "18446744073709551615") throw new Error("random precision");
-await primitives.sleepUntil("9007199254740994");
+await primitives.sleepUntil(deadline);
+return deadline;
+}});
 "#,
     );
-    let run = registered_run(
+    let input = br#""9007199254740994""#;
+    let run = registration_with_input(
         &pool,
-        &artifact,
         ProgramGrants::new([
             ProgramCapability::Time,
             ProgramCapability::Random,
             ProgramCapability::Sleep,
         ]),
+        artifact.source(),
+        input,
     )
     .await?;
     let draws = Rc::new(Cell::new(0));
@@ -87,7 +96,7 @@ await primitives.sleepUntil("9007199254740994");
         restarted
             .execute_registered(run, &mut resumed, &mut effects)
             .await?,
-        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+        ProgramExecutionOutcome::Completed(payload(input))
     );
     assert_eq!(
         draws.get(),
@@ -106,15 +115,24 @@ async fn admitted_deadline_fires_after_restarting_the_host() -> Result<(), Box<d
     let journal = ProgramJournalRepository::new(pool.clone());
     let artifact = ProgramArtifact::new(
         r#"
-import { primitives } from "@signalbox/program-sdk/v1";
-const wake = await primitives.sleepUntil("2000");
+import { defineProgram, jsonCodec, primitives } from "@signalbox/program-sdk/v1";
+const string = jsonCodec((value) => {
+  if (typeof value !== "string") throw new TypeError("expected a string");
+  return value;
+});
+export default defineProgram({ input: string, output: string, async run(deadline) {
+const wake = await primitives.sleepUntil(deadline);
 if (wake.kind !== "wake" || wake.value !== "2000") throw new Error("deadline moved");
+return wake.value;
+}});
 "#,
     );
-    let run = registered_run(
+    let input = br#""2000""#;
+    let run = registration_with_input(
         &pool,
-        &artifact,
         ProgramGrants::new([ProgramCapability::Sleep]),
+        artifact.source(),
+        input,
     )
     .await?;
     let deadline = SleepUntil(UnixMillis(2000));
@@ -134,10 +152,7 @@ if (wake.kind !== "wake" || wake.value !== "2000") throw new Error("deadline mov
     let outcome = WorkflowHost::new(restarted.clone())
         .execute_registered(run, &mut primitives, &mut no_effects())
         .await?;
-    assert_eq!(
-        outcome,
-        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
-    );
+    assert_eq!(outcome, ProgramExecutionOutcome::Completed(payload(input)));
     assert!(restarted.outstanding_waits(run).await?.is_empty());
     pool.close().await;
     Ok(())
@@ -187,18 +202,26 @@ async fn event_wait_replays_its_source_position_and_retained_answer() -> Result<
         source: ProgramEventSource::ProgramAnswers(source_run),
         after: 2,
     };
-    let artifact = ProgramArtifact::new(format!(
+    let artifact = ProgramArtifact::new(
         r#"
-import {{ primitives }} from "@signalbox/program-sdk/v1";
-const event = await primitives.awaitEvent({{ source: {{ kind: "program_answers", run: "{}" }}, after: "2" }});
+import { defineProgram, jsonCodec, primitives } from "@signalbox/program-sdk/v1";
+const string = jsonCodec((value) => {
+  if (typeof value !== "string") throw new TypeError("expected a string");
+  return value;
+});
+export default defineProgram({ input: string, output: string, async run(source) {
+const event = await primitives.awaitEvent({ source: { kind: "program_answers", run: source }, after: "2" });
 if (event.kind !== "answer" || event.value.position !== "4" || event.value.payload[0] !== 110) throw new Error("wrong event");
+return source;
+}});
 "#,
-        source_run.into_uuid()
-    ));
-    let run = registered_run(
+    );
+    let input = deno_core::serde_json::to_vec(&source_run.into_uuid().to_string())?;
+    let run = registration_with_input(
         &pool,
-        &artifact,
         ProgramGrants::new([ProgramCapability::Subscribe]),
+        artifact.source(),
+        &input,
     )
     .await?;
     journal
@@ -215,7 +238,7 @@ if (event.kind !== "answer" || event.value.position !== "4" || event.value.paylo
         WorkflowHost::new(journal.clone())
             .execute_registered(run, &mut primitives, &mut no_effects())
             .await?,
-        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+        ProgramExecutionOutcome::Completed(InlineFramePayload::new(input))
     );
     assert_eq!(
         journal.next_event(wait).await?,
@@ -282,18 +305,26 @@ async fn event_committed_between_empty_read_and_subscribe_is_delivered_without_a
             RequestKind::Now(InlineFramePayload::default()),
         )
         .await?;
-    let artifact = ProgramArtifact::new(format!(
+    let artifact = ProgramArtifact::new(
         r#"
-import {{ primitives }} from "@signalbox/program-sdk/v1";
-const event = await primitives.awaitEvent({{ source: {{ kind: "program_answers", run: "{}" }}, after: "0" }});
+import { defineProgram, jsonCodec, primitives } from "@signalbox/program-sdk/v1";
+const string = jsonCodec((value) => {
+  if (typeof value !== "string") throw new TypeError("expected a string");
+  return value;
+});
+export default defineProgram({ input: string, output: string, async run(source) {
+const event = await primitives.awaitEvent({ source: { kind: "program_answers", run: source }, after: "0" });
 if (event.kind !== "answer" || event.value.position !== "2" || event.value.payload[0] !== 114) throw new Error("lost racing event");
+return source;
+}});
 "#,
-        source.into_uuid()
-    ));
-    let run = registered_run(
+    );
+    let input = deno_core::serde_json::to_vec(&source.into_uuid().to_string())?;
+    let run = registration_with_input(
         &pool,
-        &artifact,
         ProgramGrants::new([ProgramCapability::Subscribe]),
+        artifact.source(),
+        &input,
     )
     .await?;
     let events = CommitDuringSubscribe {
@@ -315,7 +346,7 @@ if (event.kind !== "answer" || event.value.position !== "2" || event.value.paylo
     .await??;
     assert_eq!(
         outcome,
-        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+        ProgramExecutionOutcome::Completed(InlineFramePayload::new(input))
     );
     pool.close().await;
     Ok(())

@@ -1,90 +1,13 @@
 use super::*;
 use deno_core::serde_json;
-use deno_core::v8;
 
-#[tokio::test(flavor = "current_thread")]
-async fn emitted_typescript_entry_returns_checked_session_result() -> Result<(), Box<dyn Error>> {
-    const COMMAND: &str = "12345678-1234-1234-1234-123456789abc";
-    const MODEL: &str = "22345678-1234-1234-1234-123456789abc";
-    const SESSION: &str = "32345678-1234-1234-1234-123456789abc";
-    let (sender, mut receiver) = mpsc::unbounded_channel();
-    let (mut runtime, _) = isolate(sender)?;
-    let module = runtime
-        .load_main_es_module_from_code(
-            &ModuleSpecifier::parse(PROGRAM_MAIN_SPECIFIER)?,
-            include_str!("../tests/fixtures/session.js"),
-        )
-        .await?;
-    let evaluation = runtime.mod_evaluate(module);
-    runtime
-        .run_event_loop(PollEventLoopOptions::default())
-        .await?;
-    evaluation.await?;
-    let namespace = runtime.get_module_namespace(module)?;
-    let entry = {
-        deno_core::scope!(scope, runtime);
-        let namespace = v8::Local::new(scope, namespace);
-        let name = v8::String::new(scope, "default").expect("entrypoint name");
-        let value = namespace.get(scope, name.into()).expect("default export");
-        let function = v8::Local::<v8::Function>::try_from(value)?;
-        v8::Global::new(scope, function)
-    };
-    let input = serde_json::to_vec(&serde_json::json!({ "command": COMMAND, "model": MODEL }))?;
-    let input = runtime.execute_script(
-        "fixture-input",
-        format!("new Uint8Array({})", serde_json::to_string(&input)?),
-    )?;
-    let completion = runtime.call_with_args(&entry, &[input]);
-    let answer = serde_json::to_vec(&serde_json::json!({ "session": SESSION }))?;
-    let mut effect_requests = Vec::new();
-    loop {
-        let status = poll_runtime_once(&mut runtime).await;
-        while let Ok(request) = receiver.try_recv() {
-            effect_requests.push(request.kind);
-            request
-                .reply
-                .send(DeliveryKind::Answer {
-                    resolves: RequestOrdinal::try_from_u64(1).expect("fixture ordinal"),
-                    payload: InlineFramePayload::new(answer.clone()),
-                })
-                .unwrap_or_else(|_| panic!("entrypoint must await its effect"));
-        }
-        if let Poll::Ready(result) = status {
-            result?;
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let result = completion.await?;
-    let bytes = {
-        deno_core::scope!(scope, runtime);
-        let value = v8::Local::new(scope, result);
-        let value = v8::Local::<v8::Uint8Array>::try_from(value)?;
-        let mut bytes = vec![0; value.byte_length()];
-        value.copy_contents(&mut bytes);
-        bytes
-    };
-    assert_eq!(
-        bytes, answer,
-        "the emitted entrypoint returns its encoded typed result"
-    );
-    assert_eq!(effect_requests.len(), 1);
-    let RequestKind::Effect(request) = &effect_requests[0] else {
-        panic!("expected a session effect")
-    };
-    assert_eq!(request.method(), "create");
-    let wire: serde_json::Value = serde_json::from_slice(request.payload().as_bytes())?;
-    assert_eq!(
-        wire,
-        serde_json::json!({ "command": COMMAND, "model": MODEL })
-    );
-    Ok(())
-}
+// The isolate bridge strips delivery ordinals; these fixtures need any positive ordinal.
+const SCRIPTED_REQUEST: RequestOrdinal = RequestOrdinal::try_from_u64(1).expect("positive ordinal");
 
 /// Executes SDK calls inside the closed isolate and supplies exact scripted answers.
 async fn sdk_script(
     source: &str,
-    answers: impl IntoIterator<Item = IsolateDelivery>,
+    answers: impl IntoIterator<Item = DeliveryKind>,
 ) -> (Result<(), Box<dyn Error>>, Vec<RequestKind>) {
     let mut observed = Vec::new();
     let result = async {
@@ -105,9 +28,7 @@ async fn sdk_script(
                 observed.push(request.kind);
                 request
                     .reply
-                    .send(host_answer(
-                        answers.next().expect("scripted answer for every request"),
-                    ))
+                    .send(answers.next().expect("scripted answer for every request"))
                     .unwrap_or_else(|_| panic!("isolate must retain the request receiver"));
             }
             if let Poll::Ready(result) = status {
@@ -187,6 +108,31 @@ await program(bytes({ model: identity }));
         requests.is_empty(),
         "invalid input must not execute effects"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn output_codec_refuses_inherited_required_fields() {
+    let (result, requests) = sdk_script(
+        r#"
+Object.prototype.session = "12345678-1234-1234-1234-123456789abc";
+const output = sdk.jsonCodec(value => {
+  if (typeof value !== "object" || value === null || !("session" in value)
+    || typeof value.session !== "string") throw new TypeError("expected own session result");
+  return { session: value.session };
+});
+output.encode({ session: "22345678-1234-1234-1234-123456789abc" });
+output.encode({});
+"#,
+        [],
+    )
+    .await;
+    assert!(
+        result
+            .expect_err("inherited fields cannot supply a result")
+            .to_string()
+            .contains("expected own session result")
+    );
+    assert!(requests.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -350,19 +296,19 @@ try {
 }
 "#,
         [
-            IsolateDelivery::Answer { payload: serde_json::to_vec(&serde_json::json!({
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(serde_json::to_vec(&serde_json::json!({
                 "session": "12345678-1234-1234-1234-123456789abc",
                 "turn": "12345678-1234-1234-1234-123456789abc",
                 "accepted_input": "12345678-1234-1234-1234-123456789abc",
                 "digest": vec![255_u8; 32], "outcome": "completed"
-            })).expect("valid turn answer") },
-            IsolateDelivery::Answer { payload: br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.to_vec() },
-            IsolateDelivery::Answer { payload: br#"{"registration":"12345678-1234-1234-1234-123456789abc"}"#.to_vec() },
-            IsolateDelivery::Answer { payload: vec![] },
-            IsolateDelivery::Answer { payload: vec![] },
-            IsolateDelivery::Answer { payload: vec![] },
-            IsolateDelivery::Wake { payload: vec![] },
-            IsolateDelivery::Wake { payload: vec![] },
+            })).expect("valid turn answer")) },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.as_slice()) },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(br#"{"registration":"12345678-1234-1234-1234-123456789abc"}"#.as_slice()) },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
+            DeliveryKind::Wake { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
+            DeliveryKind::Wake { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
         ],
     )
     .await;
@@ -612,8 +558,11 @@ async fn answer_wrappers_refuse_extra_success_fields() {
     ] {
         let (result, requests) = sdk_script(
             &format!("const identity = {IDENTITY:?}; await {call};"),
-            [IsolateDelivery::Answer {
-                payload: serde_json::to_vec(&payload).expect("JSON answer fixture"),
+            [DeliveryKind::Answer {
+                resolves: SCRIPTED_REQUEST,
+                payload: InlineFramePayload::new(
+                    serde_json::to_vec(&payload).expect("JSON answer fixture"),
+                ),
             }],
         )
         .await;
@@ -653,8 +602,9 @@ Object.assign(Object.prototype, {fields});
 await {call};
 "#
             ),
-            [IsolateDelivery::Answer {
-                payload: br#"{"unexpected":1}"#.to_vec(),
+            [DeliveryKind::Answer {
+                resolves: SCRIPTED_REQUEST,
+                payload: InlineFramePayload::new(br#"{"unexpected":1}"#.as_slice()),
             }],
         )
         .await;
@@ -683,8 +633,11 @@ if (answer.kind !== "answer" || answer.value.session !== identity) {
   throw new Error("own answer data must remain valid despite inherited accessors");
 }
 "#,
-        [IsolateDelivery::Answer {
-            payload: br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.to_vec(),
+        [DeliveryKind::Answer {
+            resolves: SCRIPTED_REQUEST,
+            payload: InlineFramePayload::new(
+                br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.as_slice(),
+            ),
         }],
     )
     .await;
@@ -699,8 +652,9 @@ async fn session_wrapper_refuses_malformed_host_answer() {
 const identity = "12345678-1234-1234-1234-123456789abc";
 await sdk.session.create({ command: identity, model: identity });
 "#,
-        [IsolateDelivery::Answer {
-            payload: br#"{"session":17}"#.to_vec(),
+        [DeliveryKind::Answer {
+            resolves: SCRIPTED_REQUEST,
+            payload: InlineFramePayload::new(br#"{"session":17}"#.as_slice()),
         }],
     )
     .await;
@@ -722,7 +676,7 @@ const answer = await sdk.session.turn({ command: identity, session: identity,
   text: "雪😀", defaults_version: "18446744073709551615" });
 if (answer.kind !== "answer" || answer.value.outcome !== "refused") throw new Error("expected refusal");
 "#,
-        [IsolateDelivery::Answer { payload: br#"{"outcome":"refused"}"#.to_vec() }],
+        [DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(br#"{"outcome":"refused"}"#.as_slice()) }],
     )
     .await;
     result.expect("the maximum u64 must encode exactly");
@@ -745,7 +699,7 @@ const result = await sdk.register({ id: identity, name: "example", revision: "re
   source: [0, 255], artifact: "export {}; // 雪", grants: ["session"] });
 if (result.kind !== "reject" || result.reason !== "capability_denied") throw new Error("expected grant refusal");
 "#,
-        [IsolateDelivery::Reject { reason: IsolateRejectReason::CapabilityDenied }],
+        [DeliveryKind::Reject { resolves: SCRIPTED_REQUEST, reason: RejectReason::CapabilityDenied }],
     )
     .await;
     result.expect("grant refusals remain typed deliveries");
@@ -758,32 +712,6 @@ if (result.kind !== "reject" || result.reason !== "capability_denied") throw new
     assert_eq!(wire["artifact"], "export {}; // 雪");
     assert_eq!(wire["grants"], serde_json::json!(["session"]));
     assert_eq!(request.method(), "register");
-}
-
-fn host_answer(delivery: IsolateDelivery) -> DeliveryKind {
-    let resolves = RequestOrdinal::try_from_u64(1).expect("fixture ordinal");
-    match delivery {
-        IsolateDelivery::Answer { payload } => DeliveryKind::Answer {
-            resolves,
-            payload: InlineFramePayload::new(payload),
-        },
-        IsolateDelivery::Wake { payload } => DeliveryKind::Wake {
-            resolves,
-            payload: InlineFramePayload::new(payload),
-        },
-        IsolateDelivery::Cancel { payload } => DeliveryKind::Cancel {
-            resolves,
-            payload: InlineFramePayload::new(payload),
-        },
-        IsolateDelivery::Reject { reason } => DeliveryKind::Reject {
-            resolves,
-            reason: match reason {
-                IsolateRejectReason::OutstandingRequests => RejectReason::OutstandingRequests,
-                IsolateRejectReason::CapabilityDenied => RejectReason::CapabilityDenied,
-                IsolateRejectReason::UnsupportedOperation => RejectReason::UnsupportedOperation,
-            },
-        },
-    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -809,10 +737,10 @@ const event = await sdk.primitives.awaitEvent({ source: { kind: "program_answers
 if (now.value !== "9007199254740993" || random.value !== "18446744073709551615" || wake.value !== "9007199254740994" || event.value.position !== "18446744073709551615" || event.value.payload.join() !== "0,128,255") throw new Error("primitive precision lost");
 "#,
         [
-            IsolateDelivery::Answer { payload: now.encode().as_bytes().to_vec() },
-            IsolateDelivery::Answer { payload: random.encode().as_bytes().to_vec() },
-            IsolateDelivery::Wake { payload: deadline.0.encode().as_bytes().to_vec() },
-            IsolateDelivery::Answer { payload: event.encode().as_bytes().to_vec() },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: now.encode() },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: random.encode() },
+            DeliveryKind::Wake { resolves: SCRIPTED_REQUEST, payload: deadline.0.encode() },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: event.encode() },
         ],
     ).await;
     result?;
