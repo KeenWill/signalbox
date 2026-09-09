@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn context_prefix_keeps_a_small_result_exact() {
-        let source = "unchanged result";
+        let source = "unchanged 界 result";
         assert_eq!(context_text(source, source.len() + 2), source);
     }
 }
