@@ -5969,6 +5969,55 @@ async fn credential_wait_failure_event_requires_its_terminal_snapshot_frontier()
 }
 
 #[tokio::test]
+async fn program_cancellation_presents_the_retained_successful_result() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_process_protocol::{ProgramRunCancellationOutcome, ProgramRunTerminalState};
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let command_id = CommandId::try_from_uuid(Uuid::now_v7())?;
+    let retained = vec![0, 255, 128];
+    let outcome =
+        ProgramRunCancellationOutcome::AlreadyTerminal(ProgramRunTerminalState::Succeeded {
+            result: retained.clone(),
+        });
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &ClientRequest::CancelProgramRun { command_id, run_id },
+            ServerMessage::ProgramRunCancellationReceipt {
+                command_id,
+                run_id,
+                outcome,
+            },
+        )
+        .await
+    });
+    let mut client = ProcessClient::new(socket);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    crate::program::execute(
+        &mut client,
+        &mut Output::new(&mut stdout, &mut stderr, false),
+        crate::arguments::ProgramCommand::Cancel {
+            run_id,
+            command_id: Some(command_id),
+        },
+    )
+    .await?;
+    let text = String::from_utf8(stdout)?;
+    let (_, json) = text.split_once(' ').expect("run and receipt");
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    assert_eq!(
+        value,
+        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":retained})
+    );
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn operator_status_counts_and_displays_repository_ingestion() -> Result<(), Box<dyn Error>> {
     use signalbox_process_protocol::{
         OperatorStatusEndMessage, OperatorStatusMessage, OperatorStatusRepositoryIngestion,

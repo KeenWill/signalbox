@@ -2,7 +2,12 @@
 //!
 //! The normative cross-component contract is `docs/spec/workflows.md`.
 
-use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    num::NonZeroU64,
+};
 
 use crate::ProgramRunId;
 
@@ -364,20 +369,67 @@ pub struct ProgramJournal {
 }
 
 impl ProgramJournal {
-    /// The recorded terminal outcome, if this run already ended.
-    ///
-    /// A `run_cancel` or `fault` resolves no request and ends the attempt that
-    /// recorded it, so every later frame is behind an outcome that is already
-    /// durable. The first such delivery is therefore the run's outcome, and it
-    /// is knowable from the journal alone — a resumed run cannot produce a
-    /// different one, whatever its artifact does or whether it loads at all.
+    /// The first cancellation, fault, or accepted terminal answer.
     pub fn terminal_delivery(&self) -> Option<&DeliveryFrame> {
-        self.entries.iter().find_map(|entry| match entry.frame() {
-            JournalFrame::Delivery(delivery) if delivery.kind().resolves().is_none() => {
-                Some(delivery)
+        let mut terminals = BTreeSet::new();
+        for entry in self.entries() {
+            match entry.frame() {
+                JournalFrame::Request(request)
+                    if matches!(request.kind(), RequestKind::Terminal(_)) =>
+                {
+                    terminals.insert(request.ordinal());
+                }
+                JournalFrame::Delivery(delivery)
+                    if delivery.kind().resolves().is_none()
+                        || matches!(delivery.kind(), DeliveryKind::Answer { resolves, .. } if terminals.contains(resolves)) =>
+                {
+                    return Some(delivery);
+                }
+                _ => {}
             }
-            JournalFrame::Delivery(_) | JournalFrame::Request(_) => None,
+        }
+        None
+    }
+
+    fn terminal_request(&self, ordinal: RequestOrdinal) -> Option<&InlineFramePayload> {
+        self.entries.iter().find_map(|entry| match entry.frame() {
+            JournalFrame::Request(request) if request.ordinal() == ordinal => {
+                match request.kind() {
+                    RequestKind::Terminal(payload) => Some(payload),
+                    _ => None,
+                }
+            }
+            _ => None,
         })
+    }
+
+    /// Exact result bytes retained by an accepted Terminal/Answer pair.
+    pub fn result(&self) -> Option<&InlineFramePayload> {
+        match self.terminal_delivery()?.kind() {
+            DeliveryKind::Answer { resolves, .. } => self.terminal_request(*resolves),
+            _ => None,
+        }
+    }
+
+    /// Whether an answerable request still has no resolving delivery.
+    pub fn has_outstanding_requests(&self) -> bool {
+        let mut outstanding = BTreeSet::new();
+        for entry in self.entries() {
+            match entry.frame() {
+                JournalFrame::Request(request)
+                    if !matches!(request.kind(), RequestKind::Scope(_)) =>
+                {
+                    outstanding.insert(request.ordinal());
+                }
+                JournalFrame::Delivery(delivery) => {
+                    if let Some(ordinal) = delivery.kind().resolves() {
+                        outstanding.remove(&ordinal);
+                    }
+                }
+                _ => {}
+            }
+        }
+        !outstanding.is_empty()
     }
 
     /// Validates all three contiguous orders and resolution correlations.
@@ -390,8 +442,15 @@ impl ProgramJournal {
         let mut next_delivery = 1_u64;
         let mut answerable = BTreeSet::new();
         let mut resolved = BTreeSet::new();
+        let mut terminals = BTreeMap::new();
+        let mut refused_terminals = BTreeSet::new();
+        let mut ended = false;
+        let mut succeeded = false;
 
         for entry in &entries {
+            if succeeded {
+                return Err(ProgramJournalError::FrameAfterSuccess);
+            }
             if entry.position().as_u64() != next_position {
                 return Err(ProgramJournalError::NoncontiguousPosition);
             }
@@ -407,6 +466,12 @@ impl ProgramJournal {
                     next_request = next_request
                         .checked_add(1)
                         .ok_or(ProgramJournalError::OrdinalExhausted)?;
+                    if matches!(request.kind(), RequestKind::Terminal(_)) {
+                        terminals.insert(request.ordinal(), entry.position().as_u64());
+                        if answerable.len() != resolved.len() {
+                            refused_terminals.insert(request.ordinal());
+                        }
+                    }
                     if !matches!(request.kind(), RequestKind::Scope(_)) {
                         answerable.insert(request.ordinal());
                     }
@@ -418,7 +483,27 @@ impl ProgramJournal {
                     next_delivery = next_delivery
                         .checked_add(1)
                         .ok_or(ProgramJournalError::OrdinalExhausted)?;
+                    if delivery.kind().resolves().is_none() {
+                        ended = true;
+                    }
                     if let Some(request) = delivery.kind().resolves() {
+                        if let Some(terminal_position) = terminals.get(&request) {
+                            match delivery.kind() {
+                                DeliveryKind::Answer { .. }
+                                    if !ended
+                                        && !refused_terminals.contains(&request)
+                                        && entry.position().as_u64() == terminal_position + 1
+                                        && answerable.len() == resolved.len() + 1 =>
+                                {
+                                    succeeded = true;
+                                }
+                                DeliveryKind::Reject {
+                                    reason: RejectReason::OutstandingRequests,
+                                    ..
+                                } if refused_terminals.contains(&request) => {}
+                                _ => return Err(ProgramJournalError::InvalidTerminalResolution),
+                            }
+                        }
                         if !answerable.contains(&request) {
                             return Err(ProgramJournalError::UnknownResolvedRequest);
                         }
@@ -454,6 +539,8 @@ pub enum ProgramJournalError {
     UnknownResolvedRequest,
     RequestResolvedTwice,
     OrdinalExhausted,
+    InvalidTerminalResolution,
+    FrameAfterSuccess,
 }
 
 impl fmt::Display for ProgramJournalError {
@@ -464,6 +551,10 @@ impl fmt::Display for ProgramJournalError {
             Self::NoncontiguousDeliveryOrdinal => "delivery ordinals are not contiguous",
             Self::UnknownResolvedRequest => "delivery resolves no earlier answerable request",
             Self::RequestResolvedTwice => "request has more than one resolving delivery",
+            Self::InvalidTerminalResolution => {
+                "terminal resolution requires an immediate answer without outstanding work or an outstanding-work rejection"
+            }
+            Self::FrameAfterSuccess => "journal frame follows accepted success",
             Self::OrdinalExhausted => "journal ordinal is exhausted",
         };
         formatter.write_str(message)
@@ -668,6 +759,223 @@ mod tests {
     fn journal(entries: Vec<JournalEntry>) -> ProgramJournal {
         ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries)
             .expect("fixture journal is valid")
+    }
+
+    #[test]
+    fn accepted_terminal_answer_retains_request_bytes_as_the_result() {
+        let result = InlineFramePayload::new(b"result".as_slice());
+        let terminal = RequestFrame::new(
+            RequestOrdinal::try_from_u64(1).expect("ordinal"),
+            None,
+            RequestKind::Terminal(result.clone()),
+        );
+        let answer = delivery(1, 1, b"acknowledgement");
+        let completed = journal(vec![
+            entry(1, JournalFrame::Request(terminal)),
+            entry(2, JournalFrame::Delivery(answer.clone())),
+        ]);
+        assert_eq!(completed.result(), Some(&result));
+        assert_eq!(completed.terminal_delivery(), Some(&answer));
+        let mut late = completed.entries().to_vec();
+        late.push(entry(3, JournalFrame::Delivery(run_cancel(2, b"late"))));
+        assert_eq!(
+            ProgramJournal::try_new(completed.run(), late),
+            Err(ProgramJournalError::FrameAfterSuccess)
+        );
+    }
+
+    #[test]
+    fn terminal_emitted_with_outstanding_work_cannot_be_accepted_after_that_work_drains() {
+        let terminal = RequestFrame::new(
+            RequestOrdinal::try_from_u64(2).expect("ordinal"),
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"premature".as_slice())),
+        );
+        let entries = vec![
+            entry(1, JournalFrame::Request(request(1, b"work"))),
+            entry(2, JournalFrame::Request(terminal)),
+            entry(3, JournalFrame::Delivery(delivery(1, 1, b"drained"))),
+            entry(4, JournalFrame::Delivery(delivery(2, 2, b"ack"))),
+        ];
+        assert_eq!(
+            ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+            Err(ProgramJournalError::InvalidTerminalResolution)
+        );
+    }
+
+    #[test]
+    fn rejected_terminal_request_has_no_successful_result() {
+        let ordinal = RequestOrdinal::try_from_u64(2).expect("ordinal");
+        let terminal = RequestFrame::new(
+            ordinal,
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"refused".as_slice())),
+        );
+        let rejected = journal(vec![
+            entry(1, JournalFrame::Request(request(1, b"outstanding work"))),
+            entry(2, JournalFrame::Request(terminal)),
+            entry(
+                3,
+                JournalFrame::Delivery(DeliveryFrame::new(
+                    DeliveryOrdinal::try_from_u64(1).expect("ordinal"),
+                    DeliveryKind::Reject {
+                        resolves: ordinal,
+                        reason: RejectReason::OutstandingRequests,
+                    },
+                )),
+            ),
+        ]);
+        assert!(rejected.result().is_none());
+        assert!(rejected.terminal_delivery().is_none());
+    }
+
+    #[test]
+    fn terminal_answer_rejects_work_appended_and_resolved_after_its_request() {
+        let terminal = RequestFrame::new(
+            RequestOrdinal::try_from_u64(1).expect("ordinal"),
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"result".as_slice())),
+        );
+        let entries = vec![
+            entry(1, JournalFrame::Request(terminal)),
+            entry(2, JournalFrame::Request(request(2, b"work"))),
+            entry(3, JournalFrame::Delivery(delivery(1, 2, b"drained"))),
+            entry(4, JournalFrame::Delivery(delivery(2, 1, b"ack"))),
+        ];
+        assert_eq!(
+            ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+            Err(ProgramJournalError::InvalidTerminalResolution)
+        );
+    }
+
+    #[test]
+    fn terminal_request_rejects_non_contract_resolutions() {
+        let ordinal = RequestOrdinal::try_from_u64(1).expect("ordinal");
+        let terminal = RequestFrame::new(
+            ordinal,
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"result".as_slice())),
+        );
+        for kind in [
+            DeliveryKind::Wake {
+                resolves: ordinal,
+                payload: InlineFramePayload::default(),
+            },
+            DeliveryKind::Cancel {
+                resolves: ordinal,
+                payload: InlineFramePayload::default(),
+            },
+            DeliveryKind::Reject {
+                resolves: ordinal,
+                reason: RejectReason::OutstandingRequests,
+            },
+            DeliveryKind::Reject {
+                resolves: ordinal,
+                reason: RejectReason::CapabilityDenied,
+            },
+            DeliveryKind::Reject {
+                resolves: ordinal,
+                reason: RejectReason::UnsupportedOperation,
+            },
+        ] {
+            let entries = vec![
+                entry(1, JournalFrame::Request(terminal.clone())),
+                entry(
+                    2,
+                    JournalFrame::Delivery(DeliveryFrame::new(
+                        DeliveryOrdinal::try_from_u64(1).expect("ordinal"),
+                        kind.clone(),
+                    )),
+                ),
+            ];
+            assert_eq!(
+                ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+                Err(ProgramJournalError::InvalidTerminalResolution),
+                "{kind:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_rejection_cannot_count_work_appended_after_emission() {
+        let ordinal = RequestOrdinal::try_from_u64(1).expect("ordinal");
+        let terminal = RequestFrame::new(
+            ordinal,
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"result".as_slice())),
+        );
+        let entries = vec![
+            entry(1, JournalFrame::Request(terminal)),
+            entry(2, JournalFrame::Request(request(2, b"late work"))),
+            entry(
+                3,
+                JournalFrame::Delivery(DeliveryFrame::new(
+                    DeliveryOrdinal::try_from_u64(1).expect("ordinal"),
+                    DeliveryKind::Reject {
+                        resolves: ordinal,
+                        reason: RejectReason::OutstandingRequests,
+                    },
+                )),
+            ),
+        ];
+        assert_eq!(
+            ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+            Err(ProgramJournalError::InvalidTerminalResolution),
+        );
+    }
+
+    #[test]
+    fn terminal_rejection_retains_its_reason_after_outstanding_work_drains() {
+        let ordinal = RequestOrdinal::try_from_u64(2).expect("ordinal");
+        let terminal = RequestFrame::new(
+            ordinal,
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"refused".as_slice())),
+        );
+        let rejected = journal(vec![
+            entry(1, JournalFrame::Request(request(1, b"work"))),
+            entry(2, JournalFrame::Request(terminal)),
+            entry(3, JournalFrame::Delivery(delivery(1, 1, b"drained"))),
+            entry(
+                4,
+                JournalFrame::Delivery(DeliveryFrame::new(
+                    DeliveryOrdinal::try_from_u64(2).expect("ordinal"),
+                    DeliveryKind::Reject {
+                        resolves: ordinal,
+                        reason: RejectReason::OutstandingRequests,
+                    },
+                )),
+            ),
+        ]);
+        assert!(rejected.result().is_none());
+        assert!(!rejected.has_outstanding_requests());
+    }
+
+    #[test]
+    fn terminal_answer_rejects_an_intervening_scope_frame() {
+        let terminal = RequestFrame::new(
+            RequestOrdinal::try_from_u64(1).expect("ordinal"),
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"result".as_slice())),
+        );
+        let scope = RequestFrame::new(
+            RequestOrdinal::try_from_u64(2).expect("ordinal"),
+            None,
+            RequestKind::Scope(ScopeRequest::new(
+                ScopeOperation::Open,
+                ScopeOrdinal::try_from_u64(1).expect("scope"),
+                None,
+            )),
+        );
+        let entries = vec![
+            entry(1, JournalFrame::Request(terminal)),
+            entry(2, JournalFrame::Request(scope)),
+            entry(3, JournalFrame::Delivery(delivery(1, 1, b"ack"))),
+        ];
+        assert_eq!(
+            ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+            Err(ProgramJournalError::InvalidTerminalResolution)
+        );
     }
 
     /// replay delivers concurrent answers in durable delivery order.

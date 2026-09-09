@@ -99,8 +99,8 @@ impl Error for LiveDeliveryFailure {}
 /// Terminal observation made by this execution attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProgramExecutionOutcome {
-    /// The module evaluation fulfilled. Durable run terminalization is a later slice.
-    Completed,
+    /// Exact result bytes from the accepted terminal request.
+    Completed(InlineFramePayload),
     RunCancelled(InlineFramePayload),
     Faulted(ProgramFault),
 }
@@ -287,14 +287,7 @@ impl WorkflowHost {
         artifact: &ProgramArtifact,
         live_deliveries: &mut impl LiveDeliverySource,
     ) -> Result<ProgramExecutionOutcome, WorkflowHostError> {
-        // A run that already ended has its outcome in the journal, whatever
-        // frames precede the terminal delivery, so this asks before anything
-        // about the attempt exists. Replaying to rediscover a recorded outcome
-        // would need the artifact, and an artifact that is malformed or imports
-        // outside the contract fails the module load below — masking a
-        // `run_cancel` or `fault` that is already durable behind an isolate
-        // error.
-        if let Some(outcome) = journal.terminal_delivery().and_then(terminal_outcome) {
+        if let Some(outcome) = journal_outcome(&journal) {
             return Ok(outcome);
         }
         let durable_tail = journal
@@ -371,7 +364,7 @@ impl WorkflowHost {
                     }
                     if let Some(result) = completed_evaluation.take() {
                         result?;
-                        return Ok(ProgramExecutionOutcome::Completed);
+                        return self.complete(run, execution.durable_tail()).await;
                     }
                     true
                 }
@@ -395,7 +388,7 @@ impl WorkflowHost {
                     };
                     result?;
                     if at_live_tail {
-                        return Ok(ProgramExecutionOutcome::Completed);
+                        return self.complete(run, execution.durable_tail()).await;
                     }
                     return Err(WorkflowHostProtocolError::Stalled.into());
                 }
@@ -415,7 +408,7 @@ impl WorkflowHost {
                             };
                             result?;
                             if at_live_tail {
-                                return Ok(ProgramExecutionOutcome::Completed);
+                                return self.complete(run, execution.durable_tail()).await;
                             }
                             return Err(WorkflowHostProtocolError::Stalled.into());
                         }
@@ -430,6 +423,27 @@ impl WorkflowHost {
                 }
             }
         }
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "The host retains its replay fault inline."
+    )]
+    async fn complete(
+        &self,
+        run: ProgramRunId,
+        durable_tail: u64,
+    ) -> Result<ProgramExecutionOutcome, WorkflowHostError> {
+        self.journal
+            .complete_if_tail(run, durable_tail, InlineFramePayload::default())
+            .await?;
+        let journal = self
+            .journal
+            .load(run)
+            .await?
+            .ok_or(WorkflowHostError::JournalMissing(run))?;
+        journal_outcome(&journal)
+            .ok_or_else(|| WorkflowHostProtocolError::JournalTailChanged.into())
     }
 
     #[allow(
@@ -523,9 +537,14 @@ impl WorkflowHost {
     }
 }
 
-/// The outcome a delivery carries when it ends the run instead of resolving a
-/// request. Terminal kinds resolve nothing, which is what lets the journal name
-/// the outcome without replaying the artifact that produced it.
+fn journal_outcome(journal: &ProgramJournal) -> Option<ProgramExecutionOutcome> {
+    if let Some(result) = journal.result() {
+        return Some(ProgramExecutionOutcome::Completed(result.clone()));
+    }
+    journal.terminal_delivery().and_then(terminal_outcome)
+}
+
+/// A cancellation or fault carried by an unsolicited delivery.
 fn terminal_outcome(delivery: &DeliveryFrame) -> Option<ProgramExecutionOutcome> {
     match delivery.kind() {
         DeliveryKind::RunCancel(payload) => {

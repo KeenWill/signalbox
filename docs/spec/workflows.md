@@ -24,28 +24,28 @@ position, so their interleaving is retained. The request, delivery, and fault
 vocabularies are closed; the domain crate's `RequestKind`, `DeliveryKind`, and
 `FaultCause` and the migration's check constraints fix their members. Primitive
 requests, effects, capability refusals, nondeterminism faults, and user
-cancellation are produced.
+cancellation and successful completion are produced.
 
-Resume discards nothing and restores nothing. A registered run's journal that
-already holds a terminal delivery, one that ended the run instead of answering a
-request, names the run's outcome; the host returns that outcome and creates no
-isolate. Any other woken run re-executes its module from the start;
-`ReplayCursor` answers each request from the journal in delivery order, and
-execution goes live where the journal ends. Live primitive requests are answered
-through `LiveDeliverySource`; granted effects reach host-side `EffectExecutor`
-implementations.
+Resume discards nothing and restores nothing. A retained cancellation, fault or
+accepted Terminal/Answer pair names the run's outcome; the host returns it
+without loading executable code or creating an isolate. Any other woken run
+re-executes its module from the start; `ReplayCursor` answers each request from
+the journal in delivery order, and execution goes live where the journal ends.
+Live primitive requests are answered through `LiveDeliverySource`; granted
+effects reach host-side `EffectExecutor` implementations.
 
 `ProgramRegistrationRepository` stores immutable registrations keyed by name and
 revision, recording SHA-256 digests of exact source and stripped artifact bytes.
 Each registration carries explicit grants from `ProgramCapability`; identical
 bytes under distinct names or grant lists remain distinct programs. A run pins
-its registration, whose row records its artifact and grants. Program-initiated
-registration requires `register` and admits only a subset of the registrant's
-grants; user registration may widen grants under a new key. The host loads the
-artifact bound to the run, and session capability issuance requires a registered
-session grant. Registration and run creation take caller-supplied identities: an
-equal retry returns the recorded value; different content or a different
-registration binding conflicts.
+its registration and immutable exact input bytes; the registration records its
+artifact and grants. Program-initiated registration requires `register` and
+admits only a subset of the registrant's grants; user registration may widen
+grants under a new key. The host loads the artifact bound to the run, and
+session capability issuance requires a registered session grant. Registration
+and run creation take caller-supplied identities: an equal retry returns the
+recorded value; different content or a different registration binding or input
+conflicts.
 
 `WorkflowHost::execute_registered` loads the pinned artifact and grants;
 ungranted requests receive a journaled refusal before any executor acts.
@@ -77,9 +77,19 @@ as one `run_cancel` delivery that carries the command identity and no request
 ordinal, so a cancelled run replays to its cancellation however many requests
 were outstanding.
 
-Cancellation addresses retained journal streams; their terminal states are
-`cancelled` and `faulted`, and the receipt carries a null result because no
-durable program return value is recorded.
+Successful completion atomically records result bytes in a `Terminal` request
+and an immediately following `Answer` acknowledgement. A terminal request
+emitted with outstanding work receives `RejectReason::OutstandingRequests`; it
+cannot be accepted after that work drains. Only those deliveries may resolve a
+terminal request. No frame may follow accepted success. Existing JavaScript
+modules return the unit result, encoded as empty bytes, after their requests
+drain. `ProgramJournal::result` reads retained result bytes without execution.
+
+Cancellation addresses retained journal streams. A cancel serialized before
+completion prevents success; after accepted success it records
+`already_terminal` with state `succeeded` and the retained result bytes.
+Cancelled and faulted receipts carry a null result. Equal cancellation retries
+replay their recorded outcome without appending frames.
 
 ## Design decisions
 

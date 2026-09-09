@@ -60,8 +60,16 @@ impl program_registration::ProgramRegistrationRepository {
         &self,
         run: signalbox_domain::ProgramRunId,
         registration: signalbox_domain::ProgramRegistrationId,
+        input: &[u8],
     ) -> result::Result<
         signalbox_domain::ProgramRunId,
+        program_registration::ProgramRegistrationError,
+    >;
+    pub async fn input_for_run(
+        &self,
+        run: signalbox_domain::ProgramRunId,
+    ) -> result::Result<
+        option::Option<signalbox_domain::InlineFramePayload>,
         program_registration::ProgramRegistrationError,
     >;
     pub async fn find(

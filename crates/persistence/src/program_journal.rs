@@ -207,6 +207,51 @@ impl ProgramJournalRepository {
         Ok(Some(frame))
     }
 
+    /// Atomically records a terminal request and its acknowledgement or outstanding-work refusal.
+    /// A changed tail or an already terminal run returns no new delivery.
+    pub async fn complete_if_tail(
+        &self,
+        run: ProgramRunId,
+        expected_last_position: u64,
+        result: InlineFramePayload,
+    ) -> Result<Option<DeliveryFrame>, ProgramJournalRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let journal = Self::load_locked_in_transaction(&mut transaction, run)
+            .await?
+            .ok_or(ProgramJournalCorruption::MissingStream)?;
+        let sequence = lock_sequence(&mut transaction, run).await?;
+        if sequence.last_position != expected_last_position || journal.terminal_delivery().is_some()
+        {
+            return Ok(None);
+        }
+        let position = next_position(sequence.last_position)?;
+        let ordinal = next_request_ordinal(sequence.last_request)?;
+        let request = RequestFrame::new(ordinal, None, RequestKind::Terminal(result));
+        insert_request(&mut transaction, run, position, &request).await?;
+        advance_sequence(
+            &mut transaction,
+            run,
+            position.as_u64(),
+            ordinal.as_u64(),
+            sequence.last_delivery,
+        )
+        .await?;
+        let kind = if journal.has_outstanding_requests() {
+            DeliveryKind::Reject {
+                resolves: ordinal,
+                reason: signalbox_domain::RejectReason::OutstandingRequests,
+            }
+        } else {
+            DeliveryKind::Answer {
+                resolves: ordinal,
+                payload: InlineFramePayload::default(),
+            }
+        };
+        let delivery = Self::append_delivery_in_transaction(&mut transaction, run, kind).await?;
+        commit(transaction).await?;
+        Ok(Some(delivery))
+    }
+
     /// Appends one host delivery and allocates its durable delivery order.
     pub async fn append_delivery(
         &self,
