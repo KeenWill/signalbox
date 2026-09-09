@@ -9,10 +9,12 @@ Use this skill for browser endpoints and transports, DTOs, decoders,
 synchronization reducers, commands, read models, stream handling, retries, and
 recovery.
 
-This bootstrap does not decide open browser transport, client language, wire,
-or cross-component questions. Each implementing stack records foundation-weight
-choices in its owning living specification and ordinary choices in its
-pull-request description before this guidance applies.
+This bootstrap does not decide open browser transport, client language, wire, or
+cross-component questions. Each implementing stack records foundation-weight
+choices in a design document at its bottom and ordinary choices in its
+pull-request description before implementation. The owning specification changes
+with the code that builds the design. Committed design decisions guide unbuilt
+implementation; the specification describes built behavior.
 
 ## Separate representations
 
@@ -21,16 +23,16 @@ Keep these types distinct:
 - domain and application values;
 - persistence records and read projections;
 - process-protocol messages;
-- browser transport DTOs, such as HTTP DTOs only when the owning specification
-  selects HTTP;
+- browser transport DTOs, such as HTTP DTOs when the committed design or
+  specification selects HTTP;
 - client synchronization state; and
-- presentation models, such as React view models only when the owning
+- presentation models, such as React view models when the committed design or
   specification selects React.
 
 Do not export storage rows or process-wire frames merely because they already
-serialize. The implementing stack's owning specification decides browser DTO
-ownership, client language, contract generation or checking, and runtime
-validation.
+serialize. Follow committed design decisions for new browser DTO ownership,
+client language, contract generation or checking, and runtime validation; the
+specification records their built behavior.
 
 ## Authority
 
@@ -84,10 +86,10 @@ handling.
 
 ## HTTP boundary
 
-- Follow only the boundary and security semantics in the active implementing
-  stack's owning specification. This bootstrap does not choose transport,
-  origin policy, authentication, authorization, TLS or proxy placement,
-  mutation encoding, browser validation, streaming, or blob delivery.
+- Follow the owning committed design's boundary and security semantics for
+  unbuilt work and the specification for built behavior. This bootstrap does not
+  choose transport, origin policy, authentication, authorization, TLS or proxy
+  placement, mutation encoding, browser validation, streaming, or blob delivery.
 - Preserve the explicit item and byte bounds, cancellation, command identity,
   and authority rules that the implemented contract defines.
 
@@ -95,5 +97,5 @@ handling.
 
 Block changes that invent server facts, weaken command replay, conflate durable
 and ephemeral state, expose secrets or private storage detail, silently
-truncate, or require unbounded client materialization. Exact new semantics
+truncate, or require unbounded client materialization. Exact built semantics
 belong in the implementing stack's owning living specification.

@@ -1218,11 +1218,6 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
       case "credential_pool_policy":
         self = .credentialPoolPolicy(try SignalboxCredentialPoolPolicy(from: decoder))
       case "transcript_snapshot_start":
-        try tagged.rejectUnadmittedFields(
-          ["type", "session_id", "cursor", "runner"],
-          decoder: decoder
-        )
-        try tagged.requireFields(["runner"], decoder: decoder)
         self = .transcriptSnapshotStart(try SignalboxTranscriptSnapshotBoundary(from: decoder))
       case "transcript_turn":
         try tagged.rejectUnadmittedFields(
@@ -2833,29 +2828,90 @@ public struct SignalboxRunnerProjection: Decodable, Equatable, Sendable {
   }
 }
 
+public struct SignalboxRepositoryWatchProvenance: Decodable, Equatable, Sendable {
+  public let dispatchID: SignalboxCanonicalUUID
+  public let actionOrdinal: SignalboxCanonicalUInt64
+  public let repository: String
+  public let ruleID: String
+  public let ruleRevision: SignalboxCanonicalUInt64
+  public let eventID: SignalboxCanonicalUUID
+  public let eventKind: SignalboxRepositoryWatchEventKind
+  public let pullRequest: SignalboxCanonicalUInt64?
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let fields: Set<String> = [
+      "dispatch_id", "action_ordinal", "repository", "rule_id", "rule_revision",
+      "event_id", "event_kind", "pull_request",
+    ]
+    try payload.rejectUnadmittedFields(fields, decoder: decoder)
+    try payload.requireFields(fields, decoder: decoder)
+    dispatchID = try decoder.decode("dispatch_id")
+    actionOrdinal = try decoder.decode("action_ordinal")
+    repository = try decoder.decode("repository")
+    ruleID = try decoder.decode("rule_id")
+    ruleRevision = try decoder.decode("rule_revision")
+    eventID = try decoder.decode("event_id")
+    eventKind = try decoder.decode("event_kind")
+    pullRequest = try decoder.decodeIfPresent("pull_request")
+    guard actionOrdinal.rawValue > 0, ruleRevision.rawValue > 0,
+      pullRequest.map({ $0.rawValue > 0 }) ?? true
+    else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Repository-watch ordinals, revisions, and pull requests must be positive."
+        )
+      )
+    }
+  }
+}
+
+public enum SignalboxRepositoryWatchEventKind: String, Decodable, Equatable, Sendable {
+  case pullRequestOpened = "pull_request_opened"
+  case pullRequestClosed = "pull_request_closed"
+  case pullRequestMerged = "pull_request_merged"
+  case headChanged = "head_changed"
+  case mergeableStateChanged = "mergeable_state_changed"
+  case checksCompleted = "checks_completed"
+  case checkRunCompleted = "check_run_completed"
+  case branchWorkflowRunCompleted = "branch_workflow_run_completed"
+  case reviewSubmitted = "review_submitted"
+  case threadOpened = "thread_opened"
+  case threadResolved = "thread_resolved"
+  case labeled
+  case unlabeled
+  case baseAdvanced = "base_advanced"
+  case reactionChanged = "reaction_changed"
+}
+
 public struct SignalboxTranscriptSnapshotBoundary: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let cursor: SignalboxCanonicalUInt64
   public let runner: SignalboxRunnerProjection?
+  public let repositoryWatch: SignalboxRepositoryWatchProvenance?
 
   public init(
     sessionID: SignalboxCanonicalUUID,
     cursor: SignalboxCanonicalUInt64,
-    runner: SignalboxRunnerProjection?
+    runner: SignalboxRunnerProjection?,
+    repositoryWatch: SignalboxRepositoryWatchProvenance?
   ) {
     self.sessionID = sessionID
     self.cursor = cursor
     self.runner = runner
+    self.repositoryWatch = repositoryWatch
   }
 
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
-    let fields: Set<String> = ["type", "session_id", "cursor", "runner"]
+    let fields: Set<String> = ["type", "session_id", "cursor", "runner", "repository_watch"]
     try tagged.rejectUnadmittedFields(fields, decoder: decoder)
-    try tagged.requireFields(["runner"], decoder: decoder)
+    try tagged.requireFields(["runner", "repository_watch"], decoder: decoder)
     sessionID = try decoder.decode("session_id")
     cursor = try decoder.decode("cursor")
     runner = try decoder.decodeIfPresent("runner")
+    repositoryWatch = try decoder.decodeIfPresent("repository_watch")
   }
 }
 

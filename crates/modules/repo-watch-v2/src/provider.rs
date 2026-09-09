@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, MergeableState,
     OffsetDateTime, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
@@ -680,7 +680,7 @@ fn pull_context(
         })
         .ok()?,
         labels: array(&v["labels"], |v| {
-            signalbox_ownership_seam::LabelName::try_new(text(&v["name"])?).ok()
+            signalbox_session_ownership::LabelName::try_new(text(&v["name"])?).ok()
         })?,
         draft: v["draft"].as_bool()?,
         author,
@@ -1325,7 +1325,7 @@ mod tests {
 
     #[tokio::test]
     async fn compacted_merged_numbers_do_not_cause_provider_reads() {
-        use signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineInputV1;
+        use signalbox_session_ownership::RepoWatchMergedPullRequestBaselineInputV1;
         let mut io = fixture();
         *io.pages
             .get_mut("/repos/example/project/pulls?state=open&per_page=100&page=1")
@@ -1417,7 +1417,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_anonymous_reaction_does_not_hide_another_reviewers_removal() {
-        use signalbox_ownership_seam::{
+        use signalbox_session_ownership::{
             ReactionChange, RepoWatchEventIdentityFrontierV1, RepoWatchEventKindV1,
             UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
         };

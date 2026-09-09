@@ -423,7 +423,7 @@ the prior snapshot before terminalizing the intent with
 `configuration_reload_failed`, without replacing the running configuration.
 Other failures after either stops leave the intent pending until recovery
 installs the replacement snapshot and resumes them before terminalizing the
-claim. The [reload-intent input](ownership-seam.md) delivers rule activation
+claim. The [reload-intent input](session-ownership.md) delivers rule activation
 only, and the module activates the rules atomically and idempotently by command
 identity and digest. The activation transaction captures each repository's
 current event tail and retains it for idempotent replay. Before replay activates

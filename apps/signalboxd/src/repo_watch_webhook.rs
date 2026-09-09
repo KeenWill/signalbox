@@ -14,7 +14,7 @@ use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_module_repo_watch_v2::{
     RepoWatchStore, WebhookAdmission, WebhookDelivery, WebhookDisposition,
 };
-use signalbox_ownership_seam::OffsetDateTime;
+use signalbox_session_ownership::OffsetDateTime;
 use tokio::{
     net::TcpListener,
     sync::{Notify, RwLock, oneshot},

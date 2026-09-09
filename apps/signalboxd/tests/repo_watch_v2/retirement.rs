@@ -1,5 +1,5 @@
 use super::*;
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     LifecycleActor, LifecycleEventKind, SessionStateKind, SessionTerminal, SessionTerminalOutcome,
 };
 
@@ -118,7 +118,7 @@ async fn closing_or_merging_retires_only_live_dispatched_sessions_and_replays_af
 -> Result<(), Box<dyn Error>> {
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    let source = signalbox_ownership_seam::LifecycleEventSource::new(core_pool.clone());
+    let source = signalbox_session_ownership::LifecycleEventSource::new(core_pool.clone());
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&core_pool)
         .await?;
@@ -365,7 +365,7 @@ async fn terminal_triggered_dispatches_do_not_retire_themselves() -> Result<(), 
         .await?;
     let pool = module_pool(&url).await?;
     let store = RepoWatchStore::new(pool.clone());
-    let source = signalbox_ownership_seam::LifecycleEventSource::new(core_pool.clone());
+    let source = signalbox_session_ownership::LifecycleEventSource::new(core_pool.clone());
     // Command, model and dispatch identities distinguish this fixture's actions.
     let mut factory = FixtureSessionFactory {
         next_command: 40001,

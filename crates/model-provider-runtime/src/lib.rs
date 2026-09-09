@@ -2024,6 +2024,7 @@ fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
                 ToolExecutionErrorKind::PreauthorizationRejected => "preauthorization_rejected",
                 ToolExecutionErrorKind::ExecutionFailed => "execution_failed",
                 ToolExecutionErrorKind::ResultTooLarge => "result_too_large",
+                ToolExecutionErrorKind::ResultContainsNull => "result_contains_null",
                 ToolExecutionErrorKind::CrashLost => "crash_lost",
             };
             (
@@ -2591,6 +2592,22 @@ mod tests {
             observations: Vec::new(),
             rate_limits: None,
         }
+    }
+
+    #[test]
+    fn null_result_failure_reaches_the_model_with_its_typed_kind() {
+        let content = ModelToolResultContent::ExecutionError(ToolExecutionError::new(
+            ToolExecutionErrorKind::ResultContainsNull,
+            None,
+        ));
+
+        let (rendered, is_error) = super::render_tool_result(&content);
+
+        assert!(is_error);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&rendered).expect("rendered JSON"),
+            serde_json::json!({"error": {"kind": "result_contains_null", "detail": null}}),
+        );
     }
 
     #[test]
