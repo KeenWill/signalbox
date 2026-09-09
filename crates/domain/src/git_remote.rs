@@ -310,7 +310,7 @@ impl ConfiguredGitRemoteRecord {
         &self.name
     }
 
-    /// Borrows the exact https destination.
+    /// Borrows the exact HTTPS or SSH destination.
     pub const fn url(&self) -> &GitRemoteUrl {
         &self.url
     }

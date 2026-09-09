@@ -51,7 +51,14 @@ impl ProcessRunner for LocalSshRunner {
             "PATH".into(),
             std::env::join_paths(paths).expect("fixture PATH"),
         );
-        self.inner.run(request).await
+        let result = self.inner.run(request).await;
+        if !matches!(
+            result.outcome,
+            signalbox_tools_exec::ProcessOutcome::Exited { code: Some(0) }
+        ) {
+            eprintln!("local SSH fixture Git result: {result:?}");
+        }
+        result
     }
 }
 
@@ -138,6 +145,7 @@ for last do
     [ "$last" != -i ] || key_next=yes
 done
 [ "$has_key" = yes ] || [ -n "$SSH_AUTH_SOCK" ] || exit 93
+unset GIT_DIR GIT_WORK_TREE GIT_OBJECT_DIRECTORY
 case "$last" in
     'git-receive-pack '*|'git-upload-pack '*) exec /bin/sh -c "$last" ;;
     *) exit 90 ;;
