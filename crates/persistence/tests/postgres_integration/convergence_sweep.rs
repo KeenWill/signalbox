@@ -1175,6 +1175,35 @@ async fn lifting_one_module_park_preserves_convergence_authority() -> Result<(),
         lifecycle.resume(session).await?.is_parked(),
         "session resume cannot bypass the remaining convergence authority"
     );
+    let resume = signalbox_domain::SessionLifecycleCommand::new(
+        DurableCommandId::from_uuid(Uuid::now_v7()),
+        session,
+        signalbox_domain::SessionLifecycleOperation::Resume,
+    );
+    let commands =
+        signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(
+            pool.clone(),
+        );
+    let rejected = signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandHandlingOutcome::Recorded(
+        signalbox_domain::SessionLifecycleCommandResult::Rejected(
+            signalbox_domain::SessionLifecycleCommandRejection::TransitionNotAdmitted,
+        ),
+    );
+    assert_eq!(
+        commands
+            .handle(resume.clone(), signalbox_domain::CommandPrincipal::Operator)
+            .await?,
+        rejected,
+        "a durable resume must reject while convergence authority remains"
+    );
+    assert!(
+        lifecycle
+            .load(session)
+            .await?
+            .expect("session exists")
+            .state()
+            .is_parked()
+    );
     assert_eq!(
         store.reenroll_target(&repository, pull_request()).await?,
         Some(session)
@@ -1186,6 +1215,13 @@ async fn lifting_one_module_park_preserves_convergence_authority() -> Result<(),
             .expect("session exists")
             .state()
             .is_parked()
+    );
+    assert_eq!(
+        commands
+            .handle(resume, signalbox_domain::CommandPrincipal::Operator)
+            .await?,
+        rejected,
+        "the rejection must replay after convergence authority is lifted"
     );
     assert!(
         !store

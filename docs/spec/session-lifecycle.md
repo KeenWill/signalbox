@@ -68,8 +68,9 @@ closes any non-terminal session, supersede closes it in favour of a named
 successor, abandon and close as failed close a parked session, and each of these
 closures is refused while a different terminal outcome is already pending;
 resume returns a parked session with no pending terminal outcome and no
-remaining module park authority to its mapped state. A parked session with a
-blocked goal resumes through the goal's resume-with-guidance command; one with a
+remaining module park authority to its mapped state. A durable session resume
+rejects while a module park authority remains. A parked session with a blocked
+goal resumes through the goal's resume-with-guidance command; one with a
 pursuing goal may use the session-level resume. The goal command that
 [goal mode](goal-mode.md) calls supersede starts a new goal generation in the
 same session and is unrelated to the session outcome superseded.
