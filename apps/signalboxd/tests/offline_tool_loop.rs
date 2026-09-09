@@ -18,13 +18,14 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
-    ToolExecutionInvocation, ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
-    ToolPreauthorization, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
+    EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    OperatorFailureClass, StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, ToolCatalog,
+    ToolCatalogValidationFailure, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorEvidence, ToolInputSchema, ToolPreauthorization, UuidV7SessionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
+    UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     ActivatedTurn, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
@@ -167,6 +168,10 @@ context_window_tokens = 200000
 "#;
 
 fn approval_judge_model_configuration() -> HubModelConfiguration {
+    approval_judge_model_configuration_with_timeout("10m")
+}
+
+fn approval_judge_model_configuration_with_timeout(timeout: &str) -> HubModelConfiguration {
     support::parse_model_configuration(&format!(
         r#"
 version = 1
@@ -200,6 +205,9 @@ model_family = "fixture"
 provider_model = "scripted-tool-loop"
 max_output_tokens = 64
 context_window_tokens = 200000
+
+[tool_settings]
+approval_wait_timeout = "{timeout}"
 "#,
         Uuid::from_u128(FIXTURE_ID_SEED + 1),
         Uuid::from_u128(FIXTURE_ID_SEED + 4),
@@ -521,6 +529,28 @@ impl ToolLoopFixture {
         Executor: ToolExecutor + Clone + Send + 'static,
         Executor::Error: Send + 'static,
     {
+        self.execution_with_judge_configuration(
+            scripts,
+            judge_script,
+            catalog,
+            executor,
+            approval_judge_model_configuration(),
+        )
+    }
+
+    fn execution_with_judge_configuration<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        judge_script: Script,
+        catalog: Catalog,
+        executor: Executor,
+        configuration: HubModelConfiguration,
+    ) -> FixtureJudgeExecution<Catalog, Executor>
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let judge_runtime = Arc::new(ScriptedModel::<ModelCallId>::single(judge_script));
         let provider = RuntimeModelCallProvider::new(
@@ -538,7 +568,6 @@ impl ToolLoopFixture {
             },
             self.runtime_models.clone(),
         ));
-        let configuration = approval_judge_model_configuration();
         (
             PostgresProviderModelExecution::new(
                 PostgresModelCallRepository::new(
@@ -5485,6 +5514,87 @@ async fn approval_timeout_continues_with_a_typed_denial() -> Result<(), Box<dyn 
                 .to_string()
             ),
         ]
+    );
+    Ok(())
+}
+
+struct NoReconciliationHints;
+
+impl EligibilitySweep for NoReconciliationHints {
+    type Error = std::convert::Infallible;
+
+    async fn find_sessions(&mut self) -> Result<EligibilitySweepBatch, Self::Error> {
+        Ok(EligibilitySweepBatch::new(Vec::new(), false))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_deadline_wakes_without_periodic_reconciliation() -> Result<(), Box<dyn Error>> {
+    approval_deadline_wakes(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_deadline_restores_without_periodic_reconciliation() -> Result<(), Box<dyn Error>>
+{
+    approval_deadline_wakes(true).await
+}
+
+async fn approval_deadline_wakes(restore: bool) -> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "human-confirmed";
+    // This work source has lossless nudges, no periodic sweep, and no initial hints.
+    let (nudge, mut work_source) = InProcessEligibilityWorkSource::new(NoReconciliationHints);
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let repository = PostgresToolLoopRepository::new(fixture.pool.clone());
+    let wakeups = signalboxd::ApprovalWaitWakeups::new(repository.clone(), nudge.clone());
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime, _) = fixture.execution_with_judge_configuration(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("deadline observed"),
+        ],
+        approval_judge_script("approve", "Unused for an explicitly human request."),
+        catalog([tool(
+            TOOL_NAME,
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
+        )]),
+        executor.clone(),
+        approval_judge_model_configuration_with_timeout("1s"),
+    );
+    let execution = if restore {
+        execution
+    } else {
+        execution.with_approval_wait_wakeups(wakeups)
+    };
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    if restore {
+        let restored = signalboxd::ApprovalWaitWakeups::new(repository.clone(), nudge);
+        restored.refresh(None).await?;
+    }
+    // Harness allowance only; the configured durable wait is one second.
+    let session = timeout(Duration::from_secs(15), work_source.next()).await??;
+    assert_eq!(session, fixture.session);
+    execution.resume_active(session).await?;
+    assert!(executor.events().is_empty());
+    assert_eq!(
+        continuation_result_json(&runtime)?,
+        serde_json::json!({
+            "error": {"kind": "denied", "detail": "approval_wait_timeout"}
+        })
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?.last().map(String::as_str),
+        Some("turn_completed")
+    );
+    assert!(
+        repository
+            .pending_human_approval_waits(Some(session))
+            .await?
+            .is_empty()
     );
     Ok(())
 }

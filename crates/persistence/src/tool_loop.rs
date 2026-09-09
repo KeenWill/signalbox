@@ -433,6 +433,41 @@ impl PostgresToolLoopRepository {
         Ok(true)
     }
 
+    /// Reads finite undecided human waits and their remaining database-clock delay.
+    /// An absent session selects all pending waits for startup restoration.
+    pub async fn pending_human_approval_waits(
+        &self,
+        session: Option<SessionId>,
+    ) -> Result<Vec<(ToolRequestId, SessionId, std::time::Duration)>, ToolLoopRepositoryError> {
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, f64)>(
+            "SELECT waiting.request_id, active.session_id,
+                    GREATEST(EXTRACT(EPOCH FROM (waiting.deadline - clock_timestamp())), 0)::double precision
+               FROM tool_approval_human_wait AS waiting
+               JOIN turn_lifecycle AS active
+                 ON active.approval_tool_request_id = waiting.request_id
+              WHERE waiting.deadline IS NOT NULL
+                AND active.state_kind = 'active'
+                AND active.active_phase_kind = 'awaiting_tool_approval'
+                AND ($1::uuid IS NULL OR active.session_id = $1)
+                AND tool_request_waits_for_human(waiting.request_id)",
+        )
+        .bind(session.map(SessionId::into_uuid))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(request, session, seconds)| {
+                let delay = std::time::Duration::try_from_secs_f64(seconds).map_err(|_| {
+                    ToolLoopRepositoryError::InvalidTransition("approval deadline delay")
+                })?;
+                Ok((
+                    ToolRequestId::from_uuid(request),
+                    SessionId::from_uuid(session),
+                    delay,
+                ))
+            })
+            .collect()
+    }
+
     /// Finds the exact active turn whose durable execution can make progress.
     ///
     /// This is a reconciliation hint only. Every later tool transaction

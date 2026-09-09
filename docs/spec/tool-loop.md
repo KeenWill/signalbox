@@ -179,7 +179,8 @@ know it.
 
 Human approval waits use `tool_settings.approval_wait_timeout` (ten minutes by
 default, or `none`). The first human wait records its deadline durably; restart
-retains it. Expiry records a core-issued `RuntimeSafety` denial with reason
+restores its scheduler wake-up. Deadline wake-ups do not require periodic
+reconciliation. Expiry records a core-issued `RuntimeSafety` denial with reason
 `approval_wait_timeout` and continues the turn. Judge execution time is not part
 of the human wait.
 

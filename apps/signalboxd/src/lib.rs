@@ -46,6 +46,8 @@ use tokio::{
 
 use tracing::Instrument;
 pub mod approval_judge_eval;
+mod approval_wait_wakeups;
+pub use approval_wait_wakeups::ApprovalWaitWakeups;
 mod attachment_preparation_runtime;
 mod blob_read_runtime;
 mod blob_storage_configuration;
@@ -2380,6 +2382,7 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
             approval_judge_selection: None,
             approval_judge_configuration: None,
             approval_judge_repository_watch: None,
+            approval_wait_wakeups: None,
             workspace_instructions: None,
             shutdown_checkpoint: None,
         }
@@ -2496,6 +2499,7 @@ pub struct PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
     approval_judge_selection: Option<DirectModelSelection>,
     approval_judge_configuration: Option<HubModelConfiguration>,
     approval_judge_repository_watch: Option<repo_watch_runtime::RepositoryWatchRuntime>,
+    approval_wait_wakeups: Option<ApprovalWaitWakeups>,
     workspace_instructions: Option<WorkspaceInstructionRuntime>,
     shutdown_checkpoint: Option<watch::Receiver<bool>>,
 }
@@ -3008,6 +3012,12 @@ where
         self
     }
 
+    /// Schedules scheduler nudges for armed human-approval deadlines.
+    pub fn with_approval_wait_wakeups(mut self, wakeups: ApprovalWaitWakeups) -> Self {
+        self.approval_wait_wakeups = Some(wakeups);
+        self
+    }
+
     /// Stops one admitted turn at its next durable operation boundary.
     pub fn with_shutdown_checkpoint(mut self, shutdown: watch::Receiver<bool>) -> Self {
         self.shutdown_checkpoint = Some(shutdown);
@@ -3028,6 +3038,7 @@ where
         let model_repository = self.model_repository.clone();
         let tool_repository = self.tool_repository.clone();
         let approval_judge_repository = self.approval_judge_repository.clone();
+        let approval_wait_wakeups = self.approval_wait_wakeups.clone();
         let model_gate = self.model_gate.clone();
         let tool_gate = self.tool_gate.clone();
         let provider = self.provider.clone();
@@ -3194,6 +3205,11 @@ where
                                         )?
                                     {
                                         continue;
+                                    }
+                                    if let Some(wakeups) = &approval_wait_wakeups {
+                                        wakeups.refresh(Some(session)).await.map_err(
+                                            PostgresProviderToolLoopExecutionError::ResumeLookup,
+                                        )?;
                                     }
                                     return Ok(());
                                 }

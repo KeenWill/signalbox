@@ -95,6 +95,17 @@ impl tool_loop::PostgresToolLoopRepository {
         turn: signalbox_domain::TurnId,
         timeout: option::Option<time::Duration>,
     ) -> result::Result<bool, tool_loop::ToolLoopRepositoryError>;
+    pub async fn pending_human_approval_waits(
+        &self,
+        session: option::Option<signalbox_domain::SessionId>,
+    ) -> result::Result<
+        vec::Vec<(
+            signalbox_domain::ToolRequestId,
+            signalbox_domain::SessionId,
+            time::Duration,
+        )>,
+        tool_loop::ToolLoopRepositoryError,
+    >;
     pub async fn find_resumable_turn(
         &self,
         session: signalbox_domain::SessionId,
