@@ -5,8 +5,9 @@ This design is not built; it extends
 [session lifecycle](../spec/session-lifecycle.md),
 [model-call execution](../spec/model-call-execution.md),
 [tool loop](../spec/tool-loop.md),
-[persistence protocol](../spec/persistence-protocol.md), and
-[process protocol](../spec/process-protocol.md).
+[persistence protocol](../spec/persistence-protocol.md),
+[process protocol](../spec/process-protocol.md), and
+[configuration and credentials](../spec/configuration-and-credentials.md).
 
 ## Goal
 
