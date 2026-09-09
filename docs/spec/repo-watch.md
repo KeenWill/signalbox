@@ -40,7 +40,7 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
-The module schema contains sixteen tables:
+The module schema contains seventeen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
   repository row fences complete frontier commits with a generation and the
@@ -75,6 +75,7 @@ The module schema contains sixteen tables:
   attempt counts and the last failure.
 - `poll_cache_reviewers` and `poll_cache_page` retain the selected reviewer set
   and accepted conditional REST snapshots.
+- `poll_cursor` retains unfinished repository reconciliation.
 - `core_event_cursor` records module application progress.
 - `rule_evaluation_cursor` records each rule revision's last evaluated
   repository event, including nonmatches and suppressed dispatches.
@@ -168,13 +169,22 @@ missing their merge time are dropped without discarding the ordinary
 predecessor, dated compact entries, or event frontier. Workflow reads query
 completed runs by distinct current head SHA for the default branch and open
 pull-request same-repository head branches; prior completions for those branches
-remain comparison input. Each observation admits at most 1,000 REST and GraphQL
-requests combined; exhausting that budget rejects the incomplete observation.
-Check inventories exceeding GitHub's 1,000-suite commit limit and workflow
-searches exceeding GitHub's 1,000-result cap also reject the observation. Failed
-observations leave the prior committed state intact. The daemon starts these
-tasks, the configured webhook listener, and one serialized command worker beside
-the convergence sweep, and drains them before closing its database.
+remain comparison input. Each periodic attempt spends at most
+`numeric_bounds.repository_watch_poll_request_budget` REST and GraphQL requests,
+including its REST-quota preflight; the preflight requires that same number of
+remaining REST requests. Completed discovery, pull-request, and workflow stages
+commit independently. Discovery preserves committed branch heads; branch heads
+are refreshed after pending PR lifecycles and bases, before deriving
+`base_advanced` facts. Budget exhaustion reports `partial` in logs and operator
+status and retains a durable `poll_cursor` with pending subjects and normalized
+unfinished pages; the next poll resumes those reads, and completion clears the
+cursor. A webhook refresh removes its subject from the pending poll and discards
+unfinished reads for that subject. Webhook observations retain a 1,000-request
+ceiling per pull request. Check inventories exceeding GitHub's 1,000-suite
+commit limit and workflow searches exceeding GitHub's 1,000-result cap reject
+their stage. Failed stages preserve completed stage commits. The daemon starts
+these tasks, the configured webhook listener, and one serialized command worker
+beside the convergence sweep, and drains them before closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
 repository before accepting a delivery. An empty resolved webhook secret is
@@ -350,12 +360,13 @@ and nested-fetch identities. This transport state is separate from events and
 rules and contains no raw provider JSON, credential values, or reactions from
 actors outside the configured signal-reviewer set. Before every poller
 composition, including startup and re-enablement, the runtime compares the
-persisted reviewer set with configured signal reviewers and invalidates both
-validators and snapshots when they differ. After restart with an unchanged set,
-the first complete poll sends conditional requests for every traversed resource
-with a persisted validator. After a complete accepted observation, cache
-retention removes untraversed resources and terminal pull-request pages;
-unchanged responses retain their traversed pages.
+persisted reviewer set with configured signal reviewers and invalidates
+validators, snapshots, and unfinished poll cursors when they differ. After
+restart with an unchanged set, requests not already captured by an unfinished
+stage use persisted validators. Completed stages and budget-limited attempts
+retain accepted transport pages. A completed reconciliation removes untraversed
+resources and terminal pull-request pages; unchanged responses retain their
+traversed pages.
 
 Dispatched sessions retain the repository-watch creation cause, module actor,
 and dispatch reference. Their provenance resolves the existing dispatch ledger

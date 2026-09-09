@@ -187,6 +187,7 @@ pub struct RepositoryWatchConfiguration {
     rules: Box<[RepoWatchRule]>,
     webhook: Option<RepositoryWatchWebhookConfiguration>,
     webhook_retention: Duration,
+    poll_request_budget: std::num::NonZeroUsize,
     convergence_sweep: Option<ConvergenceSweepConfiguration>,
 }
 
@@ -214,6 +215,10 @@ impl ConvergenceSweepConfiguration {
 }
 
 impl RepositoryWatchConfiguration {
+    pub(crate) const fn poll_request_budget(&self) -> std::num::NonZeroUsize {
+        self.poll_request_budget
+    }
+
     pub(crate) const fn webhook_retention(&self) -> Duration {
         self.webhook_retention
     }
@@ -522,8 +527,17 @@ pub(super) fn parse_repository_watch_configuration(
         .ok_or(HubModelConfigurationError::InvalidNumericBound {
             field: "repository_watch_webhook_retention",
         })?;
+    let poll_request_budget = numeric_bounds
+        .integer("repository_watch_poll_request_budget")
+        .flatten()
+        .and_then(|value| usize::try_from(value).ok())
+        .and_then(std::num::NonZeroUsize::new)
+        .ok_or(HubModelConfigurationError::InvalidNumericBound {
+            field: "repository_watch_poll_request_budget",
+        })?;
     Ok(RepositoryWatchConfiguration {
         enabled,
+        poll_request_budget,
         webhook_retention,
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),

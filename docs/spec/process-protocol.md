@@ -287,7 +287,8 @@ exists; a queued but unstarted first native turn does not hide it.
 
 Operator status includes one `repository_ingestion` record per configured
 watched repository and a `repository_ingestion_count` in its end message. A
-repository attempt that leaves failed targeted observations reports `partial`.
+repository attempt that exhausts its request budget or leaves failed targeted
+observations reports `partial`.
 
 The transcript snapshot and the operator-status read stream their rows through
 server-side cursors into a secure unnamed temporary file, commit the
