@@ -647,7 +647,138 @@ mod tests {
             );
             assert_eq!(
                 ProgramRegistrationRepository::new(pool.clone())
-                    .find(&existing.content)
+                    .find(existing.id, &existing.content)
+                    .await?,
+                Some(existing)
+            );
+            pool.close().await;
+            Ok(())
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_uuid_conflict_survives_loss_before_fault_commit()
+        -> Result<(), Box<dyn Error>> {
+            assert_registration_conflict_recovery(RegistrationCollision::Identity).await
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_name_revision_conflict_survives_loss_before_fault_commit()
+        -> Result<(), Box<dyn Error>> {
+            assert_registration_conflict_recovery(RegistrationCollision::NameRevision).await
+        }
+
+        enum RegistrationCollision {
+            Identity,
+            NameRevision,
+        }
+
+        /// Selects the immutable key that conflicts; all registration identities are arbitrary.
+        async fn assert_registration_conflict_recovery(
+            collision: RegistrationCollision,
+        ) -> Result<(), Box<dyn Error>> {
+            let (_database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+            let journal = ProgramJournalRepository::new(pool.clone());
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let existing = service
+                .register_javascript(
+                    ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                    javascript_request(String::new(), ProgramGrants::new([])),
+                )
+                .await?;
+            let (id, child) = match collision {
+                RegistrationCollision::Identity => (
+                    existing.id,
+                    javascript_request(String::new(), ProgramGrants::new([])),
+                ),
+                RegistrationCollision::NameRevision => (
+                    ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                    ProgramRegistrationRequest {
+                        name: existing.content.name.clone(),
+                        revision: existing.content.revision.clone(),
+                        source: Vec::new(),
+                        artifact: String::new(),
+                        grants: ProgramGrants::new([]),
+                    },
+                ),
+            };
+            let input = serde_json::to_vec(&serde_json::json!({
+                "id": id.into_uuid().to_string(), "name": child.name,
+                "revision": child.revision, "source": child.source,
+                "artifact": child.artifact, "grants": [],
+            }))?;
+            let parent = service.register_javascript(
+                ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                javascript_request(
+                    format!("import {{ effect }} from '@signalbox/program-sdk/v1'; await effect('register', 'register', new Uint8Array({input:?}));"),
+                    ProgramGrants::new([ProgramCapability::Register]),
+                ),
+            ).await?;
+            // The fixture function's database identity also identifies its fault-write barrier.
+            sqlx::raw_sql(
+                "CREATE FUNCTION test_pause_program_fault() RETURNS trigger LANGUAGE plpgsql AS $$
+                 BEGIN PERFORM pg_advisory_xact_lock('test_pause_program_fault'::regproc::oid::bigint); RETURN NEW; END $$;
+                 CREATE TRIGGER test_pause_program_fault BEFORE INSERT ON program_run_journal_entry
+                FOR EACH ROW WHEN (NEW.frame_kind = 'fault') EXECUTE FUNCTION test_pause_program_fault();"
+            ).execute(&pool).await?;
+            let mut barrier = pool.begin().await?;
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock('test_pause_program_fault'::regproc::oid::bigint)",
+            )
+            .execute(&mut *barrier)
+            .await?;
+            let run = ProgramRunId::from_uuid(Uuid::now_v7());
+            service.start(run, parent.id, &[]).await?;
+            let task = tokio::spawn(runner.run(std::future::pending()));
+            let blocked = tokio::time::timeout(TEST_TIMEOUT, async {
+                loop {
+                    let pid: Option<i32> = sqlx::query_scalar(
+                        "SELECT pid FROM pg_locks WHERE locktype = 'advisory'
+                         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                         AND classid = 0 AND objid = 'test_pause_program_fault'::regproc::oid AND NOT granted",
+                    ).fetch_optional(&pool).await.unwrap();
+                    if let Some(pid) = pid { break pid; }
+                    assert!(!task.is_finished(), "live conflict reaches the fault-write barrier");
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+            }).await?;
+            // The live conflict has been detected. Lose its connection before the fault can commit.
+            assert!(
+                sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                    .bind(blocked)
+                    .fetch_one(&pool)
+                    .await?
+            );
+            assert!(tokio::time::timeout(TEST_TIMEOUT, task).await??.is_err());
+            barrier.rollback().await?;
+            drop(service);
+            let partial = journal.load(run).await?.unwrap();
+            assert_eq!(
+                partial.entries().len(),
+                1,
+                "only the register request survived"
+            );
+            assert!(partial.terminal_delivery().is_none());
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let failed = assert_run_failure_isolated(&pool, service, runner, run).await?;
+            assert_eq!(
+                failed.entries().len(),
+                2,
+                "the recovered conflict appends one fault"
+            );
+            assert_eq!(failed.entries()[0], partial.entries()[0]);
+            let expected = ProgramRegistrationError::RegistrationConflict { registration: id };
+            assert_eq!(
+                failed.terminal_delivery().unwrap().kind(),
+                &DeliveryKind::Fault(ProgramFault::ProgramError(InlineFramePayload::new(
+                    expected.to_string().into_bytes()
+                )))
+            );
+            assert_eq!(
+                ProgramRegistrationRepository::new(pool.clone())
+                    .find(existing.id, &existing.content)
                     .await?,
                 Some(existing)
             );
