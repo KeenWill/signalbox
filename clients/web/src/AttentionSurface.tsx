@@ -312,7 +312,7 @@ export function AttentionSurface({
               {selected.goal_block && (
                 <section className="attention-goal-block">
                   <span className="eyebrow">
-                    Blocked goal · Version {selected.goal_block.generation}
+                    Blocked goal · Generation {selected.goal_block.generation}
                   </span>
                   <strong>{enumLabel(selected.goal_block.reason)}</strong>
                   <p>{selected.goal_block.need_summary}</p>

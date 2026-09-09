@@ -517,7 +517,7 @@ export function SessionWorkspaceSurface({
                 <dd>{displayedSession.descriptor.work.queued_turn_count}</dd>
               </div>
               <div>
-                <dt>Latest event</dt>
+                <dt>Observed through</dt>
                 <dd>{displayedSession.descriptor.observed_through}</dd>
               </div>
             </dl>
