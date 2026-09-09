@@ -39,6 +39,12 @@ pub struct ProgramRegistrationRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl program_registration::ProgramRegistrationRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub async fn unfinished_runs(
+        &self,
+    ) -> result::Result<
+        vec::Vec<signalbox_domain::ProgramRunId>,
+        program_registration::ProgramRegistrationError,
+    >;
     pub async fn register_user(
         &self,
         registration: signalbox_domain::ProgramRegistrationId,
@@ -82,6 +88,7 @@ impl program_registration::ProgramRegistrationRepository {
     >;
     pub async fn find(
         &self,
+        id: signalbox_domain::ProgramRegistrationId,
         content: &signalbox_domain::program_registration::ProgramRegistrationContent,
     ) -> result::Result<
         option::Option<signalbox_domain::program_registration::ProgramRegistration>,

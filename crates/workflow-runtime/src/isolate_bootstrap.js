@@ -5,6 +5,13 @@ Object.defineProperty(globalThis, "__signalboxProgramRequest", {
   configurable: true,
 });
 Reflect.deleteProperty(globalThis, "Deno");
+// Deno's generated async-op stub invokes the native op through originalOp.call.
+// Keep that invocation intrinsic fixed before program code can intercept requests.
+Object.defineProperty(Function.prototype, "call", {
+  value: Function.prototype.call,
+  writable: false,
+  configurable: false,
+});
 Object.defineProperty(Math, "random", {
   value: undefined,
   writable: false,

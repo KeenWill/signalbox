@@ -239,17 +239,19 @@ impl goal::GoalRepository {
         need: signalbox_domain::GoalNeed,
         provenance: signalbox_domain::GoalModelProvenance,
     ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
-    pub async fn declare_achieved(
+    pub async fn declare_achieved<Check, Checked>(
         &self,
         session: signalbox_domain::SessionId,
         report: signalbox_domain::GoalReport,
         provenance: signalbox_domain::GoalModelProvenance,
-        verdict: signalbox_domain::FinishCheckVerdict,
-    ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>;
-    pub async fn load_finish_condition(
-        &self,
-        session: signalbox_domain::SessionId,
-    ) -> result::Result<option::Option<signalbox_domain::FinishCondition>, goal::GoalRepositoryError>;
+        check: Check,
+    ) -> result::Result<goal::GoalTransitionOutcome, goal::GoalRepositoryError>
+    where
+        Check: function::FnOnce(
+            option::Option<signalbox_domain::FinishCondition>,
+            signalbox_domain::GoalReport,
+        ) -> Checked,
+        Checked: future::Future<Output = signalbox_domain::FinishCheckVerdict>;
     pub async fn block_execution_failure(
         &self,
         session: signalbox_domain::SessionId,
