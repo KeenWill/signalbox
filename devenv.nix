@@ -263,6 +263,79 @@ in
     '';
   };
 
+  scripts.signalbox-dev-credential = {
+    description = "Select a dev credential file or create a private empty placeholder.";
+    exec = ''
+      ${tomlPython}/bin/python3 -c ${shellArg ''
+        import os
+        from pathlib import Path
+        import sys
+
+        override, preferred, placeholder = sys.argv[1:]
+        if override:
+            path = Path(override)
+        elif preferred and Path(preferred).exists():
+            path = Path(preferred)
+        else:
+            path = Path(placeholder)
+            try:
+                descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(descriptor)
+        print(path.absolute())
+      ''} "$1" "$2" "$3"
+    '';
+  };
+
+  scripts.signalbox-seed-config = {
+    description = "Prepare the example catalog's dev credential and blob paths.";
+    exec = ''
+      ${tomlPython}/bin/python3 -c ${shellArg ''
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        import tomlkit
+
+        config_path = Path(sys.argv[1])
+        credential_path = str(Path(sys.argv[2]).absolute())
+        document = tomlkit.parse(config_path.read_text())
+        profiles = document.get("credential_profiles", [])
+        profile = next(
+            (entry for entry in profiles if entry.get("name") == "anthropic-primary"),
+            None,
+        )
+        if profile is None:
+            raise SystemExit("example config has no anthropic-primary profile")
+        profile["file"] = credential_path
+        for entry in profiles:
+            if entry.get("delivery") == "file" and entry is not profile:
+                entry["file"] = subprocess.check_output([
+                    "signalbox-dev-credential", "", "",
+                    str(config_path.parent / (entry["name"] + "-api-key")),
+                ], text=True).strip()
+        if sys.argv[5] == "true":
+            blob_storage = document.get("blob_storage")
+            if blob_storage is None:
+                raise SystemExit("example config has no blob_storage table")
+            blob_storage["staging_directory"] = str(Path(sys.argv[3]).absolute())
+            stores = blob_storage.get("stores", [])
+            primary = next(
+                (entry for entry in stores if entry.get("name") == "primary"),
+                None,
+            )
+            if primary is None:
+                raise SystemExit("example config has no primary blob store")
+            primary["root_directory"] = str(Path(sys.argv[4]).absolute())
+        else:
+            document.pop("blob_storage", None)
+        config_path.write_text(tomlkit.dumps(document))
+      ''} "$1" "$2" "$3" "$4" "$5"
+    '';
+  };
+
   languages.python = {
     enable = true;
     venv = {
@@ -426,45 +499,13 @@ in
         seeded_daemon_config=${shellArg daemonConfigFile}.seed-staging
         cp "$DEVENV_ROOT/config/signalboxd.example.toml" \
            "$seeded_daemon_config"
-        # The example names deployment secret paths that do not exist here, and
-        # a credential profile now carries its own path rather than reading one
-        # from the process environment. Point the seeded copy at this
-        # developer's key file once; the copy is theirs to edit afterwards.
-        seed_key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
-        ${tomlPython}/bin/python3 -c ${shellArg ''
-          import sys
-          from pathlib import Path
-
-          import tomlkit
-
-          config_path = Path(sys.argv[1])
-          credential_path = str(Path(sys.argv[2]).absolute())
-          document = tomlkit.parse(config_path.read_text())
-          profiles = document.get("credential_profiles", [])
-          profile = next(
-              (entry for entry in profiles if entry.get("name") == "anthropic-primary"),
-              None,
-          )
-          if profile is None:
-              raise SystemExit("example config has no anthropic-primary profile")
-          profile["file"] = credential_path
-          if sys.argv[5] == "true":
-              blob_storage = document.get("blob_storage")
-              if blob_storage is None:
-                  raise SystemExit("example config has no blob_storage table")
-              blob_storage["staging_directory"] = str(Path(sys.argv[3]).absolute())
-              stores = blob_storage.get("stores", [])
-              primary = next(
-                  (entry for entry in stores if entry.get("name") == "primary"),
-                  None,
-              )
-              if primary is None:
-                  raise SystemExit("example config has no primary blob store")
-              primary["root_directory"] = str(Path(sys.argv[4]).absolute())
-          else:
-              document.pop("blob_storage", None)
-          config_path.write_text(tomlkit.dumps(document))
-        ''} "$seeded_daemon_config" "$seed_key_file" \
+        # Seed private dev-state placeholders for absent credentials; supplied
+        # paths and the seeded catalog remain the developer's to edit.
+        seed_key_file="$(signalbox-dev-credential \
+          "''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-}" \
+          "$HOME/.config/signalbox/anthropic-api-key" \
+          ${shellArg "${stateRoot}/anthropic-api-key"})"
+        signalbox-seed-config "$seeded_daemon_config" "$seed_key_file" \
           ${shellArg daemonBlobStagingDirectory} ${shellArg daemonBlobPrimaryDirectory} \
           ${shellArg (pkgs.lib.boolToString blobStorageSupported)}
         chmod 644 "$seeded_daemon_config"
@@ -587,20 +628,15 @@ in
         "$supervisor_executable"
       chmod 600 ${shellArg daemonRuntimeConfigFile}
 
-      # Deployment-owned credential channels: one file per secret. The launcher
-      # passes the two integration channels; the Anthropic key path lives in the
-      # seeded model catalog instead, because a credential profile now carries
-      # its own file. Naming a path that does not exist is deliberate and safe
-      # here, because no file is read at startup. The read timing, what the
-      # file's bytes mean, and the effect of an absent file are stated in the
-      # credential lifecycle section of
-      # docs/spec/configuration-and-credentials.md. The GitHub default resolves
-      # against the developer's own home directory, not the process-scoped HOME
-      # the exec below sets. Brave uses a devenv-state placeholder unless the
-      # developer supplies an override.
-      search_key_file_default=${shellArg daemonBraveApiKeyFile}
-      search_key_file="''${SIGNALBOX_DEV_BRAVE_API_KEY_FILE:-$search_key_file_default}"
-      token_file="''${SIGNALBOX_DEV_GITHUB_TOKEN_FILE:-$HOME/.config/signalbox/github-token}"
+      # Integration files are admitted at startup. Use explicit overrides or
+      # existing home credentials, otherwise private dev-state placeholders.
+      search_key_file="$(signalbox-dev-credential \
+        "''${SIGNALBOX_DEV_BRAVE_API_KEY_FILE:-}" "" \
+        ${shellArg daemonBraveApiKeyFile})"
+      token_file="$(signalbox-dev-credential \
+        "''${SIGNALBOX_DEV_GITHUB_TOKEN_FILE:-}" \
+        "$HOME/.config/signalbox/github-token" \
+        ${shellArg "${stateRoot}/github-token"})"
 
       exec env ${scrub} \
         HOME=${shellArg daemonHome} \
