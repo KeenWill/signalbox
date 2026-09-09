@@ -2,10 +2,7 @@ load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_integration_test", "rust_quality_tests", "rust_unit_test")
 
-CRATE_FEATURES = [
-    "default",
-    "test-support",
-]
+CRATE_FEATURES = ["default"]
 
 rust_package()
 
@@ -51,10 +48,7 @@ rust_api_json(
 rust_doc_test(
     name = "doc_tests",
     crate = ":signalbox_blob_store_filesystem",
-    crate_features = [
-        "default",
-        "test-support",
-    ],
+    crate_features = ["default"],
 )
 
 rust_quality_tests(documented_crates = [":signalbox_blob_store_filesystem"])
