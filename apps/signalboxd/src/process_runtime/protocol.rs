@@ -748,7 +748,7 @@ where
             if matches!(command.operation(), SessionLifecycleOperation::Adopt { .. })
                 && let Some(goal_resumption) = &services.goal_resumption
             {
-                goal_resumption.arm_blocked_goal_resumption(session);
+                goal_resumption.arm_adopted_goal_resumption(session);
             }
             if let SessionLifecycleApplication::ClosurePending {
                 live_turn,

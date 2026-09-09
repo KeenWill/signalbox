@@ -729,12 +729,39 @@ fn push_snapshot_excludes_unchanged_oversized_fence_blobs() {
         .blob(&vec![b'x'; crate::limits::MAX_OBJECT_BYTES + 1])
         .expect("existing large blob");
     let fence = commit_with_push_blob(&fixture, blob);
+    let parent = repository.find_commit(fence).expect("fence commit");
+    let tree = parent.tree().expect("fence tree");
+    let mut builder = repository.treebuilder(Some(&tree)).expect("tree builder");
+    let added = repository.blob(b"new content").expect("new blob");
+    builder.insert("added", added, 0o100644).expect("new entry");
+    let tree = repository
+        .find_tree(builder.write().expect("new tree writes"))
+        .expect("new tree");
+    let signature = parent.author();
+    let tip = repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            "add a file",
+            &tree,
+            &[&parent],
+        )
+        .expect("child commit");
     let snapshot = crate::push_objects::PushObjectSnapshot::capture(
         &fixture.executor().repository_authority,
-        fence,
+        tip,
         Some(fence),
     )
-    .expect("unchanged fence tree does not decode its blobs");
+    .expect("changed tree does not decode unchanged fence blobs");
+    assert_eq!(
+        snapshot
+            .repository
+            .find_blob(added)
+            .expect("selected new blob")
+            .content(),
+        b"new content"
+    );
     assert!(
         !snapshot
             .repository
