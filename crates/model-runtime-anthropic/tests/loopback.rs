@@ -676,7 +676,7 @@ async fn a_redirect_is_never_followed_and_surfaces_as_evidence() {
 }
 
 #[tokio::test]
-async fn buffered_response_overflow_is_typed_body_loss() {
+async fn buffered_response_overflow_retains_observed_content() {
     let body = vec![b' '; OVERSIZED_PROVIDER_RESPONSE_BYTES];
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
@@ -697,6 +697,7 @@ async fn buffered_response_overflow_is_typed_body_loss() {
         panic!("an oversized buffered response must fail closed as boundary loss");
     };
     assert!(matches!(loss.cause, LossCause::ResponseBodyLost(_)));
+    assert!(loss.response_content_observed);
 }
 
 #[tokio::test]
@@ -723,8 +724,8 @@ async fn connection_refused_is_proven_unsent() {
 }
 
 #[tokio::test]
-async fn response_body_cut_short_is_boundary_loss_not_error_guessing() {
-    // Headers promise 4096 body bytes; the connection closes after 20.
+async fn buffered_body_cut_short_retains_observed_content() {
+    // The connection closes after a body prefix, before its promised length.
     let mut response =
         b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 4096\r\n\r\n"
             .to_vec();
@@ -738,6 +739,7 @@ async fn response_body_cut_short_is_boundary_loss_not_error_guessing() {
         panic!("a truncated response body is not definitive evidence");
     };
     assert!(matches!(loss.cause, LossCause::ResponseBodyLost(_)));
+    assert!(loss.response_content_observed);
     assert_eq!(loss.exchange.http_status, Some(200));
 }
 
@@ -1839,4 +1841,27 @@ fn a_non_http_base_url_scheme_fails_construction() {
         error,
         AnthropicConstructionError::InvalidBaseUrl { .. }
     ));
+}
+
+#[tokio::test]
+async fn buffered_body_lost_before_bytes_does_not_claim_observed_content() {
+    let response =
+        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 4096\r\n\r\n"
+            .to_vec();
+    let server = CannedServer::serving(vec![response]).await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-buffered-body-absent"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
+        panic!("missing response body is typed body loss");
+    };
+    assert!(matches!(loss.cause, LossCause::ResponseBodyLost(_)));
+    assert!(!loss.response_content_observed);
+    assert_eq!(loss.exchange.http_status, Some(200));
 }

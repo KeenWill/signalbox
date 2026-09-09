@@ -16,9 +16,9 @@ use signalbox_model_runtime::{
     ObservationSink, PreparationDefect, PreparationFailure, PreparationOutcome,
     ProviderCompactionMode, ProviderErrorEvidence, ProviderErrorKind, ProviderRequestId,
     ResponsePrefixBudget as PrefixBudget, SseFraming, StreamInterruption, TerminalEvidence,
-    TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause,
-    boundary_loss_evidence as exchange_loss, emit_provider_observation as emit, parse_retry_after,
-    pre_exchange_loss_evidence as pre_exchange_loss, proven_unsent_evidence as proven_unsent,
+    TerminalReport, TokenUsage, ToolCallsAtLoss, UnsentCause, emit_provider_observation as emit,
+    parse_retry_after, pre_exchange_loss_evidence as pre_exchange_loss,
+    proven_unsent_evidence as proven_unsent,
     provider_response_body_too_large as response_body_too_large,
     provider_response_prefix_len as streamed_response_prefix_len,
     serialize_provider_request as serialize_request, transport_facts_from_error as transport_facts,
@@ -539,9 +539,18 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
         let body = match collect_response_body(response, cancellation).await {
-            None => return exchange_loss(LossCause::CancellationRequested, exchange),
-            Some(Err(cause)) => return exchange_loss(cause, exchange),
-            Some(Ok(bytes)) => bytes,
+            Err(failure) => {
+                return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    response_content_observed: failure.received_bytes > 0,
+                    cause: failure.cause,
+                    exchange,
+                    reported_model: None,
+                    finish_reported: None,
+                    tool_calls: ToolCallsAtLoss::Unobserved,
+                    usage: TokenUsage::unreported(),
+                });
+            }
+            Ok(bytes) => bytes,
         };
         decode_buffered_response(
             &body,
@@ -812,14 +821,17 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             };
         }
         let body = match collect_response_body(response, &mut cancellation).await {
-            None => return InputTokenCountOutcome::Cancelled { correlation },
-            Some(Err(_)) => {
+            Err(BufferedBodyLoss {
+                cause: LossCause::CancellationRequested,
+                ..
+            }) => return InputTokenCountOutcome::Cancelled { correlation },
+            Err(_) => {
                 return InputTokenCountOutcome::Failed {
                     correlation,
                     failure: InputTokenCountFailure::ResponseBody,
                 };
             }
-            Some(Ok(body)) => body,
+            Ok(body) => body,
         };
         if validate_provider_json_nesting(&body).is_err() {
             return InputTokenCountOutcome::Failed {
@@ -951,8 +963,11 @@ async fn finish_error(
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
     let body = match collect_response_body(response, cancellation).await {
-        None => Vec::new(),
-        Some(Err(cause)) => {
+        Err(BufferedBodyLoss {
+            cause: LossCause::CancellationRequested,
+            ..
+        }) => Vec::new(),
+        Err(BufferedBodyLoss { cause, .. }) => {
             return TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 credential_recovery: None,
                 exchange,
@@ -966,7 +981,7 @@ async fn finish_error(
                 usage: TokenUsage::unreported(),
             });
         }
-        Some(Ok(bytes)) => bytes,
+        Ok(bytes) => bytes,
     };
     if validate_provider_json_nesting(&body).is_ok()
         && let Ok(ErrorEnvelope {
@@ -1011,31 +1026,36 @@ async fn finish_error(
     })
 }
 
-/// Reads a non-streaming provider body without allowing it to grow without
-/// bound. `None` retains the caller-cancellation race used by both success
-/// and error paths.
+struct BufferedBodyLoss {
+    cause: LossCause,
+    received_bytes: usize,
+}
+
 async fn collect_response_body(
     response: reqwest::Response,
     cancellation: &mut CancellationSignal,
-) -> Option<Result<Vec<u8>, LossCause>> {
+) -> Result<Vec<u8>, BufferedBodyLoss> {
     let mut body = response.bytes_stream();
     let mut collected = Vec::new();
-    loop {
+    let mut received_bytes = 0usize;
+    let cause = loop {
         match cancellation.run_until_cancelled(body.next()).await {
-            None => return None,
-            Some(None) => return Some(Ok(collected)),
-            Some(Some(Err(error))) => return Some(Err(classify_body_error(&error))),
+            None => break LossCause::CancellationRequested,
+            Some(None) => return Ok(collected),
+            Some(Some(Err(error))) => break classify_body_error(&error),
             Some(Some(Ok(chunk))) => {
-                let Some(next_len) = collected.len().checked_add(chunk.len()) else {
-                    return Some(Err(response_body_too_large()));
-                };
-                if next_len > MAX_BUFFERED_RESPONSE_BYTES {
-                    return Some(Err(response_body_too_large()));
+                received_bytes = received_bytes.saturating_add(chunk.len());
+                if received_bytes > MAX_BUFFERED_RESPONSE_BYTES {
+                    break response_body_too_large();
                 }
                 collected.extend_from_slice(&chunk);
             }
         }
-    }
+    };
+    Err(BufferedBodyLoss {
+        cause,
+        received_bytes,
+    })
 }
 
 /// Classifies a send-phase transport failure per the full-request-send
@@ -1057,9 +1077,7 @@ fn classify_send_error(error: &reqwest::Error) -> TerminalEvidence {
 }
 
 /// Classifies a body-phase read failure: a caller-configured deadline keeps
-/// its typed timeout cause; anything else is a lost response body. Either
-/// way the exchange lacks a definitive response (the ambiguous branch in
-/// `docs/spec/model-call-execution.md`).
+/// its typed timeout cause; anything else is a lost response body.
 fn classify_body_error(error: &reqwest::Error) -> LossCause {
     if error.is_timeout() {
         LossCause::TimedOut(transport_facts(error))

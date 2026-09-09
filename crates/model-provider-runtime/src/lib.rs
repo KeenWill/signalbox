@@ -3536,6 +3536,29 @@ mod tests {
     }
 
     #[test]
+    fn availability_does_not_retry_buffered_body_loss_after_received_bytes() {
+        let loss = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            response_content_observed: true,
+            cause: LossCause::ResponseBodyLost(TransportFacts::new("recorded body loss")),
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            finish_reported: None,
+            tool_calls: ToolCallsAtLoss::Unobserved,
+            usage: TokenUsage::unreported(),
+        });
+        let classified = classify_terminal(loss, &[], &configured("model-exact"))
+            .expect("buffered bytes retain ambiguity without decoded observations");
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::Ambiguous
+        );
+        assert_eq!(
+            classified.cause,
+            ModelCallCauseCode::BoundaryLoss(super::BoundaryLossCode::ResponseBodyLost)
+        );
+    }
+
+    #[test]
     fn availability_does_not_retry_a_timeout_after_content() {
         let loss = TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             response_content_observed: true,
