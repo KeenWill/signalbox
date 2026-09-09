@@ -94,10 +94,11 @@ pub(super) async fn result_byte_limit(
         .map_err(|_| ToolLoopCorruption::Inconsistent("tool result framing"))?;
     let safe_prefix = window.saturating_sub(output).saturating_sub(prompt_bytes);
     // The next response can request tools: retain its output while reserving
-    // the following model call's output ceiling.
+    // the following model call's output ceiling and another round of envelopes.
     let continuation_output = output.saturating_add(output);
     let headroom = window
         .saturating_sub(continuation_output)
+        .saturating_sub(framing)
         .saturating_sub(input)
         .saturating_sub(previous_output);
     let per_result = safe_prefix

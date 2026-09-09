@@ -5575,12 +5575,13 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     const FIXTURE_SEED: u128 = 0x269_1000;
     const INPUT_TOKENS: u64 = 141_000;
     const FIRST_OUTPUT_TOKENS: u64 = 117;
-    const FOLLOWUP_OUTPUT_TOKENS: u64 = 2_012;
+    const OUTPUT_CEILING: u64 = 8_192;
     let (container, pool, _) = migrated_postgres().await?;
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
         FIXTURE_SEED + 6,
     )));
-    let limits = ToolContinuationUsageLimit::new(target, FastMode::Disabled, 8_192, 200_000);
+    let limits =
+        ToolContinuationUsageLimit::new(target, FastMode::Disabled, OUTPUT_CEILING, 200_000);
     let fixture =
         checkpoint_restart_model_call_with_limits(&pool, FIXTURE_SEED, false, None, &[limits])
             .await?;
@@ -5598,7 +5599,7 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     else {
         panic!("fixture call authorizes");
     };
-    let (fixture, repository, _, _) = commit_authorized_tool_batch(
+    let (fixture, repository, _, requests) = commit_authorized_tool_batch(
         FIXTURE_SEED,
         (fixture, repository, *authorized),
         &[("current_time", "{}")],
@@ -5651,6 +5652,7 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
             result.len() - retained.len(),
         )
     );
+    let result_entry = SemanticTranscriptEntryId::from_uuid(Uuid::now_v7());
     let continuation = ModelCallId::from_uuid(Uuid::now_v7());
     let checkpointed = tools
         .prepare_continuation(
@@ -5658,7 +5660,7 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
             fixture.turn,
             fixture.call,
             signalbox_application::ToolContinuationIdentities::new(
-                vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                vec![result_entry],
                 ContextFrontierId::from_uuid(Uuid::now_v7()),
                 continuation,
                 FailedModelCallTurnIdentities::new(
@@ -5680,8 +5682,19 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     else {
         panic!("bounded-result continuation authorizes");
     };
-    // The fixture provider counts each admitted result byte as one token.
-    let followup_input = INPUT_TOKENS + FIRST_OUTPUT_TOKENS + projected.len() as u64;
+    // The fixture provider counts the complete admitted result envelope as bytes
+    // and spends its full output ceiling before requesting the next tool.
+    let result_envelope = serde_json::json!({
+        "position": 0,
+        "source_session_id": fixture.session.into_uuid().to_string(),
+        "entry_id": result_entry.into_uuid().to_string(),
+        "type": "tool_execution_result",
+        "tool_request_id": requests[0].into_uuid().to_string(),
+        "tool_attempt_id": attempt.into_uuid().to_string(),
+        "content": projected,
+    });
+    let followup_input =
+        INPUT_TOKENS + FIRST_OUTPUT_TOKENS + serde_json::to_vec(&result_envelope)?.len() as u64;
     let (fixture, repository, _, _) = commit_authorized_tool_batch(
         FIXTURE_SEED + 0x100,
         (
@@ -5696,7 +5709,7 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
         InitialToolApproval::PolicyAuto,
         ProviderReportedTokenUsage::unreported()
             .with_input_tokens(Some(followup_input))
-            .with_output_tokens(Some(FOLLOWUP_OUTPUT_TOKENS)),
+            .with_output_tokens(Some(OUTPUT_CEILING)),
         None,
     )
     .await?;
