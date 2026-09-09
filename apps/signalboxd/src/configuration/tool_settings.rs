@@ -429,3 +429,28 @@ fn validate_conversation_tool_mapping(mapping: &Table) -> Result<(), HubModelCon
     }
     Ok(())
 }
+
+pub(super) fn parse_approval_wait_timeout(
+    item: Option<&Item>,
+) -> Result<Option<std::time::Duration>, HubModelConfigurationError> {
+    // The default bounds unattended human waits to ten minutes.
+    let default = Some(std::time::Duration::from_secs(600));
+    let Some(item) = item else {
+        return Ok(default);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidToolSettings)?;
+    reject_unknown_fields(table, &["approval_wait_timeout"])
+        .map_err(|_| HubModelConfigurationError::InvalidToolSettings)?;
+    match table.get("approval_wait_timeout") {
+        None => Ok(default),
+        Some(item) if item.as_str() == Some("none") => Ok(None),
+        Some(item) => item
+            .as_str()
+            .and_then(super::numeric_bounds::parse_numeric_bound_duration)
+            .filter(|duration| !duration.is_zero())
+            .map(Some)
+            .ok_or(HubModelConfigurationError::InvalidToolSettings),
+    }
+}

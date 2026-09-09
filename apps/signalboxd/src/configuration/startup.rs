@@ -14,6 +14,7 @@ pub(super) struct ParsedStartup {
     pub(super) credential_profiles: HashMap<Arc<str>, CredentialProfile>,
     pub(super) credential_pools: HashMap<Arc<str>, CredentialPool>,
     pub(super) tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
+    pub(super) approval_wait_timeout: Option<std::time::Duration>,
     pub(super) approval_judge_selection: Option<DirectModelSelection>,
     pub(super) convergence: Option<signalbox_convergence::ConvergencePolicy>,
     pub(super) workspace_instructions: WorkspaceInstructionConfiguration,
@@ -52,6 +53,7 @@ pub(super) fn parse_startup(
             "daemon_tools",
             "git_identity",
             "tool_approval_postures",
+            "tool_settings",
             "approval_judge",
             "convergence",
             "repository_watch",
@@ -142,6 +144,8 @@ pub(super) fn parse_startup(
     let credential_profiles = parse_credential_profiles(document.get("credential_profiles"))?;
     let credential_pools =
         parse_credential_pools(document.get("credential_pools"), &credential_profiles)?;
+    let approval_wait_timeout =
+        tool_settings::parse_approval_wait_timeout(document.get("tool_settings"))?;
     let tool_approval_postures =
         parse_tool_approval_postures(document.get("tool_approval_postures"))?;
     let tool_composition = match daemon_tools {
@@ -369,6 +373,7 @@ pub(super) fn parse_startup(
         credential_profiles,
         credential_pools,
         tool_approval_postures,
+        approval_wait_timeout,
         approval_judge_selection,
         convergence,
         workspace_instructions,
