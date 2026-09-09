@@ -5459,3 +5459,91 @@ async fn base_advancement_uses_refreshed_pull_lifecycles_and_bases() -> Result<(
     drop(container);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn reopening_a_closed_pull_does_not_repeat_its_initial_snapshot_facts()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::poll_cache::observe_webhook_pulls;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    let mut io = ConditionalPollFixture::new();
+    io.changed = true;
+    io.thread_nodes = vec![serde_json::json!({"id":"fixture-thread", "isResolved":true})];
+    io.pages
+        .get_mut("/repos/example/project/pulls/1")
+        .expect("pull detail")
+        .0["labels"] = serde_json::json!([{"name":"repo-watch"}]);
+    let now = OffsetDateTime::now_utc();
+    for (action, lifecycle, retained_pulls) in [
+        ("opened", "open", 1),
+        ("closed", "closed", 0),
+        ("reopened", "open", 1),
+    ] {
+        // Recompose the store so reopened detection must use durable evidence.
+        let store = RepoWatchStore::new(pool.clone());
+        store.prepare_poll_cache(&repository, &[]).await?;
+        io.pages
+            .get_mut("/repos/example/project/pulls/1")
+            .expect("pull detail")
+            .0["state"] = serde_json::json!(lifecycle);
+        let delivery = Uuid::now_v7();
+        store
+            .admit_webhook(WebhookDelivery {
+                repository: &repository,
+                hook_id: 1,
+                delivery_id: delivery,
+                event: "pull_request",
+                action: Some(action),
+                body: br#"{"pull_request":{"number":1}}"#,
+                received_at: now,
+                expires_at: now + MERGED_RETENTION,
+            })
+            .await?;
+        store
+            .settle_webhook(1, delivery, WebhookDisposition::Applied, now)
+            .await?;
+        assert_eq!(
+            observe_webhook_pulls(&io, &store, &repository, &[], MERGED_RETENTION).await?,
+            signalbox_module_repo_watch_v2::measurements::PollOutcome::Succeeded
+        );
+        assert_eq!(
+            store
+                .ingest_baseline(&repository)
+                .await?
+                .observation
+                .expect("repository observed")
+                .state()
+                .pull_requests()
+                .len(),
+            retained_pulls,
+            "{action}"
+        );
+    }
+    let counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT event_kind, count(*) FROM gh_event GROUP BY event_kind ORDER BY event_kind",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        counts,
+        [
+            (String::from("check_run_completed"), 1),
+            (String::from("checks_completed"), 1),
+            (String::from("labeled"), 1),
+            (String::from("mergeable_state_changed"), 2),
+            (String::from("pull_request_closed"), 1),
+            (String::from("pull_request_opened"), 2),
+            (String::from("review_submitted"), 1),
+            (String::from("thread_opened"), 1),
+            (String::from("thread_resolved"), 1),
+        ]
+    );
+    drop(container);
+    Ok(())
+}
