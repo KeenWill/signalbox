@@ -5569,6 +5569,179 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
+-> Result<(), Box<dyn Error>> {
+    // Only supplies distinct identities for the two model responses.
+    const FIXTURE_SEED: u128 = 0x269_1000;
+    const INPUT_TOKENS: u64 = 141_000;
+    const FIRST_OUTPUT_TOKENS: u64 = 117;
+    const FOLLOWUP_OUTPUT_TOKENS: u64 = 2_012;
+    let (container, pool, _) = migrated_postgres().await?;
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+        FIXTURE_SEED + 6,
+    )));
+    let limits = ToolContinuationUsageLimit::new(target, FastMode::Disabled, 8_192, 200_000);
+    let fixture =
+        checkpoint_restart_model_call_with_limits(&pool, FIXTURE_SEED, false, None, &[limits])
+            .await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(FIXTURE_SEED + 5)),
+        target,
+    )])
+    .expect("fixture target is unique");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([limits]);
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(fixture.session, fixture.call)
+        .await?
+    else {
+        panic!("fixture call authorizes");
+    };
+    let (fixture, repository, _, _) = commit_authorized_tool_batch(
+        FIXTURE_SEED,
+        (fixture, repository, *authorized),
+        &[("current_time", "{}")],
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(INPUT_TOKENS))
+            .with_output_tokens(Some(FIRST_OUTPUT_TOKENS)),
+        None,
+    )
+    .await?;
+    let tools = repository.tool_loop_repository();
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    tools
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tools
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    tools
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new("X".repeat(65_536))
+                            .expect("fixture result is valid"),
+                    ),
+                }),
+        )
+        .await?;
+    let projected: String =
+        sqlx::query_scalar("SELECT context_result_text FROM tool_attempt WHERE attempt_id = $1")
+            .bind(attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(projected.contains("[tool result truncated:"));
+    let continuation = ModelCallId::from_uuid(Uuid::now_v7());
+    let checkpointed = tools
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                continuation,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("fixture has no steering"),
+        )
+        .await?;
+    assert_eq!(
+        checkpointed,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation)
+    );
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(fixture.session, continuation)
+        .await?
+    else {
+        panic!("bounded-result continuation authorizes");
+    };
+    // The fixture provider counts each admitted result byte as one token.
+    let followup_input = INPUT_TOKENS + FIRST_OUTPUT_TOKENS + projected.len() as u64;
+    let (fixture, repository, _, _) = commit_authorized_tool_batch(
+        FIXTURE_SEED + 0x100,
+        (
+            RestartModelCallFixture {
+                call: continuation,
+                ..fixture
+            },
+            repository,
+            *authorized,
+        ),
+        &[("current_time", "{}")],
+        InitialToolApproval::PolicyAuto,
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(followup_input))
+            .with_output_tokens(Some(FOLLOWUP_OUTPUT_TOKENS)),
+        None,
+    )
+    .await?;
+    let tools = repository.tool_loop_repository();
+    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    tools
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tools
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    tools
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::KnownFailed {
+                    error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+                }),
+        )
+        .await?;
+    let following_call = ModelCallId::from_uuid(Uuid::now_v7());
+    let checkpointed = tools
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            continuation,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+                following_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+                ContextFrontierId::from_uuid(Uuid::now_v7()),
+            ),
+            |_| panic!("fixture has no steering"),
+        )
+        .await?;
+    assert_eq!(
+        checkpointed,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(following_call),
+        "a bounded result must leave room to report the following tool's typed failure"
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn source_arguments_do_not_consume_the_result_envelope_allowance()
 -> Result<(), Box<dyn Error>> {
     let small_arguments = "{}";
