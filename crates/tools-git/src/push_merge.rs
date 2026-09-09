@@ -2,10 +2,11 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    path::Path,
     time::Instant,
 };
 
-use git2::{Diff, DiffOptions, ObjectType, Oid, Patch};
+use git2::{Delta, Diff, DiffFindOptions, DiffOptions, ObjectType, Odb, Oid, Patch};
 use serde::Serialize;
 
 use crate::{
@@ -101,9 +102,14 @@ pub(super) fn verify_merge(
         let branch_tree = tree(branch).map_err(repository_failure)?;
         let ancestor_tree = tree(ancestor).map_err(repository_failure)?;
         let mut options = diff_options();
-        let carried = repository
+        let mut carried = repository
             .diff_tree_to_tree(Some(&base_tree), Some(&merge_tree), Some(&mut options))
             .map_err(repository_failure)?;
+        let mut own = repository
+            .diff_tree_to_tree(Some(&ancestor_tree), Some(&branch_tree), Some(&mut options))
+            .map_err(repository_failure)?;
+        detect_renames(&mut carried, &mut source, &database)?;
+        detect_renames(&mut own, &mut source, &database)?;
         for (index, delta) in carried.deltas().enumerate() {
             let path = delta
                 .new_file()
@@ -113,13 +119,17 @@ pub(super) fn verify_merge(
             if dropped.contains_key(path) {
                 continue;
             }
-            let mut options = diff_options();
-            options.disable_pathspec_match(true).pathspec(path);
-            let own = repository
-                .diff_tree_to_tree(Some(&ancestor_tree), Some(&branch_tree), Some(&mut options))
-                .map_err(repository_failure)?;
-            // Diff only touched paths; unchanged fence blobs need not be copied.
-            for delta in std::iter::once(delta).chain(own.deltas()) {
+            let own_index = own.deltas().position(|candidate| {
+                candidate
+                    .new_file()
+                    .path()
+                    .or_else(|| candidate.old_file().path())
+                    == Some(path)
+            });
+            // Capture compared paths only, in addition to the rename candidates.
+            for delta in
+                std::iter::once(delta).chain(own_index.and_then(|index| own.get_delta(index)))
+            {
                 for file in [delta.old_file(), delta.new_file()] {
                     if !file.id().is_zero() && file.mode() != git2::FileMode::Commit {
                         source
@@ -128,10 +138,10 @@ pub(super) fn verify_merge(
                     }
                 }
             }
-            let mut permitted = Vec::new();
-            for index in 0..own.deltas().len() {
-                permitted.extend(hunks(&own, index)?);
-            }
+            let mut permitted = own_index
+                .map(|index| hunks(&own, index))
+                .transpose()?
+                .unwrap_or_default();
             for hunk in hunks(&carried, index)? {
                 if let Some(index) = permitted.iter().position(|own| own == &hunk) {
                     permitted.remove(index);
@@ -149,13 +159,37 @@ pub(super) fn verify_merge(
         Err(GitPushFailure::MergeDroppedBaseChanges(
             dropped
                 .into_iter()
-                .map(|(path, first_dropped_hunk)| DroppedBaseChanges {
-                    file: path.to_string_lossy().into_owned(),
-                    first_dropped_hunk,
+                .map(|(path, first_dropped_hunk)| {
+                    Ok(DroppedBaseChanges {
+                        file: String::from_utf8(crate::diff::quoted_diff_path(b"", &path))
+                            .map_err(repository_failure)?,
+                        first_dropped_hunk,
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, GitPushFailure>>()?,
         ))
     }
+}
+
+fn detect_renames(
+    diff: &mut Diff<'_>,
+    source: &mut ObjectSource,
+    database: &Odb<'_>,
+) -> Result<(), GitPushFailure> {
+    for delta in diff
+        .deltas()
+        .filter(|delta| matches!(delta.status(), Delta::Added | Delta::Deleted))
+    {
+        for file in [delta.old_file(), delta.new_file()] {
+            if !file.id().is_zero() && file.mode() != git2::FileMode::Commit {
+                source
+                    .capture(database, file.id())
+                    .map_err(repository_failure)?;
+            }
+        }
+    }
+    diff.find_similar(Some(DiffFindOptions::new().renames(true)))
+        .map_err(repository_failure)
 }
 
 fn diff_options() -> DiffOptions {
@@ -170,6 +204,21 @@ fn diff_options() -> DiffOptions {
 fn hunks(diff: &Diff<'_>, index: usize) -> Result<Vec<Vec<u8>>, GitPushFailure> {
     let delta = diff.get_delta(index).ok_or(GitPushFailure::Repository)?;
     let mut hunks = Vec::new();
+    if delta.status() == Delta::Renamed {
+        let quoted = |path: Option<&Path>| {
+            path.map(|path| crate::diff::quoted_diff_path(b"", path))
+                .ok_or(GitPushFailure::Repository)
+        };
+        hunks.push(
+            [
+                b"rename ".as_slice(),
+                &quoted(delta.old_file().path())?,
+                b" -> ",
+                &quoted(delta.new_file().path())?,
+            ]
+            .concat(),
+        );
+    }
     if delta.old_file().mode() != delta.new_file().mode() {
         hunks.push(
             format!(
