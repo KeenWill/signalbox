@@ -225,6 +225,26 @@ impl ProcessRunner for CheckoutBarrierRunner {
 #[ignore = "requires disposable PostgreSQL"]
 async fn input_during_checkout_waits_for_provisioned_first_turn_git_tools()
 -> Result<(), Box<dyn Error>> {
+    assert_input_during_checkout_waits(None).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn release_start_during_checkout_cannot_activate_queued_input() -> Result<(), Box<dyn Error>>
+{
+    assert_input_during_checkout_waits(Some(SessionLifecycleOperation::ReleaseStart)).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn release_ownership_during_checkout_cannot_activate_queued_input()
+-> Result<(), Box<dyn Error>> {
+    assert_input_during_checkout_waits(Some(SessionLifecycleOperation::Release)).await
+}
+
+async fn assert_input_during_checkout_waits(
+    early_release: Option<SessionLifecycleOperation>,
+) -> Result<(), Box<dyn Error>> {
     use signalbox_application::{
         EligibilityWorkSource, StartEligibleTurnOutcome, StartEligibleTurnService,
         SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
@@ -258,20 +278,6 @@ async fn input_during_checkout_waits_for_provisioned_first_turn_git_tools()
 
     let mut fixture = CheckoutFixture::new().await?;
     let (catalog, executor) = fixture.daemon_tools()?;
-    let pending = fixture
-        .store
-        .recover_pending_commands(&mut RepositoryWatchCommandCodec)
-        .await?;
-    use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
-    let CommandSubmission::Creation(CreateSessionOutcome::Applied(created)) = fixture
-        .sink
-        .submit(pending[0].command().clone())
-        .await
-        .expect("core creation")
-    else {
-        panic!("dispatch creates a session");
-    };
-    let session = created.session();
     let (nudge, mut work) = InProcessEligibilityWorkSource::new(NoReconciliation);
     fixture.sink.eligibility_nudge = nudge.clone();
     let mut submit = SubmitInputService::new(
@@ -306,6 +312,15 @@ async fn input_during_checkout_waits_for_provisioned_first_turn_git_tools()
         submit_pending_with_runner(&fixture.store, &configuration, &mut fixture.sink, runner);
     let while_cloned = async {
         cloned.notified().await;
+        let session = SessionId::from_uuid(
+            sqlx::query_scalar(
+                "SELECT checkout_session_id FROM dispatch_ledger WHERE command_id = $1",
+            )
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await
+            .expect("session created with provisioning hold"),
+        );
         let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::TurnOrigin(origin),
         )) = submit
@@ -330,6 +345,40 @@ async fn input_during_checkout_waits_for_provisioned_first_turn_git_tools()
         else {
             panic!("input must be accepted while checkout is pending");
         };
+        if let Some(operation) = early_release {
+            use signalbox_domain::{CommandPrincipal, SessionLifecycleCommandResult};
+            use signalbox_persistence::session_lifecycle_command::{
+                SessionLifecycleCommandHandlingOutcome, SessionLifecycleCommandRepository,
+            };
+            let released = SessionLifecycleCommandRepository::new(fixture.core.clone())
+                .handle(
+                    SessionLifecycleCommand::new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        session,
+                        operation,
+                    ),
+                    CommandPrincipal::Operator,
+                )
+                .await
+                .expect("operator release");
+            assert!(matches!(
+                released,
+                SessionLifecycleCommandHandlingOutcome::Recorded(
+                    SessionLifecycleCommandResult::Applied(_)
+                )
+            ));
+            let start_gate_held: bool = sqlx::query_scalar(
+                "SELECT start_gate_held FROM session_lifecycle WHERE session_id = $1",
+            )
+            .bind(session.into_uuid())
+            .fetch_one(&fixture.core)
+            .await
+            .expect("ordinary start gate");
+            assert!(
+                !start_gate_held,
+                "the public command released the ordinary start gate"
+            );
+        }
         assert_eq!(work.next().await.expect("input wake"), session);
         assert_eq!(
             start.execute(session).await.expect("eligibility pass"),
@@ -343,9 +392,9 @@ async fn input_during_checkout_waits_for_provisioned_first_turn_git_tools()
                 .is_none()
         );
         resume.notify_one();
-        origin
+        (session, origin)
     };
-    let (provisioned, origin) = tokio::join!(provisioning, while_cloned);
+    let (provisioned, (session, origin)) = tokio::join!(provisioning, while_cloned);
     provisioned.expect("checkout completes");
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), work.next()).await??,
