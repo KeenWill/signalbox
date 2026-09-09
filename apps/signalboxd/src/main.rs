@@ -2321,7 +2321,11 @@ async fn run_hub(
         );
     }
     let (workflow_shutdown, workflow_shutdown_receiver) = oneshot::channel();
-    let workflow_pool = pool.clone();
+    let workflows = signalboxd::workflows::WorkflowRuntime::new(pool.clone());
+    let process_runtime = match &workflows {
+        Ok((service, _)) => process_runtime.with_workflows(service.clone()),
+        Err(_) => process_runtime,
+    };
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (fenced_pool_floor_shutdown, fenced_pool_floor_shutdown_receiver) = watch::channel(false);
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
@@ -2333,7 +2337,7 @@ async fn run_hub(
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         let result = async {
-            let (_service, workflows) = signalboxd::workflows::WorkflowRuntime::new(workflow_pool)?;
+            let (_service, workflows) = workflows?;
             workflows
                 .run(async {
                     let _ = workflow_shutdown_receiver.await;

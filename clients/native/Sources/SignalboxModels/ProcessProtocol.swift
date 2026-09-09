@@ -1042,6 +1042,10 @@ private struct SignalboxProcessServerWireFrame: Decodable {
 }
 
 public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
+  case programRunCancellationReceipt(commandID: SignalboxCommandID, runID: SignalboxCanonicalUUID, outcome: SignalboxProgramCancellationOutcome)
+  case programRegistered(registrationID: SignalboxCanonicalUUID)
+  case programRunStarted(runID: SignalboxCanonicalUUID, registrationID: SignalboxCanonicalUUID)
+  case programRunRead(runID: SignalboxCanonicalUUID, run: SignalboxProgramRun)
   case sessionCreated(
     sessionID: SignalboxCanonicalUUID,
     modelSettings: SignalboxModelSettingsSnapshot
@@ -1217,6 +1221,21 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .modelAliasesEnd(aliasCount: try decoder.decode("alias_count"))
       case "credential_pool_policy":
         self = .credentialPoolPolicy(try SignalboxCredentialPoolPolicy(from: decoder))
+      case "program_run_cancellation_receipt":
+        try tagged.rejectUnadmittedFields(["type", "command_id", "run_id", "outcome"], decoder: decoder)
+        self = .programRunCancellationReceipt(
+          commandID: try decoder.decode("command_id"), runID: try decoder.decode("run_id"),
+          outcome: try decoder.decode("outcome"))
+      case "program_registered":
+        try tagged.rejectUnadmittedFields(["type", "registration_id"], decoder: decoder)
+        self = .programRegistered(registrationID: try decoder.decode("registration_id"))
+      case "program_run_started":
+        try tagged.rejectUnadmittedFields(["type", "run_id", "registration_id"], decoder: decoder)
+        self = .programRunStarted(
+          runID: try decoder.decode("run_id"), registrationID: try decoder.decode("registration_id"))
+      case "program_run_read":
+        try tagged.rejectUnadmittedFields(["type", "run_id", "run"], decoder: decoder)
+        self = .programRunRead(runID: try decoder.decode("run_id"), run: try decoder.decode("run"))
       case "transcript_snapshot_start":
         self = .transcriptSnapshotStart(try SignalboxTranscriptSnapshotBoundary(from: decoder))
       case "transcript_turn":
@@ -1300,6 +1319,110 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
     }
   }
 
+}
+
+public enum SignalboxProgramCancellationOutcome: Decodable, Equatable, Sendable {
+  case applied
+  case notFound
+  case alreadyCancelled
+  case alreadyFaulted
+  case alreadySucceeded(result: [UInt8], resultExtent: SignalboxProgramByteExtent)
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxUntaggedPayload(from: decoder)
+    let kind: String = try decoder.decode("kind")
+    switch kind {
+    case "not_found":
+      try tagged.rejectUnadmittedFields(["kind"], decoder: decoder)
+      self = .notFound
+      return
+    case "applied":
+      try tagged.rejectUnadmittedFields(["kind", "terminal_state", "result"], decoder: decoder)
+      if tagged.payload["terminal_state"] == .string("cancelled"), tagged.payload["result"] == .null {
+        self = .applied
+        return
+      }
+    case "already_terminal":
+      let state: String = try decoder.decode("terminal_state")
+      switch state {
+      case "succeeded":
+        try tagged.rejectUnadmittedFields(["kind", "terminal_state", "result", "result_extent"], decoder: decoder)
+        self = .alreadySucceeded(result: try decoder.decode("result"), resultExtent: try decoder.decode("result_extent"))
+        return
+      case "cancelled", "faulted":
+        try tagged.rejectUnadmittedFields(["kind", "terminal_state", "result"], decoder: decoder)
+        if tagged.payload["result"] == .null {
+          self = state == "cancelled" ? .alreadyCancelled : .alreadyFaulted
+          return
+        }
+      default: break
+      }
+    default: break
+    }
+    throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid program cancellation outcome."))
+  }
+}
+
+public enum SignalboxProgramByteExtent: Decodable, Equatable, Sendable {
+  case complete
+  case truncated(totalBytes: UInt64)
+
+  public init(from decoder: Decoder) throws {
+    let kind: String = try decoder.decode("kind")
+    let tagged = try SignalboxUntaggedPayload(from: decoder)
+    switch kind {
+    case "complete":
+      try tagged.rejectUnadmittedFields(["kind"], decoder: decoder)
+      self = .complete
+    case "truncated":
+      try tagged.rejectUnadmittedFields(["kind", "total_bytes"], decoder: decoder)
+      self = .truncated(totalBytes: try decoder.decode("total_bytes"))
+    default:
+      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown program byte extent."))
+    }
+  }
+}
+
+public struct SignalboxProgramRun: Decodable, Equatable, Sendable {
+  public let registrationID: SignalboxCanonicalUUID
+  public let input: [UInt8]
+  public let inputExtent: SignalboxProgramByteExtent
+  public let outcome: SignalboxProgramRunState
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxUntaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(["registration_id", "input", "input_extent", "outcome"], decoder: decoder)
+    registrationID = try decoder.decode("registration_id")
+    input = try decoder.decode("input")
+    inputExtent = try decoder.decode("input_extent")
+    outcome = try decoder.decode("outcome")
+  }
+}
+
+public enum SignalboxProgramRunState: Decodable, Equatable, Sendable {
+  case running
+  case cancelled
+  case faulted
+  case succeeded(result: [UInt8], resultExtent: SignalboxProgramByteExtent)
+
+  public init(from decoder: Decoder) throws {
+    let state: String = try decoder.decode("state")
+    let tagged = try SignalboxUntaggedPayload(from: decoder)
+    switch state {
+    case "running", "cancelled", "faulted":
+      try tagged.rejectUnadmittedFields(["state"], decoder: decoder)
+      switch state {
+      case "running": self = .running
+      case "cancelled": self = .cancelled
+      default: self = .faulted
+      }
+    case "succeeded":
+      try tagged.rejectUnadmittedFields(["state", "result", "result_extent"], decoder: decoder)
+      self = .succeeded(result: try decoder.decode("result"), resultExtent: try decoder.decode("result_extent"))
+    default:
+      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown program run state."))
+    }
+  }
 }
 
 public struct SignalboxToolRequestDecided: Decodable, Equatable, Sendable {

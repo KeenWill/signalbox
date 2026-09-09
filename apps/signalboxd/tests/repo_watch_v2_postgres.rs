@@ -4675,6 +4675,219 @@ async fn failed_subject_keeps_completed_poll_stages() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+/// An open PR with one identified review; successive identities are new review events.
+fn goal_review_observation(
+    repository: &RepositorySlug,
+    review: u64,
+) -> signalbox_module_repo_watch_v2::ingest::RepositoryObservation {
+    let mut observed = dispatch_observation(repository, 1, OffsetDateTime::now_utc());
+    let pull = ComparisonPullRequestState::try_new(RepoWatchPullRequestStateInput {
+        context: PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(NonZeroU64::MIN),
+            head_sha: observed.default_head.clone(),
+            head_repository: repository.clone(),
+            base_branch: observed.default_branch.clone(),
+            head_branch: BranchName::try_new("fix-review".to_owned()).expect("fixture branch"),
+            title: PullRequestTitle::try_new("Review completion".to_owned())
+                .expect("fixture title"),
+            body: PullRequestBody::try_new(String::new()).expect("empty fixture body"),
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        }),
+        lifecycle: RepoWatchPullRequestLifecycle::Open,
+        mergeable_state: MergeableState::Unknown,
+        completed_check_suites: Vec::new(),
+        completed_check_runs: Vec::new(),
+        reviews: vec![RepoWatchReviewObservation::new(
+            GitHubObjectId::new(NonZeroU64::new(review).expect("positive review identity")),
+            RepoWatchAuthorLogin::try_new("reviewer".to_owned()).expect("fixture author"),
+            Some(ReviewState::ChangesRequested),
+            observed.default_head.clone(),
+        )],
+        threads: Vec::new(),
+        reactions: Vec::new(),
+    })
+    .expect("fixture pull request");
+    observed.observation = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull],
+            branch_heads: Vec::new(),
+            workflow_runs: Vec::new(),
+        })
+        .expect("fixture repository"),
+    );
+    observed
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn achieved_goal_rearms_on_a_new_review_event() -> Result<(), Box<dyn Error>> {
+    use signalbox_session_ownership::{
+        GoalChange, GoalEventKind, LifecycleActor, LifecycleEventKind, SessionStateKind,
+        SessionTerminal, SessionTerminalOutcome,
+    };
+    let (_container, core, url) = postgres().await?;
+    migrate(&core).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let source = signalbox_session_ownership::LifecycleEventSource::new(core.clone());
+    let repository = RepositorySlug::try_new("dispatch/project".to_owned())?;
+    let now = OffsetDateTime::now_utc();
+    let initial = goal_review_observation(&repository, 1);
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &initial,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new("reviews".to_owned())?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::ReviewSubmitted],
+            repository: Some(repository.clone()),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new("watch".to_owned())?,
+        }],
+        RepoWatchSingletonScope::PullRequest,
+        Duration::ZERO,
+    )?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            now,
+        )
+        .await?;
+    let mut ids = FixedDispatchIds {
+        value: 10001,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory {
+        next_command: 20001,
+        model: 30001,
+    };
+    let mut codec = FixtureCommandCodec;
+    let review = goal_review_observation(&repository, 2);
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &review,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    assert!(
+        store
+            .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+            .await
+            .expect("review dispatch")
+    );
+    let pending = store.recover_pending_commands(&mut codec).await?;
+    assert_eq!(pending.len(), 1);
+    let dispatched = pending[0].dispatch();
+    let session = SessionId::from_uuid(Uuid::now_v7());
+    store
+        .react_to_lifecycle(
+            &LifecycleEvent::session_created_for_test(
+                1,
+                now,
+                session,
+                SessionCreated {
+                    cause: SessionCreationCause::ModuleDispatched {
+                        dispatch: ModuleDispatch::RepositoryWatch {
+                            dispatch: dispatched,
+                        },
+                    },
+                    ownership: SessionOwnership::Owned,
+                },
+            ),
+            &mut factory,
+            &mut codec,
+            &source,
+        )
+        .await?;
+    store
+        .react_to_lifecycle(
+            &LifecycleEvent::for_test(
+                2,
+                now,
+                Some(session),
+                LifecycleEventKind::GoalChanged(GoalChange {
+                    event_ordinal: 2,
+                    generation: 1,
+                    kind: GoalEventKind::Achieved,
+                }),
+            ),
+            &mut factory,
+            &mut codec,
+            &source,
+        )
+        .await?;
+    assert!(
+        store.recover_pending_commands(&mut codec).await?.is_empty(),
+        "achievement must not issue a sticky stop"
+    );
+    store
+        .react_to_lifecycle(
+            &LifecycleEvent::for_test(
+                3,
+                now,
+                Some(session),
+                LifecycleEventKind::SessionTerminal(SessionTerminal {
+                    prior: SessionStateKind::Active,
+                    outcome: SessionTerminalOutcome::AchievedVerified,
+                    standing: None,
+                    actor: LifecycleActor::Core {
+                        agency: signalbox_domain::CoreAgency::Daemon,
+                    },
+                }),
+            ),
+            &mut factory,
+            &mut codec,
+            &source,
+        )
+        .await?;
+    assert!(
+        store.next_rule_event(&repository, &rule).await?.is_none(),
+        "completion itself supplies no new task"
+    );
+    let review = goal_review_observation(&repository, 3);
+    store
+        .ingest_observation(
+            &store.ingest_baseline(&repository).await?,
+            &review,
+            EventProducer::Poll,
+            MERGED_RETENTION,
+        )
+        .await?;
+    assert!(
+        store
+            .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+            .await
+            .expect("new review re-arms pursuit")
+    );
+    let pending = store.recover_pending_commands(&mut codec).await?;
+    assert_eq!(pending.len(), 1);
+    assert_ne!(pending[0].dispatch(), dispatched);
+    assert!(matches!(
+        pending[0].command().clone().into_payload(),
+        SessionCommandPayload::CreateSession(_)
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
 async fn labeled_webhook_dispatches_without_a_poll() -> Result<(), Box<dyn Error>> {

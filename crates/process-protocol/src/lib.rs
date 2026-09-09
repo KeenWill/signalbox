@@ -55,7 +55,9 @@ pub enum SessionWorkspaceRootKind {
 mod tests;
 
 pub use program::{
-    ProgramRunCancellationOutcome, ProgramRunCancelledState, ProgramRunTerminalState,
+    ProgramByteExtent, ProgramExecutableInput, ProgramGrant, ProgramRegistrationInput, ProgramRun,
+    ProgramRunCancellationOutcome, ProgramRunCancelledState, ProgramRunState,
+    ProgramRunTerminalState,
 };
 
 mod credential_pool;

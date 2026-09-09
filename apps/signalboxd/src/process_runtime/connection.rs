@@ -2,6 +2,7 @@ use super::client_io::ArrivalReader;
 use super::*;
 
 pub(super) struct ConnectionDependencies {
+    pub(super) workflows: Option<crate::workflows::WorkflowService>,
     pub(super) metrics: Option<crate::telemetry::TelemetryMetrics>,
     pub(super) configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     pub(super) recovery_reporter: Option<FatalRecoveryReporter>,
@@ -58,6 +59,7 @@ pub(super) async fn serve_connections(
         imported_storage,
     );
     let services = ConnectionServices {
+        workflows: dependencies.workflows,
         configuration_reload: dependencies.configuration_reload,
         recovery_reporter: dependencies.recovery_reporter,
         oauth_service: dependencies.oauth_service,
@@ -624,6 +626,9 @@ pub(super) fn conversation_import_request_requires_permit(
         | ClientRequest::ListCredentialExclusions { .. }
         | ClientRequest::ReadCredentialPoolPolicy { .. }
         | ClientRequest::ReadRunnerStatus { .. }
+        | ClientRequest::RegisterProgram { .. }
+        | ClientRequest::StartProgramRun { .. }
+        | ClientRequest::ReadProgramRun { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReadDeploymentLimits {}
@@ -826,6 +831,7 @@ impl SnapshotReaderAdmission {
         match request {
             ClientRequest::ListSessions {}
             | ClientRequest::ReadOperatorStatus {}
+            | ClientRequest::ReadProgramRun { .. }
             | ClientRequest::ReadRunnerStatus { .. }
             | ClientRequest::ReadGoal { .. }
             | ClientRequest::ReadTranscript { .. }
@@ -851,6 +857,8 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ListTemplates {}
             | ClientRequest::ListCredentialExclusions { .. }
             | ClientRequest::ReadCredentialPoolPolicy { .. }
+        | ClientRequest::RegisterProgram { .. }
+        | ClientRequest::StartProgramRun { .. }
         | ClientRequest::CancelProgramRun { .. }
         | ClientRequest::ClearCredentialExclusion { .. }
         | ClientRequest::ReloadConfiguration { .. }

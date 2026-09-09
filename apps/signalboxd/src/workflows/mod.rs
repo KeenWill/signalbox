@@ -24,8 +24,8 @@ pub const CLOCK_ENTRY: &str = "clock";
 /// Revision of the pilot's big-endian u64 input and input/time result.
 pub const CLOCK_REVISION: &str = "1";
 
-/// Internal user-authorized admission; no process-protocol launch surface.
-#[derive(Clone)]
+/// User-authorized admission to the daemon-owned runner.
+#[derive(Clone, Debug)]
 pub struct WorkflowService {
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedSender<ProgramRunId>,
