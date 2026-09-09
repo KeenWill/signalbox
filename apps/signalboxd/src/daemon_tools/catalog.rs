@@ -108,6 +108,12 @@ impl DaemonToolCatalog {
             let Some(entry) = self.entries.get_mut(&name) else {
                 return Err(ConfiguredApprovalPostureError::UnknownTool { name });
             };
+            let posture = match (name.as_str(), posture) {
+                ("web_fetch" | "web_search", ToolApprovalPosture::Auto) => {
+                    ToolApprovalPosture::Delegated
+                }
+                _ => posture,
+            };
             entry.definition = entry.definition.clone().with_approval_posture(posture);
         }
         Ok(self)

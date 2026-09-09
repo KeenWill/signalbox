@@ -12,15 +12,12 @@ pub const WEB_FETCH_NAME: &str;
 
 ```rust
 pub struct WebFetchEgressPolicy {/* private */}
-// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
 impl WebFetchEgressPolicy {
     pub const fn deny_all() -> Self;
     pub fn try_from_allowed_origins(
         origins: impl collect::IntoIterator<Item = string::String>,
     ) -> result::Result<Self, WebFetchEgressPolicyError>;
-}
-impl default::Default for WebFetchEgressPolicy {
-    fn default() -> Self;
 }
 ```
 

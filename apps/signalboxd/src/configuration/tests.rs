@@ -6249,6 +6249,7 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
         );
     }
 }
+
 #[test]
 fn repository_watch_and_tools_share_the_configured_app_cache() {
     let source = configuration_with_repository_watch().replace(
@@ -6301,4 +6302,52 @@ fn declared_github_token_file_preserves_polling_credential_isolation() {
     );
     let configuration = HubModelConfiguration::parse(&source).expect("token-file profile parses");
     assert!(configuration.github_tool_credential_conflicts(Path::new("/unused/environment-token")));
+}
+
+#[test]
+fn checked_in_example_admits_unlisted_web_origins() {
+    use signalbox_application::ToolCatalog;
+    let configuration = super::checked_in_example_configuration().expect("example parses");
+    let (catalog, _) = signalbox_tools_web::WebFetchTool::try_new_production(
+        configuration.web_fetch_egress_policy(),
+    )
+    .expect("web transport constructs")
+    .into_parts();
+    let name =
+        signalbox_domain::ToolName::try_new(String::from(WEB_FETCH_NAME)).expect("valid name");
+    let arguments = signalbox_domain::NormalizedToolArguments::try_from_provider_text(
+        String::from(r#"{"url":"https://unlisted.example/documentation"}"#),
+    )
+    .expect("valid arguments");
+    assert_eq!(catalog.validate_arguments(&name, &arguments), Ok(()));
+}
+
+#[test]
+fn human_approval_wait_accepts_a_duration_or_none() {
+    let timed = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"2m\"\n"
+    ))
+    .expect("duration is valid");
+    assert_eq!(
+        timed.approval_wait_timeout(),
+        Some(Duration::from_secs(120))
+    );
+    let unbounded = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"none\"\n"
+    ))
+    .expect("none is valid");
+    assert_eq!(unbounded.approval_wait_timeout(), None);
+}
+
+#[test]
+fn human_approval_wait_rejects_zero_and_invalid_durations() {
+    for value in ["0s", "-1s", "forever"] {
+        assert!(
+            HubModelConfiguration::parse(&format!(
+                "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"{value}\"\n"
+            ))
+            .is_err(),
+            "{value}"
+        );
+    }
 }
