@@ -79,7 +79,7 @@ rust_library(
         "//crates/conversation-import-claude-code:signalbox_conversation_import_claude_code",
         "//crates/conversation-import-codex:signalbox_conversation_import_codex",
         "//crates/domain:signalbox_domain",
-    "//crates/github-transport:signalbox_github_transport",
+        "//crates/github-transport:signalbox_github_transport",
         "//crates/model-provider-runtime:signalbox_model_provider_runtime",
         "//crates/model-runtime:signalbox_model_runtime",
         "//crates/model-runtime-anthropic:signalbox_model_runtime_anthropic",
