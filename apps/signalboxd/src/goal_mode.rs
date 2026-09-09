@@ -383,21 +383,23 @@ impl ToolExecutor for GoalDeclarationExecutor {
                         detail: Some(self.rejected.clone()),
                     }));
                 };
-                let verdict = match self
-                    .repository
-                    .load_finish_condition(correlation.session())
-                    .await
-                    .map_err(GoalDeclarationExecutorError::Repository)?
-                {
-                    None => FinishCheckVerdict::Unverified,
-                    Some(condition) => {
-                        self.finish_check
-                            .check(correlation.session(), &condition, &report)
-                            .await
-                    }
-                };
+                let finish_check = Arc::clone(&self.finish_check);
                 self.repository
-                    .declare_achieved(correlation.session(), report, provenance, verdict)
+                    .declare_achieved(
+                        correlation.session(),
+                        report,
+                        provenance,
+                        |condition, report| async move {
+                            match condition {
+                                None => FinishCheckVerdict::Unverified,
+                                Some(condition) => {
+                                    finish_check
+                                        .check(correlation.session(), &condition, &report)
+                                        .await
+                                }
+                            }
+                        },
+                    )
                     .await
             }
             CheckedGoalDeclaration::Blocked { reason } => {
@@ -645,6 +647,13 @@ impl PostgresGoalPassDisposition {
             }));
         }
         Ok(count)
+    }
+
+    /// Nudges the ordinary goal disposition and arms any execution-failure block
+    /// when ownership is adopted.
+    pub fn arm_adopted_goal_resumption(&self, session: SessionId) {
+        let _ = self.eligibility_nudge.nudge(session);
+        self.arm_blocked_goal_resumption(session);
     }
 
     /// Arms automatic resumption for the execution-failure block an adopted session

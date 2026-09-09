@@ -116,6 +116,9 @@ the session is adopted, the daemon appends an effective-need overlay naming the
 scheduled resumption under the session lock and arms it; the blocked event
 itself is unchanged.
 
+Adoption of a pursuing goal reconciles its completed turn and queues the next
+turn through the ordinary completion path.
+
 The automatic-resumption run is the trailing alternation of execution-failure
 blocks and the resumptions that answered them; every other event ends it, and a
 resume carrying any identity other than the derived one is an operator's and
@@ -150,11 +153,13 @@ A synthesized statement's template is system-authored, but the identifiers it
 renders come from the watched repository, so a consumer that places it in a
 model prompt quotes it as it quotes any session text.
 
-A model declaration of achievement is gated on the session's finish check: a
-failing verdict appends a block for the failed check with the check's result as
-its need, a passing verdict commits a verified achievement to the session's
-terminal handoff in the same transaction, and a declaration no check verifies
-commits a declared achievement.
+For a model declaration, the session lock covers transition validation, reading
+and evaluating the finish condition, and committing its result. Rejected
+declarations do not run the finish check. A model declaration of achievement is
+gated on the session's finish check: a failing verdict appends a block for the
+failed check with the check's result as its need, a passing verdict commits a
+verified achievement to the session's terminal handoff in the same transaction,
+and a declaration no check verifies commits a declared achievement.
 
 The command claim and replay protocol and the attribution rule are stated on
 [identity and commands](identity-and-commands.md), the lock order on

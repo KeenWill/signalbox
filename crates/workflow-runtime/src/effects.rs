@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, future::Future, pin::Pin};
 use deno_core::serde_json;
 use serde::Deserialize;
 use signalbox_domain::{
-    DeliveryKind, EffectRequest, InlineFramePayload, JournalFrame, ProgramCapability,
+    DeliveryKind, EffectRequest, InlineFramePayload, JournalFrame, ProgramCapability, ProgramFault,
     ProgramRegistrationId, ProgramRunId, RejectReason, RequestFrame, RequestKind, RequestOrdinal,
     program_registration::{ProgramExecutable, ProgramGrants, ProgramRegistrationRequest},
 };
@@ -291,22 +291,27 @@ impl<P, E> GrantedDeliveries<'_, P, E> {
                 .registrations
                 .register_child(self.run, registration_id, input)
                 .await
-                .map_err(registration_failure)?,
+                .map(Some),
             EffectAttempt::Recovered => {
-                let Some(registration) = self
-                    .registrations
-                    .find(&input.into_content())
+                self.registrations
+                    .find(registration_id, &input.into_content())
                     .await
-                    .map_err(registration_failure)?
-                    .filter(|registration| registration.id == registration_id)
-                else {
-                    return Ok(DeliveryKind::Answer {
-                        resolves: frame.ordinal(),
-                        payload: ambiguous_answer(),
-                    });
-                };
-                registration
             }
+        };
+        let registration = match registration {
+            Ok(Some(registration)) => registration,
+            Ok(None) => {
+                return Ok(DeliveryKind::Answer {
+                    resolves: frame.ordinal(),
+                    payload: ambiguous_answer(),
+                });
+            }
+            Err(error @ ProgramRegistrationError::RegistrationConflict { .. }) => {
+                return Ok(DeliveryKind::Fault(ProgramFault::ProgramError(
+                    InlineFramePayload::new(error.to_string().into_bytes()),
+                )));
+            }
+            Err(error) => return Err(registration_failure(error)),
         };
         let payload = serde_json::to_vec(
             &serde_json::json!({"registration": registration.id.into_uuid().to_string()}),

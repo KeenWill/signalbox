@@ -15,7 +15,7 @@ use std::{
     future::{Future, poll_fn},
     pin::Pin,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex, Weak},
     task::Poll,
 };
 
@@ -233,14 +233,43 @@ impl Error for WorkflowHostProtocolError {}
 pub struct WorkflowHost {
     journal: ProgramJournalRepository,
     native_catalog: Option<Arc<native::NativeCatalog>>,
+    interrupts: Arc<Mutex<IsolateInterrupts>>,
+}
+
+#[derive(Debug, Default)]
+struct IsolateInterrupts {
+    stopped: bool,
+    handles: Vec<Weak<deno_core::v8::IsolateHandle>>,
 }
 
 impl WorkflowHost {
-    pub const fn new(journal: ProgramJournalRepository) -> Self {
+    pub fn new(journal: ProgramJournalRepository) -> Self {
         Self {
             journal,
             native_catalog: None,
+            interrupts: Arc::default(),
         }
+    }
+
+    /// Permanently interrupts JavaScript execution on this host and its clones.
+    /// May be called from another thread, including while an artifact does not yield.
+    pub fn interrupt(&self) {
+        let mut interrupts = self
+            .interrupts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        interrupts.stopped = true;
+        for handle in interrupts.handles.iter().filter_map(Weak::upgrade) {
+            handle.terminate_execution();
+        }
+    }
+
+    /// Whether this host's JavaScript execution has been interrupted for shutdown.
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stopped
     }
 
     /// Supplies the compiled entries available in this executing binary.
@@ -310,6 +339,22 @@ impl WorkflowHost {
 
         let (request_sender, mut request_receiver) = mpsc::unbounded_channel();
         let (mut runtime, module_loader) = isolate(request_sender)?;
+        // Publish before user code; the stop flag also covers concurrent creation.
+        let _interrupt = {
+            let handle = Arc::new(runtime.v8_isolate().thread_safe_handle());
+            let mut interrupts = self
+                .interrupts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            interrupts
+                .handles
+                .retain(|handle| handle.strong_count() > 0);
+            if interrupts.stopped {
+                handle.terminate_execution();
+            }
+            interrupts.handles.push(Arc::downgrade(&handle));
+            handle
+        };
         let sdk_specifier = ModuleSpecifier::parse(PROGRAM_SDK_PRELOAD_SPECIFIER)
             .map_err(JsErrorBox::from_err)
             .map_err(deno_core::error::CoreError::from)?;

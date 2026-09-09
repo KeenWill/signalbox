@@ -56,7 +56,10 @@ ungranted requests receive a journaled refusal before any executor acts.
 Recovery first adopts a proven durable outcome, reissues only operations
 declared idempotent, and otherwise journals an ambiguous answer. The register
 executor checks child-grant attenuation and adopts a matching immutable
-registration after a lost answer.
+registration after a lost answer. A recovered request that conflicts at either
+the registration identity or name/revision records the same `ProgramError` as a
+live conflict. If neither key is registered, recovery journals an ambiguous
+answer.
 
 `SessionEffects` composes host-side session creation and input services.
 Unsupported operations and invalid session requests receive a journaled refusal.
@@ -94,6 +97,26 @@ completion prevents success; after accepted success it records
 `already_terminal` with state `succeeded` and the retained result bytes.
 Cancelled and faulted receipts carry a null result. Equal cancellation retries
 replay their recorded outcome without appending frames.
+
+## Daemon runner
+
+The fenced daemon owns one local workflow runner. Internal registration and
+start admission retain executable identity, grants and exact input before waking
+it. Startup resumes registered runs without a terminal outcome, and an active
+run has one attempt at a time. Shutdown interrupts non-yielding JavaScript and
+drops attempts; restart replays the retained requests and deliveries. JavaScript
+loading or execution errors, stalled programs, child registration conflicts and
+unavailable granted effects record a per-run `ProgramError` fault; other runs
+continue and restart retains that outcome. Recovery retries an unanswered
+unavailable effect into the same fault. A concurrent terminal outcome is
+preserved.
+
+The Linux compiled catalog includes `clock` revision `1`: its input is a
+big-endian u64, and its result concatenates that input and a journaled
+big-endian u64 Unix time in seconds. The runner resolves admitted JavaScript
+artifacts from their registrations without requiring a native catalog.
+Registration effects and the clock are composed; other effects and durable waits
+are not composed. There is no public launch command.
 
 ## Native programs
 
