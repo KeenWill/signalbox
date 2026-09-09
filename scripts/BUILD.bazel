@@ -9,7 +9,7 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
     )
     for checker in [
         "check_migration_versions",
-        "check_ownership_seam",
+        "check_session_ownership",
     ]
 ]
 
@@ -58,7 +58,7 @@ py_library(
     )
     for checker in [
         "check_migration_versions",
-        "check_ownership_seam",
+        "check_session_ownership",
     ]
 ]
 

@@ -18,7 +18,7 @@ crates = [
     "signalbox-model-runtime-claude-cli",
     "signalbox-model-runtime-codex-cli",
     "signalbox-model-runtime-openai",
-    "signalbox-ownership-seam",
+    "signalbox-session-ownership",
     "signalbox-persistence",
     "signalbox-process-protocol",
     "signalbox-workflow-runtime",
