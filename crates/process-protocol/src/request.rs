@@ -67,6 +67,19 @@ pub enum ClientRequest {
         command_id: CommandId,
         mint_id: CanonicalUuid,
     },
+    /// Register exact executable content under a caller-supplied immutable identity.
+    RegisterProgram {
+        registration_id: CanonicalUuid,
+        registration: crate::ProgramRegistrationInput,
+    },
+    /// Admit immutable input before waking the daemon workflow runner.
+    StartProgramRun {
+        run_id: CanonicalUuid,
+        registration_id: CanonicalUuid,
+        input: Vec<u8>,
+    },
+    /// Read retained input and outcome without executing the program.
+    ReadProgramRun { run_id: CanonicalUuid },
     /// Cancel a retained program run through its journal.
     CancelProgramRun {
         command_id: CommandId,
@@ -894,6 +907,9 @@ impl ClientRequest {
             | Self::DecideToolRequest { .. }
             | Self::ReadCredentialPoolPolicy { .. }
             | Self::CancelProgramRun { .. }
+            | Self::RegisterProgram { .. }
+            | Self::StartProgramRun { .. }
+            | Self::ReadProgramRun { .. }
             | Self::OverrideDeniedToolRequest { .. } => {}
         }
         match self {

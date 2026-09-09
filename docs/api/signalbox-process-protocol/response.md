@@ -92,6 +92,17 @@ pub enum ServerMessage {
         command_id: CommandId,
         withdrawal_id: CanonicalUuid,
     },
+    ProgramRegistered {
+        registration_id: CanonicalUuid,
+    },
+    ProgramRunStarted {
+        run_id: CanonicalUuid,
+        registration_id: CanonicalUuid,
+    },
+    ProgramRunRead {
+        run_id: CanonicalUuid,
+        run: ProgramRun,
+    },
     ProgramRunCancellationReceipt {
         command_id: CommandId,
         run_id: CanonicalUuid,

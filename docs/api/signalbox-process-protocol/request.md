@@ -29,6 +29,18 @@ pub enum ClientRequest {
         command_id: CommandId,
         mint_id: CanonicalUuid,
     },
+    RegisterProgram {
+        registration_id: CanonicalUuid,
+        registration: ProgramRegistrationInput,
+    },
+    StartProgramRun {
+        run_id: CanonicalUuid,
+        registration_id: CanonicalUuid,
+        input: vec::Vec<u8>,
+    },
+    ReadProgramRun {
+        run_id: CanonicalUuid,
+    },
     CancelProgramRun {
         command_id: CommandId,
         run_id: CanonicalUuid,
