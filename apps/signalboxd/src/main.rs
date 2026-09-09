@@ -1649,6 +1649,7 @@ async fn run_hub(
             tool_configuration.exec_supervisor_executable(),
             tool_configuration.cargo_registry_cache(),
             tool_configuration.sandbox(),
+            tool_configuration.sandboxed_exec_timeout_bound(),
             model_configuration.web_fetch_egress_policy(),
         ),
         None => DaemonTools::try_new_without_tool_mappings(
