@@ -4407,6 +4407,24 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testDefaultsRefreshClearsPerCallChoicesForThePreviousModel() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let refreshed = try ProcessSubmissionFixture.refreshedSession(from: session)
+    XCTAssertNotEqual(session.modelSelection, refreshed.modelSelection)
+    let service = DefaultsMismatchThenAcceptingProcessService(refreshed: refreshed)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { service }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+    viewModel.perCallSettings.reasoningLevel = .value(.high)
+
+    await viewModel.send()
+
+    XCTAssertEqual(viewModel.session.modelSelection, refreshed.modelSelection)
+    XCTAssertEqual(viewModel.perCallSettings, .inheritAll)
+  }
+
+  @MainActor
   func testDefaultsMismatchRefreshesTheNextSubmissionEpoch() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -4808,8 +4826,14 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(receipt.termination?.descendantCount.rawValue, UInt64.max)
   }
 
-  func testPresentTerminationMetadataCannotBeNull() throws {
-    XCTAssertThrowsError(try ProcessDriverFixture.inputSubmitted(terminationJSON: "null"))
+  func testNullTerminationMetadataIsRejectedAsAnUnknownReceipt() throws {
+    let frame = try ProcessDriverFixture.inputSubmitted(terminationJSON: "null")
+    guard case .unknown(let kind, let payload, let diagnostic) = frame.message else {
+      return XCTFail("A null termination must not decode as an accepted receipt.")
+    }
+    XCTAssertEqual(kind, "input_submitted")
+    XCTAssertEqual(payload["termination"], .null)
+    XCTAssertNotNil(diagnostic)
   }
 
   func testOrdinarySubmissionRejectsTerminationMetadata() async throws {
@@ -5638,14 +5662,16 @@ private struct RejectingProcessService: SignalboxProcessServiceProtocol {
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     SignalboxPreparedInputSubmission(
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -5687,7 +5713,8 @@ private actor UpdateEmittingProcessService: SignalboxProcessServiceProtocol {
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     try ProcessSubmissionFixture.preparedSubmission()
   }
@@ -5755,7 +5782,8 @@ private actor SuspendedConnectionProcessService: SignalboxProcessServiceProtocol
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     try ProcessSubmissionFixture.preparedSubmission()
   }
@@ -5825,7 +5853,8 @@ private actor SuspendedSessionListProcessService: SignalboxProcessServiceProtoco
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     try ProcessSubmissionFixture.preparedSubmission()
   }
@@ -5907,7 +5936,8 @@ private actor SuspendedArchiveProcessService: SignalboxProcessServiceProtocol {
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     try ProcessSubmissionFixture.preparedSubmission()
   }
@@ -5953,7 +5983,8 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     let commandID =
       if ProcessSubmissionFixture.usesReplacementCommand(for: content) {
@@ -5966,7 +5997,8 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
       sessionID: session.id,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -6009,7 +6041,8 @@ private actor AmbiguousThenAcceptingReconciliationProcessService: SignalboxProce
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     try ProcessSubmissionFixture.preparedSubmission()
   }
@@ -6023,7 +6056,8 @@ private actor AmbiguousThenAcceptingReconciliationProcessService: SignalboxProce
   func prepareTurnReconciliation(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnReconciliation {
     SignalboxPreparedTurnReconciliation(
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
@@ -6031,7 +6065,8 @@ private actor AmbiguousThenAcceptingReconciliationProcessService: SignalboxProce
       activeTurnID: activeTurnID,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -6076,7 +6111,8 @@ private actor AmbiguousThenAcceptingStopProcessService: SignalboxProcessServiceP
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     try ProcessSubmissionFixture.preparedSubmission()
   }
@@ -6090,7 +6126,8 @@ private actor AmbiguousThenAcceptingStopProcessService: SignalboxProcessServiceP
   func prepareTurnStop(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnStop {
     SignalboxPreparedTurnStop(
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
@@ -6098,7 +6135,8 @@ private actor AmbiguousThenAcceptingStopProcessService: SignalboxProcessServiceP
       activeTurnID: activeTurnID,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -6153,7 +6191,8 @@ private actor AmbiguousThenAcceptingToolDecisionProcessService:
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     try ProcessSubmissionFixture.preparedSubmission()
   }
@@ -6266,14 +6305,16 @@ private actor CancellationThenAcceptingProcessService: SignalboxProcessServicePr
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     SignalboxPreparedInputSubmission(
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -6313,14 +6354,16 @@ private actor ImmediateAcceptingProcessService: SignalboxProcessServiceProtocol 
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     SignalboxPreparedInputSubmission(
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -6334,7 +6377,8 @@ private actor ImmediateAcceptingProcessService: SignalboxProcessServiceProtocol 
   func prepareTurnStop(
     session: SignalboxProcessSession,
     activeTurnID: SignalboxCanonicalUUID,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedTurnStop {
     SignalboxPreparedTurnStop(
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
@@ -6342,7 +6386,8 @@ private actor ImmediateAcceptingProcessService: SignalboxProcessServiceProtocol 
       activeTurnID: activeTurnID,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -6384,7 +6429,8 @@ private actor DefaultsMismatchThenAcceptingProcessService: SignalboxProcessServi
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     preparedVersions.append(session.defaultsVersion)
     return SignalboxPreparedInputSubmission(
@@ -6392,7 +6438,8 @@ private actor DefaultsMismatchThenAcceptingProcessService: SignalboxProcessServi
       sessionID: session.id,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -6448,7 +6495,8 @@ private actor SuspendedSubmissionService: SignalboxProcessServiceProtocol {
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) async throws -> SignalboxPreparedInputSubmission {
     prepareCallCount += 1
     return SignalboxPreparedInputSubmission(
@@ -6456,7 +6504,8 @@ private actor SuspendedSubmissionService: SignalboxProcessServiceProtocol {
       sessionID: session.id,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -6514,7 +6563,8 @@ private actor AmbiguousThenUnsentSubmissionService: SignalboxProcessServiceProto
 
   func prepareInputSubmission(
     session: SignalboxProcessSession,
-    content: String
+    content: String,
+    modelSettings: SignalboxModelSettingsOverlay = .inheritAll
   ) throws -> SignalboxPreparedInputSubmission {
     prepareCallCount += 1
     return SignalboxPreparedInputSubmission(
@@ -6522,7 +6572,8 @@ private actor AmbiguousThenUnsentSubmissionService: SignalboxProcessServiceProto
       sessionID: session.id,
       content: content,
       expectedDefaultsVersion: session.defaultsVersion,
-      modelSelection: session.modelSelection
+      modelSelection: session.modelSelection,
+      modelSettings: modelSettings
     )
   }
 
@@ -8368,7 +8419,23 @@ private enum ProcessProjectionFixture {
        "ended_attempt_id":"\(ProcessDriverFixture.attempt)",
        "recovery_tool_attempt_id":"\(ProcessDriverFixture.modelCall)",
        "automatic_reconciliation_attempts":"1","operator_action_required":true}
-      """
+      """,
+      modelCallUsage: [
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage_provenance":"reported",
+          "usage":{
+            "input_tokens":null,"output_tokens":null,
+            "cache_creation_input_tokens":null,"cache_read_input_tokens":null
+          },
+          "cost":null
+        }
+        """,
+      ]
     )
   }
 
@@ -8745,7 +8812,8 @@ private enum ProcessProjectionFixture {
 
   private static func snapshotWithActiveTurnState(
     _ state: String,
-    cursor: UInt64 = 1
+    cursor: UInt64 = 1,
+    modelCallUsage: [String] = []
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -8765,7 +8833,10 @@ private enum ProcessProjectionFixture {
           "state":\(state)
         }
         """,
-        emptyModelCallsBoundary,
+      ] + modelCallUsage + [
+        """
+        {"type":"transcript_model_calls_end","model_call_count":"\(modelCallUsage.count)"}
+        """,
         """
         {
           "type":"transcript_snapshot_end",
