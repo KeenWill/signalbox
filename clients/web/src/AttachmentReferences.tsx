@@ -6,8 +6,9 @@ export function AttachmentReferences({ attachments }: { attachments: Attachments
   if (attachments.length === 0) return null
   return (
     <ul className="session-detail-attachments" aria-label="Attachment references">
-      {attachments.map((attachment) => (
-        <li key={attachment.blob_id}>
+      {attachments.map((attachment, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: Accepted attachment positions are immutable; repeated digests are valid.
+        <li key={`${attachment.blob_id}:${index}`}>
           <code>{attachment.blob_id}</code>
           <span>
             {attachment.media_type ?? 'unknown media'} · {attachment.length_bytes} B

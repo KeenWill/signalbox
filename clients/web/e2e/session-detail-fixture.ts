@@ -47,6 +47,7 @@ export const detailItems: WebSessionTimelineDetail[] = [
       text: input,
       attachments: [
         { blob_id: `sha256:${'a'.repeat(64)}`, length_bytes: '4', media_type: 'image/png' },
+        { blob_id: `sha256:${'a'.repeat(64)}`, length_bytes: '4', media_type: 'image/jpeg' },
       ],
     },
   },
