@@ -38,6 +38,7 @@ struct Work {
 }
 
 fn completed_work(target: &Target, tools: Vec<GoalCompletedTool>) -> Option<Work> {
+    let repository = RepositorySlug::try_new(target.repository.clone()).ok()?;
     let mut commit = None;
     let mut threads = BTreeSet::new();
     for tool in tools {
@@ -50,9 +51,8 @@ fn completed_work(target: &Target, tools: Vec<GoalCompletedTool>) -> Option<Work
             }
             "change_request_thread_reply" => {
                 let reply: Reply = serde_json::from_str(&tool.arguments_text).ok()?;
-                if reply.repository == target.repository
-                    && reply.number.to_string() == target.number
-                {
+                let reply_repository = RepositorySlug::try_new(reply.repository).ok()?;
+                if reply_repository == repository && reply.number.to_string() == target.number {
                     threads.insert(reply.thread_id);
                 }
             }
@@ -522,6 +522,38 @@ mod tests {
     #[test]
     fn goal_without_a_reply_does_not_trigger_verification() {
         assert!(completed_work(&target(), vec![push()]).is_none());
+    }
+
+    #[test]
+    fn goal_reply_with_mixed_case_repository_triggers_verification() {
+        let reply = GoalCompletedTool {
+            arguments_text: json!({
+                "repository": "ExAmPlE/PrOjEcT", "number": 7,
+                "thread_id": "thread-A", "body": "Fixed",
+            })
+            .to_string(),
+            ..reply()
+        };
+
+        let work = completed_work(&target(), vec![push(), reply])
+            .expect("a successful reply to the canonical target triggers verification");
+
+        assert_eq!(work.commit.as_str(), PUSHED);
+        assert_eq!(work.threads, BTreeSet::from(["thread-A".to_owned()]));
+    }
+
+    #[test]
+    fn goal_reply_to_another_repository_does_not_trigger_verification() {
+        let reply = GoalCompletedTool {
+            arguments_text: json!({
+                "repository": "Other/Project", "number": 7,
+                "thread_id": "thread-A", "body": "Fixed",
+            })
+            .to_string(),
+            ..reply()
+        };
+
+        assert!(completed_work(&target(), vec![push(), reply]).is_none());
     }
 
     #[test]
