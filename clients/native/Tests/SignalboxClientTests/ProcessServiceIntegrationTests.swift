@@ -314,7 +314,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let requester = SequencedProcessRequester(pages: [frames, [
       try frame(#"{"type":"model_aliases_start"}"#),
       try frame(aliasesFail
-        ? #"{"type":"error","code":"unavailable","message":"Alias catalog unavailable.","detail":null}"#
+        ? #"{"type":"error","code":"unavailable","message":"Alias catalog unavailable."}"#
         : #"{"type":"model_aliases_end","alias_count":"0"}"#),
     ]])
     let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
@@ -3237,7 +3237,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
-  func testArchiveCommitWinsOverRacingStaleRefresh() async throws {
+  func testNewerRefreshKeepsItsRowsWhenArchiveCompletes() async throws {
     let backingService = makeService()
     let fixtures = try await backingService.listConversations(includeArchived: true).conversations
     let conversation = try fixtureConversation(MockSignalboxFixtures.activeSessionID, in: fixtures)
@@ -3258,7 +3258,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     await service.completeMutation()
     await mutation.value
 
-    XCTAssertEqual(viewModel.conversations, [archived])
+    XCTAssertEqual(viewModel.conversations, [conversation])
     XCTAssertFalse(viewModel.isLoading)
   }
 
