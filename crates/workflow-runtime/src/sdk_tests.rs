@@ -174,6 +174,44 @@ await sdk.defineProgram({ input: codec, output: codec, run: () => 1 })(codec.enc
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn json_codec_encoding_uses_the_preloaded_stringifier() {
+    let (result, requests) = sdk_script(
+        r#"
+const codec = sdk.jsonCodec(value => {
+  JSON.stringify = () => '{"corrupted":true}';
+  return value;
+});
+const encoded = codec.encode({ correct: true });
+if (String.fromCharCode(...encoded) !== '{"correct":true}') {
+  throw new Error("a codec callback must not replace the SDK JSON stringifier");
+}
+"#,
+        [],
+    )
+    .await;
+    result.expect("encoding must preserve the validated value after JSON.stringify is reassigned");
+    assert!(requests.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn json_codec_decoding_uses_the_preloaded_parser() {
+    let (result, requests) = sdk_script(
+        r#"
+JSON.parse = () => ({ corrupted: true });
+const codec = sdk.jsonCodec(value => value);
+const decoded = codec.decode(Uint8Array.from('{"correct":true}', c => c.charCodeAt(0)));
+if (decoded.correct !== true || Object.hasOwn(decoded, "corrupted")) {
+  throw new Error("program code must not replace the SDK JSON parser");
+}
+"#,
+        [],
+    )
+    .await;
+    result.expect("decoding must read the input bytes after JSON.parse is reassigned");
+    assert!(requests.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn json_codec_refuses_values_that_json_cannot_preserve() {
     for value in [
         "NaN",

@@ -1,6 +1,7 @@
 (() => {
   const request = globalThis.__signalboxProgramRequest;
   Reflect.deleteProperty(globalThis, "__signalboxProgramRequest");
+  const { stringify: jsonStringify, parse: jsonParse } = JSON;
 
   const call = (kind, payload) => {
     if (!(payload instanceof Uint8Array)) {
@@ -67,13 +68,13 @@
   const encodeJson = (value) => {
     checkJson(value);
     // ASCII JSON preserves UTF-16 strings without requiring ambient text codecs.
-    const text = JSON.stringify(value);
+    const text = jsonStringify(value);
     if (text === undefined) throw new TypeError("expected a JSON value");
     return Uint8Array.from(text.replace(/[\u007f-\uffff]/g,
       (character) => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0")),
       (character) => character.charCodeAt(0));
   };
-  const decodeJson = (value) => JSON.parse(decodeURIComponent(Array.from(bytes(value),
+  const decodeJson = (value) => jsonParse(decodeURIComponent(Array.from(bytes(value),
     (byte) => "%" + byte.toString(16).padStart(2, "0")).join("")));
   const jsonCodec = (decode) => Object.freeze({
     decode(value) { return decode(decodeJson(value)); },
