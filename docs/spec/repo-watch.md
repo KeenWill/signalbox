@@ -173,16 +173,18 @@ remain comparison input. Each periodic attempt spends at most
 `numeric_bounds.repository_watch_poll_request_budget` REST and GraphQL requests,
 including its REST-quota preflight; the preflight requires that same number of
 remaining REST requests. Completed discovery, pull-request, and workflow stages
-commit independently. Budget exhaustion logs `partial` and retains a durable
-`poll_cursor` with pending subjects and normalized unfinished pages; the next
-poll resumes those reads, and completion clears the cursor. A webhook refresh
-removes its subject from the pending poll and discards unfinished reads for that
-subject. Webhook observations retain a 1,000-request ceiling per pull request.
-Check inventories exceeding GitHub's 1,000-suite commit limit and workflow
-searches exceeding GitHub's 1,000-result cap reject their stage. Failed stages
-preserve completed stage commits. The daemon starts these tasks, the configured
-webhook listener, and one serialized command worker beside the convergence
-sweep, and drains them before closing its database.
+commit independently. Discovery preserves committed branch heads; branch heads
+are refreshed after pending PR lifecycles and bases, before deriving
+`base_advanced` facts. Budget exhaustion reports `partial` in logs and operator
+status and retains a durable `poll_cursor` with pending subjects and normalized
+unfinished pages; the next poll resumes those reads, and completion clears the
+cursor. A webhook refresh removes its subject from the pending poll and discards
+unfinished reads for that subject. Webhook observations retain a 1,000-request
+ceiling per pull request. Check inventories exceeding GitHub's 1,000-suite
+commit limit and workflow searches exceeding GitHub's 1,000-result cap reject
+their stage. Failed stages preserve completed stage commits. The daemon starts
+these tasks, the configured webhook listener, and one serialized command worker
+beside the convergence sweep, and drains them before closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
 repository before accepting a delivery. An empty resolved webhook secret is
@@ -190,19 +192,21 @@ unavailable. Primary pull-request, review, and check deliveries durably coalesce
 their named pull requests in `webhook_pull_wake` and wake the repository task.
 Each queued pull request is fetched and admitted independently against the
 committed baseline; the command worker evaluates its events without waiting for
-a poll. Successful admission clears only the consumed delivery; a newer delivery
-remains pending. Failed observations retain their failure and attempt count.
-After three failed attempts, that row is skipped until a new delivery resets it.
-Other queued PRs continue; periodic polls reconcile repository-wide state
-independently. Startup wakes resume eligible pending rows. Shadow hooks
-acknowledge without queuing or waking. The runtime's `reload_configuration`
-reconciles rule revisions and replaces listener settings inside the reload.
-Enabled rule templates must resolve before composition or reload. Stale or
-conflicting rule revisions fail reload without replacing the running
-configuration. Same-address changes swap the path and hook map atomically;
-address changes bind a replacement before retiring the running listener, and a
-bind failure preserves the running settings. In-flight deliveries retry against
-the replacement configuration.
+a poll. For an unseen PR, the final snapshot also derives its labels, reviews,
+threads, and completed checks independently of the observation source. A drain
+with any failed targeted read reports a partial outcome. Successful admission
+clears only the consumed delivery; a newer delivery remains pending. Failed
+observations retain their failure and attempt count. After three failed
+attempts, that row is skipped until a new delivery resets it. Other queued PRs
+continue; periodic polls reconcile repository-wide state independently. Startup
+wakes resume eligible pending rows. Shadow hooks acknowledge without queuing or
+waking. The runtime's `reload_configuration` reconciles rule revisions and
+replaces listener settings inside the reload. Enabled rule templates must
+resolve before composition or reload. Stale or conflicting rule revisions fail
+reload without replacing the running configuration. Same-address changes swap
+the path and hook map atomically; address changes bind a replacement before
+retiring the running listener, and a bind failure preserves the running
+settings. In-flight deliveries retry against the replacement configuration.
 
 Lifecycle reactions accept `session_terminal`, `goal_changed`, and retained
 `pull_request_closed` or `pull_request_merged` facts and emit only

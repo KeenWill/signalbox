@@ -81,6 +81,7 @@ pub enum OperatorStatusMessage {
 pub enum RepositoryPollOutcome {
     InProgress,
     Succeeded,
+    Partial,
     ClientFailed,
     ObservationFailed,
     StoreFailed,

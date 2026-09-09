@@ -291,7 +291,7 @@ where
         let result = self.observe(producer).await;
         use crate::measurements::PollOutcome;
         attempt.finish(match &result {
-            Ok(_) => PollOutcome::Succeeded,
+            Ok(outcome) => *outcome,
             Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
             Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
             Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
@@ -305,14 +305,14 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
     async fn observe(
         &mut self,
         producer: EventProducer,
-    ) -> Result<bool, RepositoryAttemptError<Loader::Error>> {
+    ) -> Result<crate::measurements::PollOutcome, RepositoryAttemptError<Loader::Error>> {
         let client = self
             .clients
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
         if producer == EventProducer::Webhook {
-            crate::poll_cache::observe_webhook_pulls(
+            return crate::poll_cache::observe_webhook_pulls(
                 &client,
                 &self.store,
                 &self.repository,
@@ -320,8 +320,7 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
                 self.subject_retention,
             )
             .await
-            .map_err(RepositoryAttemptError::Observation)?;
-            return Ok(true);
+            .map_err(RepositoryAttemptError::Observation);
         }
         crate::poll_cache::poll_with_cache(
             &client,
@@ -332,6 +331,13 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
             self.poll_request_budget,
         )
         .await
+        .map(|complete| {
+            if complete {
+                crate::measurements::PollOutcome::Succeeded
+            } else {
+                crate::measurements::PollOutcome::Partial
+            }
+        })
         .map_err(|error| match error {
             ObservationError::Cache(error) => RepositoryAttemptError::Store(error),
             error => RepositoryAttemptError::Observation(error),
@@ -541,14 +547,11 @@ pub(crate) async fn fetch_poll_pull(
     })
 }
 
-pub(crate) async fn fetch_poll_repository(
+async fn fetch_repository_heads(
     io: &impl GitHubObservationRead,
-    repository: &RepositorySlug,
-    reviewers: &[RepoWatchAuthorLogin],
-    baseline: &crate::ingest::IngestBaseline,
-) -> Result<(RepositoryObservation, Vec<PullRequestNumber>), ObservationError> {
-    let root = format!("/repos/{}", repository.as_str());
-    let (metadata, _) = read_page(io, &root).await?;
+    root: &str,
+) -> Result<(BranchName, CommitSha, Vec<RepoWatchBranchHead>), ObservationError> {
+    let (metadata, _) = read_page(io, root).await?;
     let default_branch =
         metadata.admit(BranchName::try_new(metadata.text(&metadata["default_branch"])?).ok())?;
     let branch_heads = pages(io, &format!("{root}/branches"), None)
@@ -569,6 +572,31 @@ pub(crate) async fn fetch_poll_repository(
         )?
         .head()
         .clone();
+    Ok((default_branch, default_head, branch_heads))
+}
+
+pub(crate) async fn fetch_poll_repository(
+    io: &impl GitHubObservationRead,
+    repository: &RepositorySlug,
+    reviewers: &[RepoWatchAuthorLogin],
+    baseline: &crate::ingest::IngestBaseline,
+) -> Result<(RepositoryObservation, Vec<PullRequestNumber>), ObservationError> {
+    let root = format!("/repos/{}", repository.as_str());
+    let (default_branch, default_head, branch_heads) = if let Some(prior) = &baseline.observation {
+        (
+            baseline
+                .default_branch
+                .clone()
+                .ok_or(ObservationError::InvalidResponse)?,
+            baseline
+                .default_head
+                .clone()
+                .ok_or(ObservationError::InvalidResponse)?,
+            prior.state().branch_heads().to_vec(),
+        )
+    } else {
+        fetch_repository_heads(io, &root).await?
+    };
     let previous = baseline.observation.as_ref();
     let pulls = previous
         .map(|prior| prior.state().pull_requests().to_vec())
@@ -630,17 +658,9 @@ pub(crate) async fn fetch_poll_workflows(
         .observation
         .as_ref()
         .ok_or(ObservationError::InvalidResponse)?;
-    let default_branch = baseline
-        .default_branch
-        .clone()
-        .ok_or(ObservationError::InvalidResponse)?;
-    let default_head = baseline
-        .default_head
-        .clone()
-        .ok_or(ObservationError::InvalidResponse)?;
+    let (default_branch, default_head, branch_heads) = fetch_repository_heads(io, &root).await?;
     let state = previous.state();
-    let retained_branches = state
-        .branch_heads()
+    let retained_branches = branch_heads
         .iter()
         .filter(|branch| {
             branch.branch() == &default_branch
@@ -655,7 +675,7 @@ pub(crate) async fn fetch_poll_workflows(
         fetch_workflows(io, &root, repository, &retained_branches, Some(previous)).await?;
     let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
         pull_requests: state.pull_requests().to_vec(),
-        branch_heads: state.branch_heads().to_vec(),
+        branch_heads,
         workflow_runs,
     })
     .map_err(|source| ObservationError::InvalidState {
