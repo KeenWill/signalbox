@@ -17,7 +17,7 @@ async function openDetails(
   mismatch = false,
   override = false,
   creation?: WebTimelineCreationCause,
-  outcome?: 'reconciliation' | 'retired' | 'exhausted',
+  outcome?: 'reconciliation' | 'retired' | 'exhausted' | 'reconciliation_exhausted',
   partialResult = false,
 ) {
   const items = detailItems.map((item, index) =>
@@ -39,11 +39,20 @@ async function openDetails(
               operation: { type: 'model_call' as const, model_call_id: detailSessionId },
             },
           }
-        : outcome === 'retired' && index === 4
+        : (outcome === 'retired' || outcome === 'reconciliation_exhausted') && index === 4
           ? {
               ...item,
-              kind: 'goal_turn_retired' as const,
-              body: { type: 'event_fact' as const, kind: 'goal_turn_retired' as const },
+              kind:
+                outcome === 'retired'
+                  ? ('goal_turn_retired' as const)
+                  : ('automatic_reconciliation_exhausted' as const),
+              body: {
+                type: 'event_fact' as const,
+                kind:
+                  outcome === 'retired'
+                    ? ('goal_turn_retired' as const)
+                    : ('automatic_reconciliation_exhausted' as const),
+              },
             }
           : outcome === 'exhausted' && index >= 3
             ? {
@@ -370,8 +379,27 @@ test('shows reconciliation-required turn outcomes with events hidden', async ({ 
   await page.screenshot({ path: test.info().outputPath('reconciliation-outcome.png') })
 })
 
+test('shows automatic reconciliation exhaustion as awaiting an operator decision', async ({
+  page,
+}) => {
+  await openDetails(page, false, false, undefined, 'reconciliation_exhausted')
+  await page
+    .getByRole('row')
+    .filter({ hasText: 'automatic reconciliation exhausted' })
+    .press('Enter')
+  const detail = page.getByRole('article', { name: 'automatic reconciliation exhausted detail' })
+  await expect(detail).toContainText(
+    'Automatic reconciliation exhausted. Waiting for an operator decision.',
+  )
+  await expect(detail).not.toContainText('Turn retired before activation.')
+})
+
 test('shows retired goal turns in conversation order with events hidden', async ({ page }) => {
   await openDetails(page, false, false, undefined, 'retired')
+  await page.getByRole('row').filter({ hasText: 'goal turn retired' }).press('Enter')
+  await expect(page.getByRole('article', { name: 'goal turn retired detail' })).toContainText(
+    'Turn retired before activation.',
+  )
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(conversation.getByText('Goal turn retired', { exact: true })).toBeVisible()

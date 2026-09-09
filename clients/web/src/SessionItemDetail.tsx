@@ -291,7 +291,11 @@ const detailContent = (body: DetailBody): ReactNode => {
     case 'ownership':
       return <Facts facts={[['Ownership', body.transition.replaceAll('_', ' ')]]} />
     case 'event_fact':
-      return <p>Turn retired before activation.</p>
+      return body.kind === 'automatic_reconciliation_exhausted' ? (
+        <p>Automatic reconciliation exhausted. Waiting for an operator decision.</p>
+      ) : (
+        <p>Turn retired before activation.</p>
+      )
 
     case 'session_created':
       return (
