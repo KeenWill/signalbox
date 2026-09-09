@@ -898,8 +898,28 @@ async fn mark_exhausted_recoveries(
     )
     .bind(attempt_budget)
     .bind(window)
-    .fetch_all(connection)
+    .fetch_all(&mut *connection)
     .await?;
+    for row in &rows {
+        sqlx::query(
+            "WITH header AS (
+                INSERT INTO outbox_event (event_kind, storage_version, session_id)
+                VALUES ('automatic_reconciliation_exhausted', 1, $1)
+                RETURNING event_sequence, event_kind, storage_version, session_id
+             )
+             INSERT INTO automatic_reconciliation_exhausted_outbox_event
+                (event_sequence, event_kind, storage_version, session_id,
+                 turn_id, model_call_id, tool_attempt_id)
+             SELECT event_sequence, event_kind, storage_version, session_id, $2, $3, $4
+               FROM header",
+        )
+        .bind(row.try_get::<uuid::Uuid, _>("session_id")?)
+        .bind(row.try_get::<uuid::Uuid, _>("turn_id")?)
+        .bind(row.try_get::<Option<uuid::Uuid>, _>("model_call_id")?)
+        .bind(row.try_get::<Option<uuid::Uuid>, _>("tool_attempt_id")?)
+        .execute(&mut *connection)
+        .await?;
+    }
     Ok(rows)
 }
 

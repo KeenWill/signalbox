@@ -1324,7 +1324,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed, .turnRefused, .turnCancelled,
+    case .automaticReconciliationExhausted, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
     case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult,
@@ -2058,7 +2058,7 @@ extension SignalboxProcessSessionEvent {
       return ("tool_batch_transition.state.\(kind)", nil)
     case .unknown(let kind, _, let diagnostic):
       return (kind, diagnostic)
-    case .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
+    case .automaticReconciliationExhausted, .goalTurnRetired, .childSpawned, .childWaiting, .sessionMessage, .childResult, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition,
       .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnCredentialPoolExhausted, .turnFailed,
@@ -2097,7 +2097,7 @@ extension SignalboxProcessSessionEvent {
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .goalTurnRetired, .childSpawned, .childWaiting, .childLifecycleDisposition,
+    case .automaticReconciliationExhausted, .goalTurnRetired, .childSpawned, .childWaiting, .childLifecycleDisposition,
       .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .turnActivated, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,

@@ -775,6 +775,29 @@ fn read_operation_rejects_the_live_object_directory_changed_before_return() {
 }
 
 #[test]
+fn read_operation_rejects_a_selected_object_parent_replaced_before_return() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let object_id = fixture.initial.to_string();
+    let prefix = &object_id[..2];
+    let name = &object_id[2..];
+    let object_directory = fixture.root().join(".git/objects").join(prefix);
+    let retired_directory = fixture.root().join("retired-object-prefix");
+
+    let failure = executor
+        .execute_read_with_return_hook(LocalOperation::Status, || {
+            fs::rename(&object_directory, &retired_directory)
+                .expect("selected object parent retires");
+            fs::create_dir(&object_directory).expect("replacement object parent creates");
+            fs::hard_link(retired_directory.join(name), object_directory.join(name))
+                .expect("selected object leaf links into replacement parent");
+        })
+        .expect_err("replaced selected object parent rejects read return");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
 fn commit_rejects_an_index_replaced_before_reference_publication() {
     let fixture = Fixture::new();
     let executor = fixture.executor();
