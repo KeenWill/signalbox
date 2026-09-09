@@ -263,6 +263,7 @@ pub(super) fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
 /// Files are reread at use; App profiles share their installation-token cache.
 #[derive(Clone)]
 pub struct FileCredentialAccess {
+    request_timeout: Option<std::time::Duration>,
     paths: Arc<HashMap<CredentialReference, PathBuf>>,
     app: Option<(
         CredentialReference,
@@ -282,6 +283,7 @@ impl FileCredentialAccess {
             }
             crate::credential_pools::GithubCredentialDelivery::GithubApp { .. } => Self {
                 paths: Arc::new(HashMap::new()),
+                request_timeout: None,
                 app: profile.authentication().map(|app| (reference, app)),
             },
         }
@@ -289,6 +291,12 @@ impl FileCredentialAccess {
     /// Shared installation authentication for GitHub request transports.
     pub fn github_app(&self) -> Option<Arc<signalbox_github_transport::AppAuthentication>> {
         self.app.as_ref().map(|(_, app)| app.clone())
+    }
+
+    /// Applies the caller's HTTP budget to installation-token preparation.
+    pub fn with_request_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// Checks each configured file's admission without reading its secret bytes.
@@ -309,6 +317,7 @@ impl FileCredentialAccess {
     pub fn from_files(files: impl IntoIterator<Item = (CredentialReference, PathBuf)>) -> Self {
         Self {
             paths: Arc::new(files.into_iter().collect()),
+            request_timeout: None,
             app: None,
         }
     }
@@ -346,10 +355,16 @@ impl CredentialAccess for FileCredentialAccess {
                     CredentialAccessFailure::Unmapped,
                 ));
             }
-            let header = app.authorization().await.map_err(|failure| {
-                tracing::warn!(?failure, "GitHub App credential unavailable");
-                CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unavailable)
-            })?;
+            let header = app
+                .authorization(self.request_timeout)
+                .await
+                .map_err(|failure| {
+                    tracing::warn!(?failure, "GitHub App credential unavailable");
+                    CredentialAccessError::new(
+                        reference.clone(),
+                        CredentialAccessFailure::Unavailable,
+                    )
+                })?;
             return Ok(CredentialValue::new(&header.as_bytes()[b"Bearer ".len()..]));
         }
         let path = self.paths.get(reference).ok_or_else(|| {

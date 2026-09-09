@@ -174,6 +174,7 @@ impl<Clock>
         let github_transport = GitHubApiTransport::try_new()
             .map_err(|_| DaemonToolsConstructionError::GitHub)?
             .with_app(github.github_app());
+        let github = github.with_request_timeout(Some(github_transport.request_timeout()));
         let github = GitHubTools::try_new(github, github_transport, github_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::GitHub)?;
         let workspace = PinnedWorkspaceFileSystem::try_new(workspace_root)

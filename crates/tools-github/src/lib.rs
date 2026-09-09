@@ -1925,6 +1925,11 @@ impl GitHubApiTransport {
         })
     }
 
+    /// Request budget used for credential preparation and HTTP exchanges.
+    pub const fn request_timeout(&self) -> Duration {
+        self.timeout
+    }
+
     /// Uses the profile's shared installation authentication for each request.
     pub fn with_app(
         mut self,
@@ -2187,14 +2192,18 @@ impl GitHubApiTransport {
             .map_err(classify_destination_failure)?;
         let request = authenticated_request(&client, method, url, authentication, body);
         let response = match &self.app {
-            Some(app) => app.send(request).await.map_err(|failure| match failure {
-                signalbox_github_transport::AppRequestFailure::Credential(_) => {
-                    GitHubTransportFailure::InvalidCredential
-                }
-                signalbox_github_transport::AppRequestFailure::Request(error) => {
-                    classify_send_failure(error.is_connect())
-                }
-            })?,
+            Some(app) => {
+                app.send(request, Some(timeout))
+                    .await
+                    .map_err(|failure| match failure {
+                        signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                            GitHubTransportFailure::InvalidCredential
+                        }
+                        signalbox_github_transport::AppRequestFailure::Request(error) => {
+                            classify_send_failure(error.is_connect())
+                        }
+                    })?
+            }
             None => request
                 .send()
                 .await

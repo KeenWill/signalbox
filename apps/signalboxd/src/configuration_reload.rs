@@ -274,6 +274,24 @@ impl ConfigurationReload {
             .validate_credential_files()
             .and_then(|()| self.integration_credentials.validate())
             .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
+        let reference = signalbox_model_runtime::CredentialReference::new(
+            signalbox_tools_code_host::CODE_HOST_CREDENTIAL_REFERENCE,
+        );
+        let github = match catalogs
+            .models
+            .github_credential_profile(reference.as_str())
+        {
+            Some(profile) => Some(crate::FileCredentialAccess::from_github(profile, reference)),
+            None => self
+                .github_tool_credential
+                .as_ref()
+                .map(|path| crate::FileCredentialAccess::new(path.clone(), reference)),
+        };
+        if let Some(github) = github {
+            github
+                .validate()
+                .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
+        }
         if let Some(tool_credential) = &self.github_tool_credential
             && catalogs
                 .models
@@ -782,6 +800,86 @@ mod tests {
                 "credential reference `anthropic-overflow` could not be resolved: InsecurePermissions"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn reload_rechecks_the_environment_github_token() {
+        let (directory, reload) = fixture();
+        let mut document = reload
+            .catalogs()
+            .models
+            .source()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("catalog");
+        document["credential_profiles"]
+            .as_array_of_tables_mut()
+            .expect("profiles")
+            .retain(|profile| {
+                profile.get("adapter").and_then(toml_edit::Item::as_str) != Some("github")
+            });
+        std::fs::write(&reload.model_path, document.to_string()).expect("fallback catalog");
+        let reload = ConfigurationReload::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@localhost/unused")
+                .expect("lazy pool"),
+            HubModelConfiguration::parse(&document.to_string()).expect("fallback models"),
+            SessionTemplateConfiguration::default(),
+            reload.model_path,
+            reload.template_path,
+            None,
+        )
+        .expect("fallback startup configuration");
+        let credential =
+            tempfile::NamedTempFile::new_in(directory.path()).expect("private fallback token");
+        let reload = reload.with_github_tool_credential(credential.path().to_path_buf());
+        reload.read_replacement().expect("valid fallback admitted");
+        credential
+            .as_file()
+            .set_len(65_537)
+            .expect("oversize fallback");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("oversize fallback rejected"),
+            failure(
+                ReloadPhase::Validate,
+                "credential reference `github-primary` could not be resolved: TooLarge"
+            )
+        );
+        credential.as_file().set_len(0).expect("restore file size");
+        std::fs::set_permissions(
+            credential.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .expect("weaken permissions");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("public fallback rejected"),
+            failure(
+                ReloadPhase::Validate,
+                "credential reference `github-primary` could not be resolved: InsecurePermissions"
+            )
+        );
+        credential.close().expect("remove fallback");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("missing fallback rejected"),
+            failure(
+                ReloadPhase::Validate,
+                "credential reference `github-primary` could not be resolved: Unavailable"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn app_profile_reload_does_not_admit_the_unused_environment_token() {
+        let (directory, reload) = fixture();
+        let reload = reload.with_github_tool_credential(directory.path().join("missing-fallback"));
+        reload
+            .read_replacement()
+            .expect("App profile does not use the missing fallback or read its key at reload");
     }
 
     #[tokio::test]

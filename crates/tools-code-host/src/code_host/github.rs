@@ -1681,14 +1681,17 @@ impl GitHubCodeHostTransport {
         let request =
             authenticated_request(&self.client, method, url, authentication, body).headers(headers);
         if let Some(app) = &self.app {
-            return app.send(request).await.map_err(|failure| match failure {
-                signalbox_github_transport::AppRequestFailure::Credential(_) => {
-                    CodeHostTransportFailure::InvalidCredential
-                }
-                signalbox_github_transport::AppRequestFailure::Request(_) => {
-                    CodeHostTransportFailure::DispatchUnknown
-                }
-            });
+            return app
+                .send(request, self.bounds.request_timeout())
+                .await
+                .map_err(|failure| match failure {
+                    signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                        CodeHostTransportFailure::InvalidCredential
+                    }
+                    signalbox_github_transport::AppRequestFailure::Request(_) => {
+                        CodeHostTransportFailure::DispatchUnknown
+                    }
+                });
         }
         request
             .send()

@@ -1556,7 +1556,8 @@ async fn run_hub(
     let code_host_credentials = match model_configuration
         .github_credential_profile(CODE_HOST_CREDENTIAL_REFERENCE)
     {
-        Some(profile) => FileCredentialAccess::from_github(profile, code_host_reference),
+        Some(profile) => FileCredentialAccess::from_github(profile, code_host_reference)
+            .with_request_timeout(configured_duration("code_host_request_timeout")),
         None => FileCredentialAccess::new(configuration.github_token_file(), code_host_reference),
     };
     code_host_credentials.validate().map_err(|error| {

@@ -187,7 +187,7 @@ private_key_file = "{}"
         profile
             .authentication()
             .expect("App source")
-            .authorization()
+            .authorization(None)
             .await,
         Err(signalbox_github_transport::AppCredentialFailure::KeyUnreadable)
     );

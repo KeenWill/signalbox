@@ -124,18 +124,20 @@ pub(crate) fn with_app_authentication(
                 std::sync::Arc::new(move |request, path| {
                     let app = app.clone();
                     Box::pin(async move {
-                        app.send(request).await.map_err(|failure| match failure {
-                            signalbox_github_transport::AppRequestFailure::Credential(_) => {
-                                GitHubClientError::InvalidCredential
-                            }
-                            signalbox_github_transport::AppRequestFailure::Request(source) => {
-                                GitHubClientError::Request {
-                                    path,
-                                    status: None,
-                                    source,
+                        app.send(request, None)
+                            .await
+                            .map_err(|failure| match failure {
+                                signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                                    GitHubClientError::InvalidCredential
                                 }
-                            }
-                        })
+                                signalbox_github_transport::AppRequestFailure::Request(source) => {
+                                    GitHubClientError::Request {
+                                        path,
+                                        status: None,
+                                        source,
+                                    }
+                                }
+                            })
                     })
                 });
             send

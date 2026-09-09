@@ -36,10 +36,14 @@ impl fmt::Debug for AppAuthentication {
 }
 impl AppAuthentication {
     pub fn new(app_id: u64, installation_id: u64, read_key: AppKeyReader) -> Self;
-    pub async fn authorization(&self) -> result::Result<value::HeaderValue, AppCredentialFailure>;
+    pub async fn authorization(
+        &self,
+        timeout: option::Option<time::Duration>,
+    ) -> result::Result<value::HeaderValue, AppCredentialFailure>;
     pub async fn send(
         &self,
         request: request::RequestBuilder,
+        timeout: option::Option<time::Duration>,
     ) -> result::Result<response::Response, AppRequestFailure>;
 }
 ```

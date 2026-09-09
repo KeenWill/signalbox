@@ -1,4 +1,4 @@
-use std::{fmt, future::Future, pin::Pin, sync::Arc};
+use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use base64::{
     Engine as _,
@@ -9,7 +9,10 @@ use ring::{
     rand::SystemRandom,
     signature::{RSA_PKCS1_SHA256, RsaKeyPair},
 };
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::Instant};
+
+// Token exchanges return a small JSON object; reject larger bodies before decoding.
+const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Sanitized reasons an installation credential cannot be supplied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,7 +33,10 @@ pub type AppKeyReader = Arc<
 >;
 
 type TokenExchange = Arc<
-    dyn Fn() -> Pin<Box<dyn Future<Output = Result<CachedToken, AppCredentialFailure>> + Send>>
+    dyn Fn(
+            Option<Duration>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<CachedToken, AppCredentialFailure>> + Send>>
         + Send
         + Sync,
 >;
@@ -61,7 +67,7 @@ impl fmt::Debug for AppAuthentication {
 impl AppAuthentication {
     /// Binds one App installation without reading its private key or sending HTTP.
     pub fn new(app_id: u64, installation_id: u64, read_key: AppKeyReader) -> Self {
-        let exchange: TokenExchange = Arc::new(move || {
+        let exchange: TokenExchange = Arc::new(move |timeout| {
             let read_key = read_key.clone();
             Box::pin(async move {
                 let key = read_key().await?;
@@ -72,7 +78,7 @@ impl AppAuthentication {
                 ))
                 .map_err(|_| AppCredentialFailure::ExchangeRejected)?;
                 let client =
-                    crate::client(None).map_err(|_| AppCredentialFailure::ExchangeRejected)?;
+                    crate::client(timeout).map_err(|_| AppCredentialFailure::ExchangeRejected)?;
                 let authorization = crate::authorization(jwt.as_bytes())
                     .map_err(|_| AppCredentialFailure::KeyUnreadable)?;
                 let response = crate::authenticated_request(
@@ -87,11 +93,7 @@ impl AppAuthentication {
                 .map_err(|_| AppCredentialFailure::ExchangeRejected)?;
                 let status = response.status();
                 admit_exchange_status(status)?;
-                let bytes = response
-                    .bytes()
-                    .await
-                    .map_err(|_| AppCredentialFailure::ExchangeRejected)?;
-                decode_exchange(&bytes)
+                read_exchange(response).await
             })
         });
         Self {
@@ -102,8 +104,11 @@ impl AppAuthentication {
     }
 
     /// Resolves a current sensitive bearer header, coalescing concurrent refreshes.
-    pub async fn authorization(&self) -> Result<HeaderValue, AppCredentialFailure> {
-        self.resolve(None)
+    pub async fn authorization(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<HeaderValue, AppCredentialFailure> {
+        self.resolve(None, timeout.map(|timeout| Instant::now() + timeout))
             .await
             .map(|authorization| authorization.header)
     }
@@ -111,9 +116,10 @@ impl AppAuthentication {
     async fn resolve(
         &self,
         rejected: Option<u64>,
+        deadline: Option<Instant>,
     ) -> Result<ResolvedAuthorization, AppCredentialFailure> {
         let observed_generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
-        let mut cached = self.cached.lock().await;
+        let mut cached = within_deadline(deadline, self.cached.lock()).await?;
         if self.generation.load(std::sync::atomic::Ordering::SeqCst) != observed_generation
             && let Err(failure) = *cached
         {
@@ -132,7 +138,10 @@ impl AppAuthentication {
             });
         }
         *cached = Ok(None);
-        let result = (self.exchange)().await;
+        let timeout = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let result = within_deadline(deadline, (self.exchange)(timeout))
+            .await
+            .and_then(std::convert::identity);
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match result {
@@ -153,31 +162,43 @@ impl AppAuthentication {
 
     /// Sends one request and retries it once after an authentication rejection.
     /// A concurrent refresh for the rejected token is reused.
-    pub async fn send(&self, request: RequestBuilder) -> Result<Response, AppRequestFailure> {
-        self.send_with(request, |request| async move { request.send().await })
-            .await
+    pub async fn send(
+        &self,
+        request: RequestBuilder,
+        timeout: Option<Duration>,
+    ) -> Result<Response, AppRequestFailure> {
+        self.send_with(
+            request,
+            timeout,
+            |request| async move { request.send().await },
+        )
+        .await
     }
 
     async fn send_with<F, Fut>(
         &self,
         request: RequestBuilder,
+        timeout: Option<Duration>,
         send: F,
     ) -> Result<Response, AppRequestFailure>
     where
         F: Fn(RequestBuilder) -> Fut,
         Fut: Future<Output = Result<Response, reqwest::Error>>,
     {
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let retry = request.try_clone().ok_or(AppRequestFailure::Credential(
             AppCredentialFailure::ExchangeRejected,
         ))?;
         let authorization = self
-            .resolve(None)
+            .resolve(None, deadline)
             .await
             .map_err(AppRequestFailure::Credential)?;
-        let mut response = send(request.headers(reqwest::header::HeaderMap::from_iter([(
-            reqwest::header::AUTHORIZATION,
-            authorization.header.clone(),
-        )])))
+        let mut response = send(with_request_deadline(request, deadline).headers(
+            reqwest::header::HeaderMap::from_iter([(
+                reqwest::header::AUTHORIZATION,
+                authorization.header.clone(),
+            )]),
+        ))
         .await
         .map_err(AppRequestFailure::Request)?;
         if response.status() != StatusCode::UNAUTHORIZED {
@@ -187,13 +208,15 @@ impl AppAuthentication {
             return Ok(response);
         }
         let authorization = self
-            .resolve(Some(authorization.generation))
+            .resolve(Some(authorization.generation), deadline)
             .await
             .map_err(AppRequestFailure::Credential)?;
-        let mut response = send(retry.headers(reqwest::header::HeaderMap::from_iter([(
-            reqwest::header::AUTHORIZATION,
-            authorization.header.clone(),
-        )])))
+        let mut response = send(with_request_deadline(retry, deadline).headers(
+            reqwest::header::HeaderMap::from_iter([(
+                reqwest::header::AUTHORIZATION,
+                authorization.header.clone(),
+            )]),
+        ))
         .await
         .map_err(AppRequestFailure::Request)?;
         response
@@ -201,6 +224,35 @@ impl AppAuthentication {
             .insert(ResponseCredential(authorization.header));
         Ok(response)
     }
+}
+
+async fn within_deadline<T>(
+    deadline: Option<Instant>,
+    future: impl Future<Output = T>,
+) -> Result<T, AppCredentialFailure> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future)
+            .await
+            .map_err(|_| AppCredentialFailure::ExchangeRejected),
+        None => Ok(future.await),
+    }
+}
+
+fn with_request_deadline(request: RequestBuilder, deadline: Option<Instant>) -> RequestBuilder {
+    match deadline {
+        Some(deadline) => request.timeout(deadline.saturating_duration_since(Instant::now())),
+        None => request,
+    }
+}
+
+async fn read_exchange(response: Response) -> Result<CachedToken, AppCredentialFailure> {
+    let (bytes, extent) = crate::read_bounded(response.bytes_stream(), MAX_TOKEN_RESPONSE_BYTES)
+        .await
+        .map_err(|_| AppCredentialFailure::ExchangeRejected)?;
+    if extent == crate::ResponseExtent::Truncated {
+        return Err(AppCredentialFailure::ExchangeRejected);
+    }
+    decode_exchange(&bytes)
 }
 
 /// Authentication preparation or request transport failure.
@@ -298,7 +350,7 @@ mod tests {
     fn fixture_auth() -> (AppAuthentication, Arc<AtomicUsize>) {
         let exchanges = Arc::new(AtomicUsize::new(0));
         let count = exchanges.clone();
-        let exchange: TokenExchange = Arc::new(move || {
+        let exchange: TokenExchange = Arc::new(move |_| {
             let generation = count.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 tokio::task::yield_now().await;
@@ -310,7 +362,13 @@ mod tests {
                         .to_string()
                         .into();
                 response["token"] = format!("synthetic-installation-{generation}").into();
-                decode_exchange(response.to_string().as_bytes())
+                read_exchange(Response::from(
+                    http::Response::builder()
+                        .status(201)
+                        .body(response.to_string())
+                        .expect("offline response"),
+                ))
+                .await
             })
         });
         (
@@ -321,6 +379,122 @@ mod tests {
             },
             exchanges,
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_exchange_expires_and_releases_the_shared_cache() {
+        let (mut auth, exchanges) = fixture_auth();
+        let successful_exchange = auth.exchange.clone();
+        auth.exchange = Arc::new(|timeout| {
+            assert_eq!(timeout, Some(Duration::from_secs(2)));
+            Box::pin(std::future::pending())
+        });
+        let started = Instant::now();
+        assert_eq!(
+            auth.authorization(Some(Duration::from_secs(2))).await,
+            Err(AppCredentialFailure::ExchangeRejected)
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert!(auth.cached.try_lock().is_ok());
+        auth.exchange = successful_exchange;
+        assert!(
+            auth.authorization(Some(Duration::from_secs(2)))
+                .await
+                .is_ok()
+        );
+        assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiting_caller_keeps_its_own_deadline() {
+        let (auth, exchanges) = fixture_auth();
+        let held = auth.cached.lock().await;
+        let started = Instant::now();
+        assert_eq!(
+            auth.authorization(Some(Duration::from_secs(1))).await,
+            Err(AppCredentialFailure::ExchangeRejected)
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert_eq!(exchanges.load(Ordering::SeqCst), 0);
+        drop(held);
+        assert!(
+            auth.authorization(Some(Duration::from_secs(1)))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unauthorized_refresh_uses_only_the_remaining_request_budget() {
+        let (mut auth, _) = fixture_auth();
+        auth.authorization(None)
+            .await
+            .expect("prime installation token");
+        auth.exchange = Arc::new(|timeout| {
+            assert_eq!(timeout, Some(Duration::from_secs(1)));
+            Box::pin(std::future::pending())
+        });
+        let client = crate::client(None).expect("offline client");
+        let started = Instant::now();
+        let result = auth
+            .send_with(
+                client.get(crate::GRAPHQL_URL),
+                Some(Duration::from_secs(2)),
+                |_| async {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Ok(Response::from(
+                        http::Response::builder()
+                            .status(401)
+                            .body("")
+                            .expect("rejection"),
+                    ))
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(AppRequestFailure::Credential(
+                AppCredentialFailure::ExchangeRejected
+            ))
+        ));
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert!(auth.cached.try_lock().is_ok());
+    }
+
+    fn exchange_response_at_size(size: usize) -> Response {
+        let mut value: serde_json::Value =
+            serde_json::from_str(TOKEN_RESPONSE).expect("recorded response");
+        value["expires_at"] =
+            jiff::Timestamp::from_second(jiff::Timestamp::now().as_second() + 3600)
+                .expect("fixture expiry")
+                .to_string()
+                .into();
+        let mut bytes = value.to_string().into_bytes();
+        bytes.resize(size, b' ');
+        Response::from(
+            http::Response::builder()
+                .status(201)
+                .body(bytes)
+                .expect("offline token response"),
+        )
+    }
+
+    #[tokio::test]
+    async fn exchange_response_at_the_body_ceiling_is_accepted() {
+        assert!(
+            read_exchange(exchange_response_at_size(MAX_TOKEN_RESPONSE_BYTES))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_response_exceeding_the_body_ceiling_is_rejected_before_decoding() {
+        // The retained prefix is valid JSON: truncation itself must reject this response.
+        assert!(matches!(
+            read_exchange(exchange_response_at_size(MAX_TOKEN_RESPONSE_BYTES + 1)).await,
+            Err(AppCredentialFailure::ExchangeRejected)
+        ));
     }
 
     #[test]
@@ -369,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_callers_share_initial_and_preexpiry_refresh() {
         let (auth, exchanges) = fixture_auth();
-        let (first, second) = tokio::join!(auth.authorization(), auth.authorization());
+        let (first, second) = tokio::join!(auth.authorization(None), auth.authorization(None));
         assert_eq!(first.expect("first token"), second.expect("shared token"));
         assert_eq!(exchanges.load(Ordering::SeqCst), 1);
         auth.cached
@@ -380,7 +554,7 @@ mod tests {
             .as_mut()
             .expect("cached token")
             .expires_at = jiff::Timestamp::now().as_second() + 60;
-        let (first, second) = tokio::join!(auth.authorization(), auth.authorization());
+        let (first, second) = tokio::join!(auth.authorization(None), auth.authorization(None));
         assert_eq!(
             first.expect("refreshed token"),
             second.expect("shared refreshed token")
@@ -436,6 +610,7 @@ mod tests {
                     .post(crate::GRAPHQL_URL)
                     .header(reqwest::header::AUTHORIZATION, "Bearer stale-token")
                     .body("synthetic-request-body"),
+                None,
                 &send
             ),
             auth.send_with(
@@ -443,6 +618,7 @@ mod tests {
                     .post(crate::GRAPHQL_URL)
                     .header(reqwest::header::AUTHORIZATION, "Bearer stale-token")
                     .body("synthetic-request-body"),
+                None,
                 &send
             )
         );
@@ -469,7 +645,7 @@ mod tests {
         let requests = AtomicUsize::new(0);
         let client = crate::client(None).expect("offline client");
         let response = auth
-            .send_with(client.get(crate::GRAPHQL_URL), |_| {
+            .send_with(client.get(crate::GRAPHQL_URL), None, |_| {
                 requests.fetch_add(1, Ordering::SeqCst);
                 async {
                     Ok(Response::from(
@@ -498,7 +674,7 @@ mod tests {
         let auth = AppAuthentication {
             cached: Mutex::new(Ok(None)),
             generation: std::sync::atomic::AtomicU64::new(0),
-            exchange: Arc::new(move || {
+            exchange: Arc::new(move |_| {
                 count.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async {
                     tokio::task::yield_now().await;
@@ -506,11 +682,11 @@ mod tests {
                 })
             }),
         };
-        let (first, second) = tokio::join!(auth.authorization(), auth.authorization());
+        let (first, second) = tokio::join!(auth.authorization(None), auth.authorization(None));
         assert_eq!(first, Err(AppCredentialFailure::ExchangeRejected));
         assert_eq!(second, first);
         assert_eq!(exchanges.load(Ordering::SeqCst), 1);
-        assert_eq!(auth.authorization().await, first);
+        assert_eq!(auth.authorization(None).await, first);
         assert_eq!(exchanges.load(Ordering::SeqCst), 2);
     }
 
@@ -521,7 +697,7 @@ mod tests {
         let auth = AppAuthentication {
             cached: Mutex::new(Ok(None)),
             generation: std::sync::atomic::AtomicU64::new(0),
-            exchange: Arc::new(move || {
+            exchange: Arc::new(move |_| {
                 count.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async {
                     tokio::task::yield_now().await;
@@ -533,10 +709,10 @@ mod tests {
                 })
             }),
         };
-        let rejected = auth.resolve(None).await.expect("initial credential");
+        let rejected = auth.resolve(None, None).await.expect("initial credential");
         let (first, second) = tokio::join!(
-            auth.resolve(Some(rejected.generation)),
-            auth.resolve(Some(rejected.generation))
+            auth.resolve(Some(rejected.generation), None),
+            auth.resolve(Some(rejected.generation), None)
         );
         assert_eq!(first.expect("refreshed").header, rejected.header);
         assert_eq!(second.expect("shared refresh").header, rejected.header);

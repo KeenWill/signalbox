@@ -53,6 +53,10 @@ expiry or after a 401, with one retry and shared concurrent refresh; these
 integration credentials do not participate in model-pool selection or
 quarantine.
 
+Installation-token preparation and refresh use the caller's configured request
+deadline, including time waiting for the shared cache. Token-exchange responses
+larger than 64 KiB are rejected as credential unavailability before decoding.
+
 ## Design decisions
 
 A rejected daemon-owned OAuth refresh or a credential-home identity that failed

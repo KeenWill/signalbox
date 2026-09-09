@@ -172,7 +172,8 @@ impl ConvergenceSweepRuntime {
                         credentials: FileCredentialAccess::from_github(
                             repository.credential(),
                             repository.credential_reference(),
-                        ),
+                        )
+                        .with_request_timeout(numeric_bounds.request_timeout),
                         credential_reference: repository.credential_reference(),
                     })
             })
@@ -852,7 +853,7 @@ impl ConvergenceSweepRuntime {
             .header(USER_AGENT, USER_AGENT_VALUE);
         let mut response = match app {
             Some(app) => app
-                .send(request)
+                .send(request, self.numeric_bounds.request_timeout)
                 .await
                 .map_err(|_| CensusError::Credential)?,
             None => request.send().await.map_err(|_| CensusError::Request)?,
@@ -897,7 +898,10 @@ impl ConvergenceSweepRuntime {
                 .header(USER_AGENT, USER_AGENT_VALUE)
                 .body(body.clone());
             let sent = match app {
-                Some(app) => app.send(request).await.map_err(|_| CensusError::Credential),
+                Some(app) => app
+                    .send(request, self.numeric_bounds.request_timeout)
+                    .await
+                    .map_err(|_| CensusError::Credential),
                 None => request.send().await.map_err(|_| CensusError::Request),
             };
             match sent {
