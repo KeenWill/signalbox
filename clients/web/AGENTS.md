@@ -6,8 +6,9 @@ relevant skills under `.agents/skills/` before changing this client.
 
 This bootstrap does not decide open browser transport, client language, wire, or
 cross-component questions. The implementing stack records foundation-weight
-choices in its owning living specification and ordinary choices in its
-pull-request description before implementation.
+choices in a design document at its bottom and ordinary choices in its
+pull-request description before implementation. The owning specification changes
+with the code that builds the design.
 
 ## Architecture
 
