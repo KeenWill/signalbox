@@ -742,6 +742,15 @@ async fn registration_fixture(
     grants: signalbox_domain::program_registration::ProgramGrants,
     artifact: &str,
 ) -> Result<ProgramRunId, Box<dyn Error>> {
+    registration_with_input(pool, grants, artifact, &[]).await
+}
+
+async fn registration_with_input(
+    pool: &PgPool,
+    grants: signalbox_domain::program_registration::ProgramGrants,
+    artifact: &str,
+    input: &[u8],
+) -> Result<ProgramRunId, Box<dyn Error>> {
     use signalbox_domain::program_registration::ProgramRegistrationRequest;
     use signalbox_persistence::program_registration::ProgramRegistrationRepository;
     let repository = ProgramRegistrationRepository::new(pool.clone());
@@ -761,7 +770,7 @@ async fn registration_fixture(
         .start_run(
             signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
             registration.id,
-            &[],
+            input,
         )
         .await?)
 }
@@ -1318,6 +1327,178 @@ fn session_repository(
 enum SessionEffectAttempt {
     Live,
     Recovered,
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn emitted_typescript_entry_runs_through_host_and_replays_its_checked_result()
+-> Result<(), Box<dyn Error>> {
+    use deno_core::serde_json::{from_slice, json, to_vec};
+    use signalbox_domain::{ProgramCapability, SessionId, program_registration::ProgramGrants};
+    use signalbox_workflow_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
+
+    let (_container, pool) = migrated_postgres().await?;
+    let input =
+        json!({ "command": Uuid::now_v7().to_string(), "model": Uuid::now_v7().to_string() });
+    let input_bytes = to_vec(&input)?;
+    let artifact = include_str!("fixtures/session.js");
+    let grants = ProgramGrants::new([ProgramCapability::Session]);
+    let run = registration_with_input(&pool, grants.clone(), artifact, &input_bytes).await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let host = WorkflowHost::new(journal.clone());
+    let mut primitives = ScriptedDeliveries::new([]);
+    let unused_effects = || EffectProbe {
+        policy: EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    let mut effects = SessionEffects::new(
+        session_repository(&pool),
+        unused_effects(),
+        |_| {},
+        |_| None,
+    );
+    let outcome = host
+        .execute_registered(run, &mut primitives, &mut effects)
+        .await?;
+    let ProgramExecutionOutcome::Completed(result) = &outcome else {
+        panic!("typed entrypoint completes successfully");
+    };
+    let answer: deno_core::serde_json::Value = from_slice(result.as_bytes())?;
+    let session = SessionId::from_uuid(
+        answer["session"]
+            .as_str()
+            .expect("session result")
+            .parse()?,
+    );
+    let created = signalbox_persistence::session::SessionRepository::new(pool.clone())
+        .load_session(session)
+        .await?
+        .expect("entrypoint creates a session");
+    assert!(
+        matches!(created.creation_provenance().cause(), signalbox_domain::SessionCreationCause::Workflow { run: actor } if actor.run() == run)
+    );
+    let loaded = journal.load(run).await?.expect("completed journal");
+    assert_eq!(loaded.result(), Some(result));
+    let JournalFrame::Request(request) = loaded.entries()[0].frame() else {
+        panic!("entrypoint effect request");
+    };
+    let RequestKind::Effect(effect) = request.kind() else {
+        panic!("session create effect");
+    };
+    assert_eq!(
+        from_slice::<deno_core::serde_json::Value>(effect.payload().as_bytes())?,
+        input
+    );
+    let JournalFrame::Delivery(delivery) = loaded.entries()[1].frame() else {
+        panic!("entrypoint effect answer");
+    };
+    assert!(matches!(delivery.kind(), DeliveryKind::Answer { payload, .. } if payload == result));
+
+    // Resume a journal containing the effect and its answer but no terminal result.
+    let replay_run = registration_with_input(&pool, grants.clone(), artifact, &input_bytes).await?;
+    journal
+        .append_request(replay_run, None, request.kind().clone())
+        .await?;
+    journal
+        .append_delivery(replay_run, delivery.kind().clone())
+        .await?;
+    let mut no_live_effects = unused_effects();
+    assert_eq!(
+        host.execute_registered(replay_run, &mut primitives, &mut no_live_effects)
+            .await?,
+        outcome
+    );
+    assert_eq!(
+        host.execute_registered(run, &mut primitives, &mut no_live_effects)
+            .await?,
+        outcome
+    );
+    assert_eq!(no_live_effects.executions, 0);
+    assert_eq!(no_live_effects.adoptions, 0);
+    assert!(primitives.observed_outstanding.is_empty());
+
+    let invalid_run = registration_with_input(&pool, grants, artifact, b"{}").await?;
+    let error = host
+        .execute_registered(invalid_run, &mut primitives, &mut no_live_effects)
+        .await
+        .expect_err("input is checked before run");
+    assert!(
+        error
+            .to_string()
+            .contains("expected command and model strings")
+    );
+    assert!(
+        journal
+            .load(invalid_run)
+            .await?
+            .expect("invalid input journal")
+            .entries()
+            .is_empty()
+    );
+    assert_eq!(no_live_effects.executions, 0);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM session")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 1);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn entrypoint_bytes_use_preloaded_intrinsics_and_nonbyte_results_cannot_complete()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::program_registration::ProgramGrants;
+    use signalbox_workflow_runtime::effects::EffectRecovery;
+    let (_container, pool) = migrated_postgres().await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let host = WorkflowHost::new(journal.clone());
+    let mut effects = EffectProbe {
+        policy: EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    let mut primitives = ScriptedDeliveries::new([]);
+    let artifact = r#"
+globalThis.Uint8Array = () => { throw new Error("late bound constructor"); };
+export default function(input) {
+  if (this !== undefined) throw new Error("entrypoint received a receiver");
+  return input;
+}
+"#;
+    let input = b"retained input returned unchanged";
+    let run = registration_with_input(&pool, ProgramGrants::new([]), artifact, input).await?;
+    assert_eq!(
+        host.execute_registered(run, &mut primitives, &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::new(input.as_slice()))
+    );
+    let invalid =
+        registration_fixture(&pool, ProgramGrants::new([]), "export default () => [1];").await?;
+    let error = host
+        .execute_registered(invalid, &mut primitives, &mut effects)
+        .await
+        .expect_err("nonbyte entrypoint result");
+    assert!(
+        error
+            .to_string()
+            .contains("program entrypoint must return a Uint8Array")
+    );
+    assert!(
+        journal
+            .load(invalid)
+            .await?
+            .expect("invalid result journal")
+            .result()
+            .is_none()
+    );
+    assert_eq!(effects.executions, 0);
+    assert!(primitives.observed_outstanding.is_empty());
+    pool.close().await;
+    Ok(())
 }
 
 async fn execute_session_creation(attempt: SessionEffectAttempt) -> Result<(), Box<dyn Error>> {

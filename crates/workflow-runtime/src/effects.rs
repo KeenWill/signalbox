@@ -96,10 +96,15 @@ impl WorkflowHost {
         };
         let result = match registration.content.executable {
             ProgramExecutable::JavaScript { artifact, .. } => {
+                let input = registrations
+                    .input_for_run(run)
+                    .await?
+                    .ok_or(ProgramRegistrationError::RunMissing)?;
                 self.execute_loaded(
                     run,
                     journal,
                     &ProgramArtifact::new(artifact),
+                    input.as_bytes(),
                     &mut deliveries,
                 )
                 .await

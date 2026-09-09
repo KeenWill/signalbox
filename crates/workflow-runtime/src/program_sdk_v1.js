@@ -133,7 +133,7 @@
   };
   const jsonCodec = (decode) => freeze({
     decode(value) { return decode(snapshotJson(decodeJson(value))); },
-    encode(value) { return encodeJson(decode(value)); },
+    encode(value) { return encodeJson(decode(snapshotJson(value))); },
   });
   const effect = (capability, method, payload) => request({
     kind: "effect", capability, method, payload: wireBytes(payload),
