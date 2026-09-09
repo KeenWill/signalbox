@@ -152,6 +152,41 @@ await program(new Uint8Array([49]));
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn input_codec_refuses_inherited_required_fields() {
+    let (result, requests) = sdk_script(
+        r#"
+const identity = "12345678-1234-1234-1234-123456789abc";
+Object.prototype.command = identity;
+const input = sdk.jsonCodec(value => {
+  if (typeof value !== "object" || value === null || !("command" in value)
+    || !("model" in value) || typeof value.command !== "string" || typeof value.model !== "string") {
+    throw new TypeError("expected command and model input fields");
+  }
+  return { command: value.command, model: value.model };
+});
+const bytes = value => Uint8Array.from(JSON.stringify(value), c => c.charCodeAt(0));
+const valid = input.decode(bytes({ command: identity, model: identity }));
+if (valid.command !== identity || valid.model !== identity) throw new Error("own input fields must decode");
+const program = sdk.defineProgram({ input, output: input,
+  run: () => { throw new Error("inherited input reached the program body"); } });
+await program(bytes({ model: identity }));
+"#,
+        [],
+    )
+    .await;
+    assert!(
+        result
+            .expect_err("a required input field must occur in the durable bytes")
+            .to_string()
+            .contains("expected command and model input fields")
+    );
+    assert!(
+        requests.is_empty(),
+        "invalid input must not execute effects"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn output_codec_refuses_invalid_program_result() {
     let (result, requests) = sdk_script(
         r#"

@@ -132,7 +132,7 @@
     return jsonParse(decodeUriComponent(escaped));
   };
   const jsonCodec = (decode) => freeze({
-    decode(value) { return decode(decodeJson(value)); },
+    decode(value) { return decode(snapshotJson(decodeJson(value))); },
     encode(value) { return encodeJson(decode(value)); },
   });
   const effect = (capability, method, payload) => request({
