@@ -1,9 +1,10 @@
-//! JavaScript isolate host for journaled Signalbox programs.
+//! JavaScript and trusted native hosts for journaled Signalbox programs.
 //!
-//! Registered runs resolve their artifact and grants from durable registration.
+//! Registered runs resolve their executable and grants from durable registration.
 //! Host-side executors answer granted effects; replay uses the checked journal.
 
 pub mod effects;
+pub mod native;
 pub mod session_effects;
 
 use std::{
@@ -14,6 +15,7 @@ use std::{
     future::{Future, poll_fn},
     pin::Pin,
     rc::Rc,
+    sync::Arc,
     task::Poll,
 };
 
@@ -189,7 +191,7 @@ impl From<WorkflowHostProtocolError> for WorkflowHostError {
     }
 }
 
-/// An invariant between the isolate, replay cursor, and delivery source failed.
+/// An invariant between the program adapter, replay cursor, and delivery source failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkflowHostProtocolError {
     RequestOrdinalExhausted,
@@ -226,15 +228,25 @@ impl fmt::Display for WorkflowHostProtocolError {
 
 impl Error for WorkflowHostProtocolError {}
 
-/// Executes JavaScript modules against a durable journal and replay cursor.
+/// Executes JavaScript modules and compiled native programs against one durable journal.
 #[derive(Clone, Debug)]
 pub struct WorkflowHost {
     journal: ProgramJournalRepository,
+    native_catalog: Option<Arc<native::NativeCatalog>>,
 }
 
 impl WorkflowHost {
     pub const fn new(journal: ProgramJournalRepository) -> Self {
-        Self { journal }
+        Self {
+            journal,
+            native_catalog: None,
+        }
+    }
+
+    /// Supplies the compiled entries available in this executing binary.
+    pub fn with_native_catalog(mut self, catalog: native::NativeCatalog) -> Self {
+        self.native_catalog = Some(Arc::new(catalog));
+        self
     }
 
     /// Verifies the retained run before fixing host-side session input attribution.
@@ -454,7 +466,7 @@ impl WorkflowHost {
         &self,
         run: ProgramRunId,
         execution: &mut ExecutionState,
-        request: IsolateRequest,
+        request: HostRequest,
     ) -> Result<(), WorkflowHostError> {
         let frame = execution.frame_for(request.kind)?;
         match execution.cursor.submit_request(frame.clone()) {
@@ -580,7 +592,7 @@ async fn poll_runtime_once(
 }
 
 fn isolate(
-    sender: mpsc::UnboundedSender<IsolateRequest>,
+    sender: mpsc::UnboundedSender<HostRequest>,
 ) -> Result<(JsRuntime, Rc<ProgramModuleLoader>), deno_core::error::CoreError> {
     let module_loader = Rc::new(ProgramModuleLoader {
         preload_admitted: Cell::new(false),
@@ -593,16 +605,16 @@ fn isolate(
     runtime
         .op_state()
         .borrow_mut()
-        .put(IsolateRequestSender(sender));
+        .put(HostRequestSender(sender));
     Ok((runtime, module_loader))
 }
 
 #[derive(Clone)]
-struct IsolateRequestSender(mpsc::UnboundedSender<IsolateRequest>);
+struct HostRequestSender(mpsc::UnboundedSender<HostRequest>);
 
-struct IsolateRequest {
-    kind: IsolateRequestKind,
-    reply: oneshot::Sender<IsolateDelivery>,
+struct HostRequest {
+    kind: RequestKind,
+    reply: oneshot::Sender<DeliveryKind>,
 }
 
 #[derive(Deserialize)]
@@ -674,23 +686,44 @@ async fn op_program_request(
 ) -> Result<IsolateDelivery, JsErrorBox> {
     let sender = {
         let state = state.borrow();
-        state.borrow::<IsolateRequestSender>().0.clone()
+        state.borrow::<HostRequestSender>().0.clone()
     };
     let (reply, delivery) = oneshot::channel();
     sender
-        .send(IsolateRequest {
-            kind: request,
+        .send(HostRequest {
+            kind: request.into_domain(),
             reply,
         })
         .map_err(|_| JsErrorBox::generic("program host request channel closed"))?;
-    delivery
+    let delivery = delivery
         .await
-        .map_err(|_| JsErrorBox::generic("program host delivery channel closed"))
+        .map_err(|_| JsErrorBox::generic("program host delivery channel closed"))?;
+    match delivery {
+        DeliveryKind::Answer { payload, .. } => Ok(IsolateDelivery::Answer {
+            payload: payload.as_bytes().to_vec(),
+        }),
+        DeliveryKind::Wake { payload, .. } => Ok(IsolateDelivery::Wake {
+            payload: payload.as_bytes().to_vec(),
+        }),
+        DeliveryKind::Cancel { payload, .. } => Ok(IsolateDelivery::Cancel {
+            payload: payload.as_bytes().to_vec(),
+        }),
+        DeliveryKind::Reject { reason, .. } => Ok(IsolateDelivery::Reject {
+            reason: match reason {
+                RejectReason::OutstandingRequests => IsolateRejectReason::OutstandingRequests,
+                RejectReason::CapabilityDenied => IsolateRejectReason::CapabilityDenied,
+                RejectReason::UnsupportedOperation => IsolateRejectReason::UnsupportedOperation,
+            },
+        }),
+        DeliveryKind::RunCancel(_) | DeliveryKind::Fault(_) => {
+            Err(JsErrorBox::generic("program ended"))
+        }
+    }
 }
 
 struct PendingRequest {
     frame: RequestFrame,
-    reply: oneshot::Sender<IsolateDelivery>,
+    reply: oneshot::Sender<DeliveryKind>,
 }
 
 struct ExecutionState {
@@ -722,23 +755,20 @@ impl ExecutionState {
         Ok(())
     }
 
-    fn frame_for(
-        &mut self,
-        kind: IsolateRequestKind,
-    ) -> Result<RequestFrame, WorkflowHostProtocolError> {
+    fn frame_for(&mut self, kind: RequestKind) -> Result<RequestFrame, WorkflowHostProtocolError> {
         let ordinal = RequestOrdinal::try_from_u64(self.next_request_ordinal)
             .ok_or(WorkflowHostProtocolError::RequestOrdinalExhausted)?;
         self.next_request_ordinal = self
             .next_request_ordinal
             .checked_add(1)
             .ok_or(WorkflowHostProtocolError::RequestOrdinalExhausted)?;
-        Ok(RequestFrame::new(ordinal, None, kind.into_domain()))
+        Ok(RequestFrame::new(ordinal, None, kind))
     }
 
     fn insert_pending(
         &mut self,
         frame: RequestFrame,
-        reply: oneshot::Sender<IsolateDelivery>,
+        reply: oneshot::Sender<DeliveryKind>,
     ) -> Result<(), WorkflowHostProtocolError> {
         let ordinal = frame.ordinal();
         if self
@@ -775,60 +805,28 @@ impl ExecutionState {
         &mut self,
         delivery: DeliveryFrame,
     ) -> Result<Option<ProgramExecutionOutcome>, WorkflowHostProtocolError> {
-        match delivery.kind() {
-            DeliveryKind::Answer { resolves, payload } => {
-                self.resolve(
-                    *resolves,
-                    IsolateDelivery::Answer {
-                        payload: payload.as_bytes().to_vec(),
-                    },
-                )?;
-                Ok(None)
-            }
-            DeliveryKind::Wake { resolves, payload } => {
-                self.resolve(
-                    *resolves,
-                    IsolateDelivery::Wake {
-                        payload: payload.as_bytes().to_vec(),
-                    },
-                )?;
-                Ok(None)
-            }
-            DeliveryKind::Reject { resolves, reason } => {
-                let reason = match reason {
-                    RejectReason::OutstandingRequests => IsolateRejectReason::OutstandingRequests,
-                    RejectReason::CapabilityDenied => IsolateRejectReason::CapabilityDenied,
-                    RejectReason::UnsupportedOperation => IsolateRejectReason::UnsupportedOperation,
-                };
-                self.resolve(*resolves, IsolateDelivery::Reject { reason })?;
-                Ok(None)
-            }
-            DeliveryKind::Cancel { resolves, payload } => {
-                self.resolve(
-                    *resolves,
-                    IsolateDelivery::Cancel {
-                        payload: payload.as_bytes().to_vec(),
-                    },
-                )?;
-                Ok(None)
-            }
-            DeliveryKind::RunCancel(_) | DeliveryKind::Fault(_) => Ok(terminal_outcome(&delivery)),
+        if let Some(outcome) = terminal_outcome(&delivery) {
+            return Ok(Some(outcome));
         }
-    }
-
-    fn resolve(
-        &mut self,
-        ordinal: RequestOrdinal,
-        delivery: IsolateDelivery,
-    ) -> Result<(), WorkflowHostProtocolError> {
+        let ordinal = delivery
+            .kind()
+            .resolves()
+            .ok_or(WorkflowHostProtocolError::UnknownResolvedRequest)?;
         let pending = self
             .pending
             .remove(&ordinal)
             .ok_or(WorkflowHostProtocolError::UnknownResolvedRequest)?;
+        let outcome = match (pending.frame.kind(), delivery.kind()) {
+            (RequestKind::Terminal(result), DeliveryKind::Answer { .. }) => {
+                Some(ProgramExecutionOutcome::Completed(result.clone()))
+            }
+            _ => None,
+        };
         pending
             .reply
-            .send(delivery)
-            .map_err(|_| WorkflowHostProtocolError::DeliveryReceiverClosed)
+            .send(delivery.kind().clone())
+            .map_err(|_| WorkflowHostProtocolError::DeliveryReceiverClosed)?;
+        Ok(outcome)
     }
 }
 

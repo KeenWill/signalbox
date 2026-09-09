@@ -7,7 +7,7 @@ use serde::Deserialize;
 use signalbox_domain::{
     DeliveryKind, EffectRequest, InlineFramePayload, JournalFrame, ProgramCapability,
     ProgramRegistrationId, ProgramRunId, RejectReason, RequestFrame, RequestKind, RequestOrdinal,
-    program_registration::{ProgramGrants, ProgramRegistrationRequest},
+    program_registration::{ProgramExecutable, ProgramGrants, ProgramRegistrationRequest},
 };
 use signalbox_persistence::program_registration::{
     ProgramRegistrationError, ProgramRegistrationRepository,
@@ -50,7 +50,7 @@ pub trait EffectExecutor {
 }
 
 impl WorkflowHost {
-    /// Loads the pinned artifact and grants before starting or replaying the isolate.
+    /// Resolves the pinned executable and grants before starting either adapter.
     #[allow(
         clippy::result_large_err,
         reason = "The host retains its replay fault inline."
@@ -86,7 +86,6 @@ impl WorkflowHost {
                 JournalFrame::Delivery(_) => None,
             })
             .collect();
-        let artifact = ProgramArtifact::new(registration.content.artifact);
         let mut deliveries = GrantedDeliveries {
             run,
             grants: registration.content.grants,
@@ -95,9 +94,55 @@ impl WorkflowHost {
             primitives,
             effects,
         };
-        let result = self
-            .execute_loaded(run, journal, &artifact, &mut deliveries)
-            .await;
+        let result = match registration.content.executable {
+            ProgramExecutable::JavaScript { artifact, .. } => {
+                self.execute_loaded(
+                    run,
+                    journal,
+                    &ProgramArtifact::new(artifact),
+                    &mut deliveries,
+                )
+                .await
+            }
+            executable @ ProgramExecutable::Native { .. } => {
+                match self
+                    .native_catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.resolve(&executable))
+                {
+                    Some(entry) => {
+                        let input = registrations
+                            .input_for_run(run)
+                            .await?
+                            .ok_or(ProgramRegistrationError::RunMissing)?;
+                        self.execute_native_loaded(
+                            run,
+                            journal,
+                            entry,
+                            input.as_bytes(),
+                            &mut deliveries,
+                        )
+                        .await
+                    }
+                    None => {
+                        let tail = journal
+                            .entries()
+                            .last()
+                            .map_or(0, |entry| entry.position().as_u64());
+                        self.native_fault(
+                            run,
+                            tail,
+                            signalbox_domain::ProgramFault::ContractRetired(
+                                InlineFramePayload::new(
+                                    b"pinned native executable is unavailable".as_slice(),
+                                ),
+                            ),
+                        )
+                        .await
+                    }
+                }
+            }
+        };
         if let Some(outcome) = self
             .journal
             .load(run)
@@ -173,6 +218,22 @@ impl<P: LiveDeliverySource, E: EffectExecutor> LiveDeliverySource for GrantedDel
                 return Ok(DeliveryKind::Answer {
                     resolves: frame.ordinal(),
                     payload,
+                });
+            }
+            if let Some(frame) = outstanding
+                .iter()
+                .find(|frame| matches!(frame.kind(), RequestKind::Terminal(_)))
+            {
+                return Ok(if outstanding.len() == 1 {
+                    DeliveryKind::Answer {
+                        resolves: frame.ordinal(),
+                        payload: InlineFramePayload::default(),
+                    }
+                } else {
+                    DeliveryKind::Reject {
+                        resolves: frame.ordinal(),
+                        reason: RejectReason::OutstandingRequests,
+                    }
                 });
             }
             self.primitives.next_delivery(outstanding).await
