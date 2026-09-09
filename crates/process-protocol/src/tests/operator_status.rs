@@ -49,11 +49,12 @@ fn operator_status_request_and_rows_round_trip_in_one_closed_vocabulary()
         request(1)?,
         ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
             OperatorStatusEndMessage {
+                repository_ingestion_count: CanonicalU64::new(0),
                 lifecycle_week_count: CanonicalU64::new(1),
                 lifecycle_deadline_violation_count: CanonicalU64::new(1),
             },
         )))),
-        r#"{"type":"operator_status","kind":"end","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1"}"#,
+        r#"{"type":"operator_status","kind":"end","repository_ingestion_count":"0","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1"}"#,
     )?;
     Ok(())
 }
@@ -128,4 +129,26 @@ fn operator_status_rejects_a_week_label_that_names_no_day() {
     assert!(!operator_status_calendar_date_is_valid(
         "2026-08-31T00:00:00Z"
     ));
+}
+
+#[test]
+fn repository_ingestion_status_preserves_in_progress_and_absent_observation()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_server_message_round_trip(
+        request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::RepositoryIngestion(
+            Box::new(OperatorStatusRepositoryIngestion {
+                repository: "owner/repository".to_owned(),
+                last_successful_observation: None,
+                last_poll: Some(RepositoryPollAttempt {
+                    attempted_at: "2026-09-08 12:00:00.0 +00:00:00".to_owned(),
+                    outcome: RepositoryPollOutcome::InProgress,
+                }),
+                last_accepted_webhook: None,
+                events_recorded: CanonicalU64::new(0),
+            }),
+        ))),
+        r#"{"type":"operator_status","kind":"repository_ingestion","repository":"owner/repository","last_successful_observation":null,"last_poll":{"attempted_at":"2026-09-08 12:00:00.0 +00:00:00","outcome":"in_progress"},"last_accepted_webhook":null,"events_recorded":"0"}"#,
+    )?;
+    Ok(())
 }

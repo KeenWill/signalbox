@@ -75,6 +75,7 @@ pub struct OperatorStatusLifecycleDeadlineViolationMessage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatorStatusEndMessage {
+    pub repository_ingestion_count: CanonicalU64,
     pub lifecycle_week_count: CanonicalU64,
     /// The `nonterminal_past_deadline` alarm value, target zero.
     pub lifecycle_deadline_violation_count: CanonicalU64,
@@ -90,6 +91,8 @@ pub enum OperatorStatusMessage {
     LifecycleWeek(Box<OperatorStatusLifecycleWeekMessage>),
     /// One owned non-terminal session past its armed-deadline obligation.
     LifecycleDeadlineViolation(Box<OperatorStatusLifecycleDeadlineViolationMessage>),
+    /// Process-local ingestion evidence for one watched repository.
+    RepositoryIngestion(Box<OperatorStatusRepositoryIngestion>),
     /// Completes the snapshot with its section counts.
     End(Box<OperatorStatusEndMessage>),
 }
@@ -125,7 +128,9 @@ pub(crate) fn validate_operator_status_message(
             // past has a record.
             item.deadline_missing == item.expired_for_seconds.is_none()
         }
-        OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => true,
+        OperatorStatusMessage::Start {}
+        | OperatorStatusMessage::End(_)
+        | OperatorStatusMessage::RepositoryIngestion(_) => true,
     };
     if valid {
         Ok(())
@@ -173,4 +178,39 @@ const fn operator_status_days_in_month(year: i64, month: u32) -> u32 {
         2 => 28,
         _ => 0,
     }
+}
+
+/// Outcome of the most recently started repository poll.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryPollOutcome {
+    InProgress,
+    Succeeded,
+    ClientFailed,
+    ObservationFailed,
+    StoreFailed,
+    FrontierConflict,
+    Cancelled,
+}
+
+/// One repository poll's UTC start and outcome.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryPollAttempt {
+    pub attempted_at: String,
+    pub outcome: RepositoryPollOutcome,
+}
+
+/// Ingestion measurements since the current daemon process started.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStatusRepositoryIngestion {
+    pub repository: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub last_successful_observation: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub last_poll: Option<RepositoryPollAttempt>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub last_accepted_webhook: Option<String>,
+    pub events_recorded: CanonicalU64,
 }

@@ -19,6 +19,7 @@ const descriptor = (count: number) => ({
   first_address: { event_sequence: '1' },
   latest_address: { event_sequence: String(count) },
   repository_watch: null,
+  workspace_root_kind: null,
   sizes: {
     item_count: String(count),
     projected_structured_bytes: String(count * 78),

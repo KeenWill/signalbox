@@ -2966,6 +2966,26 @@ impl StoredModelChangeAdjustment {
     }
 }
 
+pub(crate) const fn session_workspace_root_kind_to_str(
+    kind: signalbox_domain::SessionWorkspaceRootKind,
+) -> &'static str {
+    match kind {
+        signalbox_domain::SessionWorkspaceRootKind::Derived => "derived",
+        signalbox_domain::SessionWorkspaceRootKind::Configured => "configured",
+        signalbox_domain::SessionWorkspaceRootKind::Provisioned => "provisioned",
+    }
+}
+pub(crate) fn session_workspace_root_kind_from_str(
+    value: &str,
+) -> Option<signalbox_domain::SessionWorkspaceRootKind> {
+    match value {
+        "derived" => Some(signalbox_domain::SessionWorkspaceRootKind::Derived),
+        "configured" => Some(signalbox_domain::SessionWorkspaceRootKind::Configured),
+        "provisioned" => Some(signalbox_domain::SessionWorkspaceRootKind::Provisioned),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, str::FromStr};

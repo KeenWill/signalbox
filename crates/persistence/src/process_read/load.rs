@@ -81,7 +81,10 @@ pub(super) async fn open_transcript_in_transaction(
         load_transcript_turn_count(&mut transaction, requested_session).await?;
     let expected_model_call_count =
         load_terminal_model_call_count(&mut transaction, requested_session).await?;
+    let workspace_root_kind =
+        crate::session_workspace::read_binding(&mut transaction, requested_session).await?;
     Ok(ProcessTranscriptReader {
+        workspace_root_kind,
         transaction: Some(transaction),
         session: requested_session,
         cursor,

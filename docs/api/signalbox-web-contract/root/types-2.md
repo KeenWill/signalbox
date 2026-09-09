@@ -487,6 +487,17 @@ pub enum WebRepositoryWatchEventKind {
 // derives: clone::Clone, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
 ```
 
+## WebSessionWorkspaceRootKind
+
+```rust
+pub enum WebSessionWorkspaceRootKind {
+    Derived,
+    Configured,
+    Provisioned,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, de::Deserialize<'de>, cmp::Eq, schemars::JsonSchema, cmp::PartialEq, ser::Serialize
+```
+
 ## WebTimelineSessionState
 
 ```rust

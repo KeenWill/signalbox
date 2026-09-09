@@ -302,6 +302,25 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         store.admit_webhook(delivery()).await?,
         WebhookAdmission::Inserted
     );
+    assert_eq!(
+        store
+            .ingestion_measurements(&repository)
+            .last_accepted_webhook,
+        Some(observed_at)
+    );
+    let mut replay = delivery();
+    replay.received_at += Duration::from_secs(1);
+    assert_eq!(
+        store.admit_webhook(replay).await?,
+        WebhookAdmission::PendingReplay
+    );
+    assert_eq!(
+        store
+            .ingestion_measurements(&repository)
+            .last_accepted_webhook,
+        Some(observed_at),
+        "delivery replays preserve the accepted high-water mark"
+    );
     let stored_digest: Vec<u8> = sqlx::query_scalar(
         "SELECT body_digest
            FROM webhook_delivery
@@ -2045,6 +2064,17 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     .await?;
     assert!(lineage.0 > 0);
     assert!(lineage.1);
+    let measurements = store.clone().ingestion_measurements(&runtime_repository);
+    assert_eq!(measurements.last_successful_observation, Some(observed_at));
+    assert_eq!(measurements.events_recorded, u64::try_from(lineage.0)?);
+    assert_eq!(measurements.last_poll, None);
+    assert_eq!(
+        restarted
+            .ingestion_measurements(&runtime_repository)
+            .events_recorded,
+        0,
+        "replays and unchanged observations record no new events"
+    );
 
     for (repository_name, lifecycle, expected_kind, expected_compact_count) in [
         (

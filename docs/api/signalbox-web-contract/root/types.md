@@ -607,6 +607,7 @@ pub struct WebSessionWorkFacts {
 
 ```rust
 pub struct WebSessionTimelineDescriptor {
+    pub workspace_root_kind: option::Option<WebSessionWorkspaceRootKind>,
     pub repository_watch: option::Option<WebRepositoryWatchProvenance>,
     pub session_id: WebSessionId,
     pub sizes: WebSessionTimelineSizeFacts,
@@ -1459,6 +1460,7 @@ pub enum WebSessionTimelineDetailBody {
         kind: WebSessionTimelineEventKind,
     },
     SessionCreated {
+        workspace_root_kind: option::Option<WebSessionWorkspaceRootKind>,
         cause: WebTimelineCreationCause,
         imported_evidence: option::Option<WebTimelineImportedEvidence>,
     },
