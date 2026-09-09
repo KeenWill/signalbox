@@ -9,7 +9,7 @@ use signalbox_domain::{
     ContextFrontierId, DurableCommandId, ModelCallId, NormalizedToolArguments, SessionId,
     ToolAttemptId, ToolEffectClass, ToolName, ToolRequestId, TurnAttemptId, TurnId,
 };
-use signalbox_tools_exec::{ProcessRequest, ProcessRunResult, ProcessRunner, TokioProcessRunner};
+use signalbox_tools_exec::{ProcessRequest, ProcessRunResult, ProcessRunner};
 use signalbox_tools_git::{ConfiguredGitRemote, GIT_PUSH_CONFIGURED_NAME, GitPushTools};
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 use std::{
@@ -21,22 +21,21 @@ use std::{
 
 #[derive(Clone)]
 struct LocalSshRunner {
-    inner: TokioProcessRunner,
     bin: PathBuf,
 }
 
 impl ProcessRunner for LocalSshRunner {
     fn sandbox_launcher_program(&self) -> &Path {
-        self.inner.sandbox_launcher_program()
+        panic!("SSH fixture executes direct Git requests")
     }
     fn sandbox_launcher_descriptor(&self) -> Option<i32> {
-        self.inner.sandbox_launcher_descriptor()
+        None
     }
     async fn bwrap_availability(
         &mut self,
-        request: ProcessRequest,
+        _request: ProcessRequest,
     ) -> signalbox_tools_exec::BwrapAvailability {
-        self.inner.bwrap_availability(request).await
+        panic!("SSH fixture does not probe bubblewrap")
     }
 
     async fn run(&mut self, mut request: ProcessRequest) -> ProcessRunResult {
@@ -51,14 +50,59 @@ impl ProcessRunner for LocalSshRunner {
             "PATH".into(),
             std::env::join_paths(paths).expect("fixture PATH"),
         );
-        let result = self.inner.run(request).await;
-        if !matches!(
-            result.outcome,
-            signalbox_tools_exec::ProcessOutcome::Exited { code: Some(0) }
-        ) {
-            eprintln!("local SSH fixture Git result: {result:?}");
+        assert_eq!(
+            request.environment_inheritance,
+            signalbox_tools_exec::ProcessEnvironment::Clear
+        );
+        let mut stdout = tempfile::tempfile().expect("stdout capture");
+        let mut stderr = tempfile::tempfile().expect("stderr capture");
+        let status = tokio::time::timeout(
+            request.timeout,
+            tokio::process::Command::new(&request.program)
+                .args(&request.arguments)
+                .current_dir(&request.working_directory)
+                .env_clear()
+                .envs(&request.environment)
+                .kill_on_drop(true)
+                .stdout(stdout.try_clone().expect("stdout descriptor"))
+                .stderr(stderr.try_clone().expect("stderr descriptor"))
+                .status(),
+        )
+        .await
+        .expect("fixture process deadline")
+        .expect("fixture process starts");
+        let result = ProcessRunResult {
+            outcome: signalbox_tools_exec::ProcessOutcome::Exited {
+                code: status.code(),
+            },
+            stdout: captured_output(&mut stdout, request.capture_bytes),
+            stderr: captured_output(&mut stderr, request.capture_bytes),
+        };
+        if !status.success() {
+            eprintln!(
+                "local SSH fixture Git: {}",
+                String::from_utf8_lossy(&result.stderr.bytes)
+            );
         }
         result
+    }
+}
+
+fn captured_output(file: &mut fs::File, limit: usize) -> signalbox_tools_exec::ProcessOutput {
+    use std::io::{Read, Seek, SeekFrom};
+    let length = file.metadata().expect("capture size").len();
+    file.seek(SeekFrom::Start(0)).expect("capture rewind");
+    let mut bytes = Vec::new();
+    file.take(limit as u64)
+        .read_to_end(&mut bytes)
+        .expect("bounded capture");
+    signalbox_tools_exec::ProcessOutput {
+        bytes,
+        completeness: if length > limit as u64 {
+            signalbox_tools_exec::CaptureCompleteness::Truncated
+        } else {
+            signalbox_tools_exec::CaptureCompleteness::Complete
+        },
     }
 }
 
@@ -172,11 +216,7 @@ esac
         assert!(status.success());
     }
     let agent = fixture.path().join("agent.sock");
-    let runner = LocalSshRunner {
-        inner: TokioProcessRunner::try_new(std::env::current_exe().expect("test executable"))
-            .expect("process runner"),
-        bin,
-    };
+    let runner = LocalSshRunner { bin };
     let transport = ProcessGitPushTransport {
         runner,
         credential_file: use_key.then_some(key),
