@@ -391,7 +391,7 @@ async fn load_tool_continuation_headroom_evidence(
                                         COALESCE(octet_length(attempt.context_result_text), 0)
                                    ELSE octet_length(jsonb_build_object('error',
                                         jsonb_build_object('kind', attempt.error_kind,
-                                                          'detail', attempt.error_detail))::text)
+                                                          'detail', attempt.context_error_detail))::text)
                                    END
                                        AS content_bytes
                               FROM semantic_transcript_entry AS entry

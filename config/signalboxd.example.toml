@@ -27,6 +27,7 @@ client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 # Seven days from authenticated webhook receipt to its durable expiry.
 repository_watch_webhook_retention = "604800s"
+repository_watch_poll_request_budget = 100
 # Physical database sessions established before daemon work begins.
 fenced_pool_min_connections = 48
 # Delay between checks that restore retired fenced pool sessions.

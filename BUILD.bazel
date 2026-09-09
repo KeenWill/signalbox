@@ -676,6 +676,14 @@ PERSISTENCE_TEST_BINARIES = {
 rust_postgres_suite(
     name = "persistence",
     binaries = PERSISTENCE_TEST_BINARIES,
+    tags = {
+        # Optional real-import probes read host transcript directories and environment.
+        "//crates/persistence:conversation_import_postgres": ["external"],
+        # Capacity assertions compare host-clock snapshots with database time.
+        "//crates/persistence:postgres_integration": ["external"],
+        # The shared-container fixture test invokes host Python and Docker utilities.
+        "//crates/persistence:unit_tests": ["external"],
+    },
 )
 
 rust_postgres_suite(
@@ -689,7 +697,6 @@ rust_postgres_suite(
         "//crates/workflow-runtime:unit_tests": "signalbox_workflow_runtime",
         "//crates/workflow-runtime:workflow_host_postgres": "workflow_host_postgres",
     },
-    tags = [],
 )
 
 DAEMON_TEST_BINARIES = {
@@ -713,6 +720,14 @@ rust_postgres_suite(
     name = "signalboxd",
     binaries = DAEMON_TEST_BINARIES,
     json_preserve_order = False,
+    tags = {
+        # Live model evaluations read credentials and contact public services.
+        "//apps/signalboxd:live_tool_evals": ["external"],
+        # The live exercise reads GITHUB_TOKEN and contacts public services.
+        "//apps/signalboxd:live_tool_exercise": ["external"],
+        # Checkout tests invoke the host Git executable.
+        "//apps/signalboxd:repo_watch_v2_postgres": ["external"],
+    },
 )
 
 CLIENT_TEST_BINARIES = {

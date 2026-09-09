@@ -96,6 +96,9 @@ pub struct ToolUsingAssistantResponse {
 }
 
 impl ToolUsingAssistantResponse {
+    /// Maximum admitted tool proposals in one response.
+    pub const MAX_TOOL_COUNT: usize = MAX_TOOL_REQUESTS_PER_RESPONSE;
+
     /// Checks the positive bounded tool-count requirement while preserving
     /// part order.
     pub fn try_from_parts(

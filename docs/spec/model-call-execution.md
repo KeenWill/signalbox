@@ -48,32 +48,36 @@ summarized range. Attachments render as the bounded textual stubs
 Context compaction produces its summary through a dedicated physical model call
 with its own durable prepared, in-flight, and terminal lifecycle, separate from
 ordinary calls. The compaction call's own input budget is its context window
-less the output ceiling and the required prompt. Before completed tool results
-enter context, each result receives an equal share of the smaller of that
-safe-prefix budget and the producing call's remaining headroom, reserving result
-envelope framing. Oversized text is truncated at a UTF-8 boundary with an
-explicit marker naming the retained and dropped byte counts; JSON escaping and
-the marker count against the share. The admitted text is durable and used by
-ordinary rendering, compaction, and headroom accounting; exact executor text
-remains observation evidence. When even framing and empty-prefix markers or
-other indivisible content cannot fit the first safe prefix, no call is prepared
-and one transaction fails the turn as a last-resort compaction wall. Automatic
-compaction targets the first safe boundary at or beyond half the rendered bytes
-and falls back to the latest safe boundary that fits. At two points a headroom
-guard adds the newest reported input for the pinned target, a byte allowance for
-model-visible content that input does not cover, and the configured output
-reservation, and compares the sum with the configured context window.
-Queued-turn allowances measure each uncovered entry through the effective
-adapter's message serializer, including framing and content-free messages.
-Before activating a queued turn, the guard repeats automatic compaction until
-the continuation fits. Each attempt after the first must replace at least two
-visible entries, so the starting frontier member count bounds attempts across
-restarts. A failed attempt, an uncompactable prefix, or a summary and pending
-input that still exceed the window fails the queued turn with no ordinary call
-prepared. Inside the tool-result continuation transaction an exceeded bound
-commits the tool results, prepares no continuation call, and fails the turn with
-a headroom record. For a repository-watch-created session, the daemon queues at
-most one successor per such terminalization with the fixed input
+less the output ceiling and the required prompt. Before tool results enter
+context, each result receives an equal share of the smaller of that safe-prefix
+budget and the producing call's remaining headroom, reserving the next
+response's output, the following call's output ceiling, the current result
+envelopes, and envelopes with empty-prefix markers for the maximum admitted next
+tool batch. Successful text and failure details share the same admission bound;
+typed failure kinds remain intact. Oversized text is truncated at a UTF-8
+boundary with an explicit marker naming the retained and dropped byte counts;
+JSON escaping and the marker count against the share. The admitted text is
+durable and used by ordinary rendering, compaction, and headroom accounting;
+exact executor text and failure details remain observation evidence. When even
+framing and empty-prefix markers or other indivisible content cannot fit the
+first safe prefix, no call is prepared and one transaction fails the turn as a
+last-resort compaction wall. Automatic compaction targets the first safe
+boundary at or beyond half the rendered bytes and falls back to the latest safe
+boundary that fits. At two points a headroom guard adds the newest reported
+input for the pinned target, a byte allowance for model-visible content that
+input does not cover, and the configured output reservation, and compares the
+sum with the configured context window. Queued-turn allowances measure each
+uncovered entry through the effective adapter's message serializer, including
+framing and content-free messages. Before activating a queued turn, the guard
+repeats automatic compaction until the continuation fits. Each attempt after the
+first must replace at least two visible entries, so the starting frontier member
+count bounds attempts across restarts. A failed attempt, an uncompactable
+prefix, or a summary and pending input that still exceed the window fails the
+queued turn with no ordinary call prepared. Inside the tool-result continuation
+transaction an exceeded bound commits the tool results, prepares no continuation
+call, and fails the turn with a headroom record. For a repository-watch-created
+session, the daemon queues at most one successor per such terminalization with
+the fixed input
 `Continue the unfinished repository-watch task from the compacted context.` and
 compacts the terminal frontier through the existing automatic compaction path
 using that successor's frozen direct model selection before activating it; the

@@ -30,6 +30,21 @@ use crate::{
     repo_watch_webhook::{PreparedListener, WebhookListener},
 };
 
+/// Selects the configured repository granting push authority for the retained PR head.
+pub(crate) fn git_push_repository<'a>(
+    configuration: &'a RepositoryWatchConfiguration,
+    event: &signalbox_domain::RepoWatchEvent,
+) -> Option<&'a crate::WatchedRepositoryConfiguration> {
+    let signalbox_domain::RepoWatchEventTarget::PullRequest(context) = event.target() else {
+        return None;
+    };
+    configuration.repositories().iter().find(|repository| {
+        repository.repository() == event.repository()
+            && repository.repository() == context.head_repository()
+            && repository.push_credential_file().is_some()
+    })
+}
+
 /// Core capabilities remain in daemon-owned adapters; the module receives its own pool.
 pub struct RepositoryWatchServices {
     pub goal_resumption: crate::PostgresGoalPassDisposition,
@@ -286,21 +301,15 @@ impl RepositoryWatchRuntime {
         let Some(configuration) = configuration else {
             return Ok(None);
         };
-        Ok(configuration
-            .repositories()
-            .iter()
-            .find(|repository| {
-                repository.repository() == checkout.event.repository()
-                    && repository.repository() == context.head_repository()
-                    && repository.push_credential_file().is_some()
-            })
-            .map(|repository| {
+        Ok(
+            git_push_repository(&configuration, &checkout.event).map(|repository| {
                 (
                     repository.clone(),
                     context.head_branch().clone(),
                     context.head_sha().clone(),
                 )
-            }))
+            }),
+        )
     }
 
     /// Reconciles the configured revision set before starting repository tasks.
@@ -753,10 +762,12 @@ impl RuntimeState {
                 let Some(wake) = self.wakes.get(repository.repository()).cloned() else {
                     continue;
                 };
+                wake.notify_one();
                 let task = GitHubRepositoryTask {
                     repository: repository.repository().clone(),
                     signal_reviewers: configuration.signal_reviewers().to_vec(),
                     subject_retention: configuration.webhook_retention(),
+                    poll_request_budget: configuration.poll_request_budget(),
                     clients: RepositoryWatchClientLoader::new(repository),
                     store: self.store.clone(),
                 };
