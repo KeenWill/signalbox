@@ -65,11 +65,13 @@ impl<Runner: ProcessRunner> SandboxedExecTool<Runner> {
     pub fn try_new(
         runner: Runner,
         workspace_root: impl convert::AsRef<path::Path>,
+        timeout_bound: option::Option<time::Duration>,
     ) -> result::Result<Self, ExecToolConstructionError>;
     pub fn try_new_with_cargo_registry(
         runner: Runner,
         workspace_root: impl convert::AsRef<path::Path>,
         cargo_registry: impl convert::AsRef<path::Path>,
+        timeout_bound: option::Option<time::Duration>,
     ) -> result::Result<Self, ExecToolConstructionError>;
     pub fn with_sandbox_configuration(self, configuration: SandboxConfiguration) -> Self;
     pub fn into_parts(
@@ -83,6 +85,7 @@ impl SandboxedExecTool<TokioProcessRunner> {
     pub fn try_new_production(
         workspace_root: impl convert::AsRef<path::Path>,
         supervisor_program: impl convert::AsRef<path::Path>,
+        timeout_bound: option::Option<time::Duration>,
     ) -> result::Result<Self, ExecToolConstructionError>;
 }
 ```
