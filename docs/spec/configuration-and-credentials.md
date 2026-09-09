@@ -144,12 +144,16 @@ disabled, `CARGO_HOME` stays private and writable, and `npm_config_cache` is
 The optional `[tool_approval_postures]` table decides, per exact composed tool
 name, whether a request is approved by policy, judged by the approval judge, or
 parked for a person; a tool whose declaration always confirms keeps that
-requirement under every posture but delegation. The optional `[approval_judge]`
-table decides which configured direct selection judges delegated requests, and
-when it is absent the judge reuses the request-producing call's selection. The
-optional `[workspace_instructions]` table is either absent or present at version
-one, and its bounded `registered_roots` array names the instruction directories
-registered outside a session's workspace.
+requirement under every posture but delegation. Web tools default to delegation
+under either session blanket; explicit `auto` also delegates them and `human`
+parks them for a person. Optional `[tool_settings].approval_wait_timeout` is a
+positive duration or `"none"`, defaults to `"10m"`, and is retained for each
+human wait when that wait first reaches the daemon. The optional
+`[approval_judge]` table decides which configured direct selection judges
+delegated requests, and when it is absent the judge reuses the request-producing
+call's selection. The optional `[workspace_instructions]` table is either absent
+or present at version one, and its bounded `registered_roots` array names the
+instruction directories registered outside a session's workspace.
 
 A credential profile names one account. Its `CredentialReference` is the
 non-secret name that appears in configuration, errors, logs, and durable
@@ -587,12 +591,12 @@ guarding, output reservation, and post-response usage enforcement use the
 effective serving record's limits for the enabled call, not the selectable
 source record's.
 
-An absent `[web_fetch]` table or empty array admits no outbound `web_fetch`
-request, and every request must match one canonical configured origin before
-dispatch. Each configured entry is a bare HTTP(S) origin canonicalized to its
-scheme, host, and effective port before duplicates are rejected. The GitHub
-egress policy admits exactly `https://api.github.com:443` for authenticated
-requests, and model arguments cannot widen either admission rule.
+An absent `[web_fetch]` table admits every origin permitted by the transport. A
+present table requires each request to match `allowed_origins`; an empty array
+admits no origin. Each configured entry is a bare HTTP(S) origin canonicalized
+to its scheme, host, and effective port before duplicates are rejected. The
+GitHub egress policy admits exactly `https://api.github.com:443` for
+authenticated requests, and model arguments cannot widen either admission rule.
 
 Admission is not delivery: the daemon supplies a surface only for `anthropic`
 and `openai` `file`, `claude_cli` `ambient` and `file`, and `codex_cli`

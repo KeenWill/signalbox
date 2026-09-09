@@ -106,7 +106,8 @@ impl<Credentials, Transport> WebSearchTool<Credentials, Transport> {
         .map_err(|error| match error {
             ToolContractCompileError::Name => WebSearchToolConstructionError::Name,
             ToolContractCompileError::Schema => WebSearchToolConstructionError::Schema,
-        })?;
+        })?
+        .with_approval_posture(signalbox_domain::ToolApprovalPosture::Delegated);
         let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
             definition,
             WebSearchArgumentValidator {
