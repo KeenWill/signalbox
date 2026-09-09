@@ -34,6 +34,9 @@ impl ProgramArtifact {
 
 ```rust
 pub trait LiveDeliverySource {
+    fn suspend_on_wait(&self, _outstanding: &[signalbox_domain::RequestFrame]) -> bool {
+        /* provided */
+    }
     fn next_delivery<'a>(
         &'a mut self,
         outstanding: &'a [signalbox_domain::RequestFrame],
@@ -66,6 +69,7 @@ impl error::Error for LiveDeliveryFailure {}
 
 ```rust
 pub enum ProgramExecutionOutcome {
+    Suspended(vec::Vec<signalbox_domain::RequestFrame>),
     Completed(signalbox_domain::InlineFramePayload),
     RunCancelled(signalbox_domain::InlineFramePayload),
     Faulted(signalbox_domain::ProgramFault),
