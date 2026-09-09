@@ -2,6 +2,24 @@
 
 # operator_status
 
+## MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES
+
+```rust
+pub const MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES: usize;
+```
+
+## CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX
+
+```rust
+pub const CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX: &str;
+```
+
+## MAX_UNAVAILABLE_COMPONENT_UTF8_BYTES
+
+```rust
+pub const MAX_UNAVAILABLE_COMPONENT_UTF8_BYTES: usize;
+```
+
 ## OperatorStatusLifecycleState
 
 ```rust

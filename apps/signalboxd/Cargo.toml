@@ -50,6 +50,8 @@ opentelemetry = { version = "0.32.0", default-features = false, features = [
 ] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = [
     "grpc-tonic",
+    "gzip-http",
+    "gzip-tonic",
     "http-proto",
     "reqwest-blocking-client",
     "tls-ring",

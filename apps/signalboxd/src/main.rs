@@ -20,8 +20,9 @@ use std::{
     fmt, fs,
     future::Future,
     num::NonZeroUsize,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command, ExitCode},
     sync::Arc,
     time::Duration,
 };
@@ -73,7 +74,8 @@ use signalboxd::{
     SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
-    reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
+    ambient_otlp_environment_variables, reconcile_fenced_pool_floor,
+    run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
         WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
@@ -96,6 +98,57 @@ const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
+const SCRUBBED_DATABASE_ENVIRONMENT: &str = "SIGNALBOX_INTERNAL_SCRUBBED_DATABASE_ENVIRONMENT";
+const SCRUBBED_OTLP_ENVIRONMENT: &str = "SIGNALBOX_INTERNAL_SCRUBBED_OTLP_ENVIRONMENT";
+
+fn ambient_database_environment(
+    variable_is_present: impl Fn(&'static str) -> bool,
+) -> Vec<&'static str> {
+    signalbox_persistence::production_connection_environment_variables()
+        .filter(|name| variable_is_present(name))
+        .collect()
+}
+
+fn ambient_otlp_environment(
+    variable_is_present: impl Fn(&'static str) -> bool,
+) -> Vec<&'static str> {
+    ambient_otlp_environment_variables()
+        .filter(|name| variable_is_present(name))
+        .collect()
+}
+
+/// Replaces this process before Tokio starts any threads so SQLx and its TLS
+/// backend cannot observe ambient PostgreSQL or certificate-store variables,
+/// and the OTLP exporter cannot merge its ambient settings.
+fn reexecute_without_ambient_library_environment() -> Result<(), std::io::Error> {
+    let database = ambient_database_environment(|name| env::var_os(name).is_some());
+    let otlp = ambient_otlp_environment(|name| env::var_os(name).is_some());
+    if database.is_empty() && otlp.is_empty() {
+        return Ok(());
+    }
+
+    let executable = env::current_exe()?;
+    let mut command = Command::new(executable);
+    command.args(env::args_os().skip(1));
+    for name in signalbox_persistence::production_connection_environment_variables() {
+        command.env_remove(name);
+    }
+    for name in ambient_otlp_environment_variables() {
+        command.env_remove(name);
+    }
+    command.env(SCRUBBED_DATABASE_ENVIRONMENT, database.join(","));
+    command.env(SCRUBBED_OTLP_ENVIRONMENT, otlp.join(","));
+    Err(command.exec())
+}
+
+fn scrubbed_database_environment_warnings() -> Vec<String> {
+    env::var(SCRUBBED_DATABASE_ENVIRONMENT)
+        .unwrap_or_default()
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
 
 fn graceful_shutdown_window(
     model_exchange_timeout: Option<Duration>,
@@ -1176,7 +1229,13 @@ async fn initialize_prometheus(
 async fn run_hub(
     telemetry_configuration: &TelemetryConfiguration,
 ) -> Result<ShutdownOutcome, HubRuntimeError> {
-    for setting in signalbox_persistence::production_connection_ambient_warnings() {
+    let mut ambient_database_settings = scrubbed_database_environment_warnings();
+    ambient_database_settings.extend(
+        signalbox_persistence::production_connection_ambient_warnings()
+            .into_iter()
+            .map(str::to_owned),
+    );
+    for setting in ambient_database_settings {
         tracing::warn!(
             setting,
             "ambient PostgreSQL setting was ignored in favor of DATABASE_URL"
@@ -1539,7 +1598,10 @@ async fn run_hub(
                 "Codex credential pool member is unavailable"
             );
             signalbox_process_protocol::OperatorStatusUnavailableComponentMessage {
-                component: format!("credential:{profile}"),
+                component: format!(
+                    "{}{profile}",
+                    signalbox_process_protocol::CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX
+                ),
                 cause: "codex_home_empty".to_owned(),
             }
         })
@@ -2776,11 +2838,28 @@ fn install_tracing_subscriber(
     Ok(otlp_runtime)
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     if let Some(exit_code) = run_web_image_derivative_worker_if_requested() {
         return exit_code;
     }
+    if reexecute_without_ambient_library_environment().is_err() {
+        eprintln!("failed to isolate ambient library configuration");
+        return ExitCode::FAILURE;
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            eprintln!("failed to construct the daemon asynchronous runtime");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(run_daemon())
+}
+
+async fn run_daemon() -> ExitCode {
     let telemetry_configuration = match TelemetryConfiguration::from_environment() {
         Ok(configuration) => configuration,
         Err(error) => {
@@ -2813,7 +2892,14 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Some(setting) = telemetry_configuration.ambient_otlp_setting() {
+    let scrubbed_otlp_setting = env::var(SCRUBBED_OTLP_ENVIRONMENT)
+        .ok()
+        .and_then(|settings| settings.split(',').next().map(str::to_owned));
+    if let Some(setting) = telemetry_configuration
+        .ambient_otlp_setting()
+        .map(str::to_owned)
+        .or(scrubbed_otlp_setting)
+    {
         tracing::warn!(
             target: "signalbox_telemetry_internal",
             setting,
@@ -2954,15 +3040,43 @@ mod tests {
         ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure,
         RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause, RuntimeTaskCompletion,
         RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause, ShutdownOutcome,
-        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, combine_runtime_stop_cause,
-        completed_runtime_outcome, credential_files_conflict, database_close_failure_outcome,
-        drain_runtime_tasks, erase_startup_cause, fenced_pool_floor_reconciliation_policy,
-        graceful_shutdown_window, migrate_scan_then_schedule, operator_filter,
-        process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
+        SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, ambient_database_environment,
+        ambient_otlp_environment, combine_runtime_stop_cause, completed_runtime_outcome,
+        credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
+        erase_startup_cause, fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
+        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
+        report_database_close_failure, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
         validate_fenced_pool_min_connections,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
+
+    #[test]
+    fn database_environment_is_scrubbed_before_the_runtime_starts() {
+        let present = ambient_database_environment(|name| {
+            matches!(name, "PGAPPNAME" | "PGOPTIONS" | "SSL_CERT_FILE")
+        });
+
+        assert_eq!(present, ["PGAPPNAME", "PGOPTIONS", "SSL_CERT_FILE"]);
+    }
+
+    #[test]
+    fn otlp_environment_is_scrubbed_before_the_exporter_is_built() {
+        let present = ambient_otlp_environment(|name| {
+            matches!(
+                name,
+                "OTEL_EXPORTER_OTLP_HEADERS" | "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION"
+            )
+        });
+
+        assert_eq!(
+            present,
+            [
+                "OTEL_EXPORTER_OTLP_HEADERS",
+                "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION"
+            ]
+        );
+    }
 
     const BRAVE_KEY_FILE_FIXTURE: &str = "brave-key";
 

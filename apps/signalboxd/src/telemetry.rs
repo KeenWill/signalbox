@@ -24,7 +24,7 @@ use opentelemetry::{
     trace::{SpanBuilder, TraceContextExt as _, Tracer as _, TracerProvider as _},
 };
 use opentelemetry_otlp::{
-    Protocol, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
+    Compression, Protocol, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
 };
 use opentelemetry_sdk::{
     Resource,
@@ -85,6 +85,7 @@ pub const OTLP_MAX_EXPORT_BATCH: usize = 128;
 const OTLP_EXPORT_INTERVAL: Duration = Duration::from_secs(5);
 const OTLP_EXPORT_TIMEOUT: Duration = Duration::from_secs(5);
 const OTLP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const OTLP_COMPRESSION: Compression = Compression::Gzip;
 const MAX_ENDPOINT_BYTES: usize = 2_048;
 const MAX_HEADER_FILE_BYTES: u64 = 16 * 1024;
 const MAX_HEADER_COUNT: usize = 16;
@@ -114,6 +115,12 @@ const AMBIENT_OTLP_ENVIRONMENTS: &[&str] = &[
     "OTEL_EXPORTER_OTLP_COMPRESSION",
     "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
 ];
+
+/// Environment variables removed before an explicitly configured exporter is
+/// constructed.
+pub fn ambient_otlp_environment_variables() -> impl Iterator<Item = &'static str> {
+    AMBIENT_OTLP_ENVIRONMENTS.iter().copied()
+}
 
 /// Closed reason why opt-in telemetry configuration could not be admitted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -595,6 +602,7 @@ fn build_http_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
         .with_timeout(OTLP_EXPORT_TIMEOUT)
         .with_http_client(client)
         .with_headers(headers)
+        .with_compression(OTLP_COMPRESSION)
         .build()
         .map_err(|_| ())
 }
@@ -612,6 +620,7 @@ fn build_grpc_exporter(configuration: &OtlpConfiguration) -> Result<SpanExporter
     };
     builder
         .with_metadata(grpc_metadata(&configuration.headers)?)
+        .with_compression(OTLP_COMPRESSION)
         .build()
         .map_err(|_| ())
 }

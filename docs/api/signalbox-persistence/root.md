@@ -22,6 +22,12 @@ pub async fn connect_production(
 ) -> result::Result<sqlx_postgres::PgPool, error::Error>;
 ```
 
+## production_connection_environment_variables
+
+```rust
+pub fn production_connection_environment_variables() -> impl iterator::Iterator<Item = &'static str>;
+```
+
 ## production_connection_options
 
 ```rust

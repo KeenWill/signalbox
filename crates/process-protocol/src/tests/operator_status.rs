@@ -103,6 +103,41 @@ fn operator_status_rejects_a_lifecycle_week_that_is_not_a_rate()
     Ok(())
 }
 
+#[test]
+fn operator_status_admits_the_longest_configured_credential_component()
+-> Result<(), Box<dyn std::error::Error>> {
+    let component = format!(
+        "{}{}",
+        CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX,
+        "p".repeat(MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES)
+    );
+    let admitted = ServerFrame::try_new(
+        request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::UnavailableComponent(
+            Box::new(OperatorStatusUnavailableComponentMessage {
+                component: component.clone(),
+                cause: "codex_home_empty".to_owned(),
+            }),
+        ))),
+    );
+    assert!(admitted.is_ok());
+
+    let rejected = ServerFrame::try_new(
+        request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::UnavailableComponent(
+            Box::new(OperatorStatusUnavailableComponentMessage {
+                component: format!("{component}p"),
+                cause: "codex_home_empty".to_owned(),
+            }),
+        ))),
+    );
+    assert!(matches!(
+        rejected,
+        Err(FrameValidationError::OperatorStatusShape)
+    ));
+    Ok(())
+}
+
 /// A session with no armed record has no expiry to be past, so the two
 /// fields cannot both speak.
 #[test]

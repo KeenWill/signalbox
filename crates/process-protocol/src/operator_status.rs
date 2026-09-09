@@ -4,6 +4,17 @@ use crate::{
     CanonicalU64, CanonicalUuid, FrameValidationError, ServerMessage, deserialize_required_nullable,
 };
 
+/// Maximum UTF-8 byte length admitted for a configured credential profile or
+/// pool name.
+pub const MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES: usize = 256;
+
+/// Prefix identifying a configured credential member in operator status.
+pub const CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX: &str = "credential:";
+
+/// Maximum UTF-8 byte length of an operator-status component name.
+pub const MAX_UNAVAILABLE_COMPONENT_UTF8_BYTES: usize =
+    CREDENTIAL_UNAVAILABLE_COMPONENT_PREFIX.len() + MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES;
+
 /// One non-terminal session state a deadline violation can be reported under.
 ///
 /// `terminal` is absent by construction: a terminal session owes no deadline,
@@ -141,7 +152,7 @@ pub(crate) fn validate_operator_status_message(
         }
         OperatorStatusMessage::UnavailableComponent(item) => {
             !item.component.is_empty()
-                && item.component.len() <= 256
+                && item.component.len() <= MAX_UNAVAILABLE_COMPONENT_UTF8_BYTES
                 && !item.component.contains('\0')
                 && !item.cause.is_empty()
                 && item.cause.len() <= 128

@@ -287,9 +287,10 @@ exists; a queued but unstarted first native turn does not hide it.
 
 Operator status includes one `unavailable_component` record with a stable cause
 for each process-local store, adapter, or credential member unavailable at
-startup, and its end message carries the count. It includes one
-`repository_ingestion` record per configured watched repository and a
-`repository_ingestion_count` in its end message. A repository attempt that
+startup, and its end message carries the count. A component name admits the
+credential-member prefix plus the full configured credential-profile name. It
+includes one `repository_ingestion` record per configured watched repository and
+a `repository_ingestion_count` in its end message. A repository attempt that
 exhausts its request budget or leaves failed targeted observations reports
 `partial`.
 

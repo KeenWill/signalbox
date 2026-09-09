@@ -10,7 +10,7 @@ Configuration is loaded at startup from the process environment and two
 versioned TOML documents: the model catalog and the session-template catalog.
 The parser in `apps/signalboxd/src/configuration/mod.rs` and
 `apps/signalboxd/src/credential_pools.rs` admits a document fail-closed. The
-subsystem also owns the runner's startup configuration, the refusals that keep
+subsystem also owns the runner's startup configuration, the isolation that keeps
 ambient settings away from the production database channel, and the bridge that
 carries a credential value from its file or login directory to the adapter that
 uses it.
@@ -22,30 +22,36 @@ and the telemetry settings. An absent `SIGNALBOX_RUNNER_SOCKET_PATH` derives the
 runner socket by replacing the process socket path's final extension with
 `.runner.sock`, and the runner's `daemon_socket_path` dials that path.
 `DATABASE_URL` is the whole database channel: a deployment carries every
-connection parameter in the URL, and whatever TLS mode the URL states, the
-production connection verifies the server certificate and hostname in full.
-Model-provider credential paths come from `file` profiles in the catalog;
-`ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read. An absent
-`SIGNALBOX_WEB_BIND` binds a loopback default, and an explicit socket may use
-any IP address. The daemon's browser listener serves the `/api` routes on that
-bind and, when `SIGNALBOX_WEB_ASSET_ROOT` names a production web build, the
-static files under that root; an empty root fails configuration and an absent
-one answers every other path 404. The DTOs and schemas under
-`crates/web-contract` are the authority for that surface, and the checked-in
-JavaScript decoders and TypeScript declarations are generated from them.
-`RUST_LOG` admits one log level and nothing else; an empty or whitespace value
-selects the INFO default silently, as absence does, and any other value warns
-and falls back to it.
+connection parameter, including an explicit password, in the URL. Before the
+asynchronous runtime starts, the daemon replaces itself with the libpq and
+certificate-store variables removed; it retains their names only for startup
+warnings. The explicit password prevents SQLx from reading a password file.
+Whatever TLS mode the URL states, the production connection verifies the server
+certificate and hostname in full. Model-provider credential paths come from
+`file` profiles in the catalog; `ANTHROPIC_API_KEY_FILE` and
+`OPENAI_API_KEY_FILE` are not read. An absent `SIGNALBOX_WEB_BIND` binds a
+loopback default, and an explicit socket may use any IP address. The daemon's
+browser listener serves the `/api` routes on that bind and, when
+`SIGNALBOX_WEB_ASSET_ROOT` names a production web build, the static files under
+that root; an empty root fails configuration and an absent one answers every
+other path 404. The DTOs and schemas under `crates/web-contract` are the
+authority for that surface, and the checked-in JavaScript decoders and
+TypeScript declarations are generated from them. `RUST_LOG` admits one log level
+and nothing else; an empty or whitespace value selects the INFO default
+silently, as absence does, and any other value warns and falls back to it.
 
 `SIGNALBOX_OTLP_ENDPOINT`, a base URL to whose path `http/protobuf` export
 appends `/v1/traces`, enables span export; its absence disables OTLP and makes
-every other OTLP setting inert. With the endpoint set, a general or
-trace-specific `OTEL_EXPORTER_OTLP_*` endpoint, headers, timeout, protocol, or
-compression variable in the environment is ignored with a warning.
-`SIGNALBOX_OTLP_PROTOCOL` selects `grpc` or `http/protobuf`,
-`SIGNALBOX_OTLP_HEADERS_FILE` names a collector-header file read once at
-startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets the parent-based trace-id sampling
-ratio from 0 through 1, and `SIGNALBOX_OTLP_SERVICE_NAME` sets the service name.
+every other OTLP setting inert. Before starting the asynchronous runtime, the
+daemon removes general and trace-specific `OTEL_EXPORTER_OTLP_*` endpoint,
+headers, timeout, protocol, and compression variables, and warns when any was
+present. When export is enabled, both exporters receive the configured headers
+explicitly and select gzip compression explicitly, so the exporter library
+cannot merge ambient headers or compression. `SIGNALBOX_OTLP_PROTOCOL` selects
+`grpc` or `http/protobuf`, `SIGNALBOX_OTLP_HEADERS_FILE` names a
+collector-header file read once at startup, `SIGNALBOX_OTLP_SAMPLING_RATIO` sets
+the parent-based trace-id sampling ratio from 0 through 1, and
+`SIGNALBOX_OTLP_SERVICE_NAME` sets the service name.
 `SIGNALBOX_PROMETHEUS_BIND`, an exact IP socket address, enables a separate
 Prometheus listener.
 
@@ -236,9 +242,11 @@ production injects `SessionPlanRepository`.
 Model-provider credential paths live in catalog profiles rather than environment
 variables, because one variable cannot name several accounts.
 
-The production connection path requires every connection parameter in the URL.
-It logs and ignores libpq connection variables, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
-and the default password file.
+The production connection path requires the host, user, and password in the URL.
+It removes libpq connection variables, `SSL_CERT_FILE`, and `SSL_CERT_DIR`
+before starting the asynchronous runtime, logs each removed variable, and logs
+the presence of the default password file. The URL's explicit password keeps
+that file unread.
 
 The local test connection path keeps SQLx's behavior and no check confines its
 URL to a local cluster.

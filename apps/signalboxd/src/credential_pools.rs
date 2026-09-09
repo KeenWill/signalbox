@@ -14,6 +14,7 @@ use std::{
 };
 
 use signalbox_model_runtime_claude_cli::CLAUDE_CLI_FILE_CREDENTIAL_ENV_KEY;
+pub(crate) use signalbox_process_protocol::MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES;
 use signalbox_process_protocol::MAX_HEADROOM_RESERVE_PERCENT;
 use toml_edit::{InlineTable, Item, Table};
 use url::Url;
@@ -25,9 +26,6 @@ use crate::configuration::{
 
 /// Maximum UTF-8 byte length admitted for a credential-delivery path.
 pub(crate) const MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES: usize = 4_096;
-
-/// Maximum UTF-8 byte length admitted for a credential profile or pool name.
-pub(crate) const MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES: usize = 256;
 
 /// Maximum number of members admitted in one credential pool.
 pub(crate) const MAX_CREDENTIAL_POOL_MEMBERS: usize = 1_024;
