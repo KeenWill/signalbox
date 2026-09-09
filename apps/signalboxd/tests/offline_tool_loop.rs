@@ -556,7 +556,7 @@ impl ToolLoopFixture {
                 None,
                 Vec::new(),
             ))
-            .with_approval_judge(judge, None, configuration),
+            .with_approval_judge(judge, None, configuration, None),
             runtime,
             judge_runtime,
         )

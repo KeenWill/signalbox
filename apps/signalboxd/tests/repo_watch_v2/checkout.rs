@@ -1933,6 +1933,65 @@ async fn cleanup_restores_owner_permissions_on_root_and_nested_directories()
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL"]
+async fn approval_judge_loads_repo_watch_authority_before_ledger_settlement()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{
+        ApprovalJudgeDispatchAuthority, ApprovalJudgeDispatchProvenance,
+        ApprovalJudgePullRequestAuthority, ApprovalJudgePullRequestAuthorityInput,
+    };
+    use signalboxd::repo_watch_runtime::{RepositoryWatchRuntime, RepositoryWatchServices};
+
+    let mut fixture = CheckoutFixture::with_head_repository("contributor/project").await?;
+    fixture.submit_without_lifecycle_settlement().await;
+    let checkout = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("the dispatch retained its checkout");
+    let session = checkout.location.expect("checkout has a session").session;
+    assert!(
+        fixture
+            .store
+            .reaction_origin_for_session(session)
+            .await?
+            .is_none(),
+        "the lifecycle-created session has not settled on the module ledger",
+    );
+    let templates = signalboxd::SessionTemplateConfiguration::read(
+        &fixture._files.path().join("templates.toml"),
+        || None,
+        &fixture.sink.models,
+    )?;
+    let runtime = RepositoryWatchRuntime::unstarted(
+        fixture.module.clone(),
+        RepositoryWatchServices {
+            checkout_runner: None,
+            core_pool: fixture.core.clone(),
+            models: fixture.sink.models.clone(),
+            templates: Arc::new(templates),
+            eligibility_nudge: fixture.sink.eligibility_nudge.clone(),
+            tool_dispatch_gate: fixture.sink.tool_dispatch_gate.clone(),
+        },
+    );
+    assert_eq!(
+        runtime.approval_judge_authority(session).await?,
+        Some(ApprovalJudgeDispatchAuthority::PullRequest(
+            ApprovalJudgePullRequestAuthority::new(ApprovalJudgePullRequestAuthorityInput {
+                dispatch: ApprovalJudgeDispatchProvenance::RepoWatch(checkout.dispatch),
+                repository: RepositorySlug::try_new(String::from("checkout/project"))?,
+                pull_request: PullRequestNumber::new(NonZeroU64::MIN),
+                head_sha: fixture.head.clone(),
+                head_repository: RepositorySlug::try_new(String::from("contributor/project"))?,
+                head_branch: BranchName::try_new(String::from("review"))?,
+                base_branch: BranchName::try_new(String::from("main"))?,
+            }),
+        )),
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
 async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_commands()
 -> Result<(), Box<dyn Error>> {
     use signalboxd::repo_watch_runtime::{RepositoryWatchRuntime, RepositoryWatchServices};

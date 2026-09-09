@@ -269,6 +269,12 @@ covered requests and their ordinary constituents, otherwise escalate. Exec
 pushes require both a dispatch fence and an immutable permitted remote in the
 frozen prompt; a mutable remote alias alone does not establish the destination.
 
+For repository-watch pull-request sessions, core persistence loads the session's
+typed creation-dispatch identities. The daemon obtains the retained GitHub event
+through the module's store. The context carries dispatch identity, repository,
+pull-request number, head SHA, head repository, head branch, and base branch.
+Sessions without a dispatch carry no dispatch authority.
+
 Outside a turn judged under the commissioned generation's dispatch authority, an
 `EscalateToHuman` result for a request still admissible stores the completed
 call but no decision and leaves the same request parked. A commissioned dispatch

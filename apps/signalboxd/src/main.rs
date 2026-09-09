@@ -2012,6 +2012,7 @@ async fn run_hub(
         None => configuration_reload,
     };
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    let approval_judge_repository_watch = repository_watch_runtime.clone();
     let repository_watch_worker = match repository_watch_runtime {
         Some(runtime) => Some(runtime.spawn(repository_watch_shutdown_receiver).await),
         None => None,
@@ -2192,6 +2193,7 @@ async fn run_hub(
                 approval_judge,
                 model_configuration.configured_approval_judge_selection(),
                 model_configuration.clone(),
+                approval_judge_repository_watch.clone(),
             )
             .with_shutdown_checkpoint(turn_execution_shutdown_receiver.clone()),
         );

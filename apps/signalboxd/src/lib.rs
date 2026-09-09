@@ -2204,6 +2204,8 @@ pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
     Tool(Box<PostgresProviderToolExecutionError<ExecutorError>>),
     /// Dedicated approval-judge persistence failed closed.
     ApprovalJudge(ApprovalJudgeRepositoryError),
+    /// Repository-watch dispatch evidence could not be loaded.
+    ApprovalJudgeDispatch(signalbox_module_repo_watch_v2::StoreError),
 }
 
 impl<ProviderError, ExecutorError> fmt::Display
@@ -2220,6 +2222,7 @@ where
             Self::Model(error) => error.fmt(formatter),
             Self::Tool(error) => error.fmt(formatter),
             Self::ApprovalJudge(error) => error.fmt(formatter),
+            Self::ApprovalJudgeDispatch(error) => error.fmt(formatter),
         }
     }
 }
@@ -2238,6 +2241,7 @@ where
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),
             Self::ApprovalJudge(error) => Some(error),
+            Self::ApprovalJudgeDispatch(error) => Some(error),
         }
     }
 }
@@ -2256,6 +2260,7 @@ where
             Self::Model(error) => error.operator_failure_class(),
             Self::Tool(error) => error.operator_failure_class(),
             Self::ApprovalJudge(error) => error.operator_failure_class(),
+            Self::ApprovalJudgeDispatch(error) => approval_judge_dispatch_failure_class(error),
         }
     }
 
@@ -2267,7 +2272,21 @@ where
             Self::Model(error) => error.operator_failure_cause_code(),
             Self::Tool(error) => error.operator_failure_cause_code(),
             Self::ApprovalJudge(_) => "approval_judge_persistence",
+            Self::ApprovalJudgeDispatch(_) => "approval_judge_dispatch",
         }
+    }
+}
+
+fn approval_judge_dispatch_failure_class(
+    error: &signalbox_module_repo_watch_v2::StoreError,
+) -> OperatorFailureClass {
+    match error {
+        signalbox_module_repo_watch_v2::StoreError::Database(_) => {
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        }
+        _ => OperatorFailureClass::FailClosedCorruption,
     }
 }
 
@@ -2287,6 +2306,9 @@ where
         }
         PostgresProviderToolLoopExecutionError::ApprovalJudge(error) => {
             !is_nonambiguous_infrastructure_failure(error.operator_failure_class())
+        }
+        PostgresProviderToolLoopExecutionError::ApprovalJudgeDispatch(error) => {
+            !is_nonambiguous_infrastructure_failure(approval_judge_dispatch_failure_class(error))
         }
         // Instruction discovery can have recorded a durable manifest before it
         // failed, so it is classified exactly like the other pre-execution
@@ -2349,6 +2371,7 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
             approval_judge: None,
             approval_judge_selection: None,
             approval_judge_configuration: None,
+            approval_judge_repository_watch: None,
             workspace_instructions: None,
             shutdown_checkpoint: None,
         }
@@ -2453,6 +2476,7 @@ pub struct PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
     approval_judge: Option<std::sync::Arc<dyn ApprovalJudgeModel>>,
     approval_judge_selection: Option<DirectModelSelection>,
     approval_judge_configuration: Option<HubModelConfiguration>,
+    approval_judge_repository_watch: Option<repo_watch_runtime::RepositoryWatchRuntime>,
     workspace_instructions: Option<WorkspaceInstructionRuntime>,
     shutdown_checkpoint: Option<watch::Receiver<bool>>,
 }
@@ -2520,6 +2544,7 @@ async fn execute_approval_judge(
     configuration: &HubModelConfiguration,
     session: SessionId,
     turn: TurnId,
+    dispatch: Option<ApprovalJudgeDispatchAuthority>,
 ) -> Result<ApprovalJudgeLoopOutcome, ApprovalJudgeRepositoryError> {
     let prepared = loop {
         let call = ModelCallId::from_uuid(uuid::Uuid::now_v7());
@@ -2553,7 +2578,7 @@ async fn execute_approval_judge(
             target: prepared.target(),
             credential_reference: prepared.credential_reference().to_owned(),
             system_prompt: String::from(APPROVAL_JUDGE_SYSTEM_PROMPT),
-            rendered_request: render_approval_judge_request(&prepared),
+            rendered_request: render_approval_judge_request(&prepared, dispatch),
         })
         .await
     {
@@ -2641,7 +2666,14 @@ async fn execute_approval_judge(
     })
 }
 
-fn render_approval_judge_request(prepared: &PreparedApprovalJudge) -> String {
+fn render_approval_judge_request(
+    prepared: &PreparedApprovalJudge,
+    dispatch: Option<ApprovalJudgeDispatchAuthority>,
+) -> String {
+    let context = match dispatch {
+        Some(dispatch) => prepared.session_context().clone().with_dispatch(dispatch),
+        None => prepared.session_context().clone(),
+    };
     render_judge_request_payload(
         &JudgeRequestFields {
             request_id: &prepared.request().id().into_uuid().to_string(),
@@ -2649,7 +2681,7 @@ fn render_approval_judge_request(prepared: &PreparedApprovalJudge) -> String {
             arguments_kind: prepared.request().arguments().kind(),
             arguments: prepared.request().arguments().as_str(),
         },
-        prepared.session_context(),
+        &context,
     )
 }
 
@@ -2948,10 +2980,12 @@ where
         approval_judge: std::sync::Arc<dyn ApprovalJudgeModel>,
         configured_selection: Option<DirectModelSelection>,
         configuration: HubModelConfiguration,
+        repository_watch: Option<repo_watch_runtime::RepositoryWatchRuntime>,
     ) -> Self {
         self.approval_judge = Some(approval_judge);
         self.approval_judge_selection = configured_selection;
         self.approval_judge_configuration = Some(configuration);
+        self.approval_judge_repository_watch = repository_watch;
         self
     }
 
@@ -2984,6 +3018,7 @@ where
         let approval_judge = self.approval_judge.clone();
         let approval_judge_selection = self.approval_judge_selection;
         let approval_judge_configuration = self.approval_judge_configuration.clone();
+        let approval_judge_repository_watch = self.approval_judge_repository_watch.clone();
         let workspace_instructions = self.workspace_instructions.clone();
         let mut shutdown_checkpoint = self.shutdown_checkpoint.clone();
         Box::pin(async move {
@@ -3072,6 +3107,15 @@ where
                             else {
                                 return Ok(());
                             };
+                            let dispatch = match &approval_judge_repository_watch {
+                                Some(runtime) => runtime
+                                    .approval_judge_authority(session)
+                                    .await
+                                    .map_err(
+                                    PostgresProviderToolLoopExecutionError::ApprovalJudgeDispatch,
+                                )?,
+                                None => None,
+                            };
                             match execute_approval_judge(
                                 &approval_judge_repository,
                                 approval_judge,
@@ -3079,6 +3123,7 @@ where
                                 configuration,
                                 session,
                                 turn,
+                                dispatch,
                             )
                             .await
                             .map_err(PostgresProviderToolLoopExecutionError::ApprovalJudge)?
@@ -3261,7 +3306,8 @@ where
             PostgresProviderToolLoopExecutionError::WorkspaceInstructions(_)
             | PostgresProviderToolLoopExecutionError::Model(_)
             | PostgresProviderToolLoopExecutionError::Tool(_)
-            | PostgresProviderToolLoopExecutionError::ApprovalJudge(_) => true,
+            | PostgresProviderToolLoopExecutionError::ApprovalJudge(_)
+            | PostgresProviderToolLoopExecutionError::ApprovalJudgeDispatch(_) => true,
         }
     }
 
@@ -3272,7 +3318,8 @@ where
             | PostgresProviderToolLoopExecutionError::ResumeLookup(_)
             | PostgresProviderToolLoopExecutionError::Model(_)
             | PostgresProviderToolLoopExecutionError::Tool(_)
-            | PostgresProviderToolLoopExecutionError::ApprovalJudge(_) => None,
+            | PostgresProviderToolLoopExecutionError::ApprovalJudge(_)
+            | PostgresProviderToolLoopExecutionError::ApprovalJudgeDispatch(_) => None,
         }
     }
 }
@@ -4754,7 +4801,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_dispatch_authority_reaches_the_judge_as_structured_evidence() {
+    fn approval_judge_renders_repo_watch_pull_request_dispatch_authority() {
         const FIXTURE_DISPATCH_ID: u128 = 4;
         let fixture =
             ApprovalJudgePullRequestAuthority::new(ApprovalJudgePullRequestAuthorityInput {
@@ -4781,6 +4828,10 @@ mod tests {
             serde_json::from_str(&dispatch_json).expect("the dispatch authority is JSON");
         let rendered = render_session_authority_context(&context);
 
+        assert_eq!(
+            decoded["dispatch_id"],
+            fixture.dispatch().into_uuid().to_string()
+        );
         assert_eq!(decoded["repository"], fixture.repository().as_str());
         assert_eq!(decoded["pull_request"], fixture.pull_request().get());
         assert_eq!(decoded["head_sha"], fixture.head_sha().as_str());
