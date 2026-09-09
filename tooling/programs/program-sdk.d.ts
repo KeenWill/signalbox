@@ -5,10 +5,10 @@ declare module "@signalbox/program-sdk/v1" {
   }
 
   /** Validates decoded JSON and validates again before encoding a result. */
-  export function jsonCodec<T>(decode: (value: unknown) => T): Codec<T>;
+  export function jsonCodec<T>(decode: (this: void, value: unknown) => T): Codec<T>;
   export function defineProgram<Input, Output>(definition: {
     input: Codec<Input>;
-    output: Codec<Output>;
+    output: Codec<Awaited<Output>>;
     run: (this: void, input: Input) => Output | Promise<Output>;
   }): (input: Uint8Array) => Promise<Uint8Array>;
 
@@ -60,7 +60,7 @@ declare module "@signalbox/program-sdk/v1" {
   }
   export type SessionRefusal = { outcome: "refused" | "ambiguous" };
   export const session: {
-    create(input: SessionCreateInput): Promise<EffectResult<{ session: string } | SessionRefusal>>;
-    turn(input: SessionTurnInput): Promise<EffectResult<SessionTurnOutcome | SessionRefusal>>;
+    create: (input: SessionCreateInput) => Promise<EffectResult<{ session: string } | SessionRefusal>>;
+    turn: (input: SessionTurnInput) => Promise<EffectResult<SessionTurnOutcome | SessionRefusal>>;
   };
 }

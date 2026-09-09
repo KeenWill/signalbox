@@ -17,6 +17,13 @@ exports generic capability effects and four primitives: the virtual clock, a
 randomness draw, a sleep, and an event wait. Each takes exact bytes and produces
 one typed request at the Rust boundary.
 
+After module evaluation, the JavaScript host invokes a default export as a
+function without a receiver, passing the run's retained input as a `Uint8Array`.
+It awaits the returned `Uint8Array` through the same request and replay loop and
+records those exact bytes as the successful result. A module without a default
+export completes with empty result bytes. Invalid entrypoints and nonbyte
+results fail the execution attempt without recording success.
+
 The journal is one append-only sequence of frames per program-run identity, held
 by `ProgramJournalRepository`. A frame is a request (what the program asked) or
 a delivery (what the host answered). Requests are journaled in program order,
@@ -85,8 +92,8 @@ Successful completion records result bytes in a `Terminal` request and an
 immediately following `Answer` acknowledgement. A terminal request emitted with
 outstanding work receives `RejectReason::OutstandingRequests`; it cannot be
 accepted after that work drains. Only those deliveries may resolve a terminal
-request. No frame may follow accepted success. Existing JavaScript modules
-return the unit result, encoded as empty bytes, after their requests drain.
+request. No frame may follow accepted success. JavaScript modules without a
+default export return empty bytes after their requests drain.
 `ProgramJournal::result` reads retained result bytes without execution.
 
 Cancellation addresses retained journal streams. A cancel serialized before
@@ -173,14 +180,13 @@ import, including relative files and the unversioned name.
 
 The SDK's `defineProgram` decodes input bytes before calling the program body
 and encodes its result through explicit runtime codecs. `jsonCodec` checks JSON
-values during decoding and encoding. Decoding passes a frozen snapshot of own
-data properties to the validator. Encoding serializes a frozen snapshot of
-validated own data properties; SDK payload intrinsics are captured before
-program evaluation. Typed `register`, `session.create`, and `session.turn`
-wrappers validate method inputs and answer records; refusals and cancellation
-remain typed deliveries. Session defaults versions are decimal strings in
-TypeScript and encode as exact JSON integers without conversion through
-`Number`.
+values during decoding and encoding. Both pass a frozen snapshot of own data
+properties to the validator. Encoding serializes a frozen snapshot of validated
+own data properties; SDK payload intrinsics are captured before program
+evaluation. Typed `register`, `session.create`, and `session.turn` wrappers
+validate method inputs and answer records; refusals and cancellation remain
+typed deliveries. Session defaults versions are decimal strings in TypeScript
+and encode as exact JSON integers without conversion through `Number`.
 
 [`tooling/programs`](../../tooling/programs/package.json) owns SDK declarations
 and strict TypeScript examples. `pnpm --dir tooling/programs run check` checks

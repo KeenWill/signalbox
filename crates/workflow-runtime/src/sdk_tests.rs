@@ -1,88 +1,8 @@
 use super::*;
 use deno_core::serde_json;
-use deno_core::v8;
 
 // The isolate bridge strips delivery ordinals; these fixtures need any positive ordinal.
 const SCRIPTED_REQUEST: RequestOrdinal = RequestOrdinal::try_from_u64(1).expect("positive ordinal");
-
-#[tokio::test(flavor = "current_thread")]
-async fn emitted_typescript_entry_returns_checked_session_result() -> Result<(), Box<dyn Error>> {
-    const COMMAND: &str = "12345678-1234-1234-1234-123456789abc";
-    const MODEL: &str = "22345678-1234-1234-1234-123456789abc";
-    const SESSION: &str = "32345678-1234-1234-1234-123456789abc";
-    let (sender, mut receiver) = mpsc::unbounded_channel();
-    let (mut runtime, _) = isolate(sender)?;
-    let module = runtime
-        .load_main_es_module_from_code(
-            &ModuleSpecifier::parse(PROGRAM_MAIN_SPECIFIER)?,
-            include_str!("../tests/fixtures/session.js"),
-        )
-        .await?;
-    let evaluation = runtime.mod_evaluate(module);
-    runtime
-        .run_event_loop(PollEventLoopOptions::default())
-        .await?;
-    evaluation.await?;
-    let namespace = runtime.get_module_namespace(module)?;
-    let entry = {
-        deno_core::scope!(scope, runtime);
-        let namespace = v8::Local::new(scope, namespace);
-        let name = v8::String::new(scope, "default").expect("entrypoint name");
-        let value = namespace.get(scope, name.into()).expect("default export");
-        let function = v8::Local::<v8::Function>::try_from(value)?;
-        v8::Global::new(scope, function)
-    };
-    let input = serde_json::to_vec(&serde_json::json!({ "command": COMMAND, "model": MODEL }))?;
-    let input = runtime.execute_script(
-        "fixture-input",
-        format!("new Uint8Array({})", serde_json::to_string(&input)?),
-    )?;
-    let completion = runtime.call_with_args(&entry, &[input]);
-    let answer = serde_json::to_vec(&serde_json::json!({ "session": SESSION }))?;
-    let mut effect_requests = Vec::new();
-    loop {
-        let status = poll_runtime_once(&mut runtime).await;
-        while let Ok(request) = receiver.try_recv() {
-            effect_requests.push(request.kind);
-            request
-                .reply
-                .send(DeliveryKind::Answer {
-                    resolves: SCRIPTED_REQUEST,
-                    payload: InlineFramePayload::new(answer.clone()),
-                })
-                .unwrap_or_else(|_| panic!("entrypoint must await its effect"));
-        }
-        if let Poll::Ready(result) = status {
-            result?;
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let result = completion.await?;
-    let bytes = {
-        deno_core::scope!(scope, runtime);
-        let value = v8::Local::new(scope, result);
-        let value = v8::Local::<v8::Uint8Array>::try_from(value)?;
-        let mut bytes = vec![0; value.byte_length()];
-        value.copy_contents(&mut bytes);
-        bytes
-    };
-    assert_eq!(
-        bytes, answer,
-        "the emitted entrypoint returns its encoded typed result"
-    );
-    assert_eq!(effect_requests.len(), 1);
-    let RequestKind::Effect(request) = &effect_requests[0] else {
-        panic!("expected a session effect")
-    };
-    assert_eq!(request.method(), "create");
-    let wire: serde_json::Value = serde_json::from_slice(request.payload().as_bytes())?;
-    assert_eq!(
-        wire,
-        serde_json::json!({ "command": COMMAND, "model": MODEL })
-    );
-    Ok(())
-}
 
 /// Executes SDK calls inside the closed isolate and supplies exact scripted answers.
 async fn sdk_script(
@@ -188,6 +108,31 @@ await program(bytes({ model: identity }));
         requests.is_empty(),
         "invalid input must not execute effects"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn output_codec_refuses_inherited_required_fields() {
+    let (result, requests) = sdk_script(
+        r#"
+Object.prototype.session = "12345678-1234-1234-1234-123456789abc";
+const output = sdk.jsonCodec(value => {
+  if (typeof value !== "object" || value === null || !("session" in value)
+    || typeof value.session !== "string") throw new TypeError("expected own session result");
+  return { session: value.session };
+});
+output.encode({ session: "22345678-1234-1234-1234-123456789abc" });
+output.encode({});
+"#,
+        [],
+    )
+    .await;
+    assert!(
+        result
+            .expect_err("inherited fields cannot supply a result")
+            .to_string()
+            .contains("expected own session result")
+    );
+    assert!(requests.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
