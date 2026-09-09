@@ -654,7 +654,8 @@ pub(super) fn commission_failure_ambiguity(
             | CreateSessionRepositoryError::Corruption(_) => None,
         },
         CommissionedDispatchRepositoryError::InitialInput(error) => match error {
-            SubmitInputRepositoryError::Database(_) => Some(false),
+            SubmitInputRepositoryError::Database(_)
+            | SubmitInputRepositoryError::CheckoutProvisioningPending => Some(false),
             SubmitInputRepositoryError::CommitAmbiguous(_) => Some(true),
             SubmitInputRepositoryError::DifferentCommandKind { .. }
             | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
@@ -2761,6 +2762,7 @@ fn wire_ingestion_measurements(
             outcome: match poll.outcome {
                 PollOutcome::InProgress => RepositoryPollOutcome::InProgress,
                 PollOutcome::Succeeded => RepositoryPollOutcome::Succeeded,
+                PollOutcome::Partial => RepositoryPollOutcome::Partial,
                 PollOutcome::ClientFailed => RepositoryPollOutcome::ClientFailed,
                 PollOutcome::ObservationFailed => RepositoryPollOutcome::ObservationFailed,
                 PollOutcome::StoreFailed => RepositoryPollOutcome::StoreFailed,

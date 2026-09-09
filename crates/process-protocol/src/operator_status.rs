@@ -186,6 +186,7 @@ const fn operator_status_days_in_month(year: i64, month: u32) -> u32 {
 pub enum RepositoryPollOutcome {
     InProgress,
     Succeeded,
+    Partial,
     ClientFailed,
     ObservationFailed,
     StoreFailed,

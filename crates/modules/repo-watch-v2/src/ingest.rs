@@ -42,6 +42,8 @@ pub struct MergedPullRequestBaseline {
 /// Durable comparison input loaded before one repository fetch.
 #[derive(Clone, Debug)]
 pub struct IngestBaseline {
+    pub(crate) default_branch: Option<BranchName>,
+    pub(crate) default_head: Option<CommitSha>,
     pub generation: u64,
     pub observation: Option<RepoWatchObservation>,
     pub merged_baselines: Vec<MergedPullRequestBaseline>,
@@ -50,6 +52,8 @@ pub struct IngestBaseline {
 
 #[derive(sqlx::FromRow)]
 struct IngestRepositoryRow {
+    default_branch: String,
+    default_head_sha: String,
     frontier_generation: Decimal,
     comparison_baseline: String,
 }
@@ -72,7 +76,7 @@ impl RepoWatchStore {
             .execute(&mut *transaction)
             .await?;
         let row: Option<IngestRepositoryRow> = sqlx::query_as(
-            "SELECT frontier_generation, comparison_baseline::text AS comparison_baseline
+            "SELECT default_branch, default_head_sha, frontier_generation, comparison_baseline::text AS comparison_baseline
                FROM repository_state WHERE repository = $1",
         )
         .bind(repository.as_str())
@@ -86,6 +90,20 @@ impl RepoWatchStore {
         .fetch_all(&mut *transaction)
         .await?;
         transaction.commit().await?;
+        let default_branch = row
+            .as_ref()
+            .map(|row| {
+                BranchName::try_new(row.default_branch.clone())
+                    .map_err(|_| StoreError::InvalidComparisonBaseline)
+            })
+            .transpose()?;
+        let default_head = row
+            .as_ref()
+            .map(|row| {
+                CommitSha::try_new(row.default_head_sha.clone())
+                    .map_err(|_| StoreError::InvalidComparisonBaseline)
+            })
+            .transpose()?;
         let (generation, observation, merged_baselines) = match row {
             Some(row) => {
                 let mut value: Value = serde_json::from_str(&row.comparison_baseline)
@@ -135,6 +153,8 @@ impl RepoWatchStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         Ok(IngestBaseline {
+            default_branch,
+            default_head,
             generation,
             observation,
             merged_baselines,
@@ -157,7 +177,7 @@ impl RepoWatchStore {
             .iter()
             .map(|entry| entry.state.clone())
             .collect::<Vec<_>>();
-        let occurrences = derive_repo_watch_events_with_merged_baselines(
+        let mut occurrences = derive_repo_watch_events_with_merged_baselines(
             &observed.repository,
             baseline.observation.as_ref(),
             &previous_merged,
@@ -166,6 +186,20 @@ impl RepoWatchStore {
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|_| StoreError::InvalidComparisonBaseline)?;
+        let initial_facts =
+            initial_facts_baseline(self, &observed.repository, baseline, &observed.observation)
+                .await?;
+        occurrences.extend(
+            derive_repo_watch_events_with_merged_baselines(
+                &observed.repository,
+                Some(&initial_facts),
+                &[],
+                &observed.observation,
+                &mut frontier,
+                &mut UuidV7RepoWatchEventIdGenerator,
+            )
+            .map_err(|_| StoreError::InvalidComparisonBaseline)?,
+        );
         let mut merged_baselines = baseline.merged_baselines.clone();
         for current in observed.observation.state().pull_requests() {
             merged_baselines
@@ -321,6 +355,146 @@ pub async fn run_repository_task(
             }
         }
     }
+}
+
+pub(crate) async fn queue_webhook_pulls(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    hook_id: u64,
+    delivery_id: uuid::Uuid,
+) -> Result<(), StoreError> {
+    let (repository, event, body): (String, String, Vec<u8>) = sqlx::query_as(
+        "SELECT repository, event_kind, body FROM webhook_delivery
+         JOIN webhook_body USING (hook_id, delivery_id)
+         WHERE hook_id=$1 AND delivery_id=$2",
+    )
+    .bind(Decimal::from(hook_id))
+    .bind(delivery_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let payload: Value =
+        serde_json::from_slice(&body).map_err(|_| StoreError::InvalidComparisonBaseline)?;
+    let mut numbers = std::collections::BTreeSet::new();
+    match event.as_str() {
+        "pull_request"
+        | "pull_request_review"
+        | "pull_request_review_comment"
+        | "pull_request_review_thread" => {
+            if let Some(number) = observation_decode::positive(&payload["pull_request"]["number"]) {
+                numbers.insert(number);
+            }
+        }
+        "check_run" | "check_suite" => {
+            if let Some(pulls) = payload[&event]["pull_requests"].as_array() {
+                numbers.extend(
+                    pulls
+                        .iter()
+                        .filter_map(|pull| observation_decode::positive(&pull["number"])),
+                );
+            }
+        }
+        _ => {}
+    }
+    for number in numbers {
+        sqlx::query(
+            "INSERT INTO webhook_pull_wake (repository, pull_request_number, delivery_id)
+            VALUES ($1,$2,$3) ON CONFLICT (repository,pull_request_number)
+            DO UPDATE SET delivery_id=EXCLUDED.delivery_id, failed_attempts=0, last_failure=NULL",
+        )
+        .bind(&repository)
+        .bind(Decimal::from(number.get()))
+        .bind(delivery_id)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+// Compare only unseen PR facts against empty collections without committing a synthetic state.
+async fn initial_facts_baseline(
+    store: &RepoWatchStore,
+    repository: &RepositorySlug,
+    baseline: &IngestBaseline,
+    current: &RepoWatchObservation,
+) -> Result<RepoWatchObservation, StoreError> {
+    use signalbox_session_ownership::{
+        PullRequestEventContext, PullRequestEventContextInput, RepoWatchPullRequestState,
+        RepoWatchPullRequestStateInput,
+    };
+    // Facts committed after this baseline belong to a retry, not its comparison history.
+    let observed_numbers: Vec<Decimal> = sqlx::query_scalar(
+        "SELECT number FROM unnest($3::numeric[]) AS candidate(number)
+         WHERE EXISTS (SELECT 1 FROM gh_event WHERE repository=$1
+             AND pull_request_number=candidate.number AND frontier_generation <= $2)",
+    )
+    .bind(repository.as_str())
+    .bind(Decimal::from(baseline.generation))
+    .bind(
+        current
+            .state()
+            .pull_requests()
+            .iter()
+            .map(|pull| Decimal::from(pull.context().number().get()))
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    let observed_numbers = observed_numbers
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let pull_requests = current
+        .state()
+        .pull_requests()
+        .iter()
+        .map(|pull| {
+            let context = pull.context();
+            let known = observed_numbers.contains(&Decimal::from(context.number().get()))
+                || baseline.observation.as_ref().is_some_and(|prior| {
+                    prior
+                        .state()
+                        .pull_requests()
+                        .iter()
+                        .any(|prior| prior.context().number() == context.number())
+                })
+                || baseline
+                    .merged_baselines
+                    .iter()
+                    .any(|prior| prior.state.number() == context.number());
+            if known {
+                return Ok(pull.clone());
+            }
+            RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+                context: PullRequestEventContext::new(PullRequestEventContextInput {
+                    number: context.number(),
+                    head_sha: context.head_sha().clone(),
+                    head_repository: context.head_repository().clone(),
+                    base_branch: context.base_branch().clone(),
+                    head_branch: context.head_branch().clone(),
+                    title: context.title().clone(),
+                    body: context.body().clone(),
+                    labels: Vec::new(),
+                    draft: context.draft(),
+                    author: context.author().cloned(),
+                }),
+                lifecycle: pull.lifecycle(),
+                mergeable_state: pull.mergeable_state(),
+                completed_check_suites: Vec::new(),
+                completed_check_runs: Vec::new(),
+                reviews: Vec::new(),
+                threads: Vec::new(),
+                reactions: pull.reactions().to_vec(),
+            })
+            .map_err(|_| StoreError::InvalidComparisonBaseline)
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    Ok(RepoWatchObservation::new(
+        current.signal_reviewers().to_vec(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests,
+            branch_heads: current.state().branch_heads().to_vec(),
+            workflow_runs: current.state().workflow_runs().to_vec(),
+        })
+        .map_err(|_| StoreError::InvalidComparisonBaseline)?,
+    ))
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@
 
 pub mod effects;
 pub mod native;
+pub mod primitives;
 pub mod session_effects;
 
 #[cfg(test)]

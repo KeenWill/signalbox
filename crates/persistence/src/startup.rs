@@ -1117,6 +1117,9 @@ pub(crate) fn map_scheduling_error(
         SubmitInputRepositoryError::ModelExecution(_) => {
             StartupScanCorruption::Inconsistent("origin command application").into()
         }
+        SubmitInputRepositoryError::CheckoutProvisioningPending => {
+            StartupScanCorruption::Inconsistent("admission deferral while loading origin").into()
+        }
     }
 }
 

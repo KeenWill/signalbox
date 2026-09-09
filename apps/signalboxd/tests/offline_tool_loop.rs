@@ -2425,6 +2425,272 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
     Ok(())
 }
 
+async fn assert_park_defers_instruction_discovery(
+    through_wrapper: bool,
+) -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        DispatchingModule, InstructionPath, LifecycleActor, SessionParkCause, SessionParkResponder,
+    };
+    use signalbox_persistence::workspace_instructions::{
+        TurnInstructionManifestPreflight, WorkspaceInstructionRepository,
+    };
+
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let workspace = tempdir()?;
+    fs::write(
+        workspace.path().join("AGENTS.md"),
+        "Fixture workspace instructions.\n",
+    )?;
+    let instructions = WorkspaceInstructionRepository::new(fixture.pool.clone());
+    assert!(matches!(
+        instructions
+            .preflight_turn_start(fixture.session, fixture.turn)
+            .await?,
+        TurnInstructionManifestPreflight::Absent,
+    ));
+    let lifecycle = signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(
+        fixture.pool.clone(),
+    );
+    lifecycle
+        .adopt(fixture.session, LifecycleActor::Operator)
+        .await?;
+    lifecycle
+        .park(
+            fixture.session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+        )
+        .await?;
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution(
+        [completion_script("completed after discovery")],
+        catalog([]),
+        executor.clone(),
+    );
+    let workspace_instructions = signalboxd::WorkspaceInstructionRuntime::new(
+        fixture.pool.clone(),
+        None,
+        vec![InstructionPath::try_new(
+            workspace
+                .path()
+                .to_str()
+                .expect("UTF-8 fixture path")
+                .to_owned(),
+        )?],
+    );
+    let execution = execution.with_workspace_instructions(workspace_instructions.clone());
+    let wrapped = signalboxd::WorkspaceInstructionPreparedExecution::new(
+        execution.clone(),
+        workspace_instructions,
+    );
+    if through_wrapper {
+        wrapped.execute(Box::new(fixture.activated.clone())).await?;
+    } else {
+        execution
+            .execute(Box::new(fixture.activated.clone()))
+            .await?;
+    }
+    let evidence: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM instruction_discovery WHERE session_id = $1 AND turn_id = $2),
+            (SELECT count(*) FROM turn_instruction_manifest WHERE session_id = $1 AND turn_id = $2)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        evidence,
+        (0, 0),
+        "a park must precede discovery and manifest preparation"
+    );
+    assert!(runtime.received_operations().is_empty());
+    assert!(executor.events().is_empty());
+
+    lifecycle.resume(fixture.session).await?;
+    if through_wrapper {
+        wrapped.execute(Box::new(fixture.activated.clone())).await?;
+    } else {
+        execution
+            .execute(Box::new(fixture.activated.clone()))
+            .await?;
+    }
+    let manifests: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_instruction_manifest WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        manifests, 1,
+        "restoration must prepare the deferred manifest"
+    );
+    assert_eq!(runtime.received_operations().len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_parked_turn_defers_instruction_discovery_until_release() -> Result<(), Box<dyn Error>> {
+    assert_park_defers_instruction_discovery(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_instruction_wrapper_defers_discovery_while_parked() -> Result<(), Box<dyn Error>> {
+    assert_park_defers_instruction_discovery(true).await
+}
+
+#[derive(Clone, Debug)]
+struct ParkingExecutor {
+    inner: RecordingExecutor,
+    lifecycle: signalbox_persistence::session_lifecycle::SessionLifecycleRepository,
+    cause: signalbox_domain::SessionParkCause,
+    responder: signalbox_domain::SessionParkResponder,
+    actor: signalbox_domain::LifecycleActor,
+}
+
+impl ToolExecutor for ParkingExecutor {
+    type Error = FixtureExecutorError;
+
+    async fn execute(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
+        let session = invocation.correlation().session();
+        let result = self.inner.execute(invocation).await?;
+        self.lifecycle
+            .park(session, self.cause, self.responder, None, self.actor)
+            .await
+            .expect("the fixture parks during the issued tool operation");
+        Ok(result)
+    }
+}
+
+async fn assert_park_suspends_running_pass(
+    cause: signalbox_domain::SessionParkCause,
+    responder: signalbox_domain::SessionParkResponder,
+    actor: signalbox_domain::LifecycleActor,
+) -> Result<(), Box<dyn Error>> {
+    const FIRST_TOOL: &str = "first_boundary";
+    const NEXT_TOOL: &str = "after_release";
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let lifecycle = signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(
+        fixture.pool.clone(),
+    );
+    lifecycle
+        .adopt(fixture.session, signalbox_domain::LifecycleActor::Operator)
+        .await?;
+    let tool_catalog = catalog([
+        tool(
+            FIRST_TOOL,
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        ),
+        tool(
+            NEXT_TOOL,
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        ),
+    ]);
+    let recording = RecordingExecutor::completing();
+    let executor = ParkingExecutor {
+        inner: recording.clone(),
+        lifecycle: lifecycle.clone(),
+        cause,
+        responder,
+        actor,
+    };
+    let (execution, first_runtime) = fixture.execution(
+        [
+            tool_use_script(&[(FIRST_TOOL, "{}"), (NEXT_TOOL, "{}")]),
+            completion_script("unused while parked"),
+        ],
+        tool_catalog.clone(),
+        executor,
+    );
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    assert_eq!(recording.events(), vec![String::from(FIRST_TOOL)]);
+    assert_eq!(first_runtime.received_operations().len(), 1);
+    assert!(
+        lifecycle
+            .load(fixture.session)
+            .await?
+            .expect("parked session")
+            .state()
+            .is_parked()
+    );
+
+    let resumed_executor = RecordingExecutor::completing();
+    let (resumed, resumed_runtime) = fixture.execution(
+        [completion_script("completed after the park lifted")],
+        tool_catalog,
+        resumed_executor.clone(),
+    );
+    resumed.resume_active(fixture.session).await?;
+    assert!(
+        resumed_executor.events().is_empty(),
+        "a resume hint cannot cross the park"
+    );
+    assert!(resumed_runtime.received_operations().is_empty());
+    lifecycle.resume(fixture.session).await?;
+    resumed.resume_active(fixture.session).await?;
+    assert_eq!(resumed_executor.events(), vec![String::from(NEXT_TOOL)]);
+    assert_eq!(resumed_runtime.received_operations().len(), 1);
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "tool_execution_result",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn module_park_suspends_the_running_pass_until_release() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        DispatchingModule, LifecycleActor, SessionParkCause, SessionParkResponder,
+    };
+    assert_park_suspends_running_pass(
+        SessionParkCause::ModulePark,
+        SessionParkResponder::Module {
+            module: DispatchingModule::RepositoryWatch,
+        },
+        LifecycleActor::Module {
+            module: DispatchingModule::RepositoryWatch,
+        },
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn deadline_park_suspends_the_running_pass_until_release() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{LifecycleActor, SessionParkCause, SessionParkResponder};
+    assert_park_suspends_running_pass(
+        SessionParkCause::WaitingDeadlineExpired,
+        SessionParkResponder::Operator,
+        LifecycleActor::Watchdog,
+    )
+    .await
+}
+
 /// A shutdown requested during an issued tool operation waits for its durable
 /// result, checkpoints there, and lets a successor finish without repeating
 /// the tool or beginning an extra model call before restart.
