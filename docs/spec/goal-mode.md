@@ -19,13 +19,22 @@ Users act on a goal through four commands: attach, resume with optional
 guidance, stop, and supersede with a replacement statement. Supersede changes an
 active generation's scope; guidance that leaves the scope alone is a steer while
 the goal is pursuing or a resume while it is blocked. A model reaches the goal
-only through the session-scoped `goal_declare` tool, and may declare only
-blocked or achieved. The repository-watch session-command vocabulary contains
-checked goal operations, but the inactive module dispatches no sessions or
-goals.
+through the session-scoped `goal_declare` tool, and may declare only blocked or
+achieved. The repository-watch session-command vocabulary contains checked goal
+operations.
 
-While a generation is pursuing, each successful turn's end makes the scheduler
-create and start the next turn without user input. Except for the
+For a pull-request commission, a completed turn with a successful configured
+push and a thread reply triggers a daemon GitHub check before continuation. The
+current PR head must contain the pushed commit and every thread replied on in
+the generation must be resolved. Success records a verified achievement with the
+completed turn, observed head SHA, and resolved thread IDs and closes the
+session. A failed check supplies the missing push or thread evidence as the next
+input and records that detail on the successor turn; unavailable verification
+names the evidence still to verify. The check uses `code_host_request_timeout`;
+expiry supplies unavailable-verification guidance.
+
+While a generation is pursuing, each successful turn's end otherwise makes the
+scheduler create and start the next turn without user input. Except for the
 [repository-watch compaction successor](model-call-execution.md#model-call-execution),
 a failed goal turn is not retried; the daemon appends a blocked event with the
 execution-failure reason, need text, and the failed turn's provenance. Every
@@ -139,13 +148,13 @@ A synthesized statement's template is system-authored, but the identifiers it
 renders come from the watched repository, so a consumer that places it in a
 model prompt quotes it as it quotes any session text.
 
-The session lock covers transition validation, reading and evaluating the finish
-condition, and committing its result. Rejected declarations do not run the
-finish check. An achievement is gated on the session's finish check: a failing
-verdict appends a block for the failed check with the check's result as its
-need, a passing verdict commits a verified achievement to the session's terminal
-handoff in the same transaction, and a declaration no check verifies commits a
-declared achievement.
+For a model declaration, the session lock covers transition validation, reading
+and evaluating the finish condition, and committing its result. Rejected
+declarations do not run the finish check. A model declaration of achievement is
+gated on the session's finish check: a failing verdict appends a block for the
+failed check with the check's result as its need, a passing verdict commits a
+verified achievement to the session's terminal handoff in the same transaction,
+and a declaration no check verifies commits a declared achievement.
 
 The command claim and replay protocol and the attribution rule are stated on
 [identity and commands](identity-and-commands.md), the lock order on

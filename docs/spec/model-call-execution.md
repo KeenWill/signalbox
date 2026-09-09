@@ -533,6 +533,8 @@ rendering instead of inventing text.
 
 ## Planned
 
+- Session-scoped fatal execution parking and operator reconciliation; see
+  [daemon survival design](../design/daemon-survival.md).
 - Multipart attachment rendering ([design](../design/model-call-execution.md)).
 - The executable session-tool snapshot
   ([design](../design/model-call-execution.md)).

@@ -196,7 +196,9 @@ or in-flight attempt takes the effect-class crash-loss path.
 Foreground waiting on a child through `await_session` is a logical tool
 transition that ends any physical attempt before committing the wait, so restart
 resumes from durable wait and result rows and cannot duplicate an external
-effect.
+effect. A batch can retain multiple foreground waits; continuation and
+interruption associate delivered child results with their await requests in
+proposal order.
 
 The error kind set stays closed; a family whose failures do not fit maps into it
 and may fix the detail to its own closed token vocabulary.
@@ -337,14 +339,15 @@ refuses an object-format disagreement.
 An `Ambiguous` result atomically ends the issuing turn attempt as
 `WithoutStop(Ambiguous)` and moves the lifecycle to `awaiting_tool_recovery`
 correlated with that exact attempt. A tool that executes and exits nonzero
-returns bounded structured `ExecutionFailed` evidence and is `KnownFailed`.
-Output admission applies the size, U+0000, credential-redaction, and correlation
-checks before durable semantic projection. If the authorization commit
-acknowledgement is ambiguous, execution does not begin from the returned error:
-the application rereads the attempt under the scheduler lock, and an
-inconclusive reread retains that authority state for another identical reread,
-so neither a retry nor a crash classification is inferred from a lost commit
-response.
+returns bounded structured `ExecutionFailed` evidence and is `KnownFailed`. A
+supervisor-reported sandbox timeout or cancellation retains its bounded output
+without requiring a launcher completion record. Output admission applies the
+size, U+0000, credential-redaction, and correlation checks before durable
+semantic projection. If the authorization commit acknowledgement is ambiguous,
+execution does not begin from the returned error: the application rereads the
+attempt under the scheduler lock, and an inconclusive reread retains that
+authority state for another identical reread, so neither a retry nor a crash
+classification is inferred from a lost commit response.
 
 Tool execution acquires the dispatch gate and revalidates the loaded batch
 before inserting the next attempt, acting on a loaded prepared attempt, or
@@ -548,6 +551,8 @@ the hint until a full nudge buffer has capacity.
 
 ## Planned
 
+- Session-scoped fatal execution parking; see
+  [daemon survival design](../design/daemon-survival.md).
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`

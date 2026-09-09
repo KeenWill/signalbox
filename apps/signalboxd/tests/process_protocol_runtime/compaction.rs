@@ -1671,7 +1671,7 @@ async fn inv062_transient_attachment_unavailability_recounts_after_recovery()
             .model_configuration(),
     )?;
     let reads = Arc::new(AtomicUsize::new(0));
-    let mut counting_registry = BlobStoreRegistry::initialize_for_conformance(
+    let mut counting_registry = BlobStoreRegistry::initialize(
         model_configuration.blob_storage(),
         fixture.runtime.pool.clone(),
     )
@@ -2465,12 +2465,10 @@ async fn automatic_compaction_retries_its_prepared_call_after_attachment_recover
         .await?;
     let queued_turn = accepted_successor_turn(&mut fixture.connection, session_id, 2).await?;
     let reads = Arc::new(AtomicUsize::new(0));
-    let mut registry = BlobStoreRegistry::initialize_for_conformance(
-        configuration.blob_storage(),
-        fixture.runtime.pool.clone(),
-    )
-    .await?
-    .expect("configured blob storage");
+    let mut registry =
+        BlobStoreRegistry::initialize(configuration.blob_storage(), fixture.runtime.pool.clone())
+            .await?
+            .expect("configured blob storage");
     let (name, inner) = registry.routed_store(BlobStorageClass::UserAttachment);
     let name = name.clone();
     assert!(registry.replace_store_for_conformance(

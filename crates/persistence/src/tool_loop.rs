@@ -1396,46 +1396,39 @@ impl PostgresToolLoopRepository {
                     ).bind(result_frontier.into_uuid()).fetch_one(&mut *transaction).await?;
                     result_frontier = signalbox_domain::ContextFrontierId::from_uuid(prefix);
                 }
-                let child_wait =
-                    batch
-                        .requests()
-                        .iter()
-                        .find_map(|request| match batch.attempt(request.id()) {
-                            Some(ReconstitutedToolAttempt::Ended(attempt)) => match attempt.end() {
-                                ToolAttemptEnd::AwaitingChild {
-                                    spawning_request,
-                                    child,
-                                } => Some((request.id(), *spawning_request, *child)),
-                                ToolAttemptEnd::Completed { .. }
-                                | ToolAttemptEnd::KnownFailed { .. }
-                                | ToolAttemptEnd::Ambiguous => None,
-                            },
-                            Some(ReconstitutedToolAttempt::Current(_)) | None => None,
-                        });
-                let mut projection = match child_wait {
-                    Some((awaiting_request, spawning_request, child)) => batch
-                        .prepare_delegation_result_projection(
-                            result_entries.clone(),
-                            result_frontier,
+                let mut child_outcomes = BTreeMap::new();
+                for request in batch.requests() {
+                    if let Some(ReconstitutedToolAttempt::Ended(attempt)) =
+                        batch.attempt(request.id())
+                        && let ToolAttemptEnd::AwaitingChild {
+                            spawning_request,
+                            child,
+                        } = attempt.end()
+                    {
+                        child_outcomes.insert(
+                            request.id(),
                             load_foreground_delegation_outcome(
                                 &mut transaction,
                                 session,
-                                awaiting_request,
-                                spawning_request,
-                                child,
+                                request.id(),
+                                *spawning_request,
+                                *child,
                             )
                             .await?,
-                        ),
-                    None => batch.prepare_result_projection(
+                        );
+                    }
+                }
+                let mut projection = batch
+                    .prepare_delegation_result_projection(
                         result_entries.clone(),
                         result_frontier,
-                    ),
-                }
-                .map_err(|_| {
-                    ToolLoopRepositoryError::InvalidTransition(
-                        "tool batch is not ready for continuation",
+                        child_outcomes,
                     )
-                })?;
+                    .map_err(|_| {
+                        ToolLoopRepositoryError::InvalidTransition(
+                            "tool batch is not ready for continuation",
+                        )
+                    })?;
                 if let Some((frontier, summary)) = compacted {
                     let loaded = crate::session::load_session_from_connection(&mut transaction, session)
                         .await.map_err(|error| match error {

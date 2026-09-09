@@ -37,7 +37,8 @@ and parked carry none. The admission and waiting bounds come from configuration.
 A parked session, reached only by an expired waiting deadline or a module park,
 carries a machine-readable cause and the responder who must act, the operator
 queue or one module. The operator queue is every parked session; the recorded
-responder does not filter it.
+responder does not filter it. Module park restoration projects all outstanding
+module authorities; lifting one leaves the session parked while another holds.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a finish check passed and declared when no check ran; a failed check blocks
@@ -66,12 +67,13 @@ Five further commands close a session or lift a park: a session-level stop
 closes any non-terminal session, supersede closes it in favour of a named
 successor, abandon and close as failed close a parked session, and each of these
 closures is refused while a different terminal outcome is already pending;
-resume returns a parked session with no pending terminal outcome to its mapped
-state. A parked session with a blocked goal resumes through the goal's
-resume-with-guidance command; one with a pursuing goal may use the session-level
-resume. The goal command that [goal mode](goal-mode.md) calls supersede starts a
-new goal generation in the same session and is unrelated to the session outcome
-superseded.
+resume returns a parked session with no pending terminal outcome and no
+remaining module park authority to its mapped state. A durable session resume
+rejects while a module park authority remains. A parked session with a blocked
+goal resumes through the goal's resume-with-guidance command; one with a
+pursuing goal may use the session-level resume. The goal command that
+[goal mode](goal-mode.md) calls supersede starts a new goal generation in the
+same session and is unrelated to the session outcome superseded.
 
 Modules observe the lifecycle through eight event kinds with typed payloads on
 the transactional outbox that [persistence protocol](persistence-protocol.md)
@@ -205,6 +207,8 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
 
 ## Planned
 
+- Supervised failure parking and reconciliation on operator resume for either
+  ownership state; see [daemon survival design](../design/daemon-survival.md).
 - Failure parking of owned sessions: a structural failure, an unknown failure,
   or an exhausted retry budget on a live owned session parks it with the typed
   cause instead of terminalizing it or stopping silently; see
