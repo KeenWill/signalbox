@@ -421,6 +421,32 @@ mod tests {
             }
         }
 
+        /// Pauses a selected clock answer and signals when its owning attempt releases it.
+        struct SelectedClock {
+            selected: mpsc::UnboundedSender<oneshot::Sender<()>>,
+            finished: mpsc::UnboundedSender<()>,
+        }
+        impl LiveDeliverySource for SelectedClock {
+            fn next_delivery<'a>(
+                &'a mut self,
+                outstanding: &'a [RequestFrame],
+            ) -> Pin<Box<dyn Future<Output = Result<DeliveryKind, LiveDeliveryFailure>> + 'a>>
+            {
+                Box::pin(async move {
+                    let delivery = ClockSource.next_delivery(outstanding).await?;
+                    let (release, released) = oneshot::channel();
+                    self.selected.send(release).unwrap();
+                    released.await.unwrap();
+                    Ok(delivery)
+                })
+            }
+        }
+        impl Drop for SelectedClock {
+            fn drop(&mut self) {
+                let _ = self.finished.send(());
+            }
+        }
+
         async fn result(
             journal: &ProgramJournalRepository,
             run: ProgramRunId,
@@ -826,6 +852,146 @@ mod tests {
                 "the failed database operation has no answer"
             );
             assert!(journal.terminal_delivery().is_none());
+            pool.close().await;
+            Ok(())
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_program_cancellation_adopts_a_selected_delivery_tail_race()
+        -> Result<(), Box<dyn Error>> {
+            use signalbox_domain::DurableCommandId;
+            use signalbox_persistence::program_cancellation::{
+                self, CancelProgramRun, ProgramCancellationOutcome, ProgramCancellationResult,
+            };
+            let (_database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+            let journal = ProgramJournalRepository::new(pool.clone());
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let registration = service.register_javascript(
+                ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                javascript_request(
+                    "import { now } from '@signalbox/program-sdk/v1'; await now(new Uint8Array());".into(),
+                    ProgramGrants::new([ProgramCapability::Time]),
+                ),
+            ).await?;
+            let healthy = service
+                .register_javascript(
+                    ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                    javascript_request(String::new(), ProgramGrants::new([])),
+                )
+                .await?;
+            let (selected, mut selection) = mpsc::unbounded_channel();
+            let (finished, mut completion) = mpsc::unbounded_channel();
+            let (stop, stopped) = oneshot::channel();
+            let task = tokio::spawn(runner.run_with_primitives(
+                async {
+                    let _ = stopped.await;
+                },
+                move || SelectedClock {
+                    selected: selected.clone(),
+                    finished: finished.clone(),
+                },
+            ));
+            let run = ProgramRunId::from_uuid(Uuid::now_v7());
+            service.start(run, registration.id, &[]).await?;
+            let release = tokio::time::timeout(TEST_TIMEOUT, selection.recv())
+                .await?
+                .unwrap();
+            let selected_tail = journal.load(run).await?.unwrap();
+            assert_eq!(
+                selected_tail.entries().len(),
+                1,
+                "the selected answer is not appended"
+            );
+            assert!(selected_tail.has_outstanding_requests());
+            let command = CancelProgramRun {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                run_id: run,
+            };
+            assert_eq!(
+                program_cancellation::cancel(&pool, command.clone()).await?,
+                ProgramCancellationResult::Recorded(ProgramCancellationOutcome::Applied)
+            );
+            let cancelled = journal.load(run).await?.unwrap();
+            assert_eq!(
+                cancelled.entries().len(),
+                2,
+                "request and concurrent cancellation"
+            );
+            assert!(matches!(
+                cancelled.terminal_delivery().unwrap().kind(),
+                DeliveryKind::RunCancel(_)
+            ));
+            release.send(()).unwrap();
+            tokio::time::timeout(TEST_TIMEOUT, completion.recv())
+                .await?
+                .unwrap();
+            // The raced attempt has returned before admitting another run.
+            let healthy_run = ProgramRunId::from_uuid(Uuid::now_v7());
+            service.start(healthy_run, healthy.id, &[]).await?;
+            assert_eq!(
+                result(&journal, healthy_run).await,
+                InlineFramePayload::default()
+            );
+            assert_eq!(
+                program_cancellation::cancel(&pool, command).await?,
+                ProgramCancellationResult::Recorded(ProgramCancellationOutcome::Applied)
+            );
+            stop.send(()).unwrap();
+            task.await??;
+            assert_eq!(
+                journal.load(run).await?.unwrap(),
+                cancelled,
+                "the selected answer and a replacement fault must not overwrite cancellation"
+            );
+            pool.close().await;
+            Ok(())
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_program_nonterminal_tail_changes_remain_runtime_errors()
+        -> Result<(), Box<dyn Error>> {
+            let (_database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+            let journal = ProgramJournalRepository::new(pool.clone());
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let registration = service.register_javascript(
+                ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                javascript_request(
+                    "import { now } from '@signalbox/program-sdk/v1'; await now(new Uint8Array());".into(),
+                    ProgramGrants::new([ProgramCapability::Time]),
+                ),
+            ).await?;
+            let (selected, mut selection) = mpsc::unbounded_channel();
+            let (finished, _completion) = mpsc::unbounded_channel();
+            let task =
+                tokio::spawn(runner.run_with_primitives(std::future::pending(), move || {
+                    SelectedClock {
+                        selected: selected.clone(),
+                        finished: finished.clone(),
+                    }
+                }));
+            let run = ProgramRunId::from_uuid(Uuid::now_v7());
+            service.start(run, registration.id, &[]).await?;
+            let release = tokio::time::timeout(TEST_TIMEOUT, selection.recv())
+                .await?
+                .unwrap();
+            // A second writer's request changes the tail without committing a terminal outcome.
+            journal
+                .append_request(run, None, RequestKind::Now(InlineFramePayload::default()))
+                .await?;
+            let changed = journal.load(run).await?.unwrap();
+            assert!(changed.terminal_delivery().is_none());
+            release.send(()).unwrap();
+            let error = tokio::time::timeout(TEST_TIMEOUT, task)
+                .await??
+                .expect_err("nonterminal journal conflict remains fatal");
+            assert!(
+                matches!(error, WorkflowRuntimeError::Attempt { source, .. } if matches!(source.as_ref(), WorkflowHostError::Protocol(WorkflowHostProtocolError::JournalTailChanged)))
+            );
+            assert_eq!(journal.load(run).await?.unwrap(), changed);
             pool.close().await;
             Ok(())
         }
