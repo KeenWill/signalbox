@@ -49,7 +49,8 @@ catalog work before source or worker I/O. A digest outside that frontier is
 unauthorized; a repeated digest requires its rendered selector, the semantic
 entry identity and zero-based part ordinal. The registry recognizes no format in
 the daemon. Authorization and catalog repository failures retain their operator
-failure class through tool execution.
+failure class through tool execution. Verified-source integrity violations take
+the fail-closed operator path.
 
 `file_read` takes an exact provider-owned view and either object options or an
 authenticated restart-ephemeral continuation. Continuations bind the original

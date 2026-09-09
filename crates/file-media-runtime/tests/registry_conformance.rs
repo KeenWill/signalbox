@@ -1388,7 +1388,7 @@ fn false_source_too_large_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-struct SourceFailureProcessor;
+struct SourceFailureProcessor(SourceReadError);
 
 impl FileMediaProcessor for SourceFailureProcessor {
     fn probe<'a>(
@@ -1397,7 +1397,7 @@ impl FileMediaProcessor for SourceFailureProcessor {
         _source: &'a dyn VerifiedBlobSource,
         _cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
-        Box::pin(async { Err(SourceReadError::Unavailable.into()) })
+        Box::pin(async { Err(self.0.into()) })
     }
 
     fn validate<'a>(
@@ -1427,7 +1427,7 @@ fn processor_boundary_preserves_verified_source_unavailability() {
     let registry = registry_with_view(text_view());
 
     let outcome = block_on_ready(registry.inspect(
-        &SourceFailureProcessor,
+        &SourceFailureProcessor(SourceReadError::Unavailable),
         inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         &source,
         &NeverCancelled,
@@ -1972,4 +1972,33 @@ fn invalid_reader_validation_envelopes_name_validation_bounds() {
             Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ValidationBounds)
         ));
     }
+}
+
+#[test]
+fn processor_boundary_preserves_verified_source_integrity_failure() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(text_view());
+    let processor = SourceFailureProcessor(SourceReadError::Integrity);
+
+    let inspected = block_on_ready(registry.inspect(
+        &processor,
+        inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        &source,
+        &NeverCancelled,
+    ));
+    let read = block_on_ready(registry.read(
+        &processor,
+        FileReadRequest {
+            inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+            view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view"),
+            input: FileReadInput::Initial {
+                options: serde_json::json!({}),
+            },
+        },
+        &source,
+        &NeverCancelled,
+    ));
+
+    assert_eq!(inspected, Err(FileMediaFailure::SourceIntegrity));
+    assert_eq!(read, Err(FileMediaFailure::SourceIntegrity));
 }
