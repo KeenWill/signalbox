@@ -40,7 +40,7 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
-The module schema contains thirteen tables:
+The module schema contains sixteen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
   repository row fences complete frontier commits with a generation and the
@@ -71,6 +71,10 @@ The module schema contains thirteen tables:
   payload, and settlement.
 - `webhook_delivery`, `webhook_body`, and `webhook_disposition` retain one
   authenticated delivery under its caller-selected expiry.
+- `webhook_pull_wake` coalesces pending PR observations and retains failed
+  attempt counts and the last failure.
+- `poll_cache_reviewers` and `poll_cache_page` retain the selected reviewer set
+  and accepted conditional REST snapshots.
 - `core_event_cursor` records module application progress.
 - `rule_evaluation_cursor` records each rule revision's last evaluated
   repository event, including nonmatches and suppressed dispatches.
@@ -179,7 +183,10 @@ their named pull requests in `webhook_pull_wake` and wake the repository task.
 Each queued pull request is fetched and admitted independently against the
 committed baseline; the command worker evaluates its events without waiting for
 a poll. Successful admission clears only the consumed delivery; a newer delivery
-remains pending. Periodic polls reconcile repository-wide state. Shadow hooks
+remains pending. Failed observations retain their failure and attempt count.
+After three failed attempts, that row is skipped until a new delivery resets it.
+Other queued PRs continue; periodic polls reconcile repository-wide state
+independently. Startup wakes resume eligible pending rows. Shadow hooks
 acknowledge without queuing or waking. The runtime's `reload_configuration`
 reconciles rule revisions and replaces listener settings inside the reload.
 Enabled rule templates must resolve before composition or reload. Stale or

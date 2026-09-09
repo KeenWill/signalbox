@@ -4744,3 +4744,163 @@ async fn labeled_webhook_dispatches_without_a_poll() -> Result<(), Box<dyn Error
     drop(container);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn review_thread_delivery_queues_its_pull_request() -> Result<(), Box<dyn Error>> {
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    let delivery = Uuid::now_v7();
+    let now = OffsetDateTime::now_utc();
+    store
+        .admit_webhook(WebhookDelivery {
+            repository: &repository,
+            hook_id: 1,
+            delivery_id: delivery,
+            event: "pull_request_review_thread",
+            action: Some("resolved"),
+            body: br#"{"pull_request":{"number":7}}"#,
+            received_at: now,
+            expires_at: now + MERGED_RETENTION,
+        })
+        .await?;
+    assert!(
+        store
+            .settle_webhook(1, delivery, WebhookDisposition::Applied, now)
+            .await?
+    );
+    let queued: Vec<Decimal> =
+        sqlx::query_scalar("SELECT pull_request_number FROM webhook_pull_wake WHERE repository=$1")
+            .bind(repository.as_str())
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(queued, vec![Decimal::from(7)]);
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn failed_webhook_pull_is_suspended_without_blocking_other_subjects()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::poll_cache::{observe_webhook_pulls, poll_with_cache};
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let now = OffsetDateTime::now_utc();
+    // The lower PR fails before the later queued subject is reached.
+    for number in [1, 7] {
+        let delivery = Uuid::now_v7();
+        let body = serde_json::json!({"pull_request":{"number":number}}).to_string();
+        store
+            .admit_webhook(WebhookDelivery {
+                repository: &repository,
+                hook_id: 1,
+                delivery_id: delivery,
+                event: "pull_request",
+                action: Some("labeled"),
+                body: body.as_bytes(),
+                received_at: now,
+                expires_at: now + MERGED_RETENTION,
+            })
+            .await?;
+        store
+            .settle_webhook(1, delivery, WebhookDisposition::Applied, now)
+            .await?;
+    }
+    let mut io = ConditionalPollFixture::new();
+    let mut pull = io
+        .pages
+        .remove("/repos/example/project/pulls/1")
+        .expect("fixture pull");
+    pull.0["number"] = serde_json::json!(7);
+    io.pages
+        .insert(String::from("/repos/example/project/pulls/7"), pull);
+    io.pages.insert(
+        String::from("/repos/example/project/pulls/7/reviews?per_page=100&page=1"),
+        (serde_json::json!([]), false),
+    );
+    for expected_attempts in 1..=3 {
+        observe_webhook_pulls(&io, &store, &repository, &[], MERGED_RETENTION).await?;
+        let rows: Vec<(Decimal, i32, Option<String>)> = sqlx::query_as("SELECT pull_request_number, failed_attempts, last_failure FROM webhook_pull_wake WHERE repository=$1").bind(repository.as_str()).fetch_all(&pool).await?;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the later PR must commit and leave the queue"
+        );
+        assert_eq!(rows[0].0, Decimal::from(1));
+        assert_eq!(rows[0].1, expected_attempts);
+        assert!(
+            rows[0]
+                .2
+                .as_ref()
+                .is_some_and(|failure| !failure.is_empty())
+        );
+    }
+    io.requests.lock().expect("requests").clear();
+    observe_webhook_pulls(&io, &store, &repository, &[], MERGED_RETENTION).await?;
+    assert!(
+        io.requests.lock().expect("requests").is_empty(),
+        "suspended rows consume no requests"
+    );
+    let mut polling = ConditionalPollFixture::new();
+    polling.pages.extend(
+        io.pages
+            .iter()
+            .filter(|(path, _)| path.contains("/pulls/7"))
+            .map(|(path, page)| (path.clone(), page.clone())),
+    );
+    poll_with_cache(
+        &polling,
+        &store,
+        &repository,
+        &[],
+        EventProducer::Poll,
+        MERGED_RETENTION,
+    )
+    .await?;
+    let delivery = Uuid::now_v7();
+    store
+        .admit_webhook(WebhookDelivery {
+            repository: &repository,
+            hook_id: 1,
+            delivery_id: delivery,
+            event: "pull_request",
+            action: Some("synchronize"),
+            body: br#"{"pull_request":{"number":1}}"#,
+            received_at: now,
+            expires_at: now + MERGED_RETENTION,
+        })
+        .await?;
+    store
+        .settle_webhook(1, delivery, WebhookDisposition::Applied, now)
+        .await?;
+    let reset: (i32, Option<String>) = sqlx::query_as(
+        "SELECT failed_attempts, last_failure FROM webhook_pull_wake WHERE repository=$1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reset, (0, None));
+    observe_webhook_pulls(&polling, &store, &repository, &[], MERGED_RETENTION).await?;
+    let pending: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM webhook_pull_wake WHERE repository=$1")
+            .bind(repository.as_str())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(pending, 0);
+    drop(container);
+    Ok(())
+}

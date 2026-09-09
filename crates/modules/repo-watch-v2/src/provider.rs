@@ -298,16 +298,16 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
-        crate::poll_cache::observe_webhook_pulls(
-            &client,
-            &self.store,
-            &self.repository,
-            &self.signal_reviewers,
-            self.subject_retention,
-        )
-        .await
-        .map_err(RepositoryAttemptError::Observation)?;
         if producer == EventProducer::Webhook {
+            crate::poll_cache::observe_webhook_pulls(
+                &client,
+                &self.store,
+                &self.repository,
+                &self.signal_reviewers,
+                self.subject_retention,
+            )
+            .await
+            .map_err(RepositoryAttemptError::Observation)?;
             return Ok(());
         }
         let admission = crate::poll_cache::poll_with_cache(
