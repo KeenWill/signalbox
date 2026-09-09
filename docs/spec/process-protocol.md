@@ -592,20 +592,41 @@ durable. An equal `command_id` replay returns its stored receipt before current
 state is evaluated. Both operations are authorized as every other request is:
 reaching the owner-private socket is the authority.
 
+Program commands use ordinary user authority from the owner-private socket.
+`register_program { registration_id, registration }` accepts name, revision,
+grants and a JavaScript source/artifact pair or compiled native entry/revision;
+the daemon supplies the native binary digest. It returns
+`program_registered { registration_id }`. NUL bytes in registration name,
+revision, artifact text or native entry/revision return `invalid_request`.
+`start_program_run { run_id, registration_id, input }` retains exact encoded
+input bytes and returns `program_run_started { run_id, registration_id }`. A
+failed runner wake after admission returns `commit_ambiguous`. Equal
+registration and start retries return the same admission; conflicting identity
+reuse returns `conflicting_reuse`, and an unavailable native key returns
+`invalid_request`. `read_program_run { run_id }` returns
+`program_run_read { run_id, run }`, with registration identity, `input` bytes,
+`input_extent`, and an outcome tagged by `state`: `running`, `cancelled`,
+`faulted`, or `succeeded` with `result` bytes and `result_extent`. Each extent
+is `{ kind: "complete" }` or `{ kind: "truncated", total_bytes }`. Reads fit the
+frame byte budget by returning byte prefixes, input first and then result;
+truncation leaves stored data intact. Missing reads return `not_found`.
+
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt
 `program_run_cancellation_receipt { command_id, run_id, outcome }`. The outcome
 is `applied { terminal_state: "cancelled", result: null }`, `not_found`, or
 `already_terminal { terminal_state, result }` naming the standing terminal state
 and result the command found. The terminal states are `cancelled`, `faulted` and
-`succeeded`; success carries exact result bytes as a byte array, and the other
-states carry null. The result field is required for every terminal state. An
-identical request bearing the same `command_id` replays its stored receipt even
-if the run's standing state later changes; the same identity with a different
-payload is conflicting reuse. Run-state semantics belong to
-[workflows.md](../spec/workflows.md); this pair, its version-1 encoding, and the
-closed receipt algebra belong here, and a later incompatible shape requires a
-new protocol version.
+`succeeded`; success carries a frame-bounded `result` byte prefix and a
+`result_extent` using the same complete/truncated markers as run reads. The
+prefix budget reserves the longest request identity so cancellation retries
+return identical outcomes. Other states carry null. The result field is required
+for every terminal state. An identical request bearing the same `command_id`
+replays its stored receipt even if the run's standing state later changes; the
+same identity with a different payload is conflicting reuse. Run-state semantics
+belong to [workflows.md](../spec/workflows.md); this pair, its version-1
+encoding, and the closed receipt algebra belong here, and a later incompatible
+shape requires a new protocol version.
 
 Transcript snapshot starts include nullable `repository_watch` provenance
 resolved from the retained dispatch ledger.

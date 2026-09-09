@@ -154,6 +154,9 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::GitRemoteWithdrawn { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
         | ServerMessage::CredentialPoolPolicy { .. }
+        | ServerMessage::ProgramRegistered { .. }
+        | ServerMessage::ProgramRunStarted { .. }
+        | ServerMessage::ProgramRunRead { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
