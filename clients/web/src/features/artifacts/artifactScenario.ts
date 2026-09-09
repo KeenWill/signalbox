@@ -24,6 +24,8 @@ type BlobView = WebBlobDescriptor['available_views'][number]
 // declared media type is caller-supplied, so admission is additionally verified against the actual
 // fetched bytes at load time (fetchVerifiedSingleFrameJpeg below).
 export const INLINE_ORIGINAL_MAX_BYTES = 16n * 1024n * 1024n
+// Mirrors the owning service's MAX_DERIVATIVE_BYTES admission bound.
+export const DERIVED_IMAGE_MAX_BYTES = 16n * 1024n * 1024n
 const BOUNDED_IMAGE_TRANSFORMATIONS = new Set(['image.preview', 'image.thumbnail'])
 const SINGLE_FRAME_ORIGINAL_MEDIA_TYPES = new Set(['image/jpeg'])
 
@@ -49,24 +51,21 @@ export const isSingleFrameJpegBytes = (bytes: Uint8Array): boolean =>
   bytes.length >= JPEG_START_OF_IMAGE_SIGNATURE.length &&
   JPEG_START_OF_IMAGE_SIGNATURE.every((expected, index) => bytes[index] === expected)
 
-export const fetchVerifiedSingleFrameJpeg = async (
+const fetchBoundedImageBytes = async (
   view: BlobView,
+  ceiling: bigint,
+  label: string,
   fetchImplementation: typeof fetch,
   signal?: AbortSignal,
-): Promise<Blob> => {
+): Promise<Uint8Array<ArrayBuffer>> => {
   const advertisedLength = BigInt(view.byte_length)
-  if (advertisedLength > INLINE_ORIGINAL_MAX_BYTES) {
-    throw new Error('original exceeds the inline admission ceiling')
+  if (advertisedLength > ceiling) {
+    throw new Error(`${label} exceeds the inline admission ceiling`)
   }
   const response = await fetchImplementation(view.content_url, { signal })
-  if (!response.ok) {
-    throw new Error(`original request failed with status ${String(response.status)}`)
-  }
-  if (response.body === null) {
-    throw new Error('original response exposed no readable body')
-  }
-  // Consume the body through a bounded reader: a faulty response longer than the advertised
-  // length is aborted mid-stream instead of being materialized before any size check runs.
+  if (!response.ok)
+    throw new Error(`${label} request failed with status ${String(response.status)}`)
+  if (response.body === null) throw new Error(`${label} response exposed no readable body`)
   const expectedLength = Number(advertisedLength)
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -78,12 +77,12 @@ export const fetchVerifiedSingleFrameJpeg = async (
     receivedLength += value.byteLength
     if (receivedLength > expectedLength) {
       await reader.cancel()
-      throw new Error('original bytes exceed the advertised byte length')
+      throw new Error(`${label} bytes exceed the advertised byte length`)
     }
     chunks.push(value)
   }
   if (receivedLength !== expectedLength) {
-    throw new Error('original bytes do not match the advertised byte length')
+    throw new Error(`${label} bytes do not match the advertised byte length`)
   }
   const bytes = new Uint8Array(receivedLength)
   let offset = 0
@@ -91,9 +90,39 @@ export const fetchVerifiedSingleFrameJpeg = async (
     bytes.set(chunk, offset)
     offset += chunk.byteLength
   }
+  return bytes
+}
+
+export const fetchVerifiedSingleFrameJpeg = async (
+  view: BlobView,
+  fetchImplementation: typeof fetch,
+  signal?: AbortSignal,
+): Promise<Blob> => {
+  const bytes = await fetchBoundedImageBytes(
+    view,
+    INLINE_ORIGINAL_MAX_BYTES,
+    'original',
+    fetchImplementation,
+    signal,
+  )
   if (!isSingleFrameJpegBytes(bytes)) {
     throw new Error('original bytes are not a single-frame JPEG stream')
   }
+  return new Blob([bytes], { type: view.media_type })
+}
+
+export const fetchVerifiedDerivedImage = async (
+  view: BlobView,
+  fetchImplementation: typeof fetch,
+  signal?: AbortSignal,
+): Promise<Blob> => {
+  const bytes = await fetchBoundedImageBytes(
+    view,
+    DERIVED_IMAGE_MAX_BYTES,
+    'derived image',
+    fetchImplementation,
+    signal,
+  )
   return new Blob([bytes], { type: view.media_type })
 }
 
@@ -326,7 +355,7 @@ export const fallbackDescriptor = decodeWebBlobDescriptor({
 
 const generatedText = Array.from(
   { length: 180 },
-  (_, index) => `line ${String(index + 1).padStart(3, '0')} — bounded incident chronology`,
+  (_, index) => `line ${String(index + 1).padStart(3, '0')} — incident timeline`,
 ).join('\n')
 
 const generatedCode = Array.from(
@@ -359,7 +388,7 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
   {
     id: 'bounded-photo',
     kind: 'image',
-    displayName: 'bounded-photo.jpg',
+    displayName: 'photo.jpg',
     source: { kind: 'signalbox_blob', descriptor: jpegDescriptor },
   },
   {
@@ -382,8 +411,8 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
     id: 'restricted-capture',
     kind: 'blocked',
     displayName: 'restricted.capture',
-    attemptedKind: 'unknown binary',
-    reason: 'The current capability projection does not authorize a content view.',
+    attemptedKind: 'Unknown binary',
+    reason: 'Preview not allowed.',
   },
 ]
 

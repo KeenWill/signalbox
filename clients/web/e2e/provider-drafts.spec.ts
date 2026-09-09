@@ -128,7 +128,7 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
   await page.goto('/sessions?workspace=true')
   await page.getByRole('textbox', { name: 'Session ID' }).fill(sessionId)
   await page.getByRole('button', { name: 'Open', exact: true }).click()
-  await expect(page.getByText('Following live session')).toBeVisible()
+  await expect(page.getByText('Live', { exact: true })).toBeVisible()
   await page.waitForFunction(() => Reflect.get(window, 'fixtureFollowReady') === true)
   await page.evaluate(
     ({ sessionId }) =>
@@ -145,10 +145,10 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
       ),
     { sessionId },
   )
-  await expect(page.getByRole('region', { name: 'Provider draft' })).toContainText(
+  await expect(page.getByRole('region', { name: 'Assistant draft' })).toContainText(
     'I am checking the recorded work',
   )
-  await expect(page.getByText('Runner · pinned · suspect')).toBeVisible()
+  await expect(page.getByText('Runner: Assigned, Connection uncertain')).toBeVisible()
   if (testInfo.project.name === 'chromium' && process.platform === 'linux')
     await expect.soft(page).toHaveScreenshot('provider-drafts.png', { animations: 'disabled' })
   holdLive = true
@@ -162,11 +162,11 @@ test('shows bounded provider drafts and live facts, then replaces them on resync
       }),
     ),
   )
-  await expect(page.getByText('Resynchronizing live session…')).toBeVisible()
-  await expect(page.getByRole('region', { name: 'Provider draft' })).toHaveCount(0)
-  await expect(page.getByText('Runner · pinned · suspect')).toHaveCount(0)
+  await expect(page.getByText('Reconnecting…')).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Assistant draft' })).toHaveCount(0)
+  await expect(page.getByText('Runner: Assigned, Connection uncertain')).toHaveCount(0)
   releaseLive()
-  await expect(page.getByText('Awaiting reconciliation · model call')).toBeVisible()
-  await expect(page.getByText('Following live session')).toBeVisible()
+  await expect(page.getByText('Recovery needed · Model call')).toBeVisible()
+  await expect(page.getByText('Live', { exact: true })).toBeVisible()
   expect(problems).toEqual([])
 })

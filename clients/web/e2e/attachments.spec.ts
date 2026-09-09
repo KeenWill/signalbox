@@ -98,10 +98,11 @@ test('selects an admitted derivative without loading original bytes', async ({ p
     .getByRole('button', { name: /orbital-map\.preview\.png/ })
   await derivative.focus()
   await page.keyboard.press('Enter')
-  await expect(derivative).toHaveAttribute('aria-pressed', 'true')
   await expect(
-    page.getByRole('img', { name: 'Derived preview of orbital-map.preview.png' }),
-  ).toBeVisible()
+    page.getByRole('img', { name: 'Preview of orbital-map.preview.png' }),
+  ).toHaveAttribute('src', /^blob:/)
+  await expect(derivative).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('img', { name: 'Preview of orbital-map.preview.png' })).toBeVisible()
   await previewResponse
   await expect(page.getByText('image.preview v1')).toBeVisible()
   expect(
@@ -122,10 +123,8 @@ test('fails closed when an admitted derivative cannot load', async ({ page }) =>
     .getByRole('button', { name: /orbital-map\.preview\.png/ })
     .click()
 
-  await expect(page.getByRole('status').getByText('Derivative unavailable')).toBeVisible()
-  await expect(
-    page.getByRole('img', { name: 'Derived preview of orbital-map.preview.png' }),
-  ).toHaveCount(0)
+  await expect(page.getByRole('status').getByText('Preview unavailable')).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Preview of orbital-map.preview.png' })).toHaveCount(0)
 })
 
 test('renders media placeholders and removes a composer attachment by keyboard', async ({
@@ -185,4 +184,22 @@ test('captures mobile attachment evidence', async ({ page }, testInfo) => {
     'attachments-mobile-dark.png',
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('refuses excess derived bytes before the attachment reaches the image decoder', async ({
+  page,
+}) => {
+  await page.route(`**${previewPath}`, (route) =>
+    route.fulfill({
+      body: Buffer.concat([previewFixture, Buffer.from([0])]),
+      contentType: 'image/png',
+    }),
+  )
+  await page.goto('/scenario/attachments')
+  await page
+    .getByRole('region', { name: 'Transcript attachments' })
+    .getByRole('button', { name: /orbital-map\.preview\.png/ })
+    .click()
+  await expect(page.getByText('Preview unavailable', { exact: true })).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Preview of orbital-map.preview.png' })).toHaveCount(0)
 })

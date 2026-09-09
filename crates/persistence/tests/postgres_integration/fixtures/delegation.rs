@@ -121,14 +121,14 @@ pub(crate) async fn insert_raw_delegation_tool_receipts(
             (attempt_id, request_id, session_id, turn_id,
              issuing_turn_attempt_id, effect_class, dispatch_generation,
              state_kind, terminal_disposition_kind, result_content_kind,
-             result_text)
+             result_text, context_result_text)
          VALUES
             ($1, $2, $7, $8, $9, 'external_effect', 1,
-             'terminal', 'completed', 'text', $10),
+             'terminal', 'completed', 'text', $10, $10),
             ($3, $4, $7, $8, $9, 'effect_free', 1,
-             'terminal', 'completed', 'text', $11),
+             'terminal', 'completed', 'text', $11, $11),
             ($5, $6, $7, $8, $9, 'external_effect', 1,
-             'terminal', 'completed', 'text', $12)",
+             'terminal', 'completed', 'text', $12, $12)",
     )
     .bind(Uuid::from_u128(seed + 0x300))
     .bind(fixture.spawning_request.into_uuid())

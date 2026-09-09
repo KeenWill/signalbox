@@ -2,6 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import { Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
 import { type CommandContext, type CommandId, commandRegistry, invokeCommand } from './commands'
+import { enumLabel } from './labels'
 import type { ScenarioDefinition } from './platform'
 import { ScenarioNavigation } from './ScenarioNavigation'
 import { selectApp, useAppSelector, type VisibleRange } from './state'
@@ -114,7 +115,7 @@ export function OverlaySurfaces({
       <DialogFrame
         open={overlay === 'palette'}
         title="Command palette"
-        description="One registry powers buttons, menus, hotkeys, and this palette."
+        description="Search and run commands."
         onClose={close}
       >
         <div className="command-list">
@@ -139,7 +140,7 @@ export function OverlaySurfaces({
       <DialogFrame
         open={overlay === 'help'}
         title="Keyboard help"
-        description="Modal navigation pauses while a text field owns editing."
+        description="Navigation shortcuts pause while you type."
         onClose={close}
       >
         <dl className="shortcut-list">
@@ -158,11 +159,7 @@ export function OverlaySurfaces({
       <DialogFrame
         open={overlay === 'navigation'}
         title={navigationContent ? 'Product navigation' : 'Development scenarios'}
-        description={
-          navigationContent
-            ? 'Choose a Signalbox product surface.'
-            : 'Deterministic projections exercise the real client shell.'
-        }
+        description={navigationContent ? 'Choose a page.' : 'Sample data for trying out the app.'}
         onClose={close}
       >
         {navigationContent ?? (
@@ -193,7 +190,7 @@ export function Toolbar({ context }: { context: CommandContext }) {
             aria-pressed={app.detail === detail}
             onClick={() => invokeCommand(`detail.${detail}`, context)}
           >
-            {detail}
+            {enumLabel(detail)}
           </button>
         ))}
       </fieldset>
@@ -258,54 +255,56 @@ export function Diagnostics({
   return (
     <aside className="diagnostics" aria-labelledby="diagnostics-heading">
       <header>
-        <span className="eyebrow">Read only · bounded</span>
+        <span className="eyebrow">Read only</span>
         <h2 id="diagnostics-heading">Diagnostics</h2>
       </header>
       <dl>
         <div>
           <dt>Scenario</dt>
-          <dd>{scenario.id}</dd>
+          <dd>{scenario.title}</dd>
         </div>
         <div>
           <dt>Connection</dt>
           <dd>
-            <span className={`status status-${scenario.connection}`}>{scenario.connection}</span>
+            <span className={`status status-${scenario.connection}`}>
+              {enumLabel(scenario.connection)}
+            </span>
           </dd>
         </div>
         <div>
-          <dt>Durable cursor</dt>
+          <dt>Cursor</dt>
           <dd>timeline:{Math.max(snapshot.loadedTimeline - 1, 0)}</dd>
         </div>
         <div>
-          <dt>Timeline window</dt>
+          <dt>Timeline</dt>
           <dd>
             {snapshot.loadedTimeline} / {snapshot.logicalTimeline.toLocaleString()}
           </dd>
         </div>
         <div>
-          <dt>Fleet window</dt>
+          <dt>Fleet</dt>
           <dd>
             {snapshot.loadedFleet} / {snapshot.logicalFleet.toLocaleString()}
           </dd>
         </div>
         <div>
-          <dt>Virtual timeline</dt>
+          <dt>Visible events</dt>
           <dd>
             {app.transcriptRange.start}–{app.transcriptRange.end}
           </dd>
         </div>
         <div>
-          <dt>Virtual table</dt>
+          <dt>Visible rows</dt>
           <dd>
             {app.tableRange.start}–{app.tableRange.end}
           </dd>
         </div>
         <div>
           <dt>Query cache</dt>
-          <dd>{snapshot.queryCacheSize} bounded entries</dd>
+          <dd>{snapshot.queryCacheSize} entries</dd>
         </div>
       </dl>
-      <h3>Recent Redux actions</h3>
+      <h3>Recent actions</h3>
       <ol>
         {snapshot.recentActions.slice(-VISIBLE_DIAGNOSTIC_ACTIONS).map((action, index) => (
           // biome-ignore lint/suspicious/noArrayIndexKey: Actions may repeat, so their bounded log position disambiguates them.

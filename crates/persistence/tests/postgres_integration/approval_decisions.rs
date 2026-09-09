@@ -12,6 +12,79 @@ const FAILURE_ENTRY_ID_OFFSET: u128 = 0x1_000;
 const TERMINAL_FRONTIER_ID_OFFSET: u128 = 0x1_001;
 const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_loads_creation_dispatch_from_core_session_records()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::session::{RepositoryWatchCreationDispatch, SessionRepository};
+
+    let (container, pool, _) = migrated_postgres().await?;
+    let dispatch = signalbox_domain::RepoWatchDispatchId::from_uuid(next_test_submit_uuid());
+    let command = DurableCommandId::from_uuid(next_test_submit_uuid());
+    let session = SessionId::from_uuid(next_test_submit_uuid());
+    const ARBITRARY_MODEL_SELECTION: u128 = 0x7f91;
+    let creation = CreateSession::new(
+        command,
+        signalbox_domain::SessionCreationProvenance::module_dispatched(
+            signalbox_domain::ModuleDispatch::RepositoryWatch { dispatch },
+        ),
+        SessionConfigurationDefaults::new(direct(ARBITRARY_MODEL_SELECTION)),
+    )
+    .prepare(session)
+    .expect("repository-watch creation is preparable");
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+
+    assert_eq!(
+        SessionRepository::new(pool.clone())
+            .repository_watch_creation_dispatch(session)
+            .await?,
+        Some(RepositoryWatchCreationDispatch { dispatch, command }),
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_has_no_dispatch_authority_for_an_interactive_session()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    const ARBITRARY_SEED: u128 = 0x7f90;
+    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        ARBITRARY_SEED,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+
+    let prepared = ready_approval_judge(
+        model_repository
+            .approval_judge_repository()
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(next_test_submit_uuid()),
+                None,
+            )
+            .await?,
+    );
+
+    assert_eq!(prepared.session_context().dispatch(), None);
+    assert_eq!(
+        signalbox_persistence::session::SessionRepository::new(pool.clone())
+            .repository_watch_creation_dispatch(fixture.session)
+            .await?,
+        None,
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 fn approval_judge_completion_identities(
     fresh_seed: u128,
     attempt_seed: u128,
@@ -752,9 +825,9 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     Ok(())
 }
 
-/// Superseding the judged generation during the provider round-trip withdraws
-/// its authority while leaving the request pending. Completion must escalate
-/// the offered approval and leave the request parked for a human decision.
+/// Superseding the judged generation withdraws its authority even when the
+/// replacement statement has identical text. Completion leaves the request
+/// pending for a human decision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_completion_escalates_after_the_judged_goal_is_superseded()
@@ -840,9 +913,7 @@ async fn assert_judge_escalation_after_goal_supersession(
             GoalUserCommand::new(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf4)),
                 fixture.session,
-                GoalUserAction::Supersede(GoalStatement::try_new(String::from(
-                    "pursue the replacement approval fixture goal",
-                ))?),
+                GoalUserAction::Supersede(statement.clone()),
             ),
             Some(GoalTurnCandidates::new(
                 AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0xf5)),

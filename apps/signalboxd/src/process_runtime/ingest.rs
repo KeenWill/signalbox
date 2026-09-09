@@ -483,7 +483,7 @@ where
 }
 
 pub(super) async fn handle_read_blob_metadata<Writer>(
-    reader: &BufReader<OwnedReadHalf>,
+    reader: &ClientReader,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -551,7 +551,7 @@ where
     reason = "the wire boundary keeps correlation and exact range facts explicit"
 )]
 pub(super) async fn handle_read_blob_chunk<Writer>(
-    reader: &BufReader<OwnedReadHalf>,
+    reader: &ClientReader,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -716,7 +716,7 @@ where
     }
 }
 
-pub(super) async fn wait_for_connection_loss(reader: &BufReader<OwnedReadHalf>) {
+pub(super) async fn wait_for_connection_loss(reader: &ClientReader) {
     loop {
         let Ok(readiness) = reader
             .get_ref()
