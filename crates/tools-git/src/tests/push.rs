@@ -809,3 +809,113 @@ fn sha256_push_snapshot_retains_the_fence_without_its_history() {
         fixture.initial
     );
 }
+
+/// Writes one-file commit trees without involving Git's conflict resolver.
+fn merge_test_commit(repository: &Repository, content: &str, parents: &[git2::Oid]) -> git2::Oid {
+    let blob = repository.blob(content.as_bytes()).expect("blob");
+    let mut builder = repository.treebuilder(None).expect("tree builder");
+    builder.insert("shared.txt", blob, 0o100644).expect("file");
+    let tree_id = builder.write().expect("tree");
+    let tree = repository.find_tree(tree_id).expect("tree exists");
+    let parents: Vec<_> = parents
+        .iter()
+        .map(|id| repository.find_commit(*id).expect("parent"))
+        .collect();
+    let parents: Vec<_> = parents.iter().collect();
+    let signature = git2::Signature::now("Merge test", "merge@example.test").expect("signature");
+    repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            "merge fixture",
+            &tree,
+            &parents,
+        )
+        .expect("commit")
+}
+
+fn merge_test_executor(
+    fixture: &Fixture,
+    tip: git2::Oid,
+    fence: git2::Oid,
+    transport: RecordingPushTransport,
+) -> crate::GitPushExecutor<RecordingPushTransport> {
+    let repository = Repository::open(fixture.root()).expect("repository");
+    repository
+        .reference(&format!("refs/heads/{FIX_BRANCH}"), tip, true, "test tip")
+        .expect("branch");
+    GitPushTools::try_new(
+        &LocalWorkspaceFileSystem,
+        fixture.root(),
+        ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL).expect("remote"),
+        transport,
+    )
+    .expect("push tools")
+    .into_parts()
+    .1
+    .with_commit_fence(fence.to_string())
+}
+
+#[tokio::test]
+async fn push_refuses_branch_side_resolution_that_drops_base_changes() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "shared\n", &[]);
+    let branch = merge_test_commit(&repository, "shared\nbranch\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "shared\nbase\n", &[ancestor]);
+    let merge = merge_test_commit(&repository, "shared\nbranch\n", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert_eq!(
+        result,
+        Err(GitPushFailure::MergeDroppedBaseChanges(vec![
+            crate::push_merge::DroppedBaseChanges {
+                file: "shared.txt".to_owned(),
+                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+            }
+        ]))
+    );
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_accepts_conflict_resolution_preserving_both_sides() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "shared\n", &[]);
+    let branch = merge_test_commit(&repository, "shared\nbranch\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "shared\nbase\n", &[ancestor]);
+    let merge = merge_test_commit(&repository, "shared\nbase\nbranch\n", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("both sides push");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_accepts_a_plain_commit() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "shared\n", &[]);
+    let branch = merge_test_commit(&repository, "branch\n", &[ancestor]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, branch, ancestor, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("plain commit pushes");
+
+    assert_eq!(transport.request().commit(), branch.to_string());
+}

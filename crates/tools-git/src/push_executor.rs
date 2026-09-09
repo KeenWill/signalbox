@@ -116,6 +116,12 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
             Err(GitPushFailure::Rejected) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.rejected_detail.clone()),
             },
+            Err(GitPushFailure::MergeDroppedBaseChanges(files)) => {
+                let detail = merge_dropped_detail(&files)?;
+                ToolExecutorEvidence::KnownFailed {
+                    detail: Some(detail),
+                }
+            }
             Err(GitPushFailure::PreDispatchInfrastructure) => {
                 return Err(push_infrastructure(
                     PushCommitCertainty::DefinitelyNotCommitted,
@@ -129,11 +135,12 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum GitPushFailure {
     Repository,
     Unresolved,
     Rejected,
+    MergeDroppedBaseChanges(Vec<crate::push_merge::DroppedBaseChanges>),
     PreDispatchInfrastructure,
     DispatchUnknown,
     PostDispatchInvalid,
@@ -191,6 +198,15 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
                     &authority, target, fence, deadline,
                 )
                 .map_err(|_| GitPushFailure::Repository)?;
+                if snapshot
+                    .repository
+                    .find_commit(target)
+                    .map_err(|_| GitPushFailure::Repository)?
+                    .parent_count()
+                    > 1
+                {
+                    crate::push_merge::verify_merge(&authority, target, deadline)?;
+                }
                 Ok((snapshot, target))
             },
             PUSH_PREPARATION_TIMEOUT,
@@ -278,5 +294,62 @@ const fn push_infrastructure(certainty: PushCommitCertainty) -> GitPushExecutorE
     };
     GitPushExecutorError {
         class: OperatorFailureClass::Infrastructure { commit_ambiguous },
+    }
+}
+
+fn merge_dropped_detail(
+    files: &[crate::push_merge::DroppedBaseChanges],
+) -> Result<ToolExecutionErrorDetail, GitPushExecutorError> {
+    let encoded = serde_json::to_string(&serde_json::json!({
+        "error": "MergeDroppedBaseChanges",
+        "files": files,
+    }))
+    .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))?;
+    let sanitized: String = encoded
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                character.escape_default().to_string()
+            } else {
+                character.to_string()
+            }
+        })
+        .collect();
+    // The tool-loop's ToolExecutionErrorDetail admission limit is 4096 bytes.
+    let (detail, _) = crate::bounded::bounded_text(&sanitized, 4096);
+    ToolExecutionErrorDetail::try_new(detail)
+        .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_dropped_detail;
+    use crate::push_merge::DroppedBaseChanges;
+
+    #[test]
+    fn merge_refusal_detail_names_the_error_files_and_first_hunks() {
+        let files = vec![
+            DroppedBaseChanges {
+                file: "one.txt".to_owned(),
+                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+            },
+            DroppedBaseChanges {
+                file: "two.txt".to_owned(),
+                first_dropped_hunk: "-keep\n".to_owned(),
+            },
+        ];
+        let detail = merge_dropped_detail(&files).expect("model-visible detail");
+        let value: serde_json::Value =
+            serde_json::from_str(detail.as_str()).expect("structured refusal");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "error": "MergeDroppedBaseChanges",
+                "files": [
+                    { "file": "one.txt", "first_dropped_hunk": "-base\n+branch\n" },
+                    { "file": "two.txt", "first_dropped_hunk": "-keep\n" },
+                ],
+            })
+        );
     }
 }

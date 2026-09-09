@@ -40,6 +40,11 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
+The example `merge-forward` template instructs the session to stop on a
+`git_push_configured` `MergeDroppedBaseChanges` refusal, leave the conflict
+visible, and reply once naming the files reported by the base-hunk preservation
+check in [tool-loop](tool-loop.md).
+
 The module schema contains thirteen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A

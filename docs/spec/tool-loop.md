@@ -158,7 +158,12 @@ composed and a watched repository configures `push_credential_file`; execution
 resolves that session's retained dispatch and current repository configuration
 on every call. The transport pushes without force to the configured repository
 URL and confirms the remote branch equals the resolved commit before
-acknowledging success.
+acknowledging success. Before pushing a merge, the executor compares each
+zero-context hunk relative to its merged base parent against the branch's hunks
+relative to the parents' merge base, ignoring line offsets. A hunk absent from
+the branch diff refuses the push with `MergeDroppedBaseChanges`, naming each
+file and its first dropped hunk within the tool-error detail bound. Non-merge
+pushes are unaffected.
 
 The seven local Git tools perform no remote operation.
 
