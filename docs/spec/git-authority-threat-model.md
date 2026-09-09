@@ -137,7 +137,8 @@ residual.
 ## Boundary contracts
 
 The Git family resolves the configured root's `.git` directory or `gitdir:`
-file, including a linked worktree's common administration directory. The root is
+file, including a linked worktree's common administration directory. Branch
+switching refuses a branch checked out in another worktree. The root is
 construction input and never a per-call argument, so a local operation cannot
 select another repository. Composing several suites does not weaken this: each
 suite is a separate construction, and no suite can reach another's root.

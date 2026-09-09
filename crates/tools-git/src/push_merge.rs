@@ -42,7 +42,7 @@ pub(super) fn verify_merge(
         .open_repository_shell()
         .map_err(repository_failure)?;
     let database = repository.odb().map_err(repository_failure)?;
-    let mut source = ObjectSource::open(authority, deadline).map_err(repository_failure)?;
+    let mut source = ObjectSource::open(authority, Some(deadline)).map_err(repository_failure)?;
     source
         .capture(&database, target)
         .map_err(repository_failure)?;
