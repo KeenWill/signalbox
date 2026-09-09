@@ -1,4 +1,4 @@
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     CoreAgency, DispatchingModule, GoalBlockedReasonKind, SessionFailureCause,
     SessionLifecycleState, SessionParkCause, SessionParkResponder, SessionRecoveryOperation,
     SessionRetirementCause, SessionRetryableCause, SessionStructuralCause,

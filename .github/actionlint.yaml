@@ -5,3 +5,4 @@ self-hosted-runner:
     - signalbox-integration-tests
     - signalbox-reports
     - signalbox-coverage
+    - signalbox-smokes

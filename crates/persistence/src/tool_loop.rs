@@ -3214,6 +3214,7 @@ fn decode_error_kind(value: &str) -> Result<ToolExecutionErrorKind, ToolLoopRepo
         "preauthorization_rejected" => Ok(ToolExecutionErrorKind::PreauthorizationRejected),
         "execution_failed" => Ok(ToolExecutionErrorKind::ExecutionFailed),
         "result_too_large" => Ok(ToolExecutionErrorKind::ResultTooLarge),
+        "result_contains_null" => Ok(ToolExecutionErrorKind::ResultContainsNull),
         "crash_lost" => Ok(ToolExecutionErrorKind::CrashLost),
         value => Err(ToolLoopCorruption::Unsupported {
             field: "error_kind",
@@ -3415,6 +3416,7 @@ const fn encode_error_kind(value: ToolExecutionErrorKind) -> &'static str {
         ToolExecutionErrorKind::PreauthorizationRejected => "preauthorization_rejected",
         ToolExecutionErrorKind::ExecutionFailed => "execution_failed",
         ToolExecutionErrorKind::ResultTooLarge => "result_too_large",
+        ToolExecutionErrorKind::ResultContainsNull => "result_contains_null",
         ToolExecutionErrorKind::CrashLost => "crash_lost",
     }
 }
