@@ -83,6 +83,27 @@ pub struct CheckoutRemovalCandidate {
 }
 
 impl RepoWatchStore {
+    /// Retains one kickoff identity after provisioning, returning the frozen dispatch text.
+    pub async fn retain_dispatch_kickoff(
+        &self,
+        creation: DurableCommandId,
+        candidate: DurableCommandId,
+    ) -> Result<Option<(DurableCommandId, String)>, StoreError> {
+        let row: Option<(Uuid, String)> = sqlx::query_as(
+            "UPDATE dispatch_ledger
+             SET kickoff_command_id = COALESCE(kickoff_command_id, $2)
+             WHERE command_id = $1 AND kickoff_text IS NOT NULL
+               AND checkout_head_sha IS NOT NULL AND checkout_retired_reason IS NULL
+               AND NOT checkout_removed
+             RETURNING kickoff_command_id, kickoff_text",
+        )
+        .bind(creation.into_uuid())
+        .bind(candidate.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id, text)| (DurableCommandId::from_uuid(id), text)))
+    }
+
     /// Lists retained locations, including interrupted filesystem provisioning.
     pub async fn checkout_removal_candidates(
         &self,

@@ -347,8 +347,20 @@ row and its created session, rule revision, event, action ordinal, repository,
 and optional pull request, without a second stored copy of the dispatch or
 session identity. Transcript snapshots and browser session descriptors project
 that retained origin as soon as creation commits, before ledger settlement; the
-browser workspace displays it. Held creation submits no initial input and
-creates no turn.
+browser workspace displays it. After recording the provisioned checkout, the
+daemon submits a first input with the repository-watch module principal and
+`start_when_no_active_turn` delivery before releasing the provisioning hold. The
+ledger freezes the target repository, pull request number, title, head branch,
+head SHA, base branch, and rule instruction at dispatch, and retains the submit
+command identity before submission; pending creation replay resubmits the
+identical input through core command idempotency. Failed provisioning submits no
+input. `labeled-review-response` requests thread repair, validation, commit,
+push with `git_push_configured`, replies naming the commit, and thread
+resolution; a stored observation with no unresolved threads instead requests a
+one-turn mergeability and gating-check convergence check, a plain pull request
+reply, and a clean finish. `renovate-merge-forward` requests merging the base
+forward, resolving only conflicts, validating, committing, pushing, and
+reporting the result.
 
 ## Planned
 
