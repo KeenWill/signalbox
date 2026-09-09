@@ -1,8 +1,8 @@
 //! Typed repository-local Git tools over an injected workspace root.
 //!
-//! Repository discovery and linked worktrees are deliberately unsupported. A
-//! suite binds one direct main worktree whose .git directory is inside the
-//! injected root. The local family has no remote operation.
+//! A suite binds the injected repository root, resolving `.git` directories or
+//! `gitdir:` files and linked-worktree common directories. Repository discovery
+//! is not performed. The local family has no remote operation.
 mod arguments;
 mod bounded;
 mod branch;
@@ -35,6 +35,7 @@ mod push_transport;
 mod reference_lock;
 mod reference_read;
 mod reflog;
+mod repository_directories;
 mod result;
 mod rollback;
 mod status;
@@ -63,3 +64,4 @@ pub use push_transport::{
     ConfiguredGitRemote, GitPushReceipt, GitPushRequest, GitPushTransport, GitPushTransportFailure,
     InvalidConfiguredGitRemote, InvalidGitPushReceipt,
 };
+pub use repository_directories::open_repository_administration;

@@ -25,8 +25,10 @@ use crate::reference_lock::{
 pub(super) fn open_git_directory_path(
     authority: &PinnedRepository,
     relative: &Path,
+    reference: &str,
 ) -> Result<OwnedFd, LocalGitFailure> {
-    let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+    let mut directory =
+        dup(authority.administration_for(reference)).map_err(|_| LocalGitFailure::Operation)?;
     for component in relative.components() {
         let Component::Normal(component) = component else {
             return Err(LocalGitFailure::Operation);
@@ -104,7 +106,8 @@ pub(super) fn loose_reference_parent_is_missing(
     authority: &PinnedRepository,
     name: &str,
 ) -> Result<bool, LocalGitFailure> {
-    let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+    let mut directory =
+        dup(authority.administration_for(name)).map_err(|_| LocalGitFailure::Operation)?;
     for component in Path::new(name)
         .parent()
         .unwrap_or_else(|| Path::new(""))

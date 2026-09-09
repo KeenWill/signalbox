@@ -54,35 +54,36 @@ pub(super) fn validate_repository_layout(
     if root_identity.device != injected_root.device || root_identity.inode != injected_root.inode {
         return Err(LocalGitToolsConstructionError::Repository);
     }
-    let dot_git = root.join(".git");
-    let metadata =
-        fs::symlink_metadata(&dot_git).map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(LocalGitToolsConstructionError::Repository);
-    }
-    let git_directory_identity = file_identity(&metadata);
-    let git_directory = fs::File::from(
+    let root_directory = fs::File::from(
         openat(
             CWD,
-            &dot_git,
+            root,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(|_| LocalGitToolsConstructionError::Repository)?,
     );
+    let directories =
+        crate::repository_directories::AdministrationDirectories::open(&root_directory)
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let administration = directories.binding;
+    let git_directory = directories.common;
+    let worktree_directory = directories.worktree;
     unsupported_control_files_are_absent(git_directory.as_fd())
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let config = open_repository_config_at(&git_directory)?;
-    let head = open_repository_head_at(&git_directory, config.object_format)?;
+    let head = open_repository_head_at(&worktree_directory, config.object_format)?;
     let refs = open_repository_refs_at(&git_directory)?;
     reject_administrative_symlinks_for_format(&git_directory, config.object_format)?;
+    crate::repository_directories::validate_binding(&root_directory, administration)
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let config_metadata = config
         .source
         .metadata()
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     Ok(RepositoryIdentity {
         root: root_identity,
-        git_directory: git_directory_identity,
+        administration,
         refs: file_identity(
             &refs
                 .metadata()

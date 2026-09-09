@@ -60,7 +60,7 @@ impl GitObjectFormat {
 pub struct PinnedRepositoryDirectories {
     /// Worktree root the suite was constructed with.
     pub root: WorkspaceRootIdentity,
-    /// The `.git` directory immediately inside that root.
+    /// The worktree administration directory resolved from that root.
     pub administration: WorkspaceRootIdentity,
 }
 
@@ -119,7 +119,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
                 filesystem,
                 root,
                 root_path,
-                repository_identity,
+                repository_identity: Box::new(repository_identity),
                 repository_authority,
                 identity,
                 repository_detail,
@@ -162,8 +162,18 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
                 inode: self.executor.repository_identity.root.inode,
             },
             administration: WorkspaceRootIdentity {
-                device: self.executor.repository_identity.git_directory.device,
-                inode: self.executor.repository_identity.git_directory.inode,
+                device: self
+                    .executor
+                    .repository_identity
+                    .administration
+                    .worktree
+                    .device,
+                inode: self
+                    .executor
+                    .repository_identity
+                    .administration
+                    .worktree
+                    .inode,
             },
         }
     }

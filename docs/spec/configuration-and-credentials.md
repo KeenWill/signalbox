@@ -602,9 +602,10 @@ against the configured `ModelTargetCatalog` and fails closed as
 `CallTargetMismatch` corruption when they differ.
 
 The configured root is opened once during tool construction and its pinned
-authority is cloned into the workspace, Git, and execution suites. A
-nonexistent, non-directory, final-symlink, non-repository, linked, or externally
-administered configured root fails startup for the complete mapped composition.
+authority is cloned into the workspace and execution suites. Repository roots,
+including empty repositories and linked worktrees, also compose the Git suite; a
+plain directory composes without Git. A nonexistent, non-directory,
+final-symlink, or malformed repository root fails startup.
 
 Repository-watch pull-request dispatch provisions its derived directory; other
 derived directories are provisioned by deployment. Only a reported absence at

@@ -34,7 +34,8 @@ const SESSION_WORKSPACE_DIRECTORY_SUFFIX: &str = ".sessions";
 /// recently used entry is dropped when a further session arrives.
 pub(super) const MAX_RETAINED_SESSION_WORKSPACES: usize = 8;
 
-/// Administration directory the Git family requires immediately inside a root.
+/// Direct administration entry used by repository fixtures.
+#[cfg(test)]
 pub(super) const GIT_ADMINISTRATION_DIRECTORY: &str = ".git";
 
 pub(super) const SESSION_WORKSPACE_BINDING_EVIDENCE_DETAIL: &str =
@@ -426,10 +427,7 @@ pub(super) const fn parent_aliases_the_configured_root(
     pinned: ComposedWorkspaceIdentity,
     standing: ComposedWorkspaceIdentity,
 ) -> bool {
-    parent.is_the_same_directory_as(pinned.root)
-        || parent.is_the_same_directory_as(pinned.administration)
-        || parent.is_the_same_directory_as(standing.root)
-        || parent.is_the_same_directory_as(standing.administration)
+    pinned.contains_directory(parent) || standing.contains_directory(parent)
 }
 
 /// Whether a composed workspace is the very directory its pathname was reached
@@ -455,8 +453,7 @@ pub(super) const fn composition_aliases_its_own_parent(
     composed: ComposedWorkspaceIdentity,
     parent: ComposedRootIdentity,
 ) -> bool {
-    composed.root.is_the_same_directory_as(parent)
-        || composed.administration.is_the_same_directory_as(parent)
+    composed.contains_directory(parent)
 }
 
 /// Whether any session other than `session` holds a derived binding at all.

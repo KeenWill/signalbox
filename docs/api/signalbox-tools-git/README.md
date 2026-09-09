@@ -15,3 +15,4 @@
 | push_catalog | 2 | 0 | 1 | [push_catalog](push_catalog.md) |
 | push_executor | 2 | 0 | 0 | [push_executor](push_executor.md) |
 | push_transport | 6 | 1 | 0 | [push_transport](push_transport.md) |
+| repository_directories | 0 | 0 | 1 | [repository_directories](repository_directories.md) |

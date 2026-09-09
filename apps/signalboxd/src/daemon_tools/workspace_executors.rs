@@ -47,20 +47,15 @@ pub(super) fn read_dispatch_marker(
     if (root_stat.st_dev as u64, root_stat.st_ino) != (identity.root.device, identity.root.inode) {
         return None;
     }
-    let administration = openat(
-        &root,
-        super::session_workspace_roots::GIT_ADMINISTRATION_DIRECTORY,
-        directory_flags,
-        Mode::empty(),
-    )
-    .ok()?;
+    let administration = signalbox_tools_git::open_repository_administration(path).ok()??;
+    let expected_administration = identity.administration?;
     let administration_stat = fstat(&administration).ok()?;
     if (
         administration_stat.st_dev as u64,
         administration_stat.st_ino,
     ) != (
-        identity.administration.device,
-        identity.administration.inode,
+        expected_administration.device,
+        expected_administration.inode,
     ) {
         return None;
     }
@@ -183,6 +178,19 @@ where
         self.exec_runner.clone()
     }
 
+    fn standing_configured_identity(
+        &self,
+    ) -> Result<ComposedWorkspaceIdentity, SessionWorkspaceFailure> {
+        let identity = ComposedWorkspaceIdentity::capture(self.roots.configured())
+            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
+        if self.configured.workspace_identity.administration.is_some()
+            && identity.administration.is_none()
+        {
+            return Err(SessionWorkspaceFailure::UnverifiableConfiguredRoot);
+        }
+        Ok(identity)
+    }
+
     async fn resolve_workspace_instruction_root(
         &mut self,
         session: SessionId,
@@ -278,9 +286,7 @@ where
                 // comparison on every dispatch; remaking it only there would
                 // protect only the requests that take that branch.
                 if a_derived_binding_exists(&state.bindings, session) {
-                    let standing_configured =
-                        ComposedWorkspaceIdentity::capture(self.roots.configured())
-                            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
+                    let standing_configured = self.standing_configured_identity()?;
                     if a_derived_binding_shares_the_configured_root(
                         &state.bindings,
                         session,
@@ -357,9 +363,7 @@ where
                     // under separate serialization domains. The comparison is
                     // therefore remade on every dispatch, before the retained
                     // set is consulted and before a recomposition begins.
-                    let standing_configured =
-                        ComposedWorkspaceIdentity::capture(self.roots.configured())
-                            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
+                    let standing_configured = self.standing_configured_identity()?;
                     if shares_a_directory_with_the_configured_root(
                         bound,
                         self.configured.workspace_identity,
@@ -424,8 +428,7 @@ where
         // each would pass composition on its own. The isolation this derivation
         // exists to establish is a property of the directories, not of the
         // pathname, so it is checked against what every other binding pinned.
-        let standing_configured = ComposedWorkspaceIdentity::capture(self.roots.configured())
-            .map_err(|_| SessionWorkspaceFailure::UnverifiableConfiguredRoot)?;
+        let standing_configured = self.standing_configured_identity()?;
         if shares_a_directory_with_the_configured_root(
             composed,
             self.configured.workspace_identity,
@@ -566,6 +569,8 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if LOCAL_GIT_TOOL_NAMES.contains(&name) => executors
                 .local_git
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),

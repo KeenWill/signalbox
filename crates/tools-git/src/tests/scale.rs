@@ -70,6 +70,10 @@ async fn every_git_tool_handles_the_generated_scale_repository() {
     let root = PathBuf::from(
         std::env::var_os("SIGNALBOX_GIT_SCALE_ROOT").expect("scale root is explicit"),
     );
+    exercise_every_git_tool(root).await;
+}
+
+pub(super) async fn exercise_every_git_tool(root: PathBuf) {
     let remote_directory = tempfile::tempdir().expect("remote directory");
     let remote_path = remote_directory.path().join("remote.git");
     assert!(
@@ -174,6 +178,17 @@ async fn every_git_tool_handles_the_generated_scale_repository() {
     push.execute_push(GitPushArguments::for_test("scale-tool-branch"))
         .await
         .expect("scale push succeeds");
+    let native_index = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "--error-unmatch", "large.bin"])
+        .output()
+        .expect("native Git reads the published index");
+    assert!(
+        native_index.status.success(),
+        "{}",
+        String::from_utf8_lossy(&native_index.stderr)
+    );
 }
 
 fn execute(
@@ -185,4 +200,41 @@ fn execute(
     let result = super::support::execute(executor, operation);
     eprintln!("scale operation elapsed {:?}", started.elapsed());
     result
+}
+
+#[tokio::test]
+async fn every_git_tool_operates_on_a_linked_worktree() {
+    let fixture = super::support::Fixture::new();
+    let repository = git2::Repository::open(fixture.root()).expect("fixture opens");
+    // Exceed the diff prefix budget so both diff modes exercise truncation.
+    let blob_bytes = crate::MAX_DIFF_BYTES * 2;
+    fs::write(fixture.root().join("large.bin"), vec![0u8; blob_bytes]).expect("blob writes");
+    let initial = super::support::commit_all(&repository, "linked fixture");
+    repository
+        .branch(
+            "scale-0",
+            &repository.find_commit(initial).expect("initial commit"),
+            false,
+        )
+        .expect("scale branch");
+    let parent = tempfile::tempdir().expect("linked parent");
+    let linked = parent.path().join("linked");
+    repository
+        .worktree("linked", &linked, None)
+        .expect("linked worktree creates");
+    let main_head = fs::read(fixture.root().join(".git/HEAD")).expect("main HEAD");
+    let main_index = fs::read(fixture.root().join(".git/index")).expect("main index");
+    exercise_every_git_tool(linked).await;
+    assert_eq!(
+        fs::read(fixture.root().join(".git/HEAD")).expect("main HEAD remains"),
+        main_head
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(".git/index")).expect("main index remains"),
+        main_index
+    );
+    assert_eq!(
+        repository.head().expect("main branch remains").target(),
+        Some(initial)
+    );
 }

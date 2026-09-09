@@ -114,10 +114,10 @@ configured `max_git_object_bytes` limit (`"none"` for unbounded) applies to the
 objects an operation reads, including packed delta bases, intermediate results,
 and delta instructions, not to unrelated objects retained in its history.
 
-Repository semantics outside the direct main-worktree subset are unsupported,
-not partially trusted. Linked worktrees, discovery, alternate object databases,
-replacement-object configuration, and other rejected extension surfaces need a
-separate user-approved contract before support.
+Repository semantics outside the supported worktree layouts are unsupported, not
+partially trusted. Discovery, alternate object databases, replacement-object
+configuration, and other rejected extension surfaces need a separate
+user-approved contract before support.
 
 Remote authentication, transport security, server-side authorization, and remote
 repository behavior are not properties of the local authority;
@@ -132,8 +132,8 @@ residual.
 
 ## Boundary contracts
 
-The Git family operates only on a direct main worktree whose `.git` directory is
-immediately inside the root its suite was constructed with. The root is
+The Git family resolves the configured root's `.git` directory or `gitdir:`
+file, including a linked worktree's common administration directory. The root is
 construction input and never a per-call argument, so a local operation cannot
 select another repository. Composing several suites does not weaken this: each
 suite is a separate construction, and no suite can reach another's root.

@@ -105,9 +105,10 @@ fn git_identity() -> GitIdentity {
 #[test]
 fn local_git_construction_telemetry_omits_the_workspace_path() {
     let directory = tempfile::tempdir().unwrap();
-    // A directory without Git metadata reaches the local Git construction failure.
+    // Present but incomplete Git metadata reaches the construction failure.
     let root = directory.path().join("private-workspace");
     fs::create_dir(&root).unwrap();
+    fs::create_dir(root.join(".git")).unwrap();
     let runner = TokioProcessRunner::try_new(std::env::current_exe().unwrap()).unwrap();
     let captured = crate::process_runtime::tests::capture_telemetry(|| {
         assert!(matches!(
@@ -377,6 +378,12 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
     let expected_definitions = expected_catalog.definitions();
     let workspace = tempfile::tempdir().expect("production workspace exists");
     git2::Repository::init(workspace.path()).expect("production repository initializes");
+    let actual_definitions = production_daemon_catalog(workspace.path()).definitions();
+    assert_eq!(actual_definitions, expected_definitions);
+    assert!(definition_names(&actual_definitions).contains(&GOAL_DECLARE_NAME));
+}
+
+fn production_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
     let support = tempfile::tempdir().expect("credential fixture root exists");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -413,7 +420,7 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
         ))
         .expect("offline code-host transport constructs"),
         GitHubEgressPolicy::github_api_only(),
-        workspace.path(),
+        workspace,
         git_identity(),
         &std::env::current_exe().expect("test executable path is available"),
         None,
@@ -424,11 +431,36 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
     )
     .expect("production daemon tools compile");
     let (catalog, _executor) = tools.into_parts();
-    let actual_definitions = catalog.definitions();
-    let actual_names = definition_names(&actual_definitions);
+    catalog
+}
 
-    assert_eq!(actual_definitions, expected_definitions);
-    assert!(actual_names.contains(&GOAL_DECLARE_NAME));
+#[test]
+fn production_constructor_accepts_a_plain_root_without_git_tools() {
+    let workspace = tempfile::tempdir().expect("plain workspace");
+    let definitions = production_daemon_catalog(workspace.path()).definitions();
+    let names = definition_names(&definitions);
+    assert!(names.contains(&READ_FILE_NAME));
+    assert!(names.contains(&WRITE_FILE_NAME));
+    assert!(names.contains(&SANDBOXED_EXEC_NAME));
+    assert!(names.contains(&UNSANDBOXED_EXEC_NAME));
+    assert!(
+        signalbox_tools_git::LOCAL_GIT_TOOL_NAMES
+            .iter()
+            .all(|name| !names.contains(name))
+    );
+}
+
+#[test]
+fn production_constructor_accepts_an_empty_repository() {
+    let workspace = tempfile::tempdir().expect("empty workspace");
+    git2::Repository::init(workspace.path()).expect("empty repository initializes");
+    let definitions = production_daemon_catalog(workspace.path()).definitions();
+    let names = definition_names(&definitions);
+    assert!(
+        signalbox_tools_git::LOCAL_GIT_TOOL_NAMES
+            .iter()
+            .all(|name| names.contains(name))
+    );
 }
 
 /// Renders the bridge catalog document from the daemon registry through the
@@ -5314,10 +5346,10 @@ const FIXTURE_BOUND_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdent
         device: 0x10,
         inode: 0x20,
     },
-    administration: ComposedRootIdentity {
+    administration: Some(ComposedRootIdentity {
         device: 0x10,
         inode: 0x21,
-    },
+    }),
 };
 
 /// A workspace sharing neither directory with [`FIXTURE_BOUND_IDENTITY`].
@@ -5326,10 +5358,10 @@ const FIXTURE_OTHER_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdent
         device: 0x10,
         inode: 0x30,
     },
-    administration: ComposedRootIdentity {
+    administration: Some(ComposedRootIdentity {
         device: 0x10,
         inode: 0x31,
-    },
+    }),
 };
 
 /// A distinct worktree over the directory [`FIXTURE_BOUND_IDENTITY`]
@@ -5348,11 +5380,13 @@ const FIXTURE_SHARED_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
 /// repository reached through a bind mount produces.
 const FIXTURE_WORKTREE_OVER_BOUND_ADMINISTRATION_IDENTITY: ComposedWorkspaceIdentity =
     ComposedWorkspaceIdentity {
-        root: FIXTURE_BOUND_IDENTITY.administration,
-        administration: ComposedRootIdentity {
+        root: FIXTURE_BOUND_IDENTITY
+            .administration
+            .expect("fixture has Git administration"),
+        administration: Some(ComposedRootIdentity {
             device: 0x10,
             inode: 0x50,
-        },
+        }),
     };
 
 /// A workspace administering the directory [`FIXTURE_BOUND_IDENTITY`] uses
@@ -5363,17 +5397,17 @@ const FIXTURE_ADMINISTRATION_OVER_BOUND_WORKTREE_IDENTITY: ComposedWorkspaceIden
             device: 0x10,
             inode: 0x60,
         },
-        administration: FIXTURE_BOUND_IDENTITY.root,
+        administration: Some(FIXTURE_BOUND_IDENTITY.root),
     };
 
 /// The pair the configured pathname names after its `.git` was renamed and
 /// recreated, which leaves its worktree root alone.
 const FIXTURE_CONFIGURED_STANDING_IDENTITY: ComposedWorkspaceIdentity = ComposedWorkspaceIdentity {
     root: FIXTURE_BOUND_IDENTITY.root,
-    administration: ComposedRootIdentity {
+    administration: Some(ComposedRootIdentity {
         device: 0x10,
         inode: 0x70,
-    },
+    }),
 };
 
 /// A derived workspace exposing the `.git` directory the configured
@@ -6296,7 +6330,9 @@ fn a_parent_that_is_the_configured_worktree_is_refused() {
 #[test]
 fn a_parent_that_is_the_configured_administration_directory_is_refused() {
     assert!(parent_aliases_the_configured_root(
-        FIXTURE_BOUND_IDENTITY.administration,
+        FIXTURE_BOUND_IDENTITY
+            .administration
+            .expect("fixture Git administration"),
         FIXTURE_BOUND_IDENTITY,
         FIXTURE_BOUND_IDENTITY
     ));
@@ -6308,7 +6344,9 @@ fn a_parent_that_is_the_configured_administration_directory_is_refused() {
 #[test]
 fn a_parent_that_is_the_standing_configured_administration_directory_is_refused() {
     assert!(parent_aliases_the_configured_root(
-        FIXTURE_CONFIGURED_STANDING_IDENTITY.administration,
+        FIXTURE_CONFIGURED_STANDING_IDENTITY
+            .administration
+            .expect("fixture Git administration"),
         FIXTURE_BOUND_IDENTITY,
         FIXTURE_CONFIGURED_STANDING_IDENTITY
     ));
@@ -6335,10 +6373,10 @@ fn a_parent_beside_the_configured_root_is_admitted() {
 fn a_composition_standing_on_its_own_parent_is_refused() {
     let composed = ComposedWorkspaceIdentity {
         root: FIXTURE_PARENT_IDENTITY,
-        administration: ComposedRootIdentity {
+        administration: Some(ComposedRootIdentity {
             device: 0x10,
             inode: 0xa0,
-        },
+        }),
     };
 
     assert!(composition_aliases_its_own_parent(
@@ -6357,7 +6395,7 @@ fn a_composition_administering_its_own_parent_is_refused() {
             device: 0x10,
             inode: 0xa1,
         },
-        administration: FIXTURE_PARENT_IDENTITY,
+        administration: Some(FIXTURE_PARENT_IDENTITY),
     };
 
     assert!(composition_aliases_its_own_parent(

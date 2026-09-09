@@ -1,8 +1,6 @@
 use super::{
-    DaemonToolsConstructionError,
-    composed_identity::ComposedWorkspaceIdentity,
-    session_workspace_roots::{SessionWorkspaceRoots, composed_root_identity},
-    shared_executor::SharedToolExecutor,
+    DaemonToolsConstructionError, composed_identity::ComposedWorkspaceIdentity,
+    session_workspace_roots::SessionWorkspaceRoots, shared_executor::SharedToolExecutor,
 };
 use crate::{goal_mode::GoalDeclarationTool, session_delegation::DaemonSessionDelegationPort};
 use signalbox_application::CompiledToolCatalog;
@@ -28,18 +26,18 @@ use std::{
     time::Duration,
 };
 
-/// The six executors one workspace root binds.
+/// Executors one workspace root binds, with Git present for repository roots.
 pub(super) struct WorkspaceBoundExecutors<
     FileSystem: WorkspaceMutationFileSystem,
     ExecRunner: ProcessRunner,
 > {
     pub(super) workspace_read: WorkspaceReadExecutor<FileSystem>,
     pub(super) workspace_mutation: SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>,
-    pub(super) local_git: SharedToolExecutor<LocalGitExecutor<FileSystem>>,
+    pub(super) local_git: Option<SharedToolExecutor<LocalGitExecutor<FileSystem>>>,
     pub(super) sandboxed_exec: ExecExecutor<SandboxedCommandRunner<ExecRunner>>,
     pub(super) unsandboxed_exec: ExecExecutor<UnsandboxedCommandRunner<ExecRunner>>,
     pub(super) cargo_diagnostics: CargoDiagnosticsExecutor<ExecRunner>,
-    pub(super) git_object_format: GitObjectFormat,
+    pub(super) git_object_format: Option<GitObjectFormat>,
     pub(super) workspace_identity: ComposedWorkspaceIdentity,
 }
 
@@ -123,9 +121,8 @@ where
 
     /// Composes every workspace-root-bound family around one root.
     ///
-    /// The root stays construction input for each family exactly as before:
-    /// the filesystem adapter is already bound to it, the execution suites
-    /// capture its identity, and the Git suite validates its repository layout.
+    /// The filesystem and execution suites bind every root. The Git suite is
+    /// composed when the root has a Git administration entry.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_new(
         filesystem: FileSystem,
@@ -143,23 +140,23 @@ where
         // identity is captured on both sides of the composition and compared
         // before anything is returned, so a pathname that did not resolve to
         // one directory throughout rejects the whole composition.
-        let opening_identity = composed_root_identity(root)?;
+        let opening_identity = ComposedWorkspaceIdentity::capture(root)?;
         let workspace_read = WorkspaceReadTools::try_new(filesystem.clone(), root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
         let workspace_mutation = WorkspaceMutationTools::try_new(filesystem.clone(), root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
-        let local_git =
-            LocalGitTools::try_new(filesystem, root, git_identity).map_err(|error| {
-                tracing::error!(
-                    cause = %error,
-                    root_count = 1,
-                    "local Git tool suite rejected the configured workspace"
-                );
+        let local_git = if opening_identity.administration.is_some() {
+            Some(LocalGitTools::try_new(filesystem, root, git_identity).map_err(|error| {
+                tracing::error!(cause = %error, root_count = 1, "local Git tool suite rejected the configured workspace");
                 DaemonToolsConstructionError::LocalGit
-            })?;
-        let local_git = local_git.with_max_object_bytes(max_git_object_bytes);
-        let git_object_format = local_git.object_format();
-        let pinned_directories = local_git.pinned_directories();
+            })?.with_max_object_bytes(max_git_object_bytes))
+        } else {
+            None
+        };
+        let git_object_format = local_git.as_ref().map(LocalGitTools::object_format);
+        let workspace_identity = local_git.as_ref().map_or(opening_identity, |git| {
+            ComposedWorkspaceIdentity::from_pinned(git.pinned_directories())
+        });
         let sandboxed_exec = match cargo_registry_cache {
             Some(cache) => SandboxedExecTool::try_new_with_cargo_registry(
                 exec_runner.clone(),
@@ -185,19 +182,18 @@ where
         let cargo_diagnostics = cargo_diagnostics.with_sandbox_configuration(sandbox.clone());
         let (workspace_read_catalog, workspace_read) = workspace_read.into_parts();
         let (workspace_mutation_catalog, workspace_mutation) = workspace_mutation.into_parts();
-        let (local_git_catalog, local_git) = local_git.into_parts();
+        let (local_git_catalog, local_git) = match local_git {
+            Some(git) => {
+                let (catalog, executor) = git.into_parts();
+                (catalog, Some(SharedToolExecutor::new(executor)))
+            }
+            None => (CompiledToolCatalog::default(), None),
+        };
         let (sandboxed_exec_catalog, sandboxed_exec) = sandboxed_exec.into_parts();
         let (unsandboxed_exec_catalog, unsandboxed_exec) = unsandboxed_exec.into_parts();
         let (cargo_diagnostics_catalog, cargo_diagnostics) = cargo_diagnostics.into_parts();
-        // The Git suite is the only family that pins a second directory, and it
-        // pinned the one it validated rather than the one this pathname names
-        // now, so the composition's recorded identity is taken from it. Its
-        // worktree root is still compared against the pathname every other
-        // family resolved, so a Git suite bound to another directory than the
-        // rest of the composition rejects it.
-        let workspace_identity = ComposedWorkspaceIdentity::from_pinned(pinned_directories);
-        if composed_root_identity(root)? != opening_identity
-            || workspace_identity.root != opening_identity
+        if ComposedWorkspaceIdentity::capture(root)? != opening_identity
+            || workspace_identity != opening_identity
         {
             return Err(DaemonToolsConstructionError::WorkspaceRootUnstable);
         }
@@ -213,7 +209,7 @@ where
             executors: WorkspaceBoundExecutors {
                 workspace_read,
                 workspace_mutation: SharedToolExecutor::new(workspace_mutation),
-                local_git: SharedToolExecutor::new(local_git),
+                local_git,
                 sandboxed_exec,
                 unsandboxed_exec,
                 cargo_diagnostics,
