@@ -151,8 +151,9 @@ of lifecycle state and turn phase, never an independent machine.
 An absent configured bound leaves a deadline unbounded. An owned session in a
 deadline-bearing state with no deadline row is a violation.
 
-A park takes effect at the next scheduler admission. Work already in flight
-completes; any further pass waits for resume. A stop ends the active turn. A
+A park suspends an in-flight scheduler pass at its next durable operation
+boundary. The current operation settles, and the turn resumes only after the
+park lifts. This applies to every park cause. A stop ends the active turn. A
 park defers an armed automatic goal-resume attempt without spending it; the
 attempt rereads the goal and lifecycle before retrying.
 

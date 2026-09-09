@@ -221,6 +221,7 @@ impl NumericBoundsConfiguration {
         let allowed_fields = REQUIRED_NUMERIC_BOUNDS
             .iter()
             .map(|(name, _)| *name)
+            .chain(std::iter::once("repository_watch_poll_request_budget"))
             .collect::<Vec<_>>();
         reject_unknown_fields(table, &allowed_fields)?;
         let mut values = HashMap::with_capacity(REQUIRED_NUMERIC_BOUNDS.len());
@@ -248,6 +249,19 @@ impl NumericBoundsConfiguration {
             };
             values.insert(*name, value);
         }
+        let field = "repository_watch_poll_request_budget";
+        let budget = match table.get(field) {
+            Some(item) => item
+                .as_integer()
+                .and_then(|value| usize::try_from(value).ok()),
+            None => Some(signalbox_module_repo_watch_v2::poll_cache::DEFAULT_POLL_REQUEST_BUDGET),
+        }
+        .filter(|value| {
+            (2..=signalbox_module_repo_watch_v2::poll_cache::MAX_POLL_REQUEST_BUDGET)
+                .contains(value)
+        })
+        .ok_or(HubModelConfigurationError::InvalidNumericBound { field })?;
+        values.insert(field, NumericBoundValue::Integer(budget as u64));
         let configuration = Self { values };
         if configuration
             .duration("repository_watch_webhook_retention")

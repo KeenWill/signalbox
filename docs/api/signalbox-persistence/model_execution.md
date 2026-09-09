@@ -267,6 +267,10 @@ impl model_execution::PostgresModelCallRepository {
         targets: signalbox_domain::ModelTargetCatalog,
         credential_reference: signalbox_application::ModelCallCredentialReference,
     ) -> Self;
+    pub async fn session_is_parked(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<bool, model_execution::ModelCallRepositoryError>;
     pub fn with_runner_recovery(self, runner: runner_protocol::RunnerProtocolStore) -> Self;
     pub fn with_session_credentials(
         self,

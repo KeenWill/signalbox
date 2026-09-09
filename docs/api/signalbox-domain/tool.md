@@ -673,6 +673,7 @@ pub enum AssistantResponsePart {
 pub struct ToolUsingAssistantResponse {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ToolUsingAssistantResponse {
+    pub const MAX_TOOL_COUNT: usize;
     pub fn try_from_parts(
         parts: vec::Vec<AssistantResponsePart>,
     ) -> result::Result<Self, ToolUsingAssistantResponseError>;
