@@ -1467,6 +1467,16 @@ async fn checkpoint_restart_model_call_with_attachment(
     authorize: bool,
     attachment: Option<BlobDigest>,
 ) -> Result<RestartModelCallFixture, Box<dyn Error>> {
+    checkpoint_restart_model_call_with_limits(pool, seed, authorize, attachment, &[]).await
+}
+
+async fn checkpoint_restart_model_call_with_limits(
+    pool: &PgPool,
+    seed: u128,
+    authorize: bool,
+    attachment: Option<BlobDigest>,
+    limits: &[ToolContinuationUsageLimit],
+) -> Result<RestartModelCallFixture, Box<dyn Error>> {
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
     let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
     let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
@@ -1517,7 +1527,8 @@ async fn checkpoint_restart_model_call_with_attachment(
     )])
     .expect("one restart fixture target forms a catalog");
     let repository =
-        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits(limits.iter().copied());
     assert!(matches!(
         repository
             .prepare_initial_call(

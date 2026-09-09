@@ -102,6 +102,32 @@ fn git_identity() -> GitIdentity {
     GitIdentity::try_new(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL).expect("fixture Git identity is valid")
 }
 
+#[test]
+fn local_git_construction_telemetry_omits_the_workspace_path() {
+    let directory = tempfile::tempdir().unwrap();
+    // A directory without Git metadata reaches the local Git construction failure.
+    let root = directory.path().join("private-workspace");
+    fs::create_dir(&root).unwrap();
+    let runner = TokioProcessRunner::try_new(std::env::current_exe().unwrap()).unwrap();
+    let captured = crate::process_runtime::tests::capture_telemetry(|| {
+        assert!(matches!(
+            WorkspaceBoundFamilies::try_new(
+                LocalWorkspaceFileSystem,
+                &root,
+                git_identity(),
+                runner,
+                None,
+                &Default::default(),
+            ),
+            Err(DaemonToolsConstructionError::LocalGit)
+        ));
+    });
+    assert!(captured.contains("local Git tool suite rejected the configured workspace"));
+    assert!(captured.contains("root_count=1"));
+    assert!(!captured.contains(directory.path().to_str().unwrap()));
+    assert!(!captured.contains("private-workspace"));
+}
+
 #[derive(Clone, Copy, Debug)]
 struct OfflineTransport;
 

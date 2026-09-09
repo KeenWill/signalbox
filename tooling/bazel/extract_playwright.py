@@ -11,6 +11,7 @@ RUNTIME_PATHS = (
     "usr/share/fonts/",
     "usr/share/fontconfig/",
     "usr/share/glib-2.0/",
+    "usr/share/glvnd/",
     "etc/fonts/",
     "etc/alternatives/",
     "ms-playwright/",

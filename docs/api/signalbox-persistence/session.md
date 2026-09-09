@@ -50,6 +50,16 @@ impl convert::From<session::SessionCorruption> for session::SessionRepositoryErr
 }
 ```
 
+## RepositoryWatchCreationDispatch
+
+```rust
+pub struct RepositoryWatchCreationDispatch {
+    pub dispatch: signalbox_domain::RepoWatchDispatchId,
+    pub command: signalbox_domain::DurableCommandId,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+```
+
 ## SessionRepository
 
 ```rust
@@ -57,6 +67,13 @@ pub struct SessionRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl session::SessionRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub async fn repository_watch_creation_dispatch(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<
+        option::Option<session::RepositoryWatchCreationDispatch>,
+        session::SessionRepositoryError,
+    >;
     pub async fn load_session(
         &self,
         requested_session: signalbox_domain::SessionId,

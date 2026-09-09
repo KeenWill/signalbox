@@ -141,6 +141,7 @@ test('selects a bounded image view and keeps an animation-capable original downl
   await page.goto('/scenario/blobs')
   const image = page.getByRole('img', { name: 'Preview of orbital-map.png' })
   await expect(image).toBeVisible()
+  await expect(image).toHaveAttribute('src', /^blob:/)
   expect((await previewResponse).headers()['content-type']).toContain('image/png')
   expect(
     await page.evaluate(
@@ -169,7 +170,7 @@ test('advances from a failed preview to its admitted thumbnail', async ({ page }
 
   const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
   await expect(artifact.getByRole('img', { name: 'Thumbnail of orbital-map.png' })).toBeVisible()
-  await expect(artifact.getByText('thumbnail', { exact: true })).toBeVisible()
+  await expect(artifact.getByText('Thumbnail', { exact: true })).toBeVisible()
   await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
   expectOnlyExpectedFailedResourceError(problems, failedResponsePaths, [previewPath])
 })
@@ -183,7 +184,7 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
   await failRouteOnce(page, jpegOriginalPath)
   await page.goto('/scenario/blobs')
 
-  const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
+  const artifact = page.getByRole('article', { name: 'Artifact photo.jpg' })
   await artifact.scrollIntoViewIfNeeded()
   await expect(artifact.getByRole('status')).toContainText('Preview unavailable')
   await artifact.getByRole('button', { name: 'Load original' }).click()
@@ -191,7 +192,7 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
   await expect(artifact.getByRole('status')).toContainText('Original image failed to load')
 
   await artifact.getByRole('button', { name: 'Retry original' }).click()
-  await expect(artifact.getByRole('img', { name: 'Original of bounded-photo.jpg' })).toBeVisible()
+  await expect(artifact.getByRole('img', { name: 'Original of photo.jpg' })).toBeVisible()
   await expect(artifact.getByRole('button', { name: 'Original loaded' })).toHaveAttribute(
     'aria-disabled',
     'true',
@@ -228,7 +229,7 @@ test('fetches fresh original bytes after browser decoding fails', async ({ page 
     { times: 1 },
   )
   await page.goto('/scenario/blobs')
-  const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
+  const artifact = page.getByRole('article', { name: 'Artifact photo.jpg' })
   await artifact.getByRole('button', { name: 'Load original' }).click()
   await expect(artifact.getByRole('button', { name: 'Retry original' })).toBeVisible()
   const freshRead = page.waitForResponse(
@@ -248,17 +249,17 @@ test('restores a loaded original after leaving and reopening the scenario', asyn
   const problems = watchBrowser(page)
   await page.goto('/scenario/blobs')
 
-  const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
+  const artifact = page.getByRole('article', { name: 'Artifact photo.jpg' })
   await artifact.scrollIntoViewIfNeeded()
   await artifact.getByRole('button', { name: 'Load original' }).click()
-  await expect(artifact.getByRole('img', { name: 'Original of bounded-photo.jpg' })).toBeVisible()
+  await expect(artifact.getByRole('img', { name: 'Original of photo.jpg' })).toBeVisible()
 
   await page.getByRole('link', { name: /Streaming session/ }).click()
   await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
-  await page.getByRole('link', { name: /Blob evidence/ }).click()
+  await page.getByRole('link', { name: /Files/ }).click()
 
   await artifact.scrollIntoViewIfNeeded()
-  await expect(artifact.getByRole('img', { name: 'Original of bounded-photo.jpg' })).toBeVisible()
+  await expect(artifact.getByRole('img', { name: 'Original of photo.jpg' })).toBeVisible()
   await expect(artifact.getByRole('button', { name: 'Original loaded' })).toHaveAttribute(
     'aria-disabled',
     'true',
@@ -286,12 +287,12 @@ test('selects artifacts independently and scopes preview commands', async ({ pag
 
   await page.getByRole('button', { name: /incident-notes\.txt/ }).click()
   await page.getByRole('button', { name: 'Open command palette' }).click()
-  await expect(page.getByRole('button', { name: /Expand bounded artifact preview/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Expand preview/ })).toBeVisible()
   await page.keyboard.press('Escape')
 
   await page.getByRole('button', { name: /orbital-map\.png/ }).click()
   await page.getByRole('button', { name: 'Open command palette' }).click()
-  await expect(page.getByRole('button', { name: /Expand bounded artifact preview/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Expand preview/ })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -299,7 +300,7 @@ test('keyboard-scrolls overflowing artifact content', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/blobs')
 
-  const preview = page.getByRole('textbox', { name: 'Bounded preview of renderer.ts' })
+  const preview = page.getByRole('textbox', { name: 'Preview of renderer.ts' })
   await preview.focus()
   await expect(preview).toBeFocused()
   await page.keyboard.press('PageDown')
@@ -313,7 +314,7 @@ test('returns Escape focus to the artifact that owns the focused content', async
 
   await page.getByRole('button', { name: /incident-notes\.txt/ }).click()
   const heading = page.getByRole('button', { name: /renderer\.ts/ })
-  const preview = page.getByRole('textbox', { name: 'Bounded preview of renderer.ts' })
+  const preview = page.getByRole('textbox', { name: 'Preview of renderer.ts' })
   await preview.focus()
   await expect(heading).toHaveAttribute('aria-pressed', 'true')
   await page.keyboard.press('Escape')
@@ -343,8 +344,8 @@ test('keeps a generic descriptor available as metadata and download', async ({ p
   await page.goto('/scenario/blobs')
 
   const artifact = page.getByRole('article', { name: 'Artifact trace.bin' })
-  await expect(artifact.getByLabel('No compatible inline renderer')).toBeVisible()
-  await expect(artifact.getByText('metadata fallback')).toBeVisible()
+  await expect(artifact.getByLabel('No preview available')).toBeVisible()
+  await expect(artifact.getByText('Details only')).toBeVisible()
   await expect(artifact.getByText('application/octet-stream')).toBeVisible()
   await expect(
     artifact.getByText(`${BigInt(fallbackDescriptor.byte_length).toLocaleString()} bytes`),
@@ -361,7 +362,7 @@ test('renders unauthorized kinds as typed safe states', async ({ page }) => {
   await page.goto('/scenario/blobs')
 
   const blocked = page.getByRole('article', { name: 'Artifact restricted.capture' })
-  await expect(blocked.getByText('Artifact blocked')).toBeVisible()
+  await expect(blocked.getByText('Preview unavailable')).toBeVisible()
   await expect(blocked.getByRole('link')).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -371,11 +372,11 @@ test('captures desktop dark artifact evidence', async ({ page }, testInfo) => {
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.goto('/scenario/blobs')
-  await expect(page.getByRole('heading', { name: 'Artifact renderers' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Artifacts' })).toBeVisible()
   // Pixel tolerances absorb small text drift, so the record count is pinned functionally: stale
   // whole-panel evidence cannot pass by tolerance alone when the scenario inventory changes.
-  await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
-  await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
+  await expect(page.getByText(`${artifactScenario.length} artifacts`)).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Artifacts' })).toHaveScreenshot(
     'artifacts-desktop-dark.png',
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -427,8 +428,8 @@ test('captures desktop light artifact evidence', async ({ page }, testInfo) => {
   await page.getByRole('button', { name: 'Use light theme' }).focus()
   await page.keyboard.press('Enter')
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
-  await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
-  await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
+  await expect(page.getByText(`${artifactScenario.length} artifacts`)).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Artifacts' })).toHaveScreenshot(
     'artifacts-desktop-light.png',
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -439,9 +440,9 @@ test('captures mobile artifact evidence', async ({ page }, testInfo) => {
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/scenario/blobs')
-  await expect(page.getByRole('heading', { name: 'Artifact renderers' })).toBeVisible()
-  await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
-  await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
+  await expect(page.getByRole('heading', { name: 'Artifacts' })).toBeVisible()
+  await expect(page.getByText(`${artifactScenario.length} artifacts`)).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Artifacts' })).toHaveScreenshot(
     'artifacts-mobile-dark.png',
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })

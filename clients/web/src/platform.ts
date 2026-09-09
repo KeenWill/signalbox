@@ -1,3 +1,4 @@
+import { enumLabel } from './labels'
 import { SESSION_FOUNDATION_TOTAL, sessionFoundationScenario } from './session-timeline/model'
 
 export type TimelineKind = 'origin' | 'progress' | 'tool' | 'result' | 'unknown'
@@ -39,7 +40,7 @@ export const scenarios = [
   {
     id: 'streaming',
     title: 'Streaming session',
-    description: 'Durable progress with an ephemeral provider draft.',
+    description: 'Live progress with a streaming draft.',
     connection: 'connected',
     timelineTotal: 240,
     tableTotal: 180,
@@ -55,7 +56,7 @@ export const scenarios = [
   {
     id: 'recovery',
     title: 'Recovery',
-    description: 'A resynchronizing client preserves its durable cursor.',
+    description: 'Reconnecting without losing your place.',
     connection: 'recovering',
     timelineTotal: 320,
     tableTotal: 200,
@@ -63,7 +64,7 @@ export const scenarios = [
   {
     id: 'large-timeline',
     title: '100k timeline',
-    description: 'A bounded window over a six-figure session history.',
+    description: 'A 100,000-event session.',
     connection: 'connected',
     timelineTotal: 100_000,
     tableTotal: 500,
@@ -71,7 +72,7 @@ export const scenarios = [
   {
     id: 'session-foundation',
     title: 'Million-event session',
-    description: 'Stable addresses and bounded windows over one enormous durable history.',
+    description: 'A million-event session.',
     connection: 'connected',
     timelineTotal: SESSION_FOUNDATION_TOTAL,
     tableTotal: 120,
@@ -79,7 +80,7 @@ export const scenarios = [
   {
     id: 'search-usage',
     title: 'Search and usage',
-    description: 'Unloaded lexical hits and labeled model-call evidence at scale.',
+    description: 'Search and usage at scale.',
     connection: 'connected',
     timelineTotal: 1_000_000,
     tableTotal: 240,
@@ -87,7 +88,7 @@ export const scenarios = [
   {
     id: 'large-table',
     title: 'Million-row fleet',
-    description: 'A virtualized operator table over a million logical rows.',
+    description: 'A million-row fleet table.',
     connection: 'connected',
     timelineTotal: 400,
     tableTotal: 1_000_000,
@@ -95,7 +96,7 @@ export const scenarios = [
   {
     id: 'huge-source',
     title: 'Huge source',
-    description: 'Unknown and source-like records remain inspectable.',
+    description: 'Unrecognized records still display.',
     connection: 'connected',
     timelineTotal: 20_000,
     tableTotal: 300,
@@ -103,15 +104,15 @@ export const scenarios = [
   {
     id: 'imports',
     title: 'Million-row imports',
-    description: 'Bounded discovery and immutable imported-entry windows.',
+    description: 'Browsing a million imported entries.',
     connection: 'connected',
     timelineTotal: 250_000,
     tableTotal: 1_000_000,
   },
   {
     id: 'blobs',
-    title: 'Blob evidence',
-    description: 'Artifact summaries avoid eager binary materialization.',
+    title: 'Files',
+    description: 'Artifact previews without loading full files.',
     connection: 'connected',
     timelineTotal: 600,
     tableTotal: 120,
@@ -119,7 +120,7 @@ export const scenarios = [
   {
     id: 'attachments',
     title: 'Artifact attachments',
-    description: 'Typed document, derivative, and media placeholders across attachment surfaces.',
+    description: 'Document, image, and media attachments.',
     connection: 'connected',
     timelineTotal: 600,
     tableTotal: 120,
@@ -192,22 +193,25 @@ const timelineCopy = (kind: TimelineKind, index: number): TimelineCopy => {
     case 'origin':
       return {
         label: 'Operator',
-        body: `Inspect the active obligation at logical position ${serial}.`,
+        body: `Inspect item ${serial}.`,
       }
     case 'progress':
-      return { label: 'Progress', body: `Projection advanced through durable event ${serial}.` }
+      return { label: 'Progress', body: `Progressed to event ${serial}.` }
     case 'tool':
       return {
         label: 'Tool call',
-        body: `repository.status completed with bounded summary ${serial}.`,
+        body: `repository.status completed · Summary ${serial}.`,
       }
     case 'result':
       return {
-        label: 'Durable result',
-        body: `The requested operation settled at cursor timeline:${index}.`,
+        label: 'Result',
+        body: `Completed at event ${index}.`,
       }
     case 'unknown':
-      return { label: 'Unrecognized record', body: `kind=extension.preview; evidence=${serial}` }
+      return {
+        label: 'Unrecognized record',
+        body: `Unrecognized record ${serial} · extension.preview`,
+      }
   }
 }
 
@@ -235,8 +239,8 @@ export class ScenarioTransport implements SignalboxTransport {
           cursor: `timeline:${sequence}`,
           turn: Math.max(Math.floor((Number(sequence) - 1) / 6) + 1, 1),
           kind,
-          label: item.kind.replaceAll('_', ' '),
-          body: `Durable header at stable address ${sequence}; detail is loaded separately.`,
+          label: enumLabel(item.kind),
+          body: `Event ${sequence}`,
           elapsed: `${(offset % 41) + 1}s`,
         }
       })
@@ -289,7 +293,7 @@ export class ScenarioTransport implements SignalboxTransport {
         cursor: `fleet:${index}`,
         repository: `signalbox/worktree-${String(index + 1).padStart(4, '0')}`,
         state: fleetStateAt(index),
-        purpose: index % 3 === 0 ? 'Review convergence' : 'Milestone implementation',
+        purpose: index % 3 === 0 ? 'Review' : 'Milestone implementation',
         age: `${(index % 58) + 1}m`,
       }
     })

@@ -197,7 +197,7 @@ test('restores focus when pagination fails', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Next' }).click()
 
-  await expect(page.getByRole('heading', { name: 'Search could not be read' })).toBeFocused()
+  await expect(page.getByRole('heading', { name: 'Search failed' })).toBeFocused()
 })
 
 test('resets pagination when submitting a different search scope', async ({ page }) => {
@@ -270,7 +270,7 @@ test('does not request malformed session or cursor URL state', async ({ page }) 
     `/search?q=release&session=${'x'.repeat(128)}&afterAddress=${'9'.repeat(128)}&afterProjection=${'9'.repeat(128)}`,
   )
 
-  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
+  await expect(page.getByRole('alert')).toContainText('Check your search.')
   expect(searchRequests).toBe(0)
 })
 
@@ -289,7 +289,7 @@ test('does not write malformed search drafts into browser history', async ({ pag
   await search.press('Enter')
 
   await expect(page).toHaveURL(/\/search$/)
-  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
+  await expect(page.getByRole('alert')).toContainText('Check your search.')
   expect(searchRequests).toBe(0)
 })
 
@@ -327,7 +327,7 @@ test('does not request NUL-bearing search text', async ({ page }) => {
 
   await page.goto('/search?q=term%00suffix')
 
-  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
+  await expect(page.getByRole('alert')).toContainText('Check your search.')
   expect(searchRequests).toBe(0)
 })
 
@@ -340,7 +340,7 @@ test('does not request an unpaired cursor URL field', async ({ page }) => {
   })
   await page.goto('/search?q=release&afterAddress=750')
 
-  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
+  await expect(page.getByRole('alert')).toContainText('Check your search.')
   expect(searchRequests).toBe(0)
 })
 
@@ -353,7 +353,7 @@ test('does not widen repeated exact-session parameters to global search', async 
   })
   await page.goto(`/search?q=release&session=${sessionId}&session=${sessionId}`)
 
-  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
+  await expect(page.getByRole('alert')).toContainText('Check your search.')
   expect(searchRequests).toBe(0)
 })
 
@@ -362,7 +362,7 @@ test('recovers global search when resubmitting over repeated session parameters'
 }) => {
   await useSearchFixture(page)
   await page.goto(`/search?q=release&session=${sessionId}&session=${sessionId}`)
-  await expect(page.getByRole('alert')).toContainText('Invalid search parameters')
+  await expect(page.getByRole('alert')).toContainText('Check your search.')
 
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
 
@@ -474,8 +474,8 @@ test('reports an unreachable search transport separately from contract decoding'
   await page.route('**/api/search?**', (route) => route.abort('connectionrefused'))
   await page.goto('/search?q=release')
 
-  await expect(page.getByRole('alert')).toContainText('Search could not be read')
-  await expect(page.getByRole('alert')).toContainText('The Signalbox daemon could not be reached.')
+  await expect(page.getByRole('alert')).toContainText('Search failed')
+  await expect(page.getByRole('alert')).toContainText("Can't reach the Signalbox server.")
   expect(problems.pageErrors).toEqual([])
 })
 
@@ -523,7 +523,7 @@ test('rejects overflowing drafts instead of submitting a valid prefix', async ({
 test('rejects repeated query text without showing an empty search', async ({ page }) => {
   await useSearchFixture(page)
   await page.goto('/search?q=first&q=second')
-  await expect(page.getByRole('alert')).toContainText('Invalid search parameters.')
+  await expect(page.getByRole('alert')).toContainText('Check your search.')
   await expect(page.getByRole('heading', { name: /^\d+ results?$/ })).toHaveCount(0)
 })
 
@@ -547,7 +547,7 @@ test('withholds previous results after a failed refresh', async ({ page }) => {
   await expect(page.getByRole('heading', { name: '2 results' })).toBeVisible()
   await page.route('**/api/search?**', (route) => route.abort())
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
-  await expect(page.getByRole('heading', { name: 'Search could not be read' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Search failed' })).toBeVisible()
   await expect(page.getByRole('heading', { name: '2 results' })).toBeHidden()
 })
 
@@ -593,7 +593,7 @@ test('focuses search through its command and releases editing with Escape', asyn
   await page.keyboard.press('Escape')
   await expect(page.getByRole('main')).toBeFocused()
   await page.getByRole('button', { name: 'Open command palette' }).click()
-  await page.getByRole('button', { name: /Focus lexical search/ }).click()
+  await page.getByRole('button', { name: /Focus search/ }).click()
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
 })
 
@@ -601,7 +601,7 @@ test('keeps artifact inspector inputs in their editing context on Search', async
   await useSearchFixture(page)
   await page.goto('/search')
   await page.getByRole('button', { name: 'Open artifact inspector' }).click()
-  for (const name of ['Digest', 'Declared media type', 'Display filename optional']) {
+  for (const name of ['Digest', 'Media type (as declared)', 'Display filename optional']) {
     const input = page.getByRole('textbox', { name, exact: true })
     await input.focus()
     await input.press('Escape')
@@ -652,6 +652,6 @@ test('releases the imports title when the next scenario fails to load', async ({
   await page.goto('/scenario/imports')
   await expect(page).toHaveTitle('Signalbox Scenario Studio — Imports')
   await page.getByRole('link', { name: /^Streaming session/ }).click()
-  await expect(page.getByText('Scenario studio could not be loaded.')).toBeVisible()
+  await expect(page.getByText("Couldn't load Scenario studio.")).toBeVisible()
   await expect(page).not.toHaveTitle('Signalbox Scenario Studio — Imports')
 })

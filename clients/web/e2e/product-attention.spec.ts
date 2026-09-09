@@ -330,13 +330,13 @@ test('opens and closes the attention inspector without a mouse and restores focu
   await page.goto('/attention')
 
   const approval = page.getByRole('button', {
-    name: new RegExp(`awaiting approval.*${approvalSessionId}`),
+    name: new RegExp(`Needs approval.*${approvalSessionId}`),
   })
   await approval.focus()
   await approval.press('Enter')
   const close = page.getByRole('button', { name: 'Close attention inspector' })
   await expect(close).toBeFocused()
-  await expect(page.getByRole('heading', { name: 'awaiting approval', level: 2 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Needs approval', level: 2 })).toBeVisible()
   await close.press('Escape')
   await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
   await expect(approval).toBeFocused()
@@ -370,12 +370,12 @@ test('returns to the live page after a paged read fails', async ({ page }) => {
   await page.goto('/attention')
 
   await page.getByRole('button', { name: /Next/ }).click()
-  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry' })).toBeFocused()
   await page.getByRole('button', { name: 'Live page' }).click()
 
   await expect(page.getByText(approvalSessionId)).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeHidden()
+  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeHidden()
 })
 
 test('rejects a paged Attention response with a regressing cursor', async ({ page }) => {
@@ -384,10 +384,8 @@ test('rejects a paged Attention response with a regressing cursor', async ({ pag
 
   await page.getByRole('button', { name: /Next/ }).click()
 
-  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
-  await expect(
-    page.getByText('The response did not match the generated web contract.'),
-  ).toBeVisible()
+  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeVisible()
+  await expect(page.getByText('The server sent an unexpected response.')).toBeVisible()
 })
 
 test('advances the paged cursor floor after a successful read', async ({ page }) => {
@@ -400,7 +398,7 @@ test('advances the paged cursor floor after a successful read', async ({ page })
 
   await expect.poll(pagedRequests).toBe(2)
   await expect(page.getByText(idleSessionId)).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeVisible()
 })
 
 test('closes the inspector with global Escape after focus leaves it', async ({ page }) => {
@@ -408,10 +406,10 @@ test('closes the inspector with global Escape after focus leaves it', async ({ p
   await page.goto('/attention')
 
   const approval = page.getByRole('button', {
-    name: new RegExp(`awaiting approval.*${approvalSessionId}`),
+    name: new RegExp(`Needs approval.*${approvalSessionId}`),
   })
   await approval.click()
-  await page.getByRole('button', { name: 'Restart monitor' }).focus()
+  await page.getByRole('button', { name: 'Reconnect' }).focus()
   await page.keyboard.press('Escape')
 
   await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
@@ -426,9 +424,9 @@ test('moves focus to the page heading when refreshed data removes the selection'
   await page.goto('/attention')
 
   await page
-    .getByRole('button', { name: new RegExp(`awaiting approval.*${approvalSessionId}`) })
+    .getByRole('button', { name: new RegExp(`Needs approval.*${approvalSessionId}`) })
     .click()
-  await page.getByRole('button', { name: 'Restart monitor' }).click()
+  await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
   await expect(
@@ -443,19 +441,19 @@ test('restarts a failed Attention monitor in place', async ({ page }) => {
   const followRequests = await installRecoveringMonitorScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Monitor unavailable')).toBeVisible()
-  await page.getByRole('button', { name: 'Restart monitor' }).click()
+  await expect(page.getByText('Live updates unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(followRequests).toBe(2)
-  await expect(page.getByText('Monitor paused')).toBeVisible()
+  await expect(page.getByText('Live updates paused')).toBeVisible()
 })
 
 test('restarts a stale Attention monitor in place', async ({ page }) => {
   const followRequests = await installStaleMonitorScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Monitor paused')).toBeVisible()
-  await page.getByRole('button', { name: 'Restart monitor' }).click()
+  await expect(page.getByText('Live updates paused')).toBeVisible()
+  await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(followRequests).toBe(2)
 })
@@ -464,8 +462,8 @@ test('restarts the Attention monitor while the snapshot read is pending', async 
   const scenario = await installHeldSnapshotReadMonitorScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Monitor paused')).toBeVisible()
-  await page.getByRole('button', { name: 'Restart monitor' }).click()
+  await expect(page.getByText('Live updates paused')).toBeVisible()
+  await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(scenario.followRequests).toBe(2)
   await scenario.releaseHeldReads()
@@ -485,10 +483,8 @@ test('rejects a divergent equal-cursor HTTP snapshot after the follower starts',
   await installDivergentEqualCursorHttpScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
-  await expect(
-    page.getByText('The response did not match the generated web contract.'),
-  ).toBeVisible()
+  await expect(page.getByRole('heading', { name: "Couldn't load Attention" })).toBeVisible()
+  await expect(page.getByText('The server sent an unexpected response.')).toBeVisible()
 })
 
 test('keeps the live projection when a refresh snapshot regresses', async ({ page }) => {
@@ -496,7 +492,7 @@ test('keeps the live projection when a refresh snapshot regresses', async ({ pag
   await page.goto('/attention')
   await expect(page.getByText(approvalSessionId)).toBeVisible()
 
-  await page.getByRole('button', { name: 'Restart monitor' }).click()
+  await page.getByRole('button', { name: 'Reconnect' }).click()
 
   await expect.poll(snapshotRequests).toBe(2)
   await expect(page.getByText(approvalSessionId)).toBeVisible()
@@ -520,8 +516,8 @@ test('captures the light attention workbench inspector', async ({ page }, testIn
   await installAttentionScenario(page)
   await page.goto('/attention')
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await page.getByRole('button', { name: new RegExp(`blocked.*${blockedSessionId}`) }).click()
-  await expect(page.getByRole('heading', { name: 'blocked', level: 2 })).toBeVisible()
+  await page.getByRole('button', { name: new RegExp(`Blocked.*${blockedSessionId}`) }).click()
+  await expect(page.getByRole('heading', { name: 'Blocked', level: 2 })).toBeVisible()
   await expect.soft(page).toHaveScreenshot('attention-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -533,9 +529,9 @@ test('captures the focused phone inspector', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/attention')
   await page
-    .getByRole('button', { name: new RegExp(`runner lost.*${lostRunnerSessionId}`) })
+    .getByRole('button', { name: new RegExp(`Runner lost.*${lostRunnerSessionId}`) })
     .click()
-  await expect(page.getByRole('heading', { name: 'runner lost', level: 2 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Runner lost', level: 2 })).toBeVisible()
   await expect(page.getByRole('heading', { name: '3 sessions', level: 2 })).toBeHidden()
   await expect.soft(page).toHaveScreenshot('attention-mobile-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
