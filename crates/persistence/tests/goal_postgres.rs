@@ -2769,7 +2769,7 @@ async fn a_committed_closure_refuses_late_model_achievement() -> Result<(), Box<
             session(SESSION),
             GoalReport::try_new(report).expect("fixture report is admitted"),
             GoalModelProvenance::new(attached_turn.turn(), declaration_request),
-            |_, _| std::future::ready(FinishCheckVerdict::Unverified),
+            |_, _| async { panic!("a committed closure must skip the finish check") },
         )
         .await?;
 
@@ -5043,6 +5043,117 @@ async fn attach_and_declare(
     )
     .await?;
     Ok((turn, GoalModelProvenance::new(turn, declaration_request)))
+}
+
+/// Queues an active turn's declaration behind the supplied goal command, with
+/// a checker that fails the test if the stale declaration reaches evaluation.
+async fn declaration_queued_behind_goal_command(
+    action: GoalUserAction,
+    successor: Option<GoalTurnCandidates>,
+) -> Result<GoalTransitionOutcome, Box<dyn Error>> {
+    use tokio::time::{Duration, timeout};
+
+    // Arbitrary identities for the original active goal declaration.
+    const ATTACH: u128 = 0x9c6;
+    const FIRST_TURN: u128 = 0xbc6;
+    const REQUEST: u128 = 0xfc6;
+    const DECLARATION_TIMEOUT: Duration = Duration::from_secs(10);
+    let (_container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let candidates = turn_candidates(FIRST_TURN);
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(ATTACH),
+                    session(SESSION),
+                    GoalUserAction::Attach(statement("finish the fixture work")),
+                ),
+                Some(candidates),
+                |_| None,
+            )
+            .await?,
+    );
+    let turn = activate_goal_turn(&pool, FIRST_TURN + 0x10).await?;
+    let provenance = GoalModelProvenance::new(turn, tool_request(REQUEST));
+    let mut blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(session(SESSION).into_uuid())
+        .execute(&mut *blocker)
+        .await?;
+    let invalidation = tokio::spawn({
+        let repository = repository.clone();
+        async move {
+            repository
+                .handle_user_command(
+                    GoalUserCommand::new(
+                        DurableCommandId::from_uuid(Uuid::now_v7()),
+                        session(SESSION),
+                        action,
+                    ),
+                    successor,
+                    |_| None,
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the invalidating command waits on the session lock"
+    );
+    let declaration = tokio::spawn(async move {
+        repository
+            .declare_achieved(
+                session(SESSION),
+                GoalReport::try_new(String::from("the fixture work is finished"))
+                    .expect("fixture report"),
+                provenance,
+                |_, _| async { panic!("an inadmissible declaration must skip the finish check") },
+            )
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 2).await?,
+        "the declaration queues behind invalidation"
+    );
+    blocker.rollback().await?;
+    assert_applied_command(timeout(DECLARATION_TIMEOUT, invalidation).await???);
+    let outcome = timeout(DECLARATION_TIMEOUT, declaration).await???;
+    pool.close().await;
+    Ok(outcome)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_declaration_behind_goal_stop_skips_the_finish_check() -> Result<(), Box<dyn Error>> {
+    let outcome = declaration_queued_behind_goal_command(
+        GoalUserAction::Stop {
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+        },
+        None,
+    )
+    .await?;
+    assert!(
+        matches!(outcome, GoalTransitionOutcome::Rejected(error) if error.failure() == signalbox_domain::GoalTransitionFailure::RequiresPursuing)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_declaration_behind_supersession_skips_the_finish_check() -> Result<(), Box<dyn Error>> {
+    // Arbitrary identity for the replacement goal turn.
+    const SUCCESSOR: u128 = 0xbc7;
+    let outcome = declaration_queued_behind_goal_command(
+        GoalUserAction::Supersede(statement("replacement work")),
+        Some(turn_candidates(SUCCESSOR)),
+    )
+    .await?;
+    assert_eq!(outcome, GoalTransitionOutcome::NotCurrentGoalTurn);
+    Ok(())
 }
 
 /// Adoption's condition is evaluated while the committing transition holds the

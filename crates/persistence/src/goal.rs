@@ -9,6 +9,7 @@ mod stop;
 pub use stop::GoalStopSettlement;
 
 use std::num::NonZeroU64;
+use std::ops::ControlFlow;
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -1057,11 +1058,30 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         }
+        let goal = match load_system_transition_goal(
+            &mut transaction,
+            session,
+            provenance.turn(),
+            SystemTransitionAuthority::ModelAchievement,
+        )
+        .await?
+        {
+            ControlFlow::Continue(goal) => goal,
+            ControlFlow::Break(outcome) => {
+                transaction.rollback().await?;
+                return Ok(outcome);
+            }
+        };
+        if let Err(error) = goal.clone().declare_achieved(report.clone(), provenance) {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::Rejected(error));
+        }
         let condition = Self::load_finish_condition(&mut transaction, session).await?;
         let verdict = check(condition, report.clone()).await;
         self.handle_locked_system_transition(
             transaction,
             session,
+            goal,
             SystemTransition::Achieved {
                 report,
                 provenance,
@@ -1141,7 +1161,21 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTransitionOutcome::GoalNotAttached);
         }
-        self.handle_locked_system_transition(transaction, session, transition)
+        let goal = match load_system_transition_goal(
+            &mut transaction,
+            session,
+            transition.turn(),
+            transition.authority(),
+        )
+        .await?
+        {
+            ControlFlow::Continue(goal) => goal,
+            ControlFlow::Break(outcome) => {
+                transaction.rollback().await?;
+                return Ok(outcome);
+            }
+        };
+        self.handle_locked_system_transition(transaction, session, goal, transition)
             .await
     }
 
@@ -1149,6 +1183,7 @@ impl GoalRepository {
         &self,
         mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
         session: SessionId,
+        goal: Goal,
         mut transition: SystemTransition,
     ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
         if let SystemTransition::ExecutionFailure {
@@ -1164,52 +1199,6 @@ impl GoalRepository {
                 unmonitored_need.take(),
             )
             .await?;
-        }
-        if matches!(&transition, SystemTransition::Achieved { .. })
-            && session_holds_committed_closure(&mut transaction, session).await?
-        {
-            transaction.rollback().await?;
-            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-        }
-        let Some(goal) = load_goal_from_connection(&mut transaction, session).await? else {
-            transaction.rollback().await?;
-            return Ok(GoalTransitionOutcome::GoalNotAttached);
-        };
-        if session_is_closing(&mut transaction, session).await? {
-            transaction.rollback().await?;
-            return Ok(GoalTransitionOutcome::SessionClosing);
-        }
-        match transition.authority() {
-            SystemTransitionAuthority::ModelDeclaration => {}
-            SystemTransitionAuthority::SchedulerFailure => {
-                if let Some(event) = recorded_scheduler_failure(&goal, transition.turn()) {
-                    let event = event.clone();
-                    transaction.rollback().await?;
-                    return Ok(GoalTransitionOutcome::Applied(event));
-                }
-            }
-        }
-        let generation = goal_turn_generation(&mut transaction, session, transition.turn()).await?;
-        if generation != Some(goal.current().generation()) {
-            transaction.rollback().await?;
-            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-        }
-        if current_goal_turn(&mut transaction, session, goal.current().generation()).await?
-            != Some(transition.turn())
-        {
-            transaction.rollback().await?;
-            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-        }
-        match transition.authority() {
-            SystemTransitionAuthority::ModelDeclaration => {}
-            SystemTransitionAuthority::SchedulerFailure => {
-                if goal_turn_terminal_state(&mut transaction, session, transition.turn()).await?
-                    != GoalTurnTerminalState::Unsuccessful
-                {
-                    transaction.rollback().await?;
-                    return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
-                }
-            }
         }
         let mut settled = None;
         let transitioned = match transition {
@@ -1280,6 +1269,64 @@ impl GoalRepository {
         commit(transaction).await?;
         Ok(GoalTransitionOutcome::Applied(event))
     }
+}
+
+async fn load_system_transition_goal(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    authority: SystemTransitionAuthority,
+) -> Result<ControlFlow<GoalTransitionOutcome, Goal>, GoalRepositoryError> {
+    if matches!(authority, SystemTransitionAuthority::ModelAchievement)
+        && session_holds_committed_closure(&mut *connection, session).await?
+    {
+        return Ok(ControlFlow::Break(
+            GoalTransitionOutcome::NotCurrentGoalTurn,
+        ));
+    }
+    let Some(goal) = load_goal_from_connection(&mut *connection, session).await? else {
+        return Ok(ControlFlow::Break(GoalTransitionOutcome::GoalNotAttached));
+    };
+    if session_is_closing(&mut *connection, session).await? {
+        return Ok(ControlFlow::Break(GoalTransitionOutcome::SessionClosing));
+    }
+    match authority {
+        SystemTransitionAuthority::ModelDeclaration
+        | SystemTransitionAuthority::ModelAchievement => {}
+        SystemTransitionAuthority::SchedulerFailure => {
+            if let Some(event) = recorded_scheduler_failure(&goal, turn) {
+                let event = event.clone();
+                return Ok(ControlFlow::Break(GoalTransitionOutcome::Applied(event)));
+            }
+        }
+    }
+    let generation = goal_turn_generation(&mut *connection, session, turn).await?;
+    if generation != Some(goal.current().generation()) {
+        return Ok(ControlFlow::Break(
+            GoalTransitionOutcome::NotCurrentGoalTurn,
+        ));
+    }
+    if current_goal_turn(&mut *connection, session, goal.current().generation()).await?
+        != Some(turn)
+    {
+        return Ok(ControlFlow::Break(
+            GoalTransitionOutcome::NotCurrentGoalTurn,
+        ));
+    }
+    match authority {
+        SystemTransitionAuthority::ModelDeclaration
+        | SystemTransitionAuthority::ModelAchievement => {}
+        SystemTransitionAuthority::SchedulerFailure => {
+            if goal_turn_terminal_state(&mut *connection, session, turn).await?
+                != GoalTurnTerminalState::Unsuccessful
+            {
+                return Ok(ControlFlow::Break(
+                    GoalTransitionOutcome::NotCurrentGoalTurn,
+                ));
+            }
+        }
+    }
+    Ok(ControlFlow::Continue(goal))
 }
 
 /// Records an operator-required recovery cause inside the transaction that
@@ -1605,15 +1652,15 @@ enum SystemTransition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SystemTransitionAuthority {
     ModelDeclaration,
+    ModelAchievement,
     SchedulerFailure,
 }
 
 impl SystemTransition {
     const fn authority(&self) -> SystemTransitionAuthority {
         match self {
-            Self::Blocked { .. } | Self::Achieved { .. } => {
-                SystemTransitionAuthority::ModelDeclaration
-            }
+            Self::Blocked { .. } => SystemTransitionAuthority::ModelDeclaration,
+            Self::Achieved { .. } => SystemTransitionAuthority::ModelAchievement,
             Self::ExecutionFailure { .. } => SystemTransitionAuthority::SchedulerFailure,
         }
     }
