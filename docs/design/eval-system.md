@@ -9,10 +9,13 @@ using the daemon host, immutable input, journal and terminal result of
 An evaluation is one workflow run pinned to its program registration and exact
 input manifest. The manifest pins the corpus blob's SHA-256 digest, input
 format, selected cases in order, expectations and label provenance, repeats,
-scorecard kind and the selected judge binding. The binding freezes the resolved
-provider target/model, non-secret credential reference and operation contract;
-credentials remain host-side. Format-specific ingest normalizes cases once,
-preserving their authority context and category or notes when present.
+scorecard kind and the selected judge binding. The daemon resolves the provider
+target/model and non-secret credential reference, then constructs the immutable
+manifest with that binding and operation contract before starting the workflow
+run. These manifest bytes are the exact retained run input; credentials remain
+host-side. Format-specific ingest normalizes cases once, preserving their
+authority context and category or notes when present. Manifest admission
+requires exactly one repeat for the offline corpus scorecard.
 
 The workflow run identity and trial ordinal identify one trial. The manifest
 fixes the mapping from each ordinal to a case position and repeat before any
