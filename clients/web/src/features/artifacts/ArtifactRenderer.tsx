@@ -197,19 +197,21 @@ function BoundedFooter({
   expanded: boolean
   onToggle: () => void
 }) {
+  if (sourceComplete && omittedCharacters === 0 && !canExpand && !expanded) return null
+
   return (
     <footer className="artifact-bounded-footer">
       <span>
         {!sourceComplete
-          ? 'Server-truncated source prefix shown; additional source content is not loaded.'
+          ? 'Partial text'
           : omittedCharacters > 0
-            ? `${omittedCharacters.toLocaleString()} characters remain outside this bounded view`
-            : 'Complete bounded content shown'}
+            ? `${omittedCharacters.toLocaleString()} characters omitted`
+            : null}
       </span>
       {(canExpand || expanded) && (
         <button type="button" onClick={onToggle}>
           {expanded ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
-          {expanded ? 'Collapse preview' : 'Expand bounded preview'}
+          {expanded ? 'Collapse preview' : 'Expand preview'}
         </button>
       )}
     </footer>
@@ -224,7 +226,6 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
   const originalState = useAppSelector((state) => state.app.originalArtifacts[artifact.id])
   const { descriptor } = artifact.source
   const automatic = selectImageView(descriptor, failedAutomaticUrls)
-  const advertisedOriginal = selectBlobView(descriptor, 'browser_native')
   const original = selectBoundedOriginalView(descriptor)
   const download = selectBlobView(descriptor, 'download')
   const originalRequested = originalState === 'loading' || originalState === 'loaded'
@@ -340,24 +341,11 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
                   : 'Load original'}
           </button>
         )}
-        {advertisedOriginal && !original && (
-          <p>Original exceeds inline admission bounds. Download remains available.</p>
-        )}
-        {originalState === 'failed' && (
-          <p role="status">
-            {automatic
-              ? `Original image failed to load. The ${automatic.kind} remains available.`
-              : 'Original image failed to load. No automatic image view remains available.'}
-          </p>
-        )}
+        {originalState === 'failed' && <p role="status">Original image failed to load</p>}
         {originalState !== 'failed' &&
           !originalRequested &&
           failedAutomaticUrls.size > 0 &&
-          !automatic && (
-            <p role="status">
-              No admitted inline image view could be loaded. Metadata and download remain available.
-            </p>
-          )}
+          !automatic && <p role="status">Preview unavailable</p>}
         {download && (
           <a href={download.content_url} download={artifact.displayName}>
             <Download aria-hidden="true" /> Download
@@ -380,11 +368,7 @@ function RemoteImageBody({ artifact }: RendererProps<RemoteImageArtifact>) {
         renderer={admittedUrl === null ? 'remote media blocked' : 'remote media unavailable'}
         mediaType="Not inspected"
         provenance="External URL"
-      >
-        {admittedUrl !== null && (
-          <p>Remote rendering requires a bounded owning media service. No bytes were fetched.</p>
-        )}
-      </ArtifactMetadata>
+      ></ArtifactMetadata>
     </div>
   )
 }
@@ -438,7 +422,6 @@ function DocumentBody({ artifact }: RendererProps<DocumentArtifact>) {
       <div className="artifact-document-placeholder">
         <File aria-hidden="true" />
         <strong>{artifact.documentKind === 'pdf' ? 'PDF document' : 'Document'}</strong>
-        <p>Document bytes stay unloaded until an explicit open or download action.</p>
       </div>
       <ArtifactMetadata
         renderer="document placeholder"
@@ -474,7 +457,6 @@ function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
         <ShieldAlert aria-hidden="true" />
         <div>
           <strong>Derivative unavailable</strong>
-          <p>The descriptor does not authorize the requested derived view and no fallback ran.</p>
         </div>
       </div>
     )
@@ -513,7 +495,6 @@ function MediaPlaceholderBody({ artifact }: RendererProps<MediaPlaceholderArtifa
       <div className="artifact-document-placeholder media-placeholder">
         <MediaIcon aria-hidden="true" />
         <strong>{artifact.mediaKind === 'audio' ? 'Audio' : 'Video'} playback unavailable</strong>
-        <p>The current contract supplies bytes but no admitted inline media presentation.</p>
       </div>
       <ArtifactMetadata
         renderer={`${artifact.mediaKind} placeholder`}
@@ -541,7 +522,7 @@ function ArtifactMetadata({
   mediaType: string
   byteLength?: string
   provenance: string
-  children: ReactNode
+  children?: ReactNode
 }) {
   return (
     <div className="artifact-detail">
