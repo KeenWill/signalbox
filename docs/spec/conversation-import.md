@@ -230,6 +230,11 @@ the catalog the raw records converge onto are owned by
 [blob-storage](blob-storage.md). The rule that no database transaction spans
 store I/O is owned by [persistence-protocol](persistence-protocol.md).
 
+The web client retains an unresolved continuation command across reloads. On
+Imports, its navigation command availability remains locked before bootstrap
+admission and through admission failure until retry or abandonment settles the
+retained command.
+
 ## Planned
 
 - Usage evidence on imported entries, with cost derived at read time from the

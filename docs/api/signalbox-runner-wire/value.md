@@ -236,6 +236,7 @@ pub enum ExecutionErrorKind {
     InvalidArguments,
     ExecutionFailed,
     ResultTooLarge,
+    ResultContainsNull,
     CrashLost,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>

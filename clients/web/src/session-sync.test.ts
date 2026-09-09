@@ -203,6 +203,7 @@ it.each(['describe', 'load'] as const)(
       first_address: { event_sequence: '40' },
       latest_address: { event_sequence: '42' },
       repository_watch: null,
+      workspace_root_kind: null,
       sizes: {
         item_count: '3',
         projected_structured_bytes: '234',
@@ -240,6 +241,7 @@ it.each(['describe', 'load'] as const)(
         observed_through: '40',
         latest_address: { event_sequence: '40' },
         repository_watch: null,
+        workspace_root_kind: null,
         sizes: { ...descriptor.sizes, item_count: '1', projected_structured_bytes: '78' },
       },
       history: new BoundedSessionHistory(sessionId, source),
@@ -557,6 +559,7 @@ it.each([
       first_address: { event_sequence: '40' },
       latest_address: { event_sequence: String(through) },
       repository_watch: null,
+      workspace_root_kind: null,
       sizes: {
         item_count: String(through - 39),
         projected_structured_bytes: String((through - 39) * 78),

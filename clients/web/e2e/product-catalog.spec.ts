@@ -183,6 +183,7 @@ const useCatalogFixture = async (page: Page) => {
       json: {
         session_id: sessionId,
         repository_watch: null,
+        workspace_root_kind: null,
         sizes: {
           item_count: '1',
           projected_text_bytes: '0',

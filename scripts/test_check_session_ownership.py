@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove each ownership-seam reach-around rule accepts and rejects fixtures."""
+"""Prove each session-ownership reach-around rule accepts and rejects fixtures."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-CHECKER = Path(__file__).resolve().parent / "check_ownership_seam.py"
+CHECKER = Path(__file__).resolve().parent / "check_session_ownership.py"
 
 
-class OwnershipSeamCheckerTests(unittest.TestCase):
+class SessionOwnershipCheckerTests(unittest.TestCase):
     def run_checker(
         self,
         manifest: str,
@@ -27,7 +27,7 @@ class OwnershipSeamCheckerTests(unittest.TestCase):
             root = Path(temporary)
             module = root / "crates" / "modules" / "example"
             (module / "src").mkdir(parents=True)
-            (root / "crates" / "ownership-seam").mkdir()
+            (root / "crates" / "session-ownership").mkdir()
             (root / "crates" / "persistence" / "src").mkdir(parents=True)
             (module / "Cargo.toml").write_text(manifest, encoding="utf-8")
             if workspace_manifest is not None:
@@ -66,7 +66,7 @@ class OwnershipSeamCheckerTests(unittest.TestCase):
     def test_seam_and_external_dependencies_are_admitted(self) -> None:
         result = self.run_checker(
             """[dependencies]
-signalbox-ownership-seam = { path = "../../ownership-seam" }
+signalbox-session-ownership = { path = "../../session-ownership" }
 serde = "1"
 """,
             "pub fn reduce() {}\n",

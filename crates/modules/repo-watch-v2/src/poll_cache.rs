@@ -3,7 +3,7 @@
 use std::{collections::BTreeSet, future::Future, num::NonZeroU64};
 
 use serde_json::{Value, json};
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     CommitSha, RepoWatchAuthorLogin, RepoWatchPullRequestLifecycle, RepositorySlug,
 };
 use sqlx::Row;

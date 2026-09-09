@@ -4605,7 +4605,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "sha2 0.11.0",
- "signalbox-ownership-seam",
+ "signalbox-session-ownership",
  "sqlx",
  "tokio",
  "tracing",
@@ -4615,17 +4615,6 @@ dependencies = [
 [[package]]
 name = "signalbox-newtype"
 version = "0.0.0"
-
-[[package]]
-name = "signalbox-ownership-seam"
-version = "0.0.0"
-dependencies = [
- "signalbox-application",
- "signalbox-domain",
- "signalbox-persistence",
- "sqlx",
- "uuid",
-]
 
 [[package]]
 name = "signalbox-persistence"
@@ -4692,6 +4681,17 @@ dependencies = [
  "sha2 0.11.0",
  "signalbox-derive",
  "signalbox-domain",
+ "uuid",
+]
+
+[[package]]
+name = "signalbox-session-ownership"
+version = "0.0.0"
+dependencies = [
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-persistence",
+ "sqlx",
  "uuid",
 ]
 
@@ -5010,10 +5010,10 @@ dependencies = [
  "signalbox-model-runtime-codex-cli",
  "signalbox-model-runtime-openai",
  "signalbox-module-repo-watch-v2",
- "signalbox-ownership-seam",
  "signalbox-persistence",
  "signalbox-process-protocol",
  "signalbox-runner-wire",
+ "signalbox-session-ownership",
  "signalbox-test-bin",
  "signalbox-tool-contract",
  "signalbox-tool-schema-derive",

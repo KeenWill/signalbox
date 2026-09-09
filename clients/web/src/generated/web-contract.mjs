@@ -3891,9 +3891,26 @@ const schemas = {
       },
       "work": {
         "$ref": "#/$defs/WebSessionWorkFacts"
+      },
+      "workspace_root_kind": {
+        "anyOf": [
+          {
+            "description": "Path-free daemon-local workspace binding evidence.",
+            "enum": [
+              "derived",
+              "configured",
+              "provisioned"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "required": [
+      "workspace_root_kind",
       "repository_watch",
       "session_id",
       "sizes",
@@ -4120,6 +4137,16 @@ const schemas = {
               "type": {
                 "const": "session_created",
                 "type": "string"
+              },
+              "workspace_root_kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebSessionWorkspaceRootKind"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -4516,6 +4543,15 @@ const schemas = {
           "runner_state_transition",
           "delegation_update",
           "delegation_wake"
+        ],
+        "type": "string"
+      },
+      "WebSessionWorkspaceRootKind": {
+        "description": "Path-free daemon-local workspace binding evidence.",
+        "enum": [
+          "derived",
+          "configured",
+          "provisioned"
         ],
         "type": "string"
       },
@@ -6453,15 +6489,24 @@ const schemas = {
         "type": "string"
       },
       "WebTimelineToolFailureCause": {
-        "enum": [
-          "preauthorization_rejected",
-          "unknown_tool",
-          "invalid_arguments",
-          "execution_failed",
-          "result_too_large",
-          "crash_lost"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "preauthorization_rejected",
+              "unknown_tool",
+              "invalid_arguments",
+              "execution_failed",
+              "result_too_large",
+              "crash_lost"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "result_contains_null",
+            "description": "Successful content contained U+0000.",
+            "type": "string"
+          }
+        ]
       },
       "WebTimelineToolSandboxPosture": {
         "enum": [
