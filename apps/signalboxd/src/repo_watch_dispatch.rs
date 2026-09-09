@@ -335,7 +335,22 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 .await
                 .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
             {
-                self.core.submit_kickoff(kickoff, session, text).await?;
+                match self.core.submit_kickoff(kickoff, session, text).await {
+                    Err(RepositoryWatchCommandError::KickoffRejected) => {
+                        let (retry, text) = self
+                            .store
+                            .retry_dispatch_kickoff(
+                                id,
+                                kickoff,
+                                DurableCommandId::from_uuid(Uuid::now_v7()),
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+                            .ok_or(RepositoryWatchCommandError::CoreCommandFailed)?;
+                        self.core.submit_kickoff(retry, session, text).await?;
+                    }
+                    result => result?,
+                }
             }
             signalbox_persistence::start_eligible_turn::StartEligibleTurnRepository::new(
                 self.core.pool.clone(),
@@ -450,6 +465,7 @@ pub enum RepositoryWatchCommandError {
     TemplateUnavailable,
     UnsupportedCommand,
     CoreCommandFailed,
+    KickoffRejected,
     InterruptFailed,
     CheckoutRemovalFailed,
 }
@@ -474,36 +490,60 @@ impl RepositoryWatchCommandSink {
         };
         use signalbox_domain::{
             DeliveryRequest, ModelSelectionOverride, ParentTerminationKind,
-            PerInputConfigurationChoices, SessionConfigurationDefaultsVersion, UserContent,
+            PerInputConfigurationChoices, SubmitInputResult, UserContent,
+        };
+        let repository =
+            signalbox_persistence::submit_input::SubmitInputRepository::with_model_capabilities(
+                self.pool.clone(),
+                self.models.model_capability_catalog(),
+            );
+        let delivery = match repository
+            .load(command)
+            .await
+            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+        {
+            Some(recorded) => recorded.command().delivery(),
+            None => {
+                let current =
+                    signalbox_persistence::session::SessionRepository::new(self.pool.clone())
+                        .load_session(session)
+                        .await
+                        .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+                        .ok_or(RepositoryWatchCommandError::CoreCommandFailed)?;
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: PerInputConfigurationChoices::new(
+                        current.current_configuration_defaults().version(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                }
+            }
         };
         let request = SubmitInputRequest::try_new(
             command,
             session,
             UserContent::try_text(text)
                 .map_err(|_| RepositoryWatchCommandError::UnsupportedCommand)?,
-            DeliveryRequest::StartWhenNoActiveTurn {
-                configuration: PerInputConfigurationChoices::new(
-                    SessionConfigurationDefaultsVersion::first(),
-                    ModelSelectionOverride::UseSessionDefault,
-                ),
-            },
+            delivery,
         )
         .map_err(|_| RepositoryWatchCommandError::UnsupportedCommand)?;
         let mut service = SubmitInputService::new(
             UuidV7SubmitInputIdGenerator,
             crate::process_runtime::ConfiguredSubmitInputTransaction {
-                repository: signalbox_persistence::submit_input::SubmitInputRepository::with_model_capabilities(
-                    self.pool.clone(), self.models.model_capability_catalog(),
-                ),
+                repository,
                 model_configuration: &self.models,
-                principal: CommandPrincipal::Module { module: DispatchingModule::RepositoryWatch },
+                principal: CommandPrincipal::Module {
+                    module: DispatchingModule::RepositoryWatch,
+                },
                 cascade_root_kind: ParentTerminationKind::Cancelled,
             },
             self.eligibility_nudge.clone(),
             self.tool_dispatch_gate.clone(),
         );
         match service.execute(request).await {
-            Ok(SubmitInputOutcome::Recorded(_)) => Ok(()),
+            Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))) => Ok(()),
+            Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(_))) => {
+                Err(RepositoryWatchCommandError::KickoffRejected)
+            }
             Ok(SubmitInputOutcome::ConflictingReuse { .. }) => {
                 Err(RepositoryWatchCommandError::CoreCommandFailed)
             }

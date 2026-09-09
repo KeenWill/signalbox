@@ -353,7 +353,10 @@ daemon submits a first input with the repository-watch module principal and
 ledger freezes the target repository, pull request number, title, head branch,
 head SHA, base branch, and rule instruction at dispatch, and retains the submit
 command identity and publication instruction before submission; pending creation
-replay resubmits the identical input through core command idempotency. Failed
+replay preserves recorded command delivery through core command idempotency. New
+kickoff submissions read the current session defaults version. A recorded
+rejection retains the provisioning hold and replaces the kickoff identity for
+one retry per dispatch attempt; only an applied result releases the hold. Failed
 provisioning submits no input. `labeled-review-response` requests thread repair,
 validation, commit, push with `git_push_configured`, replies naming the commit,
 and thread resolution; a stored observation with no unresolved threads instead
