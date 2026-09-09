@@ -1471,46 +1471,39 @@ impl PostgresToolLoopRepository {
                     }
                     _ => return Ok(PrepareToolContinuationOutcome::NoWork),
                 };
-                let child_wait =
-                    batch
-                        .requests()
-                        .iter()
-                        .find_map(|request| match batch.attempt(request.id()) {
-                            Some(ReconstitutedToolAttempt::Ended(attempt)) => match attempt.end() {
-                                ToolAttemptEnd::AwaitingChild {
-                                    spawning_request,
-                                    child,
-                                } => Some((request.id(), *spawning_request, *child)),
-                                ToolAttemptEnd::Completed { .. }
-                                | ToolAttemptEnd::KnownFailed { .. }
-                                | ToolAttemptEnd::Ambiguous => None,
-                            },
-                            Some(ReconstitutedToolAttempt::Current(_)) | None => None,
-                        });
-                let mut projection = match child_wait {
-                    Some((awaiting_request, spawning_request, child)) => batch
-                        .prepare_delegation_result_projection(
-                            identities.result_entries().to_vec(),
-                            identities.result_frontier(),
+                let mut child_outcomes = BTreeMap::new();
+                for request in batch.requests() {
+                    if let Some(ReconstitutedToolAttempt::Ended(attempt)) =
+                        batch.attempt(request.id())
+                        && let ToolAttemptEnd::AwaitingChild {
+                            spawning_request,
+                            child,
+                        } = attempt.end()
+                    {
+                        child_outcomes.insert(
+                            request.id(),
                             load_foreground_delegation_outcome(
                                 &mut transaction,
                                 session,
-                                awaiting_request,
-                                spawning_request,
-                                child,
+                                request.id(),
+                                *spawning_request,
+                                *child,
                             )
                             .await?,
-                        ),
-                    None => batch.prepare_result_projection(
+                        );
+                    }
+                }
+                let mut projection = batch
+                    .prepare_delegation_result_projection(
                         identities.result_entries().to_vec(),
                         identities.result_frontier(),
-                    ),
-                }
-                .map_err(|_| {
-                    ToolLoopRepositoryError::InvalidTransition(
-                        "tool batch is not ready for continuation",
+                        child_outcomes,
                     )
-                })?;
+                    .map_err(|_| {
+                        ToolLoopRepositoryError::InvalidTransition(
+                            "tool batch is not ready for continuation",
+                        )
+                    })?;
                 let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
                     "SELECT accepted_input_id FROM accepted_input
                       WHERE session_id = $1 AND expected_active_turn_id = $2

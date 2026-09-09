@@ -197,7 +197,9 @@ or in-flight attempt takes the effect-class crash-loss path.
 Foreground waiting on a child through `await_session` is a logical tool
 transition that ends any physical attempt before committing the wait, so restart
 resumes from durable wait and result rows and cannot duplicate an external
-effect.
+effect. A batch can retain multiple foreground waits; continuation and
+interruption associate delivered child results with their await requests in
+proposal order.
 
 The error kind set stays closed; a family whose failures do not fit maps into it
 and may fix the detail to its own closed token vocabulary.
@@ -551,6 +553,8 @@ the hint until a full nudge buffer has capacity.
 
 ## Planned
 
+- Session-scoped fatal execution parking; see
+  [daemon survival design](../design/daemon-survival.md).
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`

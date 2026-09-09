@@ -850,6 +850,8 @@ credential pool admission as [contention](credential-availability.md).
 
 ## Planned
 
+- Guard recovery initial and maximum backoff delays and an elapsed bound
+  admitting `none`; see [daemon survival design](../design/daemon-survival.md).
 - Input-modality declarations on model and serving-target records, and the blob
   catalog they feed: [design](../design/configuration-and-credentials.md).
 - Dated rate windows on a model entry; the present grammar admits one flat rate,
