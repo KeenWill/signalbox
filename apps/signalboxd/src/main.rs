@@ -150,6 +150,7 @@ enum RuntimePhase {
 struct HubRuntimeError {
     phase: RuntimePhase,
     failure_class: OperatorFailureClass,
+    database_failure: bool,
     session: Option<SessionId>,
     turn: Option<TurnId>,
 }
@@ -158,6 +159,10 @@ impl HubRuntimeError {
     const fn infrastructure(phase: RuntimePhase) -> Self {
         Self {
             phase,
+            database_failure: matches!(
+                phase,
+                RuntimePhase::DatabaseConnection | RuntimePhase::Migration
+            ),
             failure_class: OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
@@ -173,6 +178,7 @@ impl HubRuntimeError {
     ) -> Self {
         Self {
             phase: RuntimePhase::StartupScan,
+            database_failure: true,
             failure_class,
             session,
             turn,
@@ -442,6 +448,15 @@ fn erase_startup_cause(phase: RuntimePhase, cause: SanitizedStartupCause<'_>) ->
         cause = %cause,
         "daemon startup construction failed"
     );
+    error
+}
+
+fn erase_startup_database_cause(
+    phase: RuntimePhase,
+    cause: SanitizedStartupCause<'_>,
+) -> HubRuntimeError {
+    let mut error = erase_startup_cause(phase, cause);
+    error.database_failure = true;
     error
 }
 
@@ -1184,7 +1199,7 @@ async fn run_hub(
     telemetry_configuration: &TelemetryConfiguration,
 ) -> Result<ShutdownOutcome, HubRuntimeError> {
     use signalboxd::guard_recovery::{
-        GuardRecoveryPolicy, GuardRecoveryStop, GuardedIncarnationOutcome, run_guarded_incarnations,
+        GuardRecoveryPolicy, GuardRecoveryStop, run_guarded_incarnations,
     };
     let configuration = HubConfiguration::from_environment().map_err(|error| {
         erase_startup_cause(
@@ -1225,20 +1240,10 @@ async fn run_hub(
     match run_guarded_incarnations(
         policy,
         |observer| async move {
-            match run_hub_incarnation(telemetry_configuration, observer.clone()).await {
-                Ok(ShutdownOutcome::GuardLost) => GuardedIncarnationOutcome::Reacquire,
-                Err(error)
-                    if observer.is_recovering()
-                        && error.phase == RuntimePhase::DatabaseConnection
-                        && matches!(
-                            error.failure_class,
-                            OperatorFailureClass::Infrastructure { .. }
-                        ) =>
-                {
-                    GuardedIncarnationOutcome::Reacquire
-                }
-                result => GuardedIncarnationOutcome::Finished(result),
-            }
+            recovery_incarnation_outcome(
+                run_hub_incarnation(telemetry_configuration, observer.clone()).await,
+                observer.is_recovering(),
+            )
         },
         async {
             if shutdown_requested(&mut recovery_signals).await {
@@ -1254,6 +1259,34 @@ async fn run_hub(
             tracing::error!(?reason, "database guard recovery bound exhausted");
             Ok(ShutdownOutcome::GuardRecoveryExhausted)
         }
+    }
+}
+
+fn recovery_incarnation_outcome(
+    result: Result<ShutdownOutcome, HubRuntimeError>,
+    recovering: bool,
+) -> signalboxd::guard_recovery::GuardedIncarnationOutcome<Result<ShutdownOutcome, HubRuntimeError>>
+{
+    use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+    match result {
+        Ok(ShutdownOutcome::GuardLost) => GuardedIncarnationOutcome::Reacquire,
+        Err(error)
+            if recovering
+                && error.database_failure
+                && matches!(
+                    error.phase,
+                    RuntimePhase::DatabaseConnection
+                        | RuntimePhase::Migration
+                        | RuntimePhase::StartupScan
+                )
+                && matches!(
+                    error.failure_class,
+                    OperatorFailureClass::Infrastructure { .. }
+                ) =>
+        {
+            GuardedIncarnationOutcome::Reacquire
+        }
+        result => GuardedIncarnationOutcome::Finished(result),
     }
 }
 
@@ -1525,19 +1558,27 @@ async fn run_hub_incarnation(
     .with_recovery_observer(guard_recovery.clone());
     let pool = database.pool().clone();
     let fenced_pool_floor_pool = pool.clone();
-    migrate_hub_database(&pool).await?;
+    if let Err(error) = migrate_hub_database(&pool).await {
+        let _ = database.close().await;
+        return Err(error);
+    }
     let pending_reload =
-        signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
+        match signalbox_persistence::reload_configuration::ReloadConfigurationRepository::new(
             pool.clone(),
         )
         .pending()
         .await
-        .map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
-            )
-        })?;
+        {
+            Ok(pending) => pending,
+            Err(_) => {
+                let failure = erase_startup_database_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("configuration_reload_intent_read_failed"),
+                );
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
     let retained_startup = pending_reload
         .first()
         .map(|(_, intent)| {
@@ -1790,7 +1831,7 @@ async fn run_hub_incarnation(
         async {
             install_oauth_registrations(&pool, &migration_oauth_registrations).await?;
             invocation_processes.recover().await.map_err(|_| {
-                erase_startup_cause(
+                erase_startup_database_cause(
                     RuntimePhase::StartupScan,
                     SanitizedStartupCause::Static("credential_invocation_recovery_failed"),
                 )
@@ -1801,7 +1842,7 @@ async fn run_hub_incarnation(
             )
             .await
             .map_err(|_| {
-                erase_startup_cause(
+                erase_startup_database_cause(
                     RuntimePhase::StartupScan,
                     SanitizedStartupCause::Static("credential_capacity_registration_failed"),
                 )
@@ -1812,7 +1853,7 @@ async fn run_hub_incarnation(
                 .mark_orphaned_connections_lost()
                 .await
                 .map_err(|_| {
-                    erase_startup_cause(
+                    erase_startup_database_cause(
                         RuntimePhase::StartupScan,
                         SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
                     )
@@ -1833,7 +1874,7 @@ async fn run_hub_incarnation(
                 .resume_runner_replacements()
                 .await
                 .map_err(|_| {
-                    erase_startup_cause(
+                    erase_startup_database_cause(
                         RuntimePhase::StartupScan,
                         SanitizedStartupCause::Static("runner_replacement_recovery_failed"),
                     )
@@ -2148,7 +2189,7 @@ async fn run_hub_incarnation(
     let recovery_failure =
         match await_while_guarded(&mut database, configuration_reload.recover()).await {
             GuardedAwait::Completed(Ok(())) => None,
-            GuardedAwait::Completed(Err(_)) => Some(Err(erase_startup_cause(
+            GuardedAwait::Completed(Err(_)) => Some(Err(erase_startup_database_cause(
                 RuntimePhase::StartupScan,
                 SanitizedStartupCause::Static("configuration_reload_recovery_failed"),
             ))),
@@ -3337,6 +3378,109 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn guard_recovery_retries_migration_and_scan_failures_with_capped_backoff() {
+        use signalboxd::guard_recovery::{GuardRecoveryPolicy, run_guarded_incarnations};
+        let failures = RefCell::new(VecDeque::from([
+            Ok(ShutdownOutcome::GuardLost),
+            Err(HubRuntimeError::infrastructure(RuntimePhase::Migration)),
+            Err(HubRuntimeError::startup_scan(
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                None,
+                None,
+            )),
+            Ok(ShutdownOutcome::Clean),
+        ]));
+        let attempts = RefCell::new(Vec::new());
+        let started = tokio::time::Instant::now();
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Some(Duration::from_secs(10)),
+            )
+            .unwrap(),
+            |observer| {
+                attempts.borrow_mut().push(started.elapsed());
+                let result = failures
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("four reconstruction attempts");
+                ready(super::recovery_incarnation_outcome(
+                    result,
+                    observer.is_recovering(),
+                ))
+            },
+            pending(),
+        )
+        .await;
+        assert_eq!(result, Ok(Ok(ShutdownOutcome::Clean)));
+        assert_eq!(
+            *attempts.borrow(),
+            [
+                Duration::ZERO,
+                Duration::from_secs(1),
+                Duration::from_secs(3),
+                Duration::from_secs(5)
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guard_recovery_reconstruction_failures_reach_the_configured_elapsed_bound() {
+        use signalboxd::guard_recovery::{
+            GuardRecoveryPolicy, GuardRecoveryStop, run_guarded_incarnations,
+        };
+        let result = run_guarded_incarnations(
+            GuardRecoveryPolicy::new(
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Some(Duration::from_secs(4)),
+            )
+            .unwrap(),
+            |observer| {
+                let result = if observer.is_recovering() {
+                    Err(HubRuntimeError::startup_scan(
+                        OperatorFailureClass::Infrastructure {
+                            commit_ambiguous: true,
+                        },
+                        None,
+                        None,
+                    ))
+                } else {
+                    Ok(ShutdownOutcome::GuardLost)
+                };
+                ready(super::recovery_incarnation_outcome(
+                    result,
+                    observer.is_recovering(),
+                ))
+            },
+            pending(),
+        )
+        .await;
+        assert_eq!(result, Err(GuardRecoveryStop::ElapsedBoundExhausted));
+    }
+
+    #[test]
+    fn guard_recovery_preserves_initial_startup_and_non_database_failures() {
+        use signalboxd::guard_recovery::GuardedIncarnationOutcome;
+        let migration = HubRuntimeError::infrastructure(RuntimePhase::Migration);
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(migration), false), GuardedIncarnationOutcome::Finished(Err(error)) if error == migration)
+        );
+        let filesystem = HubRuntimeError::infrastructure(RuntimePhase::StartupScan);
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(filesystem), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == filesystem)
+        );
+        let corruption =
+            HubRuntimeError::startup_scan(OperatorFailureClass::FailClosedCorruption, None, None);
+        assert!(
+            matches!(super::recovery_incarnation_outcome(Err(corruption), true), GuardedIncarnationOutcome::Finished(Err(error)) if error == corruption)
+        );
+    }
+
     #[tokio::test]
     async fn adr0044_migration_precedes_scan_and_scheduling() {
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -3735,6 +3879,7 @@ mod tests {
             HubRuntimeError {
                 phase: RuntimePhase::StartupScan,
                 failure_class: OperatorFailureClass::FailClosedCorruption,
+                database_failure: true,
                 session: Some(session),
                 turn: Some(turn),
             }
