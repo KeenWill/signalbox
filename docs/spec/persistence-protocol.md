@@ -412,8 +412,9 @@ Stopping the wait retires retryable authority before releasing the active slot,
 and the claimed-retry writer rechecks under the same scheduler lock that the
 source attempt is still in flight.
 
-Credential-pool action reads and writes take an exclusive transaction-scoped
-advisory lock per profile reference, in sorted profile order.
+Credential-pool selection and failure commits serialize through exclusive
+transaction-scoped advisory locks per profile reference, in sorted profile
+order.
 
 The first model-call insertion of a turn takes the transaction-scoped
 model-activity advisory lock keyed by session; inactivity parking takes the
