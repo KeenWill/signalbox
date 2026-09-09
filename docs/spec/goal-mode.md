@@ -30,7 +30,8 @@ the generation must be resolved. Success records a verified achievement with the
 completed turn, observed head SHA, and resolved thread IDs and closes the
 session. A failed check supplies the missing push or thread evidence as the next
 input and records that detail on the successor turn; unavailable verification
-names the evidence still to verify.
+names the evidence still to verify. The check uses `code_host_request_timeout`;
+expiry supplies unavailable-verification guidance.
 
 While a generation is pursuing, each successful turn's end otherwise makes the
 scheduler create and start the next turn without user input. Except for the

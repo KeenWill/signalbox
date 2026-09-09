@@ -1,10 +1,10 @@
 //! Pull-request completion reads made between goal turns.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, future::Future, time::Duration};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use signalbox_domain::{CommitSha, GoalGuidance, SessionId};
+use signalbox_domain::{CommitSha, Goal, GoalGeneration, GoalGuidance, SessionId};
 use signalbox_module_repo_watch_v2::github::GitHubClient;
 use signalbox_persistence::goal::{GoalCompletedTool, GoalCompletionCheck, GoalCompletionResult};
 
@@ -72,6 +72,28 @@ fn missing(detail: String) -> Result<GoalCompletionResult, ()> {
     GoalGuidance::try_new(detail)
         .map(GoalCompletionResult::Missing)
         .map_err(|_| ())
+}
+
+fn verification_generation(goal: &Goal) -> Option<GoalGeneration> {
+    matches!(
+        goal.current().state(),
+        signalbox_domain::GoalState::Pursuing
+    )
+    .then(|| goal.current().generation())
+}
+
+async fn verify_completion(
+    work: &Work,
+    request_timeout: Option<Duration>,
+    observation: impl Future<Output = Result<GoalCompletionResult, ()>>,
+) -> Result<GoalCompletionResult, ()> {
+    let observed = match request_timeout {
+        Some(bound) => tokio::time::timeout(bound, observation)
+            .await
+            .unwrap_or(Err(())),
+        None => observation.await,
+    };
+    observed.or_else(|()| missing(format!("GitHub verification unavailable. Confirm pushed commit {} is contained in the pull-request head and resolve these replied threads: {}.", work.commit.as_str(), work.threads.iter().cloned().collect::<Vec<_>>().join(", "))))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,14 +237,9 @@ impl PostgresGoalPassDisposition {
         let Some(goal) = self.repository.load_goal(session).await? else {
             return Ok(None);
         };
-        if !matches!(
-            goal.current().state(),
-            signalbox_domain::GoalState::Pursuing
-        ) || goal.current().generation().get() != 1
-        {
+        let Some(generation) = verification_generation(&goal) else {
             return Ok(None);
-        }
-        let generation = goal.current().generation();
+        };
         let Some(turn) = self
             .repository
             .load_current_goal_turn(session, generation)
@@ -271,16 +288,20 @@ impl PostgresGoalPassDisposition {
         ) else {
             return Ok(None);
         };
-        let client = match &self.configuration_reload {
-            Some(reload) => reload.goal_github_client(&target.repository).await,
-            None => Err(()),
-        };
-        let observation = match client {
-            Ok(client) => observe(&client, &target, &work).await,
-            Err(()) => Err(()),
-        };
-        let result = observation.or_else(|()| missing(format!("GitHub verification unavailable. Confirm pushed commit {} is contained in the pull-request head and resolve these replied threads: {}.", work.commit.as_str(), work.threads.iter().cloned().collect::<Vec<_>>().join(", "))))
-            .map_err(|()| PostgresGoalPassDispositionError::InvalidStaticNeed)?;
+        let result = verify_completion(
+            &work,
+            self.model_configuration
+                .numeric_bounds()
+                .duration("code_host_request_timeout")
+                .flatten(),
+            async {
+                let reload = self.configuration_reload.as_ref().ok_or(())?;
+                let client = reload.goal_github_client(&target.repository).await?;
+                observe(&client, &target, &work).await
+            },
+        )
+        .await
+        .map_err(|()| PostgresGoalPassDispositionError::InvalidStaticNeed)?;
         Ok(Some(GoalCompletionCheck {
             generation,
             turn,
@@ -292,10 +313,90 @@ impl PostgresGoalPassDisposition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signalbox_domain::{DurableCommandId, GoalStatement, GoalUserProvenance};
 
     // Distinct immutable revisions make a stale-head success observable.
     const PUSHED: &str = "1111111111111111111111111111111111111111";
     const NEW_HEAD: &str = "2222222222222222222222222222222222222222";
+
+    fn pursuing_goal() -> Goal {
+        Goal::commission(
+            SessionId::from_uuid(uuid::Uuid::now_v7()),
+            GoalStatement::try_new("Address the pull-request review".to_owned()).unwrap(),
+            GoalUserProvenance::new(DurableCommandId::from_uuid(uuid::Uuid::now_v7())),
+        )
+    }
+
+    #[test]
+    fn superseded_goal_remains_eligible_for_current_generation_verification() {
+        let goal = pursuing_goal()
+            .supersede(
+                GoalStatement::try_new("Address the revised pull-request review".to_owned())
+                    .unwrap(),
+                GoalUserProvenance::new(DurableCommandId::from_uuid(uuid::Uuid::now_v7())),
+            )
+            .unwrap();
+
+        assert_eq!(
+            verification_generation(&goal).map(GoalGeneration::get),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn stopped_goal_does_not_trigger_verification() {
+        let goal = pursuing_goal()
+            .stop(GoalUserProvenance::new(DurableCommandId::from_uuid(
+                uuid::Uuid::now_v7(),
+            )))
+            .unwrap();
+
+        assert_eq!(verification_generation(&goal), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_goal_verification_returns_missing_evidence_at_the_configured_timeout() {
+        let configuration = crate::configuration::checked_in_example_configuration().unwrap();
+        let bound = configuration
+            .numeric_bounds()
+            .duration("code_host_request_timeout")
+            .flatten()
+            .expect("the example bounds code-host requests");
+        let work = completed_work(&target(), vec![push(), reply()]).unwrap();
+        let started = tokio::time::Instant::now();
+
+        let result = verify_completion(&work, Some(bound), std::future::pending())
+            .await
+            .unwrap();
+
+        assert_eq!(started.elapsed(), bound);
+        let GoalCompletionResult::Missing(input) = result else {
+            panic!("an expired verification must supply the evidence still missing");
+        };
+        assert_eq!(
+            input.as_str(),
+            "GitHub verification unavailable. Confirm pushed commit 1111111111111111111111111111111111111111 is contained in the pull-request head and resolve these replied threads: thread-A."
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unbounded_goal_verification_waits_for_the_observation() {
+        let work = completed_work(&target(), vec![push(), reply()]).unwrap();
+        let result = verify_completion(&work, None, async {
+            // A pending observation still completes when no request bound is configured.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assess(
+                &work,
+                work.commit.clone(),
+                PushLanding::Confirmed,
+                &BTreeSet::from(["thread-A".to_owned()]),
+            )
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(result, GoalCompletionResult::Verified { .. }));
+    }
 
     fn target() -> Target {
         Target {
@@ -318,17 +419,20 @@ mod tests {
         GoalCompletedTool { tool_name: "change_request_thread_reply".to_owned(), arguments_text: r#"{"repository":"example/project","number":7,"thread_id":"thread-A","body":"Fixed"}"#.to_owned(), result_text: r#"{"id":"reply-A","url":"https://github.com/example/project/pull/7#discussion_r1"}"#.to_owned() }
     }
 
-    #[test]
-    fn goal_achieves_after_a_push_and_resolved_reply() {
+    #[tokio::test(start_paused = true)]
+    async fn goal_achieves_after_a_push_and_resolved_reply() {
         let work = completed_work(&target(), vec![push(), reply()])
             .expect("push and reply trigger verification");
         let head = CommitSha::try_new(NEW_HEAD.to_owned()).unwrap();
-        let result = assess(
-            &work,
-            head.clone(),
-            PushLanding::Confirmed,
-            &BTreeSet::from(["thread-A".to_owned()]),
-        )
+        let result = verify_completion(&work, Some(Duration::from_secs(1)), async {
+            assess(
+                &work,
+                head.clone(),
+                PushLanding::Confirmed,
+                &BTreeSet::from(["thread-A".to_owned()]),
+            )
+        })
+        .await
         .unwrap();
         assert!(
             matches!(result, GoalCompletionResult::Verified { head_sha, resolved_thread_ids } if head_sha == head && resolved_thread_ids.iter().map(signalbox_domain::ReviewThreadId::as_str).collect::<Vec<_>>() == ["thread-A"])
