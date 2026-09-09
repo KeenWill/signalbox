@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn provider_facts_returning_to_a_head_after_presentation_edits_are_coalesced()
+async fn provider_facts_returning_on_the_same_head_after_presentation_edits_are_coalesced()
 -> Result<(), Box<dyn Error>> {
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
@@ -15,7 +15,6 @@ async fn provider_facts_returning_to_a_head_after_presentation_edits_are_coalesc
     let store = RepoWatchStore::new(pool.clone());
     let repository = RepositorySlug::try_new(String::from("provider-identity/project"))?;
     let head = CommitSha::try_new("a".repeat(40))?;
-    let other_head = CommitSha::try_new("b".repeat(40))?;
     let initial = PullRequestTitle::try_new(String::from("Initial title"))?;
     let edited = PullRequestTitle::try_new(String::from("Edited title"))?;
     let reviewer = RepoWatchAuthorLogin::try_new(String::from("reviewer"))?;
@@ -31,6 +30,7 @@ async fn provider_facts_returning_to_a_head_after_presentation_edits_are_coalesc
         head.clone(),
     );
     let labels = vec![LabelName::try_new(String::from("ready"))?];
+    let mut admissions = Vec::new();
     for (observed_head, title, observed_labels, suites, reviews) in [
         (&head, &initial, Vec::new(), Vec::new(), Vec::new()),
         (
@@ -40,7 +40,7 @@ async fn provider_facts_returning_to_a_head_after_presentation_edits_are_coalesc
             vec![suite.clone()],
             vec![review.clone()],
         ),
-        (&other_head, &edited, labels.clone(), Vec::new(), Vec::new()),
+        (&head, &edited, labels.clone(), Vec::new(), Vec::new()),
         (&head, &edited, labels, vec![suite], vec![review]),
     ] {
         let branch = BranchName::try_new(String::from("main"))?;
@@ -80,7 +80,7 @@ async fn provider_facts_returning_to_a_head_after_presentation_edits_are_coalesc
                 })?,
             ),
         };
-        store
+        let admission = store
             .ingest_observation(
                 &store.ingest_baseline(&repository).await?,
                 &observed,
@@ -88,7 +88,15 @@ async fn provider_facts_returning_to_a_head_after_presentation_edits_are_coalesc
                 MERGED_RETENTION,
             )
             .await?;
+        let FrontierEventAdmission::Committed { events, .. } = admission else {
+            panic!("expected committed observation, got {admission:?}");
+        };
+        admissions.push(events);
     }
+    assert_eq!(
+        admissions.last().map(AsRef::as_ref),
+        Some([EventAdmission::Replayed, EventAdmission::Replayed].as_slice()),
+    );
     let kinds: Vec<String> = sqlx::query_scalar(
         "SELECT event_kind FROM gh_event WHERE repository = $1
            AND event_kind IN ('checks_completed', 'review_submitted')
@@ -98,6 +106,15 @@ async fn provider_facts_returning_to_a_head_after_presentation_edits_are_coalesc
     .fetch_all(&pool)
     .await?;
     assert_eq!(kinds, ["checks_completed", "review_submitted"]);
+    let retained_titles: Vec<String> = sqlx::query_scalar(
+        "SELECT convert_from(normalized_payload, 'UTF8')::jsonb #>> '{target,title}'
+           FROM gh_event WHERE repository = $1
+            AND event_kind IN ('checks_completed', 'review_submitted')",
+    )
+    .bind(repository.as_str())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(retained_titles, [initial.as_str(), initial.as_str()]);
     let title: String = sqlx::query_scalar("SELECT title FROM pr_state WHERE repository = $1")
         .bind(repository.as_str())
         .fetch_one(&pool)
