@@ -15,6 +15,7 @@ pub enum ResolvedToolConversationEntry {
         request: signalbox_domain::ToolRequest,
         attempt: signalbox_domain::EndedToolAttempt,
         context_text: option::Option<signalbox_domain::ToolResultText>,
+        context_error_detail: option::Option<signalbox_domain::ToolExecutionErrorDetail>,
     },
     Denied {
         source: signalbox_domain::SemanticTranscriptEntryRef,
