@@ -108,6 +108,9 @@ commits its registry row, payload record, result, and every effect together, and
 a failed transaction leaves no claim behind. A recorded rejection claims the
 identifier the same way an applied command does.
 
+Metadata replacement settles stored replay or conflicting reuse before applying
+current deployment limits to an unseen command.
+
 Recording who or what caused an action is provenance only. It grants no
 lifecycle, authorization, or approval authority. No automated path can attribute
 its action to the user, and an action by a model never counts as an action by

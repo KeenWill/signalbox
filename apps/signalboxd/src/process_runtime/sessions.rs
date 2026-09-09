@@ -2008,19 +2008,6 @@ pub(super) async fn handle_replace_session_metadata<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    if configured_usize(model_configuration, "max_session_metadata_tags")
-        .is_some_and(|maximum| metadata.tags().len() > maximum)
-        || configured_usize(model_configuration, "max_session_metadata_attributes")
-            .is_some_and(|maximum| metadata.attributes().len() > maximum)
-    {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    }
     let replacement = SessionMetadataContent::try_new(
         metadata.title().map(str::to_owned),
         metadata.tags().map(str::to_owned).collect(),
@@ -2053,9 +2040,46 @@ where
         )
         .await;
     };
-    let mut service =
-        ReplaceSessionMetadataService::new(SessionMetadataRepository::new(pool.clone()));
-    match service.execute(request).await {
+    let repository = SessionMetadataRepository::new(pool.clone());
+    let outcome = match repository.load_command(request.command_id()).await {
+        Ok(Some(recorded)) => {
+            let command = signalbox_domain::ReplaceSessionMetadata::new(
+                request.command_id(),
+                request.session(),
+                request.replacement().clone(),
+            );
+            Ok(if recorded.command() == &command {
+                ReplaceSessionMetadataOutcome::Recorded(recorded.result().clone())
+            } else {
+                ReplaceSessionMetadataOutcome::ConflictingReuse {
+                    command_id: request.command_id(),
+                }
+            })
+        }
+        Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }) => {
+            Ok(ReplaceSessionMetadataOutcome::ConflictingReuse { command_id })
+        }
+        Err(error) => Err(error),
+        Ok(None) => {
+            if configured_usize(model_configuration, "max_session_metadata_tags")
+                .is_some_and(|maximum| metadata.tags().len() > maximum)
+                || configured_usize(model_configuration, "max_session_metadata_attributes")
+                    .is_some_and(|maximum| metadata.attributes().len() > maximum)
+            {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
+            ReplaceSessionMetadataService::new(repository)
+                .execute(request)
+                .await
+        }
+    };
+    match outcome {
         Ok(ReplaceSessionMetadataOutcome::Recorded(ReplaceSessionMetadataResult::Applied(
             applied,
         ))) => {

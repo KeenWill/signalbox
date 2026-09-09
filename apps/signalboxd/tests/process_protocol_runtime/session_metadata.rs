@@ -264,12 +264,10 @@ async fn reads_back_tool_written_metadata() -> Result<(), Box<dyn Error>> {
     runtime.stop().await
 }
 
-/// one metadata command identity applies once, replays exactly, and
-/// rejects a structurally different reuse.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn enforces_metadata_command_identity() -> Result<(), Box<dyn Error>> {
-    let runtime = RunningRuntime::start().await?;
+async fn metadata_replay_precedes_lowered_deployment_limits() -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let first_session = create_alias_session(&mut connection).await?;
 
@@ -277,7 +275,10 @@ async fn enforces_metadata_command_identity() -> Result<(), Box<dyn Error>> {
     let replacement = SessionMetadata::try_new(
         Some(String::from("Archived plan")),
         vec![String::from("work"), String::from("daily")],
-        vec![(String::from("run"), String::from("17"))],
+        vec![
+            (String::from("run"), String::from("17")),
+            (String::from("branch"), String::from("main")),
+        ],
         true,
     )?;
     connection
@@ -307,6 +308,12 @@ async fn enforces_metadata_command_identity() -> Result<(), Box<dyn Error>> {
     assert_eq!(metadata, &replacement);
     assert!(matches!(last_writer.actor(), MetadataActor::User {}));
 
+    drop(connection);
+    runtime
+        .restart_with_model_configuration(&one_tag_and_one_attribute_configuration()?)
+        .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
     connection
         .request_version(
             ProtocolVersion::One,
@@ -328,7 +335,15 @@ async fn enforces_metadata_command_identity() -> Result<(), Box<dyn Error>> {
             ClientRequest::ReplaceSessionMetadata {
                 command_id: replacement_command,
                 session_id: first_session,
-                metadata: SessionMetadata::empty(),
+                metadata: SessionMetadata::try_new(
+                    Some(String::from("Conflicting title")),
+                    replacement.tags().map(str::to_owned).collect(),
+                    replacement
+                        .attributes()
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                        .collect(),
+                    replacement.archived(),
+                )?,
             },
         )
         .await?;
@@ -342,6 +357,71 @@ async fn enforces_metadata_command_identity() -> Result<(), Box<dyn Error>> {
 
     drop(connection);
     runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn new_metadata_command_above_deployment_limits_is_unclaimed() -> Result<(), Box<dyn Error>> {
+    let runtime =
+        RunningRuntime::start_with_model_configuration(&one_tag_and_one_attribute_configuration()?)
+            .await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let repository = SessionMetadataRepository::new(runtime.pool.clone());
+    for metadata in [
+        SessionMetadata::try_new(
+            None,
+            vec![String::from("one"), String::from("two")],
+            Vec::new(),
+            false,
+        )?,
+        SessionMetadata::try_new(
+            None,
+            Vec::new(),
+            vec![
+                (String::from("one"), String::from("1")),
+                (String::from("two"), String::from("2")),
+            ],
+            false,
+        )?,
+    ] {
+        let command_id = command()?;
+        connection
+            .request(
+                10,
+                ClientRequest::ReplaceSessionMetadata {
+                    command_id,
+                    session_id,
+                    metadata,
+                },
+            )
+            .await?;
+        assert!(matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                ..
+            }
+        ));
+        assert!(
+            repository
+                .load_command(DurableCommandId::from_uuid(command_id.into_uuid()))
+                .await?
+                .is_none()
+        );
+    }
+    drop(connection);
+    runtime.stop().await
+}
+
+fn one_tag_and_one_attribute_configuration() -> Result<String, Box<dyn Error>> {
+    let mut source = MODEL_CONFIGURATION.parse::<toml_edit::DocumentMut>()?;
+    let example = include_str!("../../../../config/signalboxd.example.toml")
+        .parse::<toml_edit::DocumentMut>()?;
+    source.insert("numeric_bounds", example["numeric_bounds"].clone());
+    source["numeric_bounds"]["max_session_metadata_tags"] = toml_edit::value(1);
+    source["numeric_bounds"]["max_session_metadata_attributes"] = toml_edit::value(1);
+    Ok(source.to_string())
 }
 
 /// the default metadata list applies exact filters while excluding an
