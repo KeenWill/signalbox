@@ -18,8 +18,14 @@ use tokio::{
 /// Retains socket readiness times across request handling and buffer refills.
 pub(super) struct ArrivalReader {
     reader: Arc<OwnedReadHalf>,
-    unread_since: watch::Sender<Option<Instant>>,
+    unread_since: watch::Sender<Option<UnreadInput>>,
     pub(super) received_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct UnreadInput {
+    received_at: Instant,
+    remaining_bytes: u64,
 }
 
 impl ArrivalReader {
@@ -55,27 +61,83 @@ impl ArrivalReader {
                     // A write-half close does not end a follow stream or pending receipt.
                     return std::future::pending().await;
                 }
-                record_input_arrival(socket, &unread_since);
+                record_input_arrival(socket, &unread_since)?;
             }
         }
     }
+
+    fn try_read_batch(
+        &mut self,
+        capacity: usize,
+        read: impl FnOnce(&UnixStream, usize) -> io::Result<usize>,
+    ) -> io::Result<usize> {
+        let socket = self.reader.as_ref().as_ref();
+        let mut result = Ok(0);
+        self.unread_since.send_modify(|input| {
+            result = (|| {
+                if input.is_none() {
+                    *input = queued_input(socket)?;
+                }
+                let received_at = input.map_or_else(Instant::now, |input| input.received_at);
+                let limit = input.map_or(capacity, |input| {
+                    capacity.min(usize::try_from(input.remaining_bytes).unwrap_or(usize::MAX))
+                });
+                match read(socket, limit) {
+                    Ok(read) => {
+                        if read > 0 {
+                            self.received_at = received_at;
+                        }
+                        if let Some(batch) = input {
+                            batch.remaining_bytes -= read as u64;
+                            if read == 0 || batch.remaining_bytes == 0 {
+                                *input = None;
+                            }
+                        }
+                        Ok(read)
+                    }
+                    Err(error) => {
+                        if error.kind() == io::ErrorKind::WouldBlock {
+                            *input = None;
+                        }
+                        Err(error)
+                    }
+                }
+            })();
+        });
+        result
+    }
 }
 
-fn record_input_arrival(socket: &UnixStream, unread_since: &watch::Sender<Option<Instant>>) {
+fn queued_input(socket: &UnixStream) -> io::Result<Option<UnreadInput>> {
+    let remaining_bytes = rustix::io::ioctl_fionread(socket)?;
+    Ok((remaining_bytes > 0).then(|| UnreadInput {
+        received_at: Instant::now(),
+        remaining_bytes,
+    }))
+}
+
+fn record_input_arrival(
+    socket: &UnixStream,
+    unread_since: &watch::Sender<Option<UnreadInput>>,
+) -> io::Result<()> {
+    let mut result = Ok(());
     unread_since.send_if_modified(|since| {
-        // Recheck under the marker's write lock: a read may have drained the peeked byte.
-        if since.is_some()
-            || !matches!(
-                socket.try_io(Interest::READABLE, || peek_input(socket)),
-                Ok(available) if available > 0
-            )
-        {
-            false
-        } else {
-            *since = Some(Instant::now());
-            true
+        if since.is_some() {
+            return false;
+        }
+        // Snapshot the byte count under the same lock used to consume this batch.
+        match queued_input(socket) {
+            Ok(input) => {
+                *since = input;
+                since.is_some()
+            }
+            Err(error) => {
+                result = Err(error);
+                false
+            }
         }
     });
+    result
 }
 
 fn peek_input(socket: &UnixStream) -> io::Result<usize> {
@@ -99,28 +161,16 @@ impl AsyncRead for ArrivalReader {
         if buffer.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
-        let socket = this.reader.as_ref().as_ref();
         loop {
-            std::task::ready!(socket.poll_read_ready(cx))?;
-            let received_at = (*this.unread_since.borrow()).unwrap_or_else(Instant::now);
-            match this.reader.try_read_buf(buffer) {
-                Ok(0) => return Poll::Ready(Ok(())),
-                Ok(_) => {
-                    this.received_at = received_at;
-                    // Keep the timestamp across short reads until the kernel buffer drains.
-                    let remaining = socket.try_io(Interest::READABLE, || peek_input(socket));
-                    if matches!(remaining, Ok(0))
-                        || matches!(remaining, Err(ref error) if error.kind() == io::ErrorKind::WouldBlock)
-                    {
-                        this.unread_since.send_replace(None);
-                    } else {
-                        this.unread_since.send_replace(Some(received_at));
-                    }
+            std::task::ready!(this.reader.as_ref().as_ref().poll_read_ready(cx))?;
+            match this.try_read_batch(buffer.remaining(), |socket, limit| {
+                socket.try_read(buffer.initialize_unfilled_to(limit))
+            }) {
+                Ok(read) => {
+                    buffer.advance(read);
                     return Poll::Ready(Ok(()));
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    this.unread_since.send_replace(None);
-                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }
@@ -191,8 +241,49 @@ impl<Writer: AsyncWrite + Unpin> AsyncWrite for ProgressWriter<Writer> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+    use crate::process_runtime::{IncomingLine, connection::read_admitted_frame};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex};
+    use tokio::sync::Semaphore;
     use tokio::time::timeout;
+
+    #[tokio::test(start_paused = true)]
+    async fn input_arriving_after_a_read_does_not_inherit_the_drained_batch_deadline() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let (server, _writer) = server.into_split();
+        let mut reader = ArrivalReader::new(server);
+        let observer = reader.reader.clone();
+        let socket = observer.as_ref().as_ref();
+        client.write_all(b"b").await.unwrap();
+        socket.readable().await.unwrap();
+        record_input_arrival(socket, &reader.unread_since).unwrap();
+        sleep(Duration::from_millis(900)).await;
+
+        let mut consumed = [0; 1];
+        reader
+            .try_read_batch(consumed.len(), |socket, limit| {
+                let read = socket.try_read(&mut consumed[..limit])?;
+                // C arrives after B drains, before the reader updates its marker.
+                assert_eq!(client.try_write(b"{}\n")?, 3);
+                Ok(read)
+            })
+            .unwrap();
+        assert_eq!(&consumed, b"b");
+        record_input_arrival(socket, &reader.unread_since).unwrap();
+        sleep(Duration::from_millis(200)).await;
+
+        let mut reader = BufReader::new(reader);
+        let (_shutdown, mut shutdown) = watch::channel(false);
+        let (_, frame) = read_admitted_frame(
+            &mut reader,
+            Arc::new(Semaphore::new(1)),
+            &mut shutdown,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .expect("C has its own deadline despite B's expired arrival timestamp")
+        .unwrap();
+        assert!(matches!(frame, IncomingLine::Complete(bytes) if bytes == b"{}\n"));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn drained_peek_does_not_age_input_arriving_after_an_idle_gap() {
@@ -212,7 +303,7 @@ mod tests {
 
         // The read wins between the watcher's successful peek and marker publication.
         assert_eq!(reader.read_u8().await.unwrap(), b'a');
-        record_input_arrival(socket, &reader.unread_since);
+        record_input_arrival(socket, &reader.unread_since).unwrap();
         sleep(Duration::from_secs(60)).await;
         client.write_all(b"b").await.unwrap();
         assert_eq!(reader.read_u8().await.unwrap(), b'b');
