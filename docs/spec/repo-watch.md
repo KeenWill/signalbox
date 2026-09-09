@@ -40,7 +40,7 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
-The module schema contains thirteen tables:
+The module schema contains sixteen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
   repository row fences complete frontier commits with a generation and the
@@ -71,6 +71,10 @@ The module schema contains thirteen tables:
   payload, and settlement.
 - `webhook_delivery`, `webhook_body`, and `webhook_disposition` retain one
   authenticated delivery under its caller-selected expiry.
+- `webhook_pull_wake` coalesces pending PR observations and retains failed
+  attempt counts and the last failure.
+- `poll_cache_reviewers` and `poll_cache_page` retain the selected reviewer set
+  and accepted conditional REST snapshots.
 - `core_event_cursor` records module application progress.
 - `rule_evaluation_cursor` records each rule revision's last evaluated
   repository event, including nonmatches and suppressed dispatches.
@@ -155,17 +159,16 @@ The module's repository task serializes polling and webhook wakes. Poll
 intervals are start-to-start; a wake received during an attempt waits for that
 attempt to finish and does not postpone the periodic poll deadline. Each attempt
 reloads its committed comparison baseline and frontier, including compacted
-merged pull requests and their head repository identities, fetches a complete
-observation, and commits the differ's facts with their poll or webhook lineage.
-Terminal pull requests leave the ordinary baseline when observed; merged
-subjects retain a compact baseline until
-`numeric_bounds.repository_watch_webhook_retention` elapses from their merge
-time, and discussion reads run only for open subjects. Compact entries missing
-their merge time are dropped without discarding the ordinary predecessor, dated
-compact entries, or event frontier. Workflow reads query completed runs by
-distinct current head SHA for the default branch and open pull-request
-same-repository head branches; prior completions for those branches remain
-comparison input. Each observation admits at most 1,000 REST and GraphQL
+merged pull requests and their head repository identities, and commits the
+differ's facts with their poll or webhook lineage. Terminal pull requests leave
+the ordinary baseline when observed; merged subjects retain a compact baseline
+until `numeric_bounds.repository_watch_webhook_retention` elapses from their
+merge time, and discussion reads run only for open subjects. Compact entries
+missing their merge time are dropped without discarding the ordinary
+predecessor, dated compact entries, or event frontier. Workflow reads query
+completed runs by distinct current head SHA for the default branch and open
+pull-request same-repository head branches; prior completions for those branches
+remain comparison input. Each observation admits at most 1,000 REST and GraphQL
 requests combined; exhausting that budget rejects the incomplete observation.
 Check inventories exceeding GitHub's 1,000-suite commit limit and workflow
 searches exceeding GitHub's 1,000-result cap also reject the observation. Failed
@@ -175,15 +178,28 @@ the convergence sweep, and drains them before closing its database.
 
 The webhook listener authenticates the configured hook identity, secret, and
 repository before accepting a delivery. An empty resolved webhook secret is
-unavailable. Primary hooks wake the repository task; shadow hooks acknowledge
-without waking it. The runtime's `reload_configuration` reconciles rule
-revisions and replaces listener settings inside the reload. Enabled rule
-templates must resolve before composition or reload. Stale or conflicting rule
-revisions fail reload without replacing the running configuration. Same-address
-changes swap the path and hook map atomically; address changes bind a
-replacement before retiring the running listener, and a bind failure preserves
-the running settings. In-flight deliveries retry against the replacement
-configuration.
+unavailable. Primary pull-request, review, and check deliveries durably coalesce
+their named pull requests in `webhook_pull_wake` and wake the repository task.
+Each queued pull request is fetched and admitted independently against the
+committed baseline; the command worker evaluates its events without waiting for
+a poll. For an unseen PR, the final snapshot also derives its labels, reviews,
+threads, and completed checks independently of the observation source. Durable
+facts at the comparison generation distinguish reopened PRs from unseen PRs;
+reopening does not synthesize their existing snapshot facts. A drain with any
+failed targeted read reports a partial outcome. Queue storage failures report
+`store_failed`. Successful admission clears only the consumed delivery; a newer
+delivery remains pending. Failed observations retain their failure and attempt
+count. After three failed attempts, that row is skipped until a new delivery
+resets it. Other queued PRs continue; periodic polls reconcile repository-wide
+state independently. Startup wakes resume eligible pending rows. Shadow hooks
+acknowledge without queuing or waking. The runtime's `reload_configuration`
+reconciles rule revisions and replaces listener settings inside the reload.
+Enabled rule templates must resolve before composition or reload. Stale or
+conflicting rule revisions fail reload without replacing the running
+configuration. Same-address changes swap the path and hook map atomically;
+address changes bind a replacement before retiring the running listener, and a
+bind failure preserves the running settings. In-flight deliveries retry against
+the replacement configuration.
 
 Lifecycle reactions accept `session_terminal`, `goal_changed`, and retained
 `pull_request_closed` or `pull_request_merged` facts and emit only

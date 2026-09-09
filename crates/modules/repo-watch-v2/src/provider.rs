@@ -278,13 +278,13 @@ where
         let result = self.observe(producer).await;
         use crate::measurements::PollOutcome;
         attempt.finish(match &result {
-            Ok(()) => PollOutcome::Succeeded,
+            Ok(outcome) => *outcome,
             Err(RepositoryAttemptError::Client(_)) => PollOutcome::ClientFailed,
             Err(RepositoryAttemptError::Observation(_)) => PollOutcome::ObservationFailed,
             Err(RepositoryAttemptError::Store(_)) => PollOutcome::StoreFailed,
             Err(RepositoryAttemptError::FrontierConflict) => PollOutcome::FrontierConflict,
         });
-        result
+        result.map(|_| ())
     }
 }
 
@@ -292,12 +292,26 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
     async fn observe(
         &mut self,
         producer: EventProducer,
-    ) -> Result<(), RepositoryAttemptError<Loader::Error>> {
+    ) -> Result<crate::measurements::PollOutcome, RepositoryAttemptError<Loader::Error>> {
         let client = self
             .clients
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
+        if producer == EventProducer::Webhook {
+            return crate::poll_cache::observe_webhook_pulls(
+                &client,
+                &self.store,
+                &self.repository,
+                &self.signal_reviewers,
+                self.subject_retention,
+            )
+            .await
+            .map_err(|error| match error {
+                ObservationError::Cache(error) => RepositoryAttemptError::Store(error),
+                error => RepositoryAttemptError::Observation(error),
+            });
+        }
         let admission = crate::poll_cache::poll_with_cache(
             &client,
             &self.store,
@@ -312,7 +326,9 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
             error => RepositoryAttemptError::Observation(error),
         })?;
         match admission {
-            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged => Ok(()),
+            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged => {
+                Ok(crate::measurements::PollOutcome::Succeeded)
+            }
             FrontierEventAdmission::Stale | FrontierEventAdmission::ConflictingReuse => {
                 Err(RepositoryAttemptError::FrontierConflict)
             }
@@ -429,6 +445,85 @@ pub async fn fetch_observation(
         default_head,
         observation: RepoWatchObservation::new(reviewers.to_vec(), state),
         merged_at,
+        observed_at: OffsetDateTime::now_utc(),
+    })
+}
+
+/// Refreshes one pull request while retaining all other committed comparison subjects.
+pub async fn fetch_pull_observation(
+    io: &impl GitHubObservationRead,
+    repository: &RepositorySlug,
+    reviewers: &[RepoWatchAuthorLogin],
+    baseline: &crate::ingest::IngestBaseline,
+    number: PullRequestNumber,
+) -> Result<RepositoryObservation, ObservationError> {
+    let budget = ObservationReadBudget {
+        io,
+        requests: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let io = &budget;
+    let root = format!("/repos/{}", repository.as_str());
+    let (metadata, _) = read_page(io, &root).await?;
+    let default_branch =
+        metadata.admit(BranchName::try_new(metadata.text(&metadata["default_branch"])?).ok())?;
+    let previous = baseline.observation.as_ref();
+    let mut branch_heads = previous
+        .map(|prior| prior.state().branch_heads().to_vec())
+        .unwrap_or_default();
+    if !branch_heads
+        .iter()
+        .any(|branch| branch.branch() == &default_branch)
+    {
+        branch_heads = pages(io, &format!("{root}/branches"), None)
+            .await?
+            .iter()
+            .map(|v| {
+                Ok(RepoWatchBranchHead::new(
+                    v.admit(BranchName::try_new(v.text(&v["name"])?).ok())?,
+                    v.admit(CommitSha::try_new(v.text(&v["commit"]["sha"])?).ok())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, ObservationError>>()?;
+    }
+    let default_head = metadata
+        .admit(
+            branch_heads
+                .iter()
+                .find(|branch| branch.branch() == &default_branch),
+        )?
+        .head()
+        .clone();
+    let mut pulls = previous
+        .map(|prior| prior.state().pull_requests().to_vec())
+        .unwrap_or_default();
+    let prior = pulls.iter().find(|pull| pull.context().number() == number);
+    let merged = baseline
+        .merged_baselines
+        .iter()
+        .find(|entry| entry.state.number() == number)
+        .map(|entry| &entry.state);
+    let (pull, merge_time) =
+        fetch_pull(io, &root, repository, number, reviewers, prior, merged).await?;
+    pulls.retain(|pull| pull.context().number() != number);
+    pulls.push(pull);
+    let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+        pull_requests: pulls,
+        branch_heads,
+        workflow_runs: previous
+            .map(|prior| prior.state().workflow_runs().to_vec())
+            .unwrap_or_default(),
+    })
+    .map_err(|source| ObservationError::InvalidState {
+        repository: repository.clone(),
+        pull_request: Some(number),
+        source,
+    })?;
+    Ok(RepositoryObservation {
+        repository: repository.clone(),
+        default_branch,
+        default_head,
+        observation: RepoWatchObservation::new(reviewers.to_vec(), state),
+        merged_at: merge_time.map(|time| (number, time)).into_iter().collect(),
         observed_at: OffsetDateTime::now_utc(),
     })
 }
@@ -932,6 +1027,48 @@ mod tests {
             assert_eq!(evidence.last_successful_observation, None);
             assert_eq!(evidence.events_recorded, 0);
         }
+        Ok(())
+    }
+
+    struct LoadedClient(GitHubClient);
+
+    impl RepositoryClientLoader for LoadedClient {
+        type Error = std::convert::Infallible;
+        async fn load_client(&self) -> Result<GitHubClient, Self::Error> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_webhook_queue_records_a_store_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = RepositorySlug::try_new("store-evidence/project".to_owned())?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")?;
+        pool.close().await;
+        let store = RepoWatchStore::new(pool);
+        // Inert fixture credentials: the closed store fails before provider I/O.
+        let client = GitHubClient::try_new("repo-watch-test", "unused-test-token")?;
+        let mut task = GitHubRepositoryTask {
+            repository: repository.clone(),
+            signal_reviewers: Vec::new(),
+            subject_retention: std::time::Duration::ZERO,
+            clients: LoadedClient(client),
+            store: store.clone(),
+        };
+        assert!(matches!(
+            task.poll(EventProducer::Webhook).await,
+            Err(RepositoryAttemptError::Store(StoreError::Database(
+                sqlx::Error::PoolClosed
+            )))
+        ));
+        let evidence = store.ingestion_measurements(&repository);
+        assert_eq!(
+            evidence.last_poll.expect("attempt recorded").outcome,
+            crate::measurements::PollOutcome::StoreFailed
+        );
+        assert_eq!(evidence.last_successful_observation, None);
+        assert_eq!(evidence.events_recorded, 0);
         Ok(())
     }
 

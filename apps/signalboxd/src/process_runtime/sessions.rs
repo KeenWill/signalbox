@@ -2762,6 +2762,7 @@ fn wire_ingestion_measurements(
             outcome: match poll.outcome {
                 PollOutcome::InProgress => RepositoryPollOutcome::InProgress,
                 PollOutcome::Succeeded => RepositoryPollOutcome::Succeeded,
+                PollOutcome::Partial => RepositoryPollOutcome::Partial,
                 PollOutcome::ClientFailed => RepositoryPollOutcome::ClientFailed,
                 PollOutcome::ObservationFailed => RepositoryPollOutcome::ObservationFailed,
                 PollOutcome::StoreFailed => RepositoryPollOutcome::StoreFailed,

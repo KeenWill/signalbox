@@ -132,7 +132,7 @@ fn operator_status_rejects_a_week_label_that_names_no_day() {
 }
 
 #[test]
-fn repository_ingestion_status_preserves_in_progress_and_absent_observation()
+fn repository_ingestion_status_preserves_partial_and_absent_observation()
 -> Result<(), Box<dyn std::error::Error>> {
     assert_server_message_round_trip(
         request(1)?,
@@ -142,13 +142,13 @@ fn repository_ingestion_status_preserves_in_progress_and_absent_observation()
                 last_successful_observation: None,
                 last_poll: Some(RepositoryPollAttempt {
                     attempted_at: "2026-09-08 12:00:00.0 +00:00:00".to_owned(),
-                    outcome: RepositoryPollOutcome::InProgress,
+                    outcome: RepositoryPollOutcome::Partial,
                 }),
                 last_accepted_webhook: None,
                 events_recorded: CanonicalU64::new(0),
             }),
         ))),
-        r#"{"type":"operator_status","kind":"repository_ingestion","repository":"owner/repository","last_successful_observation":null,"last_poll":{"attempted_at":"2026-09-08 12:00:00.0 +00:00:00","outcome":"in_progress"},"last_accepted_webhook":null,"events_recorded":"0"}"#,
+        r#"{"type":"operator_status","kind":"repository_ingestion","repository":"owner/repository","last_successful_observation":null,"last_poll":{"attempted_at":"2026-09-08 12:00:00.0 +00:00:00","outcome":"partial"},"last_accepted_webhook":null,"events_recorded":"0"}"#,
     )?;
     Ok(())
 }
