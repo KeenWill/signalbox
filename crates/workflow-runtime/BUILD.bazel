@@ -22,6 +22,7 @@ rust_unit_test(
     name = "unit_tests",
     crate = ":signalbox_workflow_runtime",
     crate_features = CRATE_FEATURES,
+    compile_data = glob(["tests/fixtures/*.js"]),
     deps = ["//crates/persistence:signalbox_persistence"],
 )
 

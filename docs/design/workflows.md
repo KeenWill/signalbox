@@ -8,9 +8,7 @@ User-authorized register, start and read commands use the
 [process protocol](../spec/process-protocol.md) and its durable command
 identity. Read returns retained run state and terminal result bytes.
 
-TypeScript's `defineProgram` takes a runtime input decoder and result encoder;
-strict `tsc` checking and type stripping happen before registration. The emitted
-artifact is one module importing only `@signalbox/program-sdk/v1`.
+
 
 Effect method input/output records have checked Rust and TypeScript codecs;
 full-width integer identities use decimal strings and exact payloads use byte

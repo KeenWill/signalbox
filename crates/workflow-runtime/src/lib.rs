@@ -7,6 +7,9 @@ pub mod effects;
 pub mod native;
 pub mod session_effects;
 
+#[cfg(test)]
+mod sdk_tests;
+
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
