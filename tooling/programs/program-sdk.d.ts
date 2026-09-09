@@ -9,7 +9,7 @@ declare module "@signalbox/program-sdk/v1" {
   export function defineProgram<Input, Output>(definition: {
     input: Codec<Input>;
     output: Codec<Output>;
-    run(input: Input): Output | Promise<Output>;
+    run: (this: void, input: Input) => Output | Promise<Output>;
   }): (input: Uint8Array) => Promise<Uint8Array>;
 
   export type Capability = "time" | "random" | "sleep" | "subscribe" | "session"
