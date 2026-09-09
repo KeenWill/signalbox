@@ -1049,7 +1049,10 @@ final class ProcessImportedConversationViewModel: ObservableObject {
     do {
       let entries = try inventory.entries(in: offset..<min(offset + entryPageSize, inventory.entryCount))
       transcript = SignalboxImportedConversationTranscript(
-        importedConversationID: inventory.importedConversationID, entries: entries)
+        importedConversationID: inventory.importedConversationID,
+        dropFacts: inventory.dropFacts,
+        entries: entries
+      )
       entryOffset = offset
       entryPageErrorMessage = nil
     } catch { entryPageErrorMessage = error.localizedDescription }
