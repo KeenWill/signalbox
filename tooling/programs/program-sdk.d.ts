@@ -4,8 +4,14 @@ declare module "@signalbox/program-sdk/v1" {
     encode: (value: T) => Uint8Array;
   }
 
-  /** Validates decoded JSON and validates again before encoding a result. */
-  export function jsonCodec<T>(decode: (this: void, value: unknown) => T): Codec<T>;
+  type JsonData<T> = T extends string | number | boolean | null ? T
+    : T extends Function ? never
+    : T extends readonly unknown[] ? { [K in keyof T]: JsonData<T[K]> }
+    : T extends object ? { [K in keyof T]: K extends string | number ? JsonData<T[K]> : never }
+    : never;
+
+  /** Validates JSON data; finite numbers, own properties and cycles are checked at runtime. */
+  export function jsonCodec<T>(decode: (this: void, value: unknown) => T & JsonData<T>): Codec<T>;
   export function defineProgram<Input, Output>(definition: {
     input: Codec<Input>;
     output: Codec<Awaited<Output>>;
