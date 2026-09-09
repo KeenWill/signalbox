@@ -123,8 +123,7 @@ base merges while the reserved prefix still exceeds the highest prefix on
 stacked on it, and only the pull request that adds a migration may still edit
 that file.
 
-Serialization of concurrent migration runs is SQLx behavior, relied on and not
-demonstrated in this repository.
+SQLx's migrator serializes concurrent migration runs with an advisory lock.
 
 There is no general-purpose event store: the guarded row is the durable
 statement of record, and current state is not rebuilt by replaying events.
@@ -332,7 +331,8 @@ remaining migrations through the fenced pool, runs the startup scan, and starts
 the runtime. Fencing locks the singleton, waits on the prior generation's
 exclusive advisory lock until its pooled sessions end, and advances the row. It
 acquires the matching session-level lock before commit and holds it through
-construction of the new pool.
+construction of the new pool. `fenced_pool_options` caps connections at
+`FENCED_POOL_MAX_CONNECTIONS` and accepts an optional minimum.
 
 The bottom pull request of a stack that adds migrations declares a reserved
 prefix block in its description, and sibling stacks pick disjoint blocks.
@@ -410,6 +410,10 @@ placement, attempt, and lease facts rather than from the stored discriminator.
 Stopping the wait retires retryable authority before releasing the active slot,
 and the claimed-retry writer rechecks under the same scheduler lock that the
 source attempt is still in flight.
+
+Credential-pool selection and failure commits serialize through exclusive
+transaction-scoped advisory locks per profile reference, in sorted profile
+order.
 
 The first model-call insertion of a turn takes the transaction-scoped
 model-activity advisory lock keyed by session; inactivity parking takes the

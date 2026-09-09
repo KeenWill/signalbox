@@ -150,7 +150,6 @@ export function ArtifactInspector({
     <div className="artifact-inspector">
       <header>
         <div>
-          <span className="eyebrow">Immutable evidence</span>
           <h2>Artifact inspector</h2>
         </div>
         <button
@@ -162,13 +161,9 @@ export function ArtifactInspector({
           <X />
         </button>
       </header>
-      <p>
-        Resolve a blob identity already supplied by Signalbox. The browser loads only descriptor
-        metadata and an admitted preview until you request original bytes.
-      </p>
       {!available ? (
         <div className="artifact-capability" role="status">
-          Blob delivery is unavailable in this daemon runtime.
+          Blob delivery unavailable
         </div>
       ) : (
         <form onSubmit={resolveDescriptor}>
