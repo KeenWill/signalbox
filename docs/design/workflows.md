@@ -15,14 +15,6 @@ JavaScript runtime exceptions journal `ProgramError`.
 
 ## Waits
 
-A sleep or daemon event wait is identified by its outstanding request's run
-identity and ordinal. Sleep admission persists its deadline; replay and restart
-reuse it. `AwaitEvent` names a typed source and durable position; delivery reads
-retained source events before listening and rechecks after wake. In-memory
-notifications are hints. Primitive deliveries use `LiveDeliverySource` in
-[`crates/workflow-runtime/src/lib.rs`](../../crates/workflow-runtime/src/lib.rs)
-and the shared journal.
-
 The daemon retains incomplete run admission, serializes attempts for each run
 and resumes from the pinned registration, immutable input and journal after
 restart. At a quiescent external wait it drops program memory and reconstructs
