@@ -418,6 +418,15 @@ pub(super) fn parse_repository_watch_configuration(
             return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
         }
         credential_file_references.push(resolved_credential_file);
+        if let Some(path) = &push_credential_file {
+            let resolved_push_credential_file = resolved_credential_file_reference(path)?;
+            if credential_file_references.iter().any(|existing| {
+                credential_file_references_conflict(existing, &resolved_push_credential_file)
+            }) {
+                return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
+            }
+            credential_file_references.push(resolved_push_credential_file);
+        }
         let repository_webhook = match (
             repository.get("webhook_hook_id"),
             repository.get("webhook_secret_file"),

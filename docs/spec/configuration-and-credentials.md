@@ -732,7 +732,10 @@ access, so a fine-grained read credential limits that role to the watched
 repositories. An optional absolute `push_credential_file` on
 `[[repository_watch.repositories]]` supplies a deployment-owned token with push
 authority; each push rereads it through `FileCredentialAccess` and passes
-authorization only in the child environment. The push family is registered at
+authorization only in the child environment. Push credential files participate
+in the repository-watch credential isolation checks, including symlink and
+hard-link aliases of polling, push, and webhook credentials. The push family is
+registered from the configuration installed by durable reload recovery at
 startup; a repository-watch reload that adds or removes `push_credential_file`
 takes effect for registration at the next boot.
 
