@@ -642,8 +642,11 @@ pub(crate) fn workspace_extended_attributes_match_for_mutation(
     expected: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
     target: &Path,
 ) -> EvalResult<bool> {
+    let creation_attributes = creation_extended_attributes(expected);
     let mut expected = expected.clone();
-    expected.entry(target.to_path_buf()).or_default();
+    expected
+        .entry(target.to_path_buf())
+        .or_insert(creation_attributes);
     Ok(workspace_extended_attributes(root)? == expected)
 }
 

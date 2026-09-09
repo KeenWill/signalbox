@@ -752,8 +752,9 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     Ok(())
 }
 
-/// Superseding the judged goal withdraws its authority while the provider call
-/// is in flight, even when the replacement statement has identical text.
+/// Superseding the judged generation withdraws its authority even when the
+/// replacement statement has identical text. Completion leaves the request
+/// pending for a human decision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_completion_escalates_after_the_judged_goal_is_superseded()
@@ -837,13 +838,13 @@ async fn assert_judge_escalation_after_goal_supersession(
     let superseded = GoalRepository::new(pool.clone())
         .handle_user_command(
             GoalUserCommand::new(
-                DurableCommandId::from_uuid(next_test_submit_uuid()),
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf4)),
                 fixture.session,
                 GoalUserAction::Supersede(statement.clone()),
             ),
             Some(GoalTurnCandidates::new(
-                AcceptedInputId::from_uuid(next_test_submit_uuid()),
-                TurnId::from_uuid(next_test_submit_uuid()),
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0xf5)),
+                TurnId::from_uuid(Uuid::from_u128(seed + 0xf6)),
             )),
             |_| None,
         )
