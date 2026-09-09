@@ -5622,14 +5622,14 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     let authorized = tools
         .authorize_attempt(fixture.session, fixture.turn, attempt)
         .await?;
+    let result = "X".repeat(65_536);
     tools
         .commit_observation(
             authorized
                 .executor_fence()
                 .bind(ToolAttemptObservation::Completed {
                     result: ToolResultContent::Text(
-                        ToolResultText::try_new("X".repeat(65_536))
-                            .expect("fixture result is valid"),
+                        ToolResultText::try_new(result.clone()).expect("fixture result is valid"),
                     ),
                 }),
         )
@@ -5639,7 +5639,18 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
             .bind(attempt.into_uuid())
             .fetch_one(&pool)
             .await?;
-    assert!(projected.contains("[tool result truncated:"));
+    let (retained, marker) = projected
+        .split_once('\n')
+        .expect("fixture result has a truncation marker");
+    assert_eq!(retained, &result[..retained.len()]);
+    assert_eq!(
+        marker,
+        format!(
+            "[tool result truncated: retained {} bytes; dropped {} bytes]",
+            retained.len(),
+            result.len() - retained.len(),
+        )
+    );
     let continuation = ModelCallId::from_uuid(Uuid::now_v7());
     let checkpointed = tools
         .prepare_continuation(
