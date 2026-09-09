@@ -268,6 +268,9 @@ undecodable arguments, deny requests explicitly outside scope, approve plainly
 covered requests and their ordinary constituents, otherwise escalate. Exec
 pushes require both a dispatch fence and an immutable permitted remote in the
 frozen prompt; a mutable remote alias alone does not establish the destination.
+The judge identifies `git_push_configured` as the built-in configured-repository
+transport and judges its branch scope without requiring a remote URL in the
+frozen prompt.
 
 Outside a turn judged under the commissioned generation's dispatch authority, an
 `EscalateToHuman` result for a request still admissible stores the completed
