@@ -69,6 +69,7 @@ const fn storage_version_for(discriminator: OutboxEventDiscriminator) -> i16 {
         OutboxEventDiscriminator::SessionCreated => SESSION_CREATED_STORAGE_VERSION,
         OutboxEventDiscriminator::SessionStateChanged
         | OutboxEventDiscriminator::SessionTerminal
+        | OutboxEventDiscriminator::AutomaticReconciliationExhausted
         | OutboxEventDiscriminator::CredentialPoolExhausted
         | OutboxEventDiscriminator::TurnTerminal
         | OutboxEventDiscriminator::GoalChanged
@@ -161,6 +162,8 @@ impl DispatchedOutboxEvent {
 /// Closed typed records currently admitted by outbox storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DispatchedOutboxEventKind {
+    /// Automatic recovery spent its attempt budget for this exact operation.
+    AutomaticReconciliationExhausted(signalbox_application::ExhaustedAutomaticReconciliation),
     /// Frozen evidence for a pre-call pool exhaustion.
     CredentialPoolExhausted(Box<crate::credential_pool_exhaustion::CredentialPoolExhaustion>),
     /// A session creation committed.
@@ -1124,6 +1127,37 @@ pub(crate) async fn load_event(
         }
         OutboxEventDiscriminator::SessionTerminal => {
             load_session_terminal(transaction, expected_sequence, stored_session).await?
+        }
+        OutboxEventDiscriminator::AutomaticReconciliationExhausted => {
+            let row = sqlx::query("SELECT turn_id, model_call_id, tool_attempt_id FROM automatic_reconciliation_exhausted_outbox_event WHERE event_sequence = $1 AND session_id = $2")
+                .bind(Decimal::from(expected_sequence))
+                .bind(stored_session)
+                .fetch_optional(&mut **transaction)
+                .await?
+                .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            let operation = match (
+                row.try_get::<Option<Uuid>, _>("model_call_id")?,
+                row.try_get::<Option<Uuid>, _>("tool_attempt_id")?,
+            ) {
+                (Some(call), None) => {
+                    signalbox_application::AutomaticReconciliationOperation::ModelCall(
+                        ModelCallId::from_uuid(call),
+                    )
+                }
+                (None, Some(attempt)) => {
+                    signalbox_application::AutomaticReconciliationOperation::ToolAttempt(
+                        ToolAttemptId::from_uuid(attempt),
+                    )
+                }
+                _ => return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into()),
+            };
+            DispatchedOutboxEventKind::AutomaticReconciliationExhausted(
+                signalbox_application::ExhaustedAutomaticReconciliation::new(
+                    session,
+                    TurnId::from_uuid(row.try_get("turn_id")?),
+                    operation,
+                ),
+            )
         }
         OutboxEventDiscriminator::CredentialPoolExhausted => {
             let row: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT h.turn_id, h.terminal_attempt_id FROM credential_pool_exhaustion_outbox_event e JOIN credential_pool_terminal_exhaustion h ON h.terminal_attempt_id = e.terminal_attempt_id AND h.session_id = e.session_id WHERE e.event_sequence = $1 AND e.session_id = $2")

@@ -225,6 +225,7 @@ pub(crate) enum OutboxEventDiscriminator {
     SessionTerminal,
     TurnTerminal,
     CredentialPoolExhausted,
+    AutomaticReconciliationExhausted,
     GoalChanged,
     CommandSettled,
     InjectionSettled,
@@ -249,6 +250,9 @@ pub(crate) fn outbox_event_discriminator_from_str(value: &str) -> Option<OutboxE
         SESSION_TERMINAL => OutboxEventDiscriminator::SessionTerminal,
         TURN_TERMINAL => OutboxEventDiscriminator::TurnTerminal,
         "turn_credential_pool_exhausted" => OutboxEventDiscriminator::CredentialPoolExhausted,
+        "automatic_reconciliation_exhausted" => {
+            OutboxEventDiscriminator::AutomaticReconciliationExhausted
+        }
         GOAL_CHANGED => OutboxEventDiscriminator::GoalChanged,
         COMMAND_SETTLED => OutboxEventDiscriminator::CommandSettled,
         INJECTION_SETTLED => OutboxEventDiscriminator::InjectionSettled,
@@ -333,6 +337,9 @@ pub(crate) const fn timeline_event_kind_str(
             GOAL_TURN_RETIRED
         }
         (OutboxEventDiscriminator::CredentialPoolExhausted, _) => TURN_FAILED,
+        (OutboxEventDiscriminator::AutomaticReconciliationExhausted, _) => {
+            "automatic_reconciliation_exhausted"
+        }
         (OutboxEventDiscriminator::TurnTerminal, None) => return None,
         (OutboxEventDiscriminator::SessionCreated, _) => SESSION_CREATED,
         (OutboxEventDiscriminator::SessionStateChanged, _) => SESSION_STATE_CHANGED,
