@@ -47,6 +47,7 @@ pub(crate) fn git_push_repository<'a>(
 
 /// Core capabilities remain in daemon-owned adapters; the module receives its own pool.
 pub struct RepositoryWatchServices {
+    pub goal_resumption: crate::PostgresGoalPassDisposition,
     pub checkout_runner: Option<signalbox_tools_exec::TokioProcessRunner>,
     pub core_pool: PgPool,
     pub models: Arc<HubModelConfiguration>,
@@ -343,6 +344,7 @@ impl RepositoryWatchRuntime {
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
                 factory: RepositoryWatchCommandFactory(services.templates),
                 sink: RepositoryWatchCommandSink {
+                    goal_resumption: services.goal_resumption,
                     checkout_runner: services.checkout_runner,
                     pool: services.core_pool,
                     models: services.models,
@@ -875,14 +877,19 @@ mod tests {
             .connect_lazy("postgres://unused:unused@localhost/unused")
             .expect("lazy pool");
         pool.close().await;
+        let models = crate::configuration::checked_in_example_configuration().expect("models");
         let runtime = RepositoryWatchRuntime::unstarted(
             pool.clone(),
             RepositoryWatchServices {
+                goal_resumption: crate::PostgresGoalPassDisposition::new(
+                    pool.clone(),
+                    models.clone(),
+                    nudge.clone(),
+                    crate::GoalModeNumericBounds::new(None, None, None, None, None),
+                ),
                 core_pool: pool,
                 checkout_runner: None,
-                models: Arc::new(
-                    crate::configuration::checked_in_example_configuration().expect("models"),
-                ),
+                models: Arc::new(models),
                 templates: Arc::new(SessionTemplateConfiguration::default()),
                 eligibility_nudge: nudge,
                 tool_dispatch_gate: InProcessToolDispatchGate::default(),
@@ -916,14 +923,19 @@ mod tests {
         let (eligibility_nudge, _work) = signalbox_application::InProcessEligibilityWorkSource::new(
             signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
         );
+        let models = crate::configuration::checked_in_example_configuration().expect("models");
         let runtime = RepositoryWatchRuntime::unstarted(
             pool.clone(),
             RepositoryWatchServices {
+                goal_resumption: crate::PostgresGoalPassDisposition::new(
+                    pool.clone(),
+                    models.clone(),
+                    eligibility_nudge.clone(),
+                    crate::GoalModeNumericBounds::new(None, None, None, None, None),
+                ),
                 checkout_runner: None,
                 core_pool: pool,
-                models: Arc::new(
-                    crate::configuration::checked_in_example_configuration().expect("models"),
-                ),
+                models: Arc::new(models),
                 templates: Arc::new(SessionTemplateConfiguration::default()),
                 eligibility_nudge,
                 tool_dispatch_gate: InProcessToolDispatchGate::default(),

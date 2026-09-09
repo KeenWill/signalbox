@@ -452,6 +452,7 @@ impl SessionCommandCodec for RepositoryWatchCommandCodec {
 
 /// Applies seam commands through the ordinary core handlers and interrupt machinery.
 pub struct RepositoryWatchCommandSink {
+    pub goal_resumption: crate::PostgresGoalPassDisposition,
     pub checkout_runner: Option<signalbox_tools_exec::TokioProcessRunner>,
     pub pool: PgPool,
     pub models: Arc<HubModelConfiguration>,
@@ -607,6 +608,10 @@ impl RepositoryWatchCommandSink {
             }
             SessionLifecycleCommandHandlingOutcome::Recorded(result) => {
                 if let SessionLifecycleCommandResult::Applied(application) = result {
+                    if matches!(command.operation(), SessionLifecycleOperation::Adopt { .. }) {
+                        self.goal_resumption
+                            .arm_adopted_goal_resumption(command.session());
+                    }
                     match application {
                         SessionLifecycleApplication::StartReleased => {
                             let _ = self.eligibility_nudge.nudge(command.session());
