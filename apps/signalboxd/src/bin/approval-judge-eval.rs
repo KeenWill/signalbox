@@ -626,6 +626,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
                             });
                         }
                         verdicts.push(ScoredVerdict {
+                            usage: provider_reported_usage(verdict.usage),
                             recommendation: verdict.recommendation,
                             rationale: verdict.rationale,
                             provider_reported_model: if recording.is_some() {

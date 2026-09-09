@@ -449,6 +449,7 @@ mod approval_judge_tests {
                 .await
                 .expect("scripted adapter returns an admitted verdict");
             verdicts.push(ScoredVerdict {
+                usage: signalboxd::provider_reported_usage(verdict.usage),
                 recommendation: verdict.recommendation,
                 rationale: verdict.rationale,
                 provider_reported_model: verdict.provider_reported_model,
@@ -472,6 +473,17 @@ mod approval_judge_tests {
             vec![report],
         )
         .expect("live scorecard renders");
+        let expected_usage = json!({
+            "input_tokens": null,
+            "output_tokens": null,
+            "cache_creation_input_tokens": null,
+            "cache_read_input_tokens": null,
+        });
+        let expected_repeats = json!([
+            {"recommendation": "approve", "rationale": APPROVE_RATIONALE, "provider_reported_model": PROVIDER_MODEL, "usage": expected_usage},
+            {"recommendation": "approve", "rationale": APPROVE_RATIONALE, "provider_reported_model": PROVIDER_MODEL, "usage": expected_usage},
+            {"recommendation": "deny", "rationale": DENY_RATIONALE, "provider_reported_model": PROVIDER_MODEL, "usage": expected_usage}
+        ]);
         let expected = json!({
             "judge_selection": "fixture-selection", "provider_model": PROVIDER_MODEL,
             "corpus_digest": "fixture-corpus", "contract_digest": "fixture-contract",
@@ -487,11 +499,7 @@ mod approval_judge_tests {
                 "configured_posture": "delegated", "measured": true, "complete": true,
                 "majority": "approve", "tied": false, "verdict_counts": {"approve": 2, "deny": 1},
                 "stable": false, "correct": false, "failed_calls": 0, "failure_causes": [],
-                "notes": "synthetic label", "repeats": [
-                    {"recommendation": "approve", "rationale": APPROVE_RATIONALE, "provider_reported_model": PROVIDER_MODEL},
-                    {"recommendation": "approve", "rationale": APPROVE_RATIONALE, "provider_reported_model": PROVIDER_MODEL},
-                    {"recommendation": "deny", "rationale": DENY_RATIONALE, "provider_reported_model": PROVIDER_MODEL}
-                ]}]
+                "notes": "synthetic label", "repeats": expected_repeats}]
         });
         assert_eq!(
             rendered,

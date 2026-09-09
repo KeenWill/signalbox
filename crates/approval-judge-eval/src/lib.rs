@@ -273,7 +273,7 @@ pub mod live {
     use std::collections::BTreeMap;
 
     use serde::Deserialize;
-    use signalbox_domain::DelegateApprovalRecommendation;
+    use signalbox_domain::{DelegateApprovalRecommendation, ProviderReportedTokenUsage};
 
     /// Closed scorecard grouping; deserialization is the single source of truth,
     /// so an unknown spelling fails the corpus load and a new variant fails
@@ -495,6 +495,8 @@ pub mod live {
 
     /// Accepted trial evidence used by the live scorecard.
     pub struct ScoredVerdict {
+        /// Token fields retained exactly as reported, including absence.
+        pub usage: ProviderReportedTokenUsage,
         /// Admitted judge recommendation.
         pub recommendation: DelegateApprovalRecommendation,
         /// Exact admitted rationale.
@@ -578,6 +580,12 @@ pub mod live {
             "repeats": verdicts.iter().map(|verdict| serde_json::json!({
                 "recommendation": recommendation_label(verdict.recommendation),
                 "rationale": verdict.rationale,
+                "usage": {
+                    "input_tokens": verdict.usage.input_tokens(),
+                    "output_tokens": verdict.usage.output_tokens(),
+                    "cache_creation_input_tokens": verdict.usage.cache_creation_input_tokens(),
+                    "cache_read_input_tokens": verdict.usage.cache_read_input_tokens(),
+                },
                 "provider_reported_model": verdict.provider_reported_model,
             })).collect::<Vec<_>>(),
             "notes": case.notes,
@@ -600,10 +608,39 @@ pub mod live {
 
         fn verdict(recommendation: DelegateApprovalRecommendation) -> ScoredVerdict {
             ScoredVerdict {
+                usage: ProviderReportedTokenUsage::unreported(),
                 recommendation,
                 rationale: String::from("fixture rationale"),
                 provider_reported_model: None,
             }
+        }
+
+        #[test]
+        fn trial_usage_preserves_reported_counts_zero_and_absence() {
+            let mut scores = BTreeMap::new();
+            let report = score_case(
+                &case(),
+                1,
+                &[ScoredVerdict {
+                    usage: ProviderReportedTokenUsage::unreported()
+                        .with_input_tokens(Some(11))
+                        .with_output_tokens(Some(0))
+                        .with_cache_read_input_tokens(Some(3)),
+                    ..verdict(DelegateApprovalRecommendation::Approve)
+                }],
+                vec![],
+                None,
+                &mut scores,
+            );
+            assert_eq!(
+                report["repeats"][0]["usage"],
+                json!({
+                    "input_tokens": 11,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": null,
+                    "cache_read_input_tokens": 3,
+                })
+            );
         }
 
         #[test]

@@ -104,6 +104,7 @@ pub fn render_scorecard(
 
 ```rust
 pub struct ScoredVerdict {
+    pub usage: signalbox_domain::ProviderReportedTokenUsage,
     pub recommendation: signalbox_domain::DelegateApprovalRecommendation,
     pub rationale: string::String,
     pub provider_reported_model: option::Option<string::String>,
