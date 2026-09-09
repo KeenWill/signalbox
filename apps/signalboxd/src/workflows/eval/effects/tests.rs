@@ -235,11 +235,15 @@ mod postgres {
     }
     impl RunFixture {
         async fn new() -> Self {
+            Self::configured(|_| {}).await
+        }
+        async fn configured(configure: impl FnOnce(&mut Fixture)) -> Self {
             let (database, pool, _) =
                 signalbox_persistence::test_support::postgres::migrated_postgres(4)
                     .await
                     .unwrap();
-            let fixture = Fixture::new(pool.clone());
+            let mut fixture = Fixture::new(pool.clone());
+            configure(&mut fixture);
             let catalog = compiled_catalog().unwrap();
             let journal = ProgramJournalRepository::new(pool.clone());
             let ProgramExecutable::Native {
@@ -666,6 +670,35 @@ mod postgres {
         }
     }
 
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn unavailable_pinned_binding_is_rejected_before_and_after_recovery() {
+        let run = RunFixture::configured(|fixture| {
+            let bytes = br#"{"name":"live-case","category":"workspace_benign","tool":"current_time","arguments":"{}","expected":"approve"}"#.to_vec();
+            fixture.manifest.corpus = BlobDigest::digest(&bytes).to_string();
+            fixture.manifest.format = CorpusFormat::Live;
+            fixture.manifest.cases = vec![0];
+            fixture.services.blobs = Arc::new(MemoryBlobs(bytes));
+            fixture.services.binding.credential_reference = "another-host-binding".into();
+        }).await;
+        let mut failures = Vec::new();
+        for _ in 0..2 {
+            let mut effects = EvaluationEffects::new(run.fixture.services.clone());
+            let error = run
+                .host
+                .execute_registered(run.run, &mut ClockSource, &mut effects)
+                .await
+                .unwrap_err();
+            assert!(effects.rejected());
+            failures.push(error.to_string());
+        }
+        assert_eq!(failures[0], failures[1]);
+        assert!(failures[0].contains("pinned judge binding is unavailable"));
+        let journal = run.journal.load(run.run).await.unwrap().unwrap();
+        assert_eq!(journal.entries().len(), 3);
+        assert!(run.fixture.provider.received_operations().is_empty());
+    }
+
     #[derive(Debug)]
     struct NoProvider;
     impl ApprovalJudgeModel for NoProvider {
@@ -704,6 +737,7 @@ async fn live_scoring_counts_failed_and_ambiguous_requested_repeats() {
         request_digest: BlobDigest::digest(b"fixture").to_string(),
         binding: fixture.manifest.binding.clone(),
         cause: "provider_error".into(),
+        provider_reported_model: None,
         usage: usage_record(TokenUsage::unreported()),
     };
     let score = score(
@@ -779,4 +813,131 @@ async fn invalid_provider_decision_retains_failure_classification_and_usage() {
         )
     );
     assert_eq!(usage.output_tokens, Some(20));
+}
+
+#[tokio::test]
+async fn failed_judge_trials_preserve_observed_model_identity_and_usage() {
+    use signalbox_model_runtime::{
+        BoundaryLossEvidence, LossCause, NativeErrorFacts, ObservationFact, ProviderErrorEvidence,
+        ProviderErrorKind, ProviderReportedModel, RefusalEvidence, RefusalReason, ToolCallsAtLoss,
+        TransportFacts,
+    };
+    const REPORTED_MODEL: &str = "claude-fable-5-1";
+    const SUBSTITUTED_MODEL: &str = "another-judge-lineage";
+    let model = Some(ProviderReportedModel::new(REPORTED_MODEL));
+    let usage = TokenUsage {
+        input_tokens: Some(80),
+        output_tokens: Some(20),
+        ..TokenUsage::unreported()
+    };
+    let mut invalid = script("invalid");
+    if let TerminalEvidence::Completed(completed) = &mut invalid.terminal {
+        completed.reported_model = model.clone();
+    }
+    let mut substituted = script("approve");
+    if let TerminalEvidence::Completed(completed) = &mut substituted.terminal {
+        completed.reported_model = Some(ProviderReportedModel::new(SUBSTITUTED_MODEL));
+    }
+    let early_substitution = script("approve").observing(ObservationFact::ProviderModelReported(
+        ProviderReportedModel::new(SUBSTITUTED_MODEL),
+    ));
+    let early_invalid = script("invalid").observing(ObservationFact::ProviderModelReported(
+        ProviderReportedModel::new(REPORTED_MODEL),
+    ));
+    let mut over_budget = script("approve");
+    if let TerminalEvidence::Completed(completed) = &mut over_budget.terminal {
+        completed.reported_model = model.clone();
+        completed.usage.input_tokens = Some(u64::MAX);
+    }
+    let scripts = [
+        ("invalid_decision", invalid, REPORTED_MODEL),
+        ("invalid_decision", early_invalid, REPORTED_MODEL),
+        (
+            "provider_target_substituted",
+            substituted,
+            SUBSTITUTED_MODEL,
+        ),
+        (
+            "provider_target_substituted",
+            early_substitution,
+            SUBSTITUTED_MODEL,
+        ),
+        ("usage_limit_exceeded", over_budget, REPORTED_MODEL),
+        (
+            "refused",
+            Script::delivering(TerminalEvidence::Refused(RefusalEvidence {
+                reason: RefusalReason::Unspecified,
+                exchange: ExchangeFacts::default(),
+                message_id: None,
+                reported_model: model.clone(),
+                content: Vec::new(),
+                usage,
+                retained_input_tokens: None,
+                retained_output_tokens: None,
+            })),
+            REPORTED_MODEL,
+        ),
+        (
+            "provider_error",
+            Script::delivering(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: ExchangeFacts::default(),
+                reported_model: model.clone(),
+                kind: ProviderErrorKind::CredentialRejected,
+                non_acceptance_proven: false,
+                native: NativeErrorFacts::default(),
+                usage,
+            })),
+            REPORTED_MODEL,
+        ),
+        (
+            "boundary_loss",
+            Script::delivering(TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                cause: LossCause::TransportFailed(TransportFacts {
+                    detail: "recorded loss".into(),
+                }),
+                exchange: ExchangeFacts::default(),
+                reported_model: model,
+                finish_reported: None,
+                tool_calls: ToolCallsAtLoss::Unobserved,
+                usage,
+            })),
+            REPORTED_MODEL,
+        ),
+    ];
+    for (expected_cause, script, expected_model) in scripts {
+        let mut fixture = Fixture::lazy();
+        let provider = ScriptedModel::single(script);
+        fixture.services.model = Arc::new(RuntimeApprovalJudgeModel::new(
+            provider.clone(),
+            fixture.services.configuration.runtime_model_catalog(),
+        ));
+        let answer = fixture
+            .services
+            .judge(&fixture.manifest, TrialRequest { trial: 0 })
+            .await
+            .unwrap();
+        let encoded = encode(&answer).unwrap();
+        let JudgeAnswer::Failed {
+            call,
+            cause,
+            provider_reported_model,
+            usage,
+            ..
+        } = decode::<JudgeAnswer>(&encoded).unwrap()
+        else {
+            panic!("failed trial");
+        };
+        assert_eq!(cause, expected_cause);
+        assert_eq!(provider_reported_model.as_deref(), Some(expected_model));
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(
+            call,
+            Some(
+                provider.received_operations()[0]
+                    .correlation
+                    .into_uuid()
+                    .to_string()
+            )
+        );
+    }
 }

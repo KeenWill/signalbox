@@ -100,7 +100,7 @@ declare module "@signalbox/program-sdk/v1" {
   }
   export type JudgeAnswer =
     | { outcome: "ambiguous" }
-    | { outcome: "failed"; call: string | null; request_digest: string; binding: JudgeBinding; cause: string; usage: JudgeUsage }
+    | { outcome: "failed"; call: string | null; request_digest: string; binding: JudgeBinding; cause: string; provider_reported_model: string | null; usage: JudgeUsage }
     | { outcome: "verdict"; call: string; request_digest: string; binding: JudgeBinding; actual: ApprovalDisposition; rationale: string; provider_reported_model: string | null; usage: JudgeUsage };
   export type CorpusCase =
     | { format: "offline"; case: { id: string; expected: ApprovalDisposition; label_provenance: string;

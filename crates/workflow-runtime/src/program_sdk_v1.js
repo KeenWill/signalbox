@@ -270,8 +270,8 @@
       exact(value, ["outcome", "call", "request_digest", "binding", "actual", "rationale", "provider_reported_model", "usage"]);
       uuid(value.call); disposition(value.actual); string(value.rationale); nullable(value.provider_reported_model, string);
     } else if (value.outcome === "failed") {
-      exact(value, ["outcome", "call", "request_digest", "binding", "cause", "usage"]);
-      nullable(value.call, uuid); string(value.cause);
+      exact(value, ["outcome", "call", "request_digest", "binding", "cause", "provider_reported_model", "usage"]);
+      nullable(value.call, uuid); string(value.cause); nullable(value.provider_reported_model, string);
     } else throw new CodecTypeError("invalid judge outcome");
     digest(value.request_digest); judgeBinding(value.binding); judgeUsage(value.usage);
     return value;

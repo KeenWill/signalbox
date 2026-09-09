@@ -39,15 +39,16 @@ order, with a maximum of 1,000 calls. Offline scoring requires one repeat.
 The host adapters reuse the catalog's verified blob reads and `judge_eval_case`.
 Judge answers retain call identity, rendered-request digest, binding and
 contract, verdict/rationale or failure, reported model and available token
-usage. Configured usage limits apply. The common host journals requests and
+usage. Failed trials retain observed model identity, including a substituted
+lineage. Configured usage limits apply. The common host journals requests and
 answers; an admitted unanswered judge call without durable proof becomes
-ambiguous without provider retry. Invalid requests retain their rejection on
-recovery; infrastructure failures leave the request unanswered. The native
-program computes the existing offline or live scorecard through the pure library
-and returns it as the workflow result. Live scoring counts failed and ambiguous
-repeats as unsuccessful; an offline trial without a verdict faults without a
-scorecard. Missing blobs and inadmissible cases fail before provider work. No
-evaluation snapshot is sealed.
+ambiguous without provider retry. Invalid requests and unavailable pinned
+bindings retain their rejection on recovery; infrastructure failures leave the
+request unanswered. The native program computes the existing offline or live
+scorecard through the pure library and returns it as the workflow result. Live
+scoring counts failed and ambiguous repeats as unsuccessful; an offline trial
+without a verdict faults without a scorecard. Missing blobs and inadmissible
+cases fail before provider work. No evaluation snapshot is sealed.
 
 `WorkflowRuntime::with_eval` supplies the runner's host services and enables
 native eval registration; the default daemon rejects that registration. Operator

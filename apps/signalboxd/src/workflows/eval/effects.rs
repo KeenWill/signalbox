@@ -124,14 +124,19 @@ impl EvalServices {
         })
     }
 
+    fn validate_binding(&self, manifest: &EvalManifest) -> Result<(), EvalFailure> {
+        if manifest.binding != self.binding {
+            return Err(failure("pinned judge binding is unavailable"));
+        }
+        Ok(())
+    }
+
     async fn judge(
         &self,
         manifest: &EvalManifest,
         trial: TrialRequest,
     ) -> Result<JudgeAnswer, EvalFailure> {
-        if manifest.binding != self.binding {
-            return Err(failure("pinned judge binding is unavailable"));
-        }
+        self.validate_binding(manifest)?;
         let corpus = self.corpus(manifest).await?;
         let case = eval_case(&corpus.cases[(trial.trial / manifest.repeats) as usize]);
         let request_digest =
@@ -151,11 +156,12 @@ impl EvalServices {
         };
         let result = judge_eval_case(&observer, &binding, &case).await;
         let call = observer.call.into_inner().map_err(failure)?;
-        let failed = |cause: String, usage| JudgeAnswer::Failed {
+        let failed = |cause: String, usage, provider_reported_model| JudgeAnswer::Failed {
             call: call.clone(),
             request_digest: request_digest.clone(),
             binding: self.binding.clone(),
             cause,
+            provider_reported_model,
             usage: usage_record(usage),
         };
         Ok(match result {
@@ -166,7 +172,11 @@ impl EvalServices {
                     verdict.usage,
                 ) != Some(false)
                 {
-                    failed("usage_limit_exceeded".into(), verdict.usage)
+                    failed(
+                        "usage_limit_exceeded".into(),
+                        verdict.usage,
+                        verdict.provider_reported_model,
+                    )
                 } else {
                     JudgeAnswer::Verdict {
                         call: call.ok_or_else(|| failure("judge call identity missing"))?,
@@ -183,7 +193,13 @@ impl EvalServices {
                 let error = error
                     .downcast_ref::<ApprovalJudgeModelError>()
                     .ok_or_else(|| failure("judge case failed after preflight"))?;
-                failed(judge_failure(*error).into(), error.usage())
+                failed(
+                    judge_failure(error).into(),
+                    error.usage(),
+                    error
+                        .reported_model()
+                        .map(|model| model.as_str().to_owned()),
+                )
             }
         })
     }
@@ -240,6 +256,7 @@ impl EvaluationEffects {
                 "judge request does not follow manifest trial order",
             ));
         }
+        self.services.validate_binding(&manifest)?;
         Ok((manifest, trial))
     }
 
@@ -418,7 +435,7 @@ fn usage_record(usage: TokenUsage) -> Usage {
     }
 }
 
-fn judge_failure(error: ApprovalJudgeModelError) -> &'static str {
+fn judge_failure(error: &ApprovalJudgeModelError) -> &'static str {
     match error {
         ApprovalJudgeModelError::UnconfiguredTarget => "unconfigured_target",
         ApprovalJudgeModelError::InvalidContract => "invalid_contract",
@@ -430,14 +447,14 @@ fn judge_failure(error: ApprovalJudgeModelError) -> &'static str {
             "preparation_correlation_mismatch"
         }
         ApprovalJudgeModelError::CorrelationMismatch(_) => "correlation_mismatch",
-        ApprovalJudgeModelError::Refused(_) => "refused",
-        ApprovalJudgeModelError::ProviderError(_) => "provider_error",
-        ApprovalJudgeModelError::CancellationConfirmed => "cancellation_confirmed",
+        ApprovalJudgeModelError::Refused(..) => "refused",
+        ApprovalJudgeModelError::ProviderError(..) => "provider_error",
+        ApprovalJudgeModelError::CancellationConfirmed(_) => "cancellation_confirmed",
         ApprovalJudgeModelError::ProvenUnsent => "proven_unsent",
-        ApprovalJudgeModelError::BoundaryLoss(_) => "boundary_loss",
-        ApprovalJudgeModelError::ProviderTargetSubstituted(_) => "provider_target_substituted",
-        ApprovalJudgeModelError::IncompleteDecision(_) => "incomplete_decision",
-        ApprovalJudgeModelError::InvalidDecision(_) => "invalid_decision",
+        ApprovalJudgeModelError::BoundaryLoss(..) => "boundary_loss",
+        ApprovalJudgeModelError::ProviderTargetSubstituted(..) => "provider_target_substituted",
+        ApprovalJudgeModelError::IncompleteDecision(..) => "incomplete_decision",
+        ApprovalJudgeModelError::InvalidDecision(..) => "invalid_decision",
     }
 }
 

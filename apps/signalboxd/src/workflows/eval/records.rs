@@ -159,6 +159,7 @@ pub enum JudgeAnswer {
         request_digest: String,
         binding: JudgeBinding,
         cause: String,
+        provider_reported_model: Option<String>,
         usage: Usage,
     },
     Ambiguous,

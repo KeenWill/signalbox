@@ -825,3 +825,21 @@ async fn evaluation_blob_codec_refuses_trailing_digest_bytes_before_request() {
     assert!(result.is_err());
     assert!(requests.is_empty());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn evaluation_failed_trial_codec_retains_the_reported_model() {
+    let answer = serde_json::json!({
+        "outcome": "failed", "call": "12345678-1234-1234-1234-123456789abc",
+        "request_digest": format!("sha256:{}", "a".repeat(64)),
+        "binding": { "selection": "12345678-1234-1234-1234-123456789abc", "target": "12345678-1234-1234-1234-123456789abc", "credential_reference": "fixture", "provider_model": "configured-model", "contract_digest": "fixture", "cache_accounting": "input_excludes_cache" },
+        "cause": "provider_target_substituted", "provider_reported_model": "substituted-model",
+        "usage": { "input_tokens": "80", "output_tokens": "20", "cache_creation_input_tokens": null, "cache_read_input_tokens": null }
+    });
+    let (result, requests) = sdk_script(
+        r#"const result = await sdk.evaluation.judge({ trial: 0 });
+        if (result.kind !== 'answer' || result.value.cause !== 'provider_target_substituted' || result.value.provider_reported_model !== 'substituted-model') throw new Error('model evidence lost');"#,
+        [DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(serde_json::to_vec(&answer).unwrap()) }],
+    ).await;
+    result.unwrap();
+    assert_eq!(requests.len(), 1);
+}
