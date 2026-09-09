@@ -163,7 +163,7 @@ mod tests {
             format!(
                 "\n[tool result truncated: retained {} bytes; dropped {} bytes]",
                 prefix.len(),
-                source.len() - prefix.len(),
+                source.len() - prefix.len() + 1,
             )
         );
         assert!(serde_json::to_vec(&bounded).expect("text encodes").len() <= limit);
