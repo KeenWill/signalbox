@@ -202,6 +202,15 @@ jobs:
             cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
           fi
           bazel test --keep_going --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:python_checker_tests //:markdown_format //:generated_artifact_tests //:rust_format_tests
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Check and compile typed programs
+        run: |
+          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs install --frozen-lockfile
+          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs exec tsc -p tsconfig.json --noEmit
+          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs exec tsc -p tsconfig.build.json
+          git diff --exit-code -- crates/workflow-runtime/tests/fixtures
       # The scan rejects row-lock clauses and advisory-lock calls outside the
       # inventory in production Rust. This performs no Rust or SQL parsing.
       - name: Check explicit-lock inventory

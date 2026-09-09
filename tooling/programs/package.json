@@ -1,0 +1,12 @@
+{
+  "name": "@signalbox/programs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}
