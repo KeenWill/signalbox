@@ -4,7 +4,8 @@
 //! authority to the injected workspace with bubblewrap (`bwrap`). The sandbox
 //! also exposes a small read-only operating-system runtime needed to start
 //! ordinary programs, clears the ambient environment, and admits only a
-//! bounded locale plus executable search paths rooted in that runtime.
+//! bounded locale plus executable search paths and explicit deployment runtime
+//! inputs.
 //! Production uses the trusted absolute `/usr/bin/bwrap`; missing, unsupported,
 //! or unusable `bwrap` is typed refusal evidence and never falls back to
 //! unsandboxed execution.
@@ -22,10 +23,10 @@
 //! `known_truncated` flag reports positive truncation evidence; false never
 //! claims that the workspace-influenced collection is complete or authentic.
 //!
-//! The profile unshares the network namespace, imposes no resource limits,
+//! The profile isolates networking by default, imposes no resource limits,
 //! drops no uid or gid, and applies no seccomp or landlock policy. It is
 //! therefore not an admissible boundary for executing untrusted code; the
-//! network fence narrows that gap rather than closing it. Exactly what the
+//! default network fence narrows that gap rather than closing it. Exactly what the
 //! profile does and does not confine is owned by
 //! `docs/spec/configuration-and-credentials.md` and is not restated here.
 //! When configured, the sandbox binds one pinned host Cargo registry read-only
@@ -58,7 +59,7 @@ pub use process::{
     ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,
     OutputCapture, OutputEncoding, ProcessEnvironment, ProcessOutcome, ProcessOutput,
     ProcessRequest, ProcessRunResult, ProcessRunner, ProcessSpawnFailure, ProcessStatusProtocol,
-    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxProcessNamespace,
-    SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME,
-    UnsandboxedCommandRunner, UnsandboxedExecTool,
+    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxConfiguration, SandboxNetwork,
+    SandboxProcessNamespace, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
+    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };

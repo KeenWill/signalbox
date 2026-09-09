@@ -277,6 +277,15 @@ impl<Runner: ProcessRunner> SandboxedExecTool<Runner> {
         Ok(Self { catalog, executor })
     }
 
+    /// Applies explicit deployment runtime inputs to this sandbox.
+    pub fn with_sandbox_configuration(mut self, configuration: SandboxConfiguration) -> Self {
+        self.executor.command_runner = self
+            .executor
+            .command_runner
+            .with_sandbox_configuration(configuration);
+        self
+    }
+
     /// Returns separate catalog and executor composition roles.
     pub fn into_parts(
         self,
@@ -754,12 +763,38 @@ pub enum SandboxProcessNamespace {
     Container,
 }
 
+/// Network namespace selected by the deployment.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SandboxNetwork {
+    /// Isolate IP networking from the host.
+    #[default]
+    None,
+    /// Share the host network namespace without destination filtering.
+    Host,
+}
+
+/// Explicit host runtime inputs for sandboxed execution.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SandboxConfiguration {
+    /// Network namespace policy; isolated by default.
+    pub network: SandboxNetwork,
+    /// Host paths mounted read-only at the same absolute paths.
+    pub read_only_binds: Vec<PathBuf>,
+    /// Absolute executable directories placed before the runtime search path.
+    pub path_prepend: Vec<PathBuf>,
+    /// Explicit rustup installation home.
+    pub rustup_home: Option<PathBuf>,
+    /// Installed rustup toolchain selected without automatic installation.
+    pub rustup_toolchain: Option<String>,
+}
+
 /// Sandboxed command service reusable by higher-level tools.
 #[derive(Clone, Debug)]
 pub struct SandboxedCommandRunner<Runner> {
     runner: Runner,
     workspace_root: PathBuf,
     process_namespace: SandboxProcessNamespace,
+    configuration: std::sync::Arc<SandboxConfiguration>,
     #[cfg(not(target_os = "linux"))]
     sandbox_launcher: PathBuf,
     #[cfg(target_os = "linux")]
@@ -852,11 +887,18 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             workspace_identity,
             workspace_root,
             process_namespace,
+            configuration: std::sync::Arc::new(SandboxConfiguration::default()),
             #[cfg(target_os = "linux")]
             cargo_registry_identity,
             #[cfg(not(target_os = "linux"))]
             cargo_registry,
         })
+    }
+
+    /// Applies explicit deployment runtime inputs to this sandbox.
+    pub fn with_sandbox_configuration(mut self, configuration: SandboxConfiguration) -> Self {
+        self.configuration = std::sync::Arc::new(configuration);
+        self
     }
 
     /// Validates and runs one command under the production sandbox contract.
@@ -927,6 +969,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         }
         let probe = bwrap_request(
             SandboxLaunchContext {
+                configuration: &self.configuration,
                 workspace_root: &self.workspace_root,
                 #[cfg(target_os = "linux")]
                 bind_source: &self.workspace_identity.bind_source,
@@ -1032,6 +1075,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 }
                 let request = bwrap_request(
                     SandboxLaunchContext {
+                        configuration: &self.configuration,
                         workspace_root: &self.workspace_root,
                         #[cfg(target_os = "linux")]
                         bind_source: &self.workspace_identity.bind_source,
@@ -1822,6 +1866,7 @@ fn direct_request(
 
 #[derive(Clone, Copy)]
 struct SandboxLaunchContext<'a> {
+    configuration: &'a SandboxConfiguration,
     workspace_root: &'a Path,
     bind_source: &'a Path,
     #[cfg(target_os = "linux")]
@@ -1855,7 +1900,15 @@ fn bwrap_request(
     let cargo_registry_bound = context.cargo_registry_bind_descriptor.is_some();
     #[cfg(not(target_os = "linux"))]
     let cargo_registry_bound = context.cargo_registry_bind_source.is_some();
-    let sandbox_path = sandbox_path(context.workspace_root);
+    let sandbox_path = std::env::join_paths(
+        context
+            .configuration
+            .path_prepend
+            .iter()
+            .cloned()
+            .chain(std::env::split_paths(&sandbox_path(context.workspace_root))),
+    )
+    .unwrap_or_default();
     let sandbox_directory = if working_directory == "." {
         String::from(SANDBOX_WORKSPACE)
     } else {
@@ -1877,10 +1930,19 @@ fn bwrap_request(
         bwrap_arguments.push(OsString::from("--unshare-pid"));
     }
     bwrap_arguments.extend(
-        ["--unshare-ipc", "--unshare-uts", "--unshare-net"]
+        ["--unshare-ipc", "--unshare-uts"]
             .into_iter()
             .map(OsString::from),
     );
+    if context.configuration.network == SandboxNetwork::None {
+        bwrap_arguments.push(OsString::from("--unshare-net"));
+    } else {
+        bwrap_arguments.extend(
+            ["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"]
+                .into_iter()
+                .map(OsString::from),
+        );
+    }
     match process_namespace {
         SandboxProcessNamespace::Private => {
             bwrap_arguments.extend(["--proc", "/proc"].into_iter().map(OsString::from))
@@ -1931,11 +1993,6 @@ fn bwrap_request(
             // What this profile does and does not fence, including the non-IP
             // transports that survive `--unshare-net`, is owned by
             // `docs/spec/configuration-and-credentials.md`.
-            //
-            // `/etc/resolv.conf` is deliberately absent. Resolving a name needs the
-            // network that `--unshare-net` removes, so it is genuinely inert, and
-            // binding it would leave the profile reading as though egress were
-            // still expected to work.
             "--ro-bind-try",
             "/etc/hosts",
             "/etc/hosts",
@@ -1949,6 +2006,13 @@ fn bwrap_request(
         .into_iter()
         .map(OsString::from),
     );
+    for path in &context.configuration.read_only_binds {
+        bwrap_arguments.extend([
+            OsString::from("--ro-bind"),
+            path.as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ]);
+    }
     #[cfg(target_os = "linux")]
     bwrap_arguments.extend([
         OsString::from("--bind"),
@@ -2047,11 +2111,32 @@ fn bwrap_request(
         OsString::from("HOME"),
         OsString::from(SANDBOX_WORKSPACE),
     ]);
-    if cargo_registry_bound {
+    for (name, value) in [
+        (
+            "CARGO_HOME",
+            OsString::from(if cargo_registry_bound {
+                SANDBOX_CARGO_HOME
+            } else {
+                "/workspace/.cargo"
+            }),
+        ),
+        ("npm_config_cache", OsString::from("/workspace/.npm")),
+        ("RUSTUP_AUTO_INSTALL", OsString::from("0")),
+    ] {
+        bwrap_arguments.extend([OsString::from("--setenv"), OsString::from(name), value]);
+    }
+    if let Some(home) = &context.configuration.rustup_home {
         bwrap_arguments.extend([
             OsString::from("--setenv"),
-            OsString::from("CARGO_HOME"),
-            OsString::from(SANDBOX_CARGO_HOME),
+            OsString::from("RUSTUP_HOME"),
+            home.as_os_str().to_owned(),
+        ]);
+    }
+    if let Some(toolchain) = &context.configuration.rustup_toolchain {
+        bwrap_arguments.extend([
+            OsString::from("--setenv"),
+            OsString::from("RUSTUP_TOOLCHAIN"),
+            OsString::from(toolchain),
         ]);
     }
     #[cfg(target_os = "linux")]
@@ -5487,7 +5572,10 @@ mod tests {
     /// descriptor and launcher fields differ by host, so the conditional
     /// compilation lives here and both test bodies stay straight-line.
     fn isolation_fixture_context(workspace_root: &Path) -> SandboxLaunchContext<'_> {
+        static CONFIGURATION: std::sync::LazyLock<SandboxConfiguration> =
+            std::sync::LazyLock::new(SandboxConfiguration::default);
         SandboxLaunchContext {
+            configuration: &CONFIGURATION,
             workspace_root,
             bind_source: workspace_root,
             #[cfg(target_os = "linux")]

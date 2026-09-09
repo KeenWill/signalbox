@@ -5883,3 +5883,68 @@ fn disabling_reconciliation_requires_lossless_nudge_handoff() {
     );
     assert!(HubModelConfiguration::parse(&lossless).is_ok());
 }
+
+#[test]
+fn daemon_sandbox_defaults_do_not_expose_a_host_runtime() {
+    let configuration = HubModelConfiguration::parse(CONFIGURATION).expect("fixture parses");
+    assert_eq!(
+        configuration
+            .daemon_tools()
+            .expect("daemon tools")
+            .sandbox(),
+        &signalbox_tools_exec::SandboxConfiguration::default()
+    );
+}
+
+#[test]
+fn daemon_sandbox_settings_preserve_explicit_runtime_inputs() {
+    let runtime = tempfile::tempdir().expect("runtime directory");
+    let settings = format!(
+        r#"
+sandbox_network = "host"
+sandbox_read_only_binds = ["{path}"]
+sandbox_path_prepend = ["{path}"]
+sandbox_rustup_home = "{path}"
+sandbox_rustup_toolchain = "stable"
+"#,
+        path = runtime.path().display()
+    );
+    let configured =
+        CONFIGURATION.replace("[daemon_tools]", &format!("[daemon_tools]\n{settings}"));
+    let configuration = HubModelConfiguration::parse(&configured).expect("explicit runtime parses");
+    assert_eq!(
+        configuration
+            .daemon_tools()
+            .expect("daemon tools")
+            .sandbox(),
+        &signalbox_tools_exec::SandboxConfiguration {
+            network: signalbox_tools_exec::SandboxNetwork::Host,
+            read_only_binds: vec![runtime.path().to_owned()],
+            path_prepend: vec![runtime.path().to_owned()],
+            rustup_home: Some(runtime.path().to_owned()),
+            rustup_toolchain: Some(String::from("stable")),
+        }
+    );
+}
+
+#[test]
+fn daemon_sandbox_settings_reject_malformed_runtime_inputs() {
+    for settings in [
+        "sandbox_network = 'registry'",
+        "sandbox_network = true",
+        "sandbox_read_only_binds = ['relative']",
+        "sandbox_read_only_binds = ['/definitely-missing-sandbox-runtime']",
+        "sandbox_read_only_binds = 'not-an-array'",
+        "sandbox_path_prepend = [42]",
+        "sandbox_rustup_home = 'relative'",
+        "sandbox_rustup_toolchain = ''",
+    ] {
+        let configured =
+            CONFIGURATION.replace("[daemon_tools]", &format!("[daemon_tools]\n{settings}"));
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidDaemonToolSettings),
+            "{settings}"
+        );
+    }
+}

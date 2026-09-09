@@ -117,8 +117,16 @@ launch unshares the user, pid, ipc, uts, and network namespaces and mounts a
 fresh `/proc`. A container-process-namespace variant omits the pid unshare and
 read-only binds the existing `/proc`; it is admissible only when an outer
 container already isolates that namespace. The child inherits none of the
-daemon's environment and runs with a fixed variable set and a fixed bind-mount
-inventory.
+daemon's environment; deployment settings supply additional runtime inputs. The
+optional `[daemon_tools]` keys `sandbox_network` (default `"none"`, or
+`"host"`), `sandbox_read_only_binds` (default `[]`), and `sandbox_path_prepend`
+(default `[]`) select networking, absolute host paths bound read-only at the
+same paths, and absolute directories prepended to `PATH`. Host networking shares
+the daemon's network namespace and DNS configuration without destination
+filtering, independently of web-egress and tool-mapping policies. Optional
+`sandbox_rustup_home` and `sandbox_rustup_toolchain` set `RUSTUP_HOME` and
+`RUSTUP_TOOLCHAIN`; automatic toolchain installation is disabled, `CARGO_HOME`
+stays private and writable, and `npm_config_cache` is `/workspace/.npm`.
 
 The optional `[tool_approval_postures]` table decides, per exact composed tool
 name, whether a request is approved by policy, judged by the approval judge, or
