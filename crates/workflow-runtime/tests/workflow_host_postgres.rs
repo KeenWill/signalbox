@@ -17,9 +17,9 @@ use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
     program_journal::ProgramJournalRepository,
 };
-use signalbox_program_runtime::{
+use signalbox_workflow_runtime::{
     LiveDeliveryFailure, LiveDeliverySource, PROGRAM_SDK_V1_SPECIFIER, ProgramArtifact,
-    ProgramExecutionOutcome, ProgramHost, ProgramHostError, ProgramHostProtocolError,
+    ProgramExecutionOutcome, WorkflowHost, WorkflowHostError, WorkflowHostProtocolError,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -202,7 +202,7 @@ async fn isolate_replays_then_transitions_to_live_at_the_durable_tail() -> Resul
         payload: payload(&[SECOND_LIVE_ANSWER_BYTE]),
     };
     let artifact = tail_transition_artifact();
-    let host = ProgramHost::new(repository.clone());
+    let host = WorkflowHost::new(repository.clone());
     let mut live =
         ScriptedDeliveries::new([expected_concurrent_kind.clone(), expected_live_kind.clone()]);
 
@@ -287,14 +287,14 @@ async fn isolate_divergence_persists_and_replays_the_nondeterminism_fault()
         .await?;
     let observed = request(1, RequestKind::Now(payload(&[DIVERGENT_REQUEST_BYTE])));
     let artifact = divergent_artifact();
-    let host = ProgramHost::new(repository.clone());
+    let host = WorkflowHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let failure = host
         .execute_unregistered(run, &artifact, &mut live_must_not_run)
         .await
         .expect_err("different request bytes must stop the isolate host");
-    let ProgramHostError::Nondeterminism {
+    let WorkflowHostError::Nondeterminism {
         expected: failed_expected,
         observed: failed_observed,
         fault,
@@ -347,7 +347,7 @@ globalThis.FinalizationRegistry === undefined || (() => { throw new Error("Final
 globalThis.__signalboxProgramRequest === undefined || (() => { throw new Error("the raw request op reached the artifact"); })();
 "#,
     );
-    let host = ProgramHost::new(repository);
+    let host = WorkflowHost::new(repository);
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let outcome = host
@@ -370,7 +370,7 @@ async fn unresolved_top_level_await_returns_stalled_promptly() -> Result<(), Box
     let run = distinct_run_id(2);
     repository.create_stream(run).await?;
     let artifact = ProgramArtifact::new("await new Promise(() => {});");
-    let host = ProgramHost::new(repository);
+    let host = WorkflowHost::new(repository);
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let failure = tokio::time::timeout(
@@ -384,7 +384,7 @@ async fn unresolved_top_level_await_returns_stalled_promptly() -> Result<(), Box
     assert!(
         matches!(
             failure,
-            ProgramHostError::Protocol(ProgramHostProtocolError::Stalled)
+            WorkflowHostError::Protocol(WorkflowHostProtocolError::Stalled)
         ),
         "expected the typed stalled failure, got {failure:?}"
     );
@@ -414,7 +414,7 @@ now(new Uint8Array([{FIRST_LIVE_REQUEST_BYTE}]));
         resolves: expected_request.ordinal(),
         payload: payload(&[FIRST_LIVE_ANSWER_BYTE]),
     }]);
-    let host = ProgramHost::new(repository.clone());
+    let host = WorkflowHost::new(repository.clone());
 
     let outcome = host.execute_unregistered(run, &artifact, &mut live).await?;
 
@@ -440,7 +440,7 @@ async fn a_module_that_throws_is_an_isolate_failure_not_a_completion() -> Result
     let run = distinct_run_id(8);
     repository.create_stream(run).await?;
     let artifact = ProgramArtifact::new(format!(r#"throw new Error("{THROWN_MESSAGE}");"#));
-    let host = ProgramHost::new(repository);
+    let host = WorkflowHost::new(repository);
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let failure = host
@@ -448,7 +448,7 @@ async fn a_module_that_throws_is_an_isolate_failure_not_a_completion() -> Result
         .await
         .expect_err("a module that throws must not report completion");
 
-    let ProgramHostError::Isolate(error) = failure else {
+    let WorkflowHostError::Isolate(error) = failure else {
         panic!("expected the typed isolate failure, got {failure:?}");
     };
     assert!(
@@ -487,7 +487,7 @@ typeof typedArrayPrototype === "undefined" || (() => { throw new Error("a bootst
 typeof localeSensitiveMethods === "undefined" || (() => { throw new Error("a bootstrap binding reached the artifact"); })();
 "#,
     );
-    let host = ProgramHost::new(repository);
+    let host = WorkflowHost::new(repository);
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let outcome = host
@@ -514,7 +514,7 @@ async fn a_journal_opening_with_a_run_cancel_replays_before_the_artifact_request
         .append_delivery(run, DeliveryKind::RunCancel(payload(&[RUN_CANCEL_BYTE])))
         .await?;
     let artifact = immediately_requesting_artifact();
-    let host = ProgramHost::new(repository.clone());
+    let host = WorkflowHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let outcome = host
@@ -556,7 +556,7 @@ async fn a_recorded_terminal_outcome_behind_a_request_outranks_an_unloadable_art
         .append_delivery(run, DeliveryKind::RunCancel(payload(&[RUN_CANCEL_BYTE])))
         .await?;
     let artifact = ProgramArtifact::new(r#"import "./outside-the-contract.js";"#);
-    let host = ProgramHost::new(repository.clone());
+    let host = WorkflowHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let outcome = host
@@ -599,7 +599,7 @@ async fn a_leading_run_cancel_outranks_an_artifact_that_cannot_load() -> Result<
         .append_delivery(run, DeliveryKind::RunCancel(payload(&[RUN_CANCEL_BYTE])))
         .await?;
     let artifact = ProgramArtifact::new(r#"import "./outside-the-contract.js";"#);
-    let host = ProgramHost::new(repository.clone());
+    let host = WorkflowHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let outcome = host
@@ -650,7 +650,7 @@ async fn a_run_cancel_behind_a_recorded_answer_replays_before_the_next_request()
         .append_delivery(run, DeliveryKind::RunCancel(payload(&[RUN_CANCEL_BYTE])))
         .await?;
     let artifact = two_request_artifact();
-    let host = ProgramHost::new(repository.clone());
+    let host = WorkflowHost::new(repository.clone());
     let mut live_must_not_run = ScriptedDeliveries::new([]);
 
     let outcome = host
@@ -786,7 +786,7 @@ async fn session_capability_requires_a_registered_run_with_the_session_grant()
     use signalbox_domain::{ProgramCapability, program_registration::ProgramGrants};
     let (_container, pool) = migrated_postgres().await?;
     let journal = ProgramJournalRepository::new(pool.clone());
-    let host = ProgramHost::new(journal.clone());
+    let host = WorkflowHost::new(journal.clone());
     let unregistered = run_id();
     assert!(host.session_capability(unregistered).await?.is_none());
     journal.create_stream(unregistered).await?;
@@ -829,13 +829,13 @@ async fn registered_run_executes_its_stored_artifact() -> Result<(), Box<dyn Err
         payload: payload(&[FIRST_LIVE_ANSWER_BYTE]),
     }]);
     let mut effects = EffectProbe {
-        policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+        policy: signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous,
         adopted: None,
         executions: 0,
         adoptions: 0,
     };
     assert_eq!(
-        ProgramHost::new(journal.clone())
+        WorkflowHost::new(journal.clone())
             .execute_registered(run, &mut deliveries, &mut effects)
             .await?,
         ProgramExecutionOutcome::Completed,
@@ -893,22 +893,22 @@ async fn registered_run(
 }
 
 struct EffectProbe {
-    policy: signalbox_program_runtime::effects::EffectRecovery,
+    policy: signalbox_workflow_runtime::effects::EffectRecovery,
     adopted: Option<InlineFramePayload>,
     executions: usize,
     adoptions: usize,
 }
 
-impl signalbox_program_runtime::effects::EffectExecutor for EffectProbe {
+impl signalbox_workflow_runtime::effects::EffectExecutor for EffectProbe {
     fn recovery(
         &self,
         _: &signalbox_domain::EffectRequest,
-    ) -> signalbox_program_runtime::effects::EffectRecovery {
+    ) -> signalbox_workflow_runtime::effects::EffectRecovery {
         self.policy
     }
     fn adopt<'a>(
         &'a mut self,
-        _: signalbox_program_runtime::effects::EffectInvocation<'a>,
+        _: signalbox_workflow_runtime::effects::EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
     {
         self.adoptions += 1;
@@ -916,7 +916,7 @@ impl signalbox_program_runtime::effects::EffectExecutor for EffectProbe {
     }
     fn execute<'a>(
         &'a mut self,
-        _: signalbox_program_runtime::effects::EffectInvocation<'a>,
+        _: signalbox_workflow_runtime::effects::EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
         self.executions += 1;
         Box::pin(async { Ok(payload(b"executed")) })
@@ -928,12 +928,12 @@ impl signalbox_program_runtime::effects::EffectExecutor for EffectProbe {
 async fn ungranted_effect_is_journaled_as_refused_without_calling_the_executor()
 -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{RejectReason, program_registration::ProgramGrants};
-    use signalbox_program_runtime::effects::EffectRecovery;
+    use signalbox_workflow_runtime::effects::EffectRecovery;
     let (_container, pool) = migrated_postgres().await?;
     let artifact = effect_artifact("reject");
     let run = registered_run(&pool, &artifact, ProgramGrants::new([])).await?;
     let journal = ProgramJournalRepository::new(pool.clone());
-    let host = ProgramHost::new(journal.clone());
+    let host = WorkflowHost::new(journal.clone());
     let mut effects = EffectProbe {
         policy: EffectRecovery::Idempotent,
         adopted: None,
@@ -962,7 +962,7 @@ async fn ungranted_effect_is_journaled_as_refused_without_calling_the_executor()
 
 /// A persisted request without an answer models a crash after request admission.
 async fn recover_effect(
-    policy: signalbox_program_runtime::effects::EffectRecovery,
+    policy: signalbox_workflow_runtime::effects::EffectRecovery,
     adopted: Option<InlineFramePayload>,
 ) -> Result<(EffectProbe, InlineFramePayload), Box<dyn Error>> {
     use signalbox_domain::{EffectRequest, ProgramCapability, program_registration::ProgramGrants};
@@ -986,7 +986,7 @@ async fn recover_effect(
             )),
         )
         .await?;
-    let host = ProgramHost::new(journal.clone());
+    let host = WorkflowHost::new(journal.clone());
     let mut effects = EffectProbe {
         policy,
         adopted,
@@ -1015,7 +1015,7 @@ async fn recover_effect(
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn crash_recovery_adopts_a_proven_answer_without_reissuing() -> Result<(), Box<dyn Error>> {
-    use signalbox_program_runtime::effects::EffectRecovery;
+    use signalbox_workflow_runtime::effects::EffectRecovery;
     let retained = payload(b"durable outcome");
     let (effects, answer) =
         recover_effect(EffectRecovery::Ambiguous, Some(retained.clone())).await?;
@@ -1029,7 +1029,7 @@ async fn crash_recovery_adopts_a_proven_answer_without_reissuing() -> Result<(),
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn crash_recovery_reissues_only_a_declared_idempotent_operation() -> Result<(), Box<dyn Error>>
 {
-    use signalbox_program_runtime::effects::EffectRecovery;
+    use signalbox_workflow_runtime::effects::EffectRecovery;
     let (effects, answer) = recover_effect(EffectRecovery::Idempotent, None).await?;
     assert_eq!(effects.adoptions, 1);
     assert_eq!(effects.executions, 1);
@@ -1041,7 +1041,7 @@ async fn crash_recovery_reissues_only_a_declared_idempotent_operation() -> Resul
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn crash_recovery_journals_ambiguity_without_a_silent_reissue() -> Result<(), Box<dyn Error>>
 {
-    use signalbox_program_runtime::effects::EffectRecovery;
+    use signalbox_workflow_runtime::effects::EffectRecovery;
     let (effects, answer) = recover_effect(EffectRecovery::Ambiguous, None).await?;
     assert_eq!(effects.adoptions, 1);
     assert_eq!(effects.executions, 0);
@@ -1075,12 +1075,12 @@ async fn program_registration_widening_is_refused_in_the_journal() -> Result<(),
     .await?;
     let journal = ProgramJournalRepository::new(pool.clone());
     let mut effects = EffectProbe {
-        policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+        policy: signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous,
         adopted: None,
         executions: 0,
         adoptions: 0,
     };
-    ProgramHost::new(journal.clone())
+    WorkflowHost::new(journal.clone())
         .execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
         .await?;
     let registrations: i64 = sqlx::query_scalar("SELECT count(*) FROM program_registration")
@@ -1145,12 +1145,12 @@ async fn registration_recovery_adopts_the_matching_immutable_row() -> Result<(),
         )
         .await?;
     let mut effects = EffectProbe {
-        policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+        policy: signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous,
         adopted: None,
         executions: 0,
         adoptions: 0,
     };
-    ProgramHost::new(journal.clone())
+    WorkflowHost::new(journal.clone())
         .execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
         .await?;
     let loaded = journal.load(run).await?.expect("registered journal exists");
@@ -1175,23 +1175,23 @@ async fn registration_recovery_adopts_the_matching_immutable_row() -> Result<(),
 
 struct CancellingEffects(ProgramJournalRepository);
 
-impl signalbox_program_runtime::effects::EffectExecutor for CancellingEffects {
+impl signalbox_workflow_runtime::effects::EffectExecutor for CancellingEffects {
     fn recovery(
         &self,
         _: &signalbox_domain::EffectRequest,
-    ) -> signalbox_program_runtime::effects::EffectRecovery {
-        signalbox_program_runtime::effects::EffectRecovery::Ambiguous
+    ) -> signalbox_workflow_runtime::effects::EffectRecovery {
+        signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous
     }
     fn adopt<'a>(
         &'a mut self,
-        _: signalbox_program_runtime::effects::EffectInvocation<'a>,
+        _: signalbox_workflow_runtime::effects::EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
     {
         Box::pin(async { Ok(None) })
     }
     fn execute<'a>(
         &'a mut self,
-        invocation: signalbox_program_runtime::effects::EffectInvocation<'a>,
+        invocation: signalbox_workflow_runtime::effects::EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
         Box::pin(async move {
             self.0
@@ -1219,7 +1219,7 @@ async fn a_cancellation_committed_during_an_effect_remains_the_run_outcome()
     )
     .await?;
     let journal = ProgramJournalRepository::new(pool.clone());
-    let outcome = ProgramHost::new(journal.clone())
+    let outcome = WorkflowHost::new(journal.clone())
         .execute_registered(
             run,
             &mut ScriptedDeliveries::new([]),
@@ -1293,7 +1293,7 @@ async fn execute_session_creation(attempt: SessionEffectAttempt) -> Result<(), B
         ProgramCapability, SessionConfigurationDefaults, SessionId,
         program_registration::ProgramGrants, program_session::ProgramSessionCreate,
     };
-    use signalbox_program_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
+    use signalbox_workflow_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
     let (_container, pool) = migrated_postgres().await?;
     let command = Uuid::now_v7();
     let model = Uuid::now_v7();
@@ -1340,7 +1340,7 @@ async fn execute_session_creation(attempt: SessionEffectAttempt) -> Result<(), B
         adoptions: 0,
     };
     let mut effects = SessionEffects::new(sessions, other, |_| {}, |_| None);
-    let host = ProgramHost::new(journal.clone());
+    let host = WorkflowHost::new(journal.clone());
     assert_eq!(
         host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
             .await?,
@@ -1415,7 +1415,7 @@ async fn session_turn_answers_retain_only_the_exact_terminal_identities_and_dige
         session_lifecycle_command::SessionLifecycleCommandRepository,
         submit_input::SubmitInputRepository,
     };
-    use signalbox_program_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
+    use signalbox_workflow_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
     let (_container, pool) = migrated_postgres().await?;
     let sessions = session_repository(&pool);
     let creator = registered_run(
@@ -1459,7 +1459,7 @@ if (answer.kind !== "answer") throw new Error("turn refused");
     )
     .await?;
     let journal = ProgramJournalRepository::new(pool.clone());
-    let host = ProgramHost::new(journal.clone());
+    let host = WorkflowHost::new(journal.clone());
     let (nudge, mut ready) = tokio::sync::mpsc::unbounded_channel();
     let other = EffectProbe {
         policy: EffectRecovery::Ambiguous,
@@ -1550,12 +1550,12 @@ async fn terminal_unregistered_run_is_rejected_by_registered_execution()
     journal
         .append_delivery(run, DeliveryKind::RunCancel(payload(b"cancelled")))
         .await?;
-    let error = ProgramHost::new(journal)
+    let error = WorkflowHost::new(journal)
         .execute_registered(
             run,
             &mut ScriptedDeliveries::new([]),
             &mut EffectProbe {
-                policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+                policy: signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous,
                 adopted: None,
                 executions: 0,
                 adoptions: 0,
@@ -1565,7 +1565,7 @@ async fn terminal_unregistered_run_is_rejected_by_registered_execution()
         .expect_err("terminal streams require the same registration as live execution");
     assert!(matches!(
         error,
-        ProgramHostError::Registration(
+        WorkflowHostError::Registration(
             signalbox_persistence::program_registration::ProgramRegistrationError::RunMissing
         )
     ));
@@ -1580,7 +1580,7 @@ async fn refused_session_effect(
     input: &[u8],
 ) -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{EffectRequest, ProgramCapability, program_registration::ProgramGrants};
-    use signalbox_program_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
+    use signalbox_workflow_runtime::{effects::EffectRecovery, session_effects::SessionEffects};
     let artifact = ProgramArtifact::new(format!(
         r#"
 import {{ effect }} from "{PROGRAM_SDK_V1_SPECIFIER}";
@@ -1615,7 +1615,7 @@ if (answer.kind !== "answer") throw new Error("expected a session refusal answer
         adoptions: 0,
     };
     let mut effects = SessionEffects::new(session_repository(pool), other, |_| {}, |_| None);
-    let host = ProgramHost::new(journal.clone());
+    let host = WorkflowHost::new(journal.clone());
     assert_eq!(
         host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
             .await?,
@@ -1694,12 +1694,12 @@ async fn malformed_registration_requests_are_durably_rejected() -> Result<(), Bo
                     .await?;
             }
             let mut effects = EffectProbe {
-                policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+                policy: signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous,
                 adopted: None,
                 executions: 0,
                 adoptions: 0,
             };
-            let host = ProgramHost::new(journal.clone());
+            let host = WorkflowHost::new(journal.clone());
             host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
                 .await?;
             let loaded = journal.load(run).await?.expect("registered journal exists");
@@ -1767,10 +1767,10 @@ async fn a_cancellation_after_the_initial_load_outranks_successful_completion()
     sqlx::query("LOCK TABLE program_registration IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *registration_lock)
         .await?;
-    let host = ProgramHost::new(journal.clone());
+    let host = WorkflowHost::new(journal.clone());
     let mut primitives = ScriptedDeliveries::new([]);
     let mut effects = EffectProbe {
-        policy: signalbox_program_runtime::effects::EffectRecovery::Ambiguous,
+        policy: signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous,
         adopted: None,
         executions: 0,
         adoptions: 0,

@@ -3,12 +3,12 @@ load("//tooling/bazel:package.bzl", "rust_package")
 load("//tooling/bazel:rust.bzl", "rust_library")
 load("//tooling/bazel:testing.bzl", "rust_api_json", "rust_doc_test", "rust_postgres_test", "rust_quality_tests", "rust_selection_test", "rust_unit_test")
 
-CRATE_FEATURES = SUITES["program-runtime"]["crate_features"]
+CRATE_FEATURES = SUITES["workflow-runtime"]["crate_features"]
 
 rust_package()
 
 rust_library(
-    name = "signalbox_program_runtime",
+    name = "signalbox_workflow_runtime",
     compile_data = glob(["src/**/*.js"]),
     crate_features = CRATE_FEATURES,
     crate_root = "src/lib.rs",
@@ -20,17 +20,17 @@ rust_library(
 
 rust_unit_test(
     name = "unit_tests",
-    crate = ":signalbox_program_runtime",
+    crate = ":signalbox_workflow_runtime",
     crate_features = CRATE_FEATURES,
     deps = ["//crates/persistence:signalbox_persistence"],
 )
 
 rust_postgres_test(
-    name = "program_host_postgres",
-    crate_features = SUITES["program-runtime"]["crate_features"],
-    crate_root = "tests/program_host_postgres.rs",
+    name = "workflow_host_postgres",
+    crate_features = SUITES["workflow-runtime"]["crate_features"],
+    crate_root = "tests/workflow_host_postgres.rs",
     deps = [
-        ":signalbox_program_runtime",
+        ":signalbox_workflow_runtime",
         "//crates/domain:signalbox_domain",
         "//crates/persistence:signalbox_persistence",
         "@crates//:testcontainers-modules",
@@ -40,18 +40,18 @@ rust_postgres_test(
 test_suite(
     name = "postgres_tests",
     tags = ["manual"],
-    tests = ["//:postgres_program_runtime"],
+    tests = ["//:postgres_workflow_runtime"],
 )
 
 rust_api_json(
     name = "api_json",
-    crate = ":signalbox_program_runtime",
+    crate = ":signalbox_workflow_runtime",
     crate_features = CRATE_FEATURES,
 )
 
 rust_doc_test(
     name = "doc_tests",
-    crate = ":signalbox_program_runtime",
+    crate = ":signalbox_workflow_runtime",
     crate_features = [
         "default",
         "postgres-integration",
@@ -59,9 +59,9 @@ rust_doc_test(
 )
 
 rust_selection_test(
-    name = "program_host_postgres_ordinary",
+    name = "workflow_host_postgres_ordinary",
     args = ["--test-threads=4"],
-    test = ":program_host_postgres",
+    test = ":workflow_host_postgres",
 )
 
-rust_quality_tests(documented_crates = [":signalbox_program_runtime"])
+rust_quality_tests(documented_crates = [":signalbox_workflow_runtime"])
