@@ -1,18 +1,24 @@
 //! Accepted REST transport snapshots, isolated from events and rule evaluation.
 
+mod incremental;
+pub use incremental::poll_with_cache;
+
+/// Default request allowance for one reconciliation attempt.
+pub const DEFAULT_POLL_REQUEST_BUDGET: usize = 100;
+/// Hard per-attempt request ceiling.
+pub const MAX_POLL_REQUEST_BUDGET: usize = 1_000;
+
 use std::{collections::BTreeSet, future::Future, num::NonZeroU64};
 
 use serde_json::{Value, json};
-use signalbox_session_ownership::{
-    CommitSha, RepoWatchAuthorLogin, RepoWatchPullRequestLifecycle, RepositorySlug,
-};
+use signalbox_session_ownership::{CommitSha, RepoWatchAuthorLogin, RepositorySlug};
 use sqlx::Row;
 use tokio::sync::Mutex;
 
 use crate::{
     EventProducer, FrontierEventAdmission, RepoWatchStore, StoreError,
     github::{ConditionalPage, GitHubClient, HttpValidators},
-    provider::{GitHubObservationRead, ObservationError, PAGE_SIZE, fetch_observation},
+    provider::{GitHubObservationRead, ObservationError, PAGE_SIZE},
 };
 
 /// Conditional transport for complete repository observations.
@@ -735,6 +741,10 @@ impl RepoWatchStore {
         .fetch_one(&mut *tx)
         .await?;
         if !same {
+            sqlx::query("DELETE FROM poll_cursor WHERE repository=$1")
+                .bind(repository.as_str())
+                .execute(&mut *tx)
+                .await?;
             sqlx::query("DELETE FROM poll_cache_page WHERE repository=$1")
                 .bind(repository.as_str())
                 .execute(&mut *tx)
@@ -798,6 +808,7 @@ impl RepoWatchStore {
         reviewers: &[RepoWatchAuthorLogin],
         pages: Vec<(Resource, Option<AcceptedPage>)>,
         retained: BTreeSet<String>,
+        prune: bool,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
         let same: Option<bool> = sqlx::query_scalar(
@@ -825,13 +836,15 @@ impl RepoWatchStore {
                     .await?;
             }
         }
-        sqlx::query(
-            "DELETE FROM poll_cache_page WHERE repository=$1 AND NOT (resource_key = ANY($2))",
-        )
-        .bind(repository.as_str())
-        .bind(retained.into_iter().collect::<Vec<_>>())
-        .execute(&mut *tx)
-        .await?;
+        if prune {
+            sqlx::query(
+                "DELETE FROM poll_cache_page WHERE repository=$1 AND NOT (resource_key = ANY($2))",
+            )
+            .bind(repository.as_str())
+            .bind(retained.into_iter().collect::<Vec<_>>())
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -861,16 +874,6 @@ impl<'a, T> CachedObservationRead<'a, T> {
             pending: Mutex::new(Vec::new()),
             retained: Mutex::new(BTreeSet::new()),
         }
-    }
-    pub(crate) async fn retain(&self) -> Result<(), StoreError> {
-        self.store
-            .retain_poll_pages(
-                self.repository,
-                self.reviewers,
-                std::mem::take(&mut *self.pending.lock().await),
-                std::mem::take(&mut *self.retained.lock().await),
-            )
-            .await
     }
 }
 
@@ -925,73 +928,82 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for CachedObservationR
     }
 }
 
-/// Accepts one complete observation before retaining its conditional transport state.
-/// The caller prepares the reviewer set before composing the repository poller.
-pub async fn poll_with_cache(
+const WEBHOOK_PULL_ATTEMPT_LIMIT: i32 = 3;
+
+/// Drains the pending primary-webhook subjects through ordinary event admission.
+pub async fn observe_webhook_pulls(
     io: &impl ConditionalObservationRead,
     store: &RepoWatchStore,
     repository: &RepositorySlug,
     reviewers: &[RepoWatchAuthorLogin],
-    producer: EventProducer,
     retention: std::time::Duration,
-) -> Result<FrontierEventAdmission, ObservationError> {
-    let started = std::time::Instant::now();
-    let baseline = store
-        .ingest_baseline(repository)
-        .await
-        .map_err(ObservationError::Cache)?;
-    let cached = CachedObservationRead::new(io, store, repository, reviewers);
-    let counted = ObservationReadCounts {
-        io: &cached,
-        requests: std::sync::atomic::AtomicUsize::new(0),
-        comments: std::sync::atomic::AtomicUsize::new(0),
-    };
-    let observed = fetch_observation(
-        &counted,
-        repository,
-        reviewers,
-        baseline.observation.as_ref(),
-        &baseline
-            .merged_baselines
-            .iter()
-            .map(|entry| entry.state.clone())
-            .collect::<Vec<_>>(),
+) -> Result<crate::measurements::PollOutcome, ObservationError> {
+    use rust_decimal::{Decimal, prelude::ToPrimitive};
+    let pending: Vec<(Decimal, uuid::Uuid)> = sqlx::query_as(
+        "SELECT pull_request_number, delivery_id FROM webhook_pull_wake
+         WHERE repository=$1 AND failed_attempts < $2 ORDER BY pull_request_number",
     )
-    .await?;
-    let admission = store
-        .ingest_observation(&baseline, &observed, producer, retention)
-        .await
-        .map_err(ObservationError::Cache)?;
-    if matches!(
-        admission,
-        FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged
-    ) {
-        cached.retain().await.map_err(ObservationError::Cache)?;
-        let state = observed.observation.state();
-        tracing::info!(
-            repository = repository.as_str(),
-            ?producer,
-            open_pull_requests = state
-                .pull_requests()
-                .iter()
-                .filter(|p| p.lifecycle() == RepoWatchPullRequestLifecycle::Open)
-                .count(),
-            terminal_pull_requests = state
-                .pull_requests()
-                .iter()
-                .filter(|p| p.lifecycle() != RepoWatchPullRequestLifecycle::Open)
-                .count(),
-            previous_merged_baselines = baseline.merged_baselines.len(),
-            branches = state.branch_heads().len(),
-            workflow_runs = state.workflow_runs().len(),
-            requests = counted.requests.load(std::sync::atomic::Ordering::Relaxed),
-            comments = counted.comments.load(std::sync::atomic::Ordering::Relaxed),
-            elapsed_ms = started.elapsed().as_millis(),
-            "repository-watch observation completed"
-        );
+    .bind(repository.as_str())
+    .bind(WEBHOOK_PULL_ATTEMPT_LIMIT)
+    .fetch_all(&store.pool)
+    .await
+    .map_err(StoreError::from)
+    .map_err(ObservationError::Cache)?;
+    let mut outcome = crate::measurements::PollOutcome::Succeeded;
+    for (number, delivery) in pending {
+        let pull = number
+            .to_u64()
+            .and_then(NonZeroU64::new)
+            .map(signalbox_session_ownership::PullRequestNumber::new)
+            .ok_or(ObservationError::InvalidResponse)?;
+        let result: Result<(), ObservationError> = async {
+        let baseline = store
+            .ingest_baseline(repository)
+            .await
+            .map_err(ObservationError::Cache)?;
+        let cached = CachedObservationRead::new(io, store, repository, reviewers);
+        let counted = ObservationReadCounts {
+            io: &cached,
+            requests: std::sync::atomic::AtomicUsize::new(0),
+            comments: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let observed = crate::provider::fetch_pull_observation(
+            &counted, repository, reviewers, &baseline, pull,
+        )
+        .await?;
+        let admission = store
+            .ingest_observation(&baseline, &observed, EventProducer::Webhook, retention)
+            .await
+            .map_err(ObservationError::Cache)?;
+        if !matches!(
+            admission,
+            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged
+        ) {
+            return Err(ObservationError::Cache(
+                StoreError::InvalidComparisonBaseline,
+            ));
+        }
+        tracing::info!(repository=repository.as_str(),producer=?EventProducer::Webhook,
+            pull_request=pull.get(),requests=counted.requests.load(std::sync::atomic::Ordering::Relaxed),
+            "repository-watch observation completed");
+        incremental::webhook_observed(store, repository, pull).await?;
+        Ok(())
+        }.await;
+        if let Err(error) = result {
+            outcome = crate::measurements::PollOutcome::Partial;
+            sqlx::query("UPDATE webhook_pull_wake SET failed_attempts=failed_attempts+1, last_failure=$4 WHERE repository=$1 AND pull_request_number=$2 AND delivery_id=$3")
+                .bind(repository.as_str()).bind(number).bind(delivery).bind(error.to_string())
+                .execute(&store.pool).await.map_err(StoreError::from).map_err(ObservationError::Cache)?;
+            tracing::warn!(repository=repository.as_str(),pull_request=pull.get(),%error,
+                "repository-watch webhook pull observation failed");
+            continue;
+        }
+        sqlx::query("DELETE FROM webhook_pull_wake WHERE repository=$1 AND pull_request_number=$2 AND delivery_id=$3")
+            .bind(repository.as_str()).bind(number).bind(delivery).execute(&store.pool).await.map_err(StoreError::from).map_err(ObservationError::Cache)?;
     }
-    Ok(admission)
+    Ok(outcome)
 }
+
 struct ObservationReadCounts<'a, T> {
     io: &'a T,
     requests: std::sync::atomic::AtomicUsize,

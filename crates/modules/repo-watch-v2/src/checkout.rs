@@ -7,11 +7,14 @@ use signalbox_session_ownership::{
 };
 use uuid::Uuid;
 
+pub use crate::kickoff::KickoffPushAuthority;
+
 /// Closed terminal reasons for a checkout dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CheckoutRetirementReason {
     ProvisioningFailed,
     RepositoryUnconfigured,
+    KickoffRejected,
 }
 
 impl CheckoutRetirementReason {
@@ -19,6 +22,7 @@ impl CheckoutRetirementReason {
         match self {
             Self::ProvisioningFailed => "checkout_provisioning_failed",
             Self::RepositoryUnconfigured => "repository_unconfigured",
+            Self::KickoffRejected => "kickoff_rejected",
         }
     }
 }
@@ -83,6 +87,55 @@ pub struct CheckoutRemovalCandidate {
 }
 
 impl RepoWatchStore {
+    /// Freezes publication instructions with the kickoff identity after provisioning.
+    pub async fn retain_dispatch_kickoff(
+        &self,
+        creation: DurableCommandId,
+        candidate: DurableCommandId,
+        push_authority: KickoffPushAuthority,
+    ) -> Result<Option<(DurableCommandId, String)>, StoreError> {
+        let row: Option<(Uuid, String)> = sqlx::query_as(
+            "UPDATE dispatch_ledger
+             SET kickoff_command_id = COALESCE(kickoff_command_id, $2),
+                 kickoff_text = CASE WHEN kickoff_command_id IS NULL
+                     THEN $3 || kickoff_text ELSE kickoff_text END
+             WHERE command_id = $1 AND kickoff_text IS NOT NULL
+               AND checkout_head_sha IS NOT NULL AND checkout_retired_reason IS NULL
+               AND NOT checkout_removed
+             RETURNING kickoff_command_id, kickoff_text",
+        )
+        .bind(creation.into_uuid())
+        .bind(candidate.into_uuid())
+        .bind(push_authority.instruction())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id, text)| (DurableCommandId::from_uuid(id), text)))
+    }
+
+    /// Retains a fresh identity after core durably rejects a kickoff, preserving its text.
+    pub async fn retry_dispatch_kickoff(
+        &self,
+        creation: DurableCommandId,
+        rejected: DurableCommandId,
+        candidate: DurableCommandId,
+    ) -> Result<Option<(DurableCommandId, String)>, StoreError> {
+        let row: Option<(Uuid, String)> = sqlx::query_as(
+            "UPDATE dispatch_ledger
+             SET kickoff_command_id = CASE WHEN kickoff_command_id = $2
+                 THEN $3 ELSE kickoff_command_id END
+             WHERE command_id = $1 AND kickoff_command_id IS NOT NULL
+               AND kickoff_text IS NOT NULL AND checkout_head_sha IS NOT NULL
+               AND checkout_retired_reason IS NULL AND NOT checkout_removed
+             RETURNING kickoff_command_id, kickoff_text",
+        )
+        .bind(creation.into_uuid())
+        .bind(rejected.into_uuid())
+        .bind(candidate.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id, text)| (DurableCommandId::from_uuid(id), text)))
+    }
+
     /// Lists retained locations, including interrupted filesystem provisioning.
     pub async fn checkout_removal_candidates(
         &self,
@@ -169,6 +222,7 @@ impl RepoWatchStore {
                     Some("repository_unconfigured") => {
                         Some(CheckoutRetirementReason::RepositoryUnconfigured)
                     }
+                    Some("kickoff_rejected") => Some(CheckoutRetirementReason::KickoffRejected),
                     Some(_) => return Err(StoreError::InvalidRetainedCommand),
                 },
             })

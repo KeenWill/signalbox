@@ -297,6 +297,7 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
                     request,
                     attempt: ended,
                     context_text,
+                    context_error_detail,
                     ..
                 }) = resolved_tools.remove(&source)
                 else {
@@ -328,7 +329,12 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
                         ModelToolResultContent::Success(ToolResultContent::Text(text.clone()))
                     }
                     ToolAttemptEnd::KnownFailed { error } => {
-                        ModelToolResultContent::ExecutionError(error.clone())
+                        ModelToolResultContent::ExecutionError(
+                            signalbox_domain::ToolExecutionError::new(
+                                error.kind(),
+                                context_error_detail.clone(),
+                            ),
+                        )
                     }
                     ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => {
                         return Err(ModelFrontierRenderingError::UnrenderableToolResult {
@@ -631,15 +637,16 @@ pub fn projected_frontier_content_bytes<'a>(
                 ResolvedToolConversationEntry::ExecutionResult {
                     attempt,
                     context_text,
+                    context_error_detail,
                     ..
                 } => {
                     match attempt.end() {
                         ToolAttemptEnd::Completed { .. } => {
                             context_text.as_ref().map_or(0, |text| text.as_str().len())
                         }
-                        ToolAttemptEnd::KnownFailed { error } => {
-                            error.detail().map_or(0, |detail| detail.as_str().len())
-                        }
+                        ToolAttemptEnd::KnownFailed { .. } => context_error_detail
+                            .as_ref()
+                            .map_or(0, |detail| detail.as_str().len()),
                         // Neither shape renders, so neither retains content.
                         ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => 0,
                     }

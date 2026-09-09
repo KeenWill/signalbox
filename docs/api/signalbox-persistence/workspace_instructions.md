@@ -87,6 +87,10 @@ pub struct WorkspaceInstructionRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl workspace_instructions::WorkspaceInstructionRepository {
     pub const fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub async fn session_is_parked(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<bool, workspace_instructions::WorkspaceInstructionRepositoryError>;
     pub async fn preflight_turn_start(
         &self,
         session: signalbox_domain::SessionId,

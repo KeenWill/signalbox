@@ -282,14 +282,22 @@ where
                 .into(),
         );
     }
-    let pending_terminal = sqlx::query_scalar::<_, bool>(
-        "SELECT pending_terminal_outcome_kind IS NOT NULL
+    let (pending_terminal, checkout_provisioning_pending): (bool, bool) = sqlx::query_as(
+        "SELECT pending_terminal_outcome_kind IS NOT NULL, checkout_provisioning_pending
            FROM session_lifecycle
           WHERE session_id = $1",
     )
     .bind(session_id_to_uuid(command.session()))
     .fetch_one(&mut *connection)
     .await?;
+    if checkout_provisioning_pending
+        && principal
+            != Some(CommandPrincipal::Module {
+                module: signalbox_domain::DispatchingModule::RepositoryWatch,
+            })
+    {
+        return Err(SubmitInputRepositoryError::CheckoutProvisioningPending);
+    }
     let settles_closure = settles_committed_closure(connection, &command, principal).await?;
     if pending_terminal && !settles_closure {
         return Err(

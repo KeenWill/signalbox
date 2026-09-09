@@ -3,7 +3,10 @@
 use super::{ToolLoopCorruption, ToolLoopRepositoryError};
 use crate::model_execution::ToolContinuationUsageLimitCatalog;
 use rust_decimal::Decimal;
-use signalbox_domain::{ModelCallId, ProviderModelIdentity, ResolvedProviderTarget};
+use signalbox_domain::{
+    ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, ToolExecutionErrorDetail,
+    ToolUsingAssistantResponse,
+};
 use sqlx::{PgConnection, Row};
 
 pub(super) async fn result_byte_limit(
@@ -36,7 +39,11 @@ pub(super) async fn result_byte_limit(
                     'tool_attempt_id', request.request_id,
                     'content', ''
                 )::text)), 0)::bigint FROM tool_request request
-                  WHERE request.producing_model_call_id = call.model_call_id) AS framing_bytes
+                  WHERE request.producing_model_call_id = call.model_call_id) AS framing_bytes,
+                octet_length(jsonb_build_object('error', jsonb_build_object(
+                    'kind', 'preauthorization_rejected',
+                    'detail', $3::text
+                ))::text)::bigint AS minimum_failure_content_bytes
            FROM model_call call WHERE call.model_call_id = $1",
     )
     .bind(producing_call.into_uuid())
@@ -44,6 +51,7 @@ pub(super) async fn result_byte_limit(
     // have the request ID's width. Reserve the widest physical position and
     // the empty result envelope, without charging source response payloads.
     .bind(Decimal::from(u64::MAX))
+    .bind(truncation_marker(0, usize::MAX))
     .fetch_one(&mut *connection)
     .await?;
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -92,9 +100,20 @@ pub(super) async fn result_byte_limit(
         .map_err(|_| ToolLoopCorruption::Inconsistent("tool result count"))?;
     let framing = u64::try_from(row.try_get::<i64, _>("framing_bytes")?)
         .map_err(|_| ToolLoopCorruption::Inconsistent("tool result framing"))?;
+    let minimum_failure_content =
+        u64::try_from(row.try_get::<i64, _>("minimum_failure_content_bytes")?)
+            .map_err(|_| ToolLoopCorruption::Inconsistent("tool failure content"))?;
     let safe_prefix = window.saturating_sub(output).saturating_sub(prompt_bytes);
+    // The following response can admit more tools than the producing response.
+    // Reserve every envelope and an empty-prefix marker for that bounded batch.
+    let framing_per_result = framing
+        .checked_div(count)
+        .ok_or(ToolLoopCorruption::Inconsistent("empty tool result batch"))?;
+    let next_batch = (ToolUsingAssistantResponse::MAX_TOOL_COUNT as u64)
+        .saturating_mul(framing_per_result.saturating_add(minimum_failure_content));
     let headroom = window
-        .saturating_sub(output)
+        .saturating_sub(output.saturating_add(output))
+        .saturating_sub(next_batch)
         .saturating_sub(input)
         .saturating_sub(previous_output);
     let per_result = safe_prefix
@@ -105,6 +124,18 @@ pub(super) async fn result_byte_limit(
     Ok(Some(i64::try_from(per_result).map_err(|_| {
         ToolLoopCorruption::Inconsistent("tool result byte limit")
     })?))
+}
+
+fn truncation_marker(retained: usize, dropped: usize) -> String {
+    format!("\n[tool result truncated: retained {retained} bytes; dropped {dropped} bytes]")
+}
+
+pub(super) fn context_error_detail(text: &str, limit: usize) -> String {
+    // Error details remain control-free and within their existing domain bound.
+    context_text(text, limit.min(ToolExecutionErrorDetail::MAX_UTF8_BYTES))
+        .replace('\n', " ")
+        .trim_start_matches(' ')
+        .to_owned()
 }
 
 /// The budget includes JSON string escaping and the truncation marker.
@@ -120,9 +151,6 @@ pub(super) fn context_text(text: &str, limit: usize) -> String {
             })
         })
     }
-    fn marker(retained: usize, dropped: usize) -> String {
-        format!("\n[tool result truncated: retained {retained} bytes; dropped {dropped} bytes]")
-    }
     if encoded_bytes(text) <= limit {
         return text.to_owned();
     }
@@ -133,7 +161,7 @@ pub(super) fn context_text(text: &str, limit: usize) -> String {
     // Marker growth is bounded by the decimal byte counts. Shrinking the prefix
     // by the exact excess keeps every iteration moving toward a fitting result.
     loop {
-        let suffix = marker(end, text.len() - end);
+        let suffix = truncation_marker(end, text.len() - end);
         let bytes =
             encoded_bytes(&text[..end]).saturating_add(encoded_bytes(&suffix).saturating_sub(2));
         if bytes <= limit || end == 0 {
@@ -168,6 +196,17 @@ mod tests {
         );
         assert!(serde_json::to_vec(&bounded).expect("text encodes").len() <= limit);
         assert_eq!(context_text(&bounded, limit), bounded);
+    }
+
+    #[test]
+    fn context_error_detail_keeps_admitted_unicode_whitespace_exact() {
+        let source = "\u{2003}failure detail";
+        signalbox_domain::ToolExecutionErrorDetail::try_new(source.to_owned())
+            .expect("non-POSIX whitespace is admitted");
+        assert_eq!(
+            super::context_error_detail(source, source.len() + 2),
+            source
+        );
     }
 
     #[test]
