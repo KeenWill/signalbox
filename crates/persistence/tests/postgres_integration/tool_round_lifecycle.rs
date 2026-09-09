@@ -4200,7 +4200,8 @@ async fn tool_failures_close_durably() -> Result<(), Box<dyn Error>> {
             SET state_kind = 'terminal',
                 terminal_disposition_kind = 'known_failed',
                 error_kind = 'invalid_arguments',
-                error_detail = E'unsafe\\ndetail'
+                error_detail = E'unsafe\\ndetail',
+                context_error_detail = 'admitted fixture detail'
           WHERE attempt_id = $1",
     )
     .bind(schema_attempt.into_uuid())
@@ -5576,6 +5577,7 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     const INPUT_TOKENS: u64 = 141_000;
     const FIRST_OUTPUT_TOKENS: u64 = 117;
     const OUTPUT_CEILING: u64 = 8_192;
+    let next_tool_count = signalbox_domain::ToolUsingAssistantResponse::MAX_TOOL_COUNT;
     let (container, pool, _) = migrated_postgres().await?;
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
         FIXTURE_SEED + 6,
@@ -5705,7 +5707,7 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
             repository,
             *authorized,
         ),
-        &[("current_time", "{}")],
+        &vec![("current_time", "{}"); next_tool_count],
         InitialToolApproval::PolicyAuto,
         ProviderReportedTokenUsage::unreported()
             .with_input_tokens(Some(followup_input))
@@ -5714,35 +5716,89 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
     )
     .await?;
     let tools = repository.tool_loop_repository();
-    let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+    let preflight_attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
     tools
         .prepare_next_attempt(
             fixture.session,
             fixture.turn,
-            attempt,
+            preflight_attempt,
             ToolEffectClass::EffectFree,
         )
         .await?;
-    let authorized = tools
-        .authorize_attempt(fixture.session, fixture.turn, attempt)
-        .await?;
     tools
-        .commit_observation(
-            authorized
-                .executor_fence()
-                .bind(ToolAttemptObservation::KnownFailed {
-                    error: ToolExecutionError::new(
-                        ToolExecutionErrorKind::ExecutionFailed,
-                        Some(
-                            ToolExecutionErrorDetail::try_new(
-                                "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES),
-                            )
-                            .expect("maximally escaped bounded fixture detail"),
-                        ),
-                    ),
-                }),
+        .commit_preflight_error(
+            fixture.session,
+            fixture.turn,
+            preflight_attempt,
+            ToolExecutionError::new(
+                ToolExecutionErrorKind::PreauthorizationRejected,
+                Some(
+                    ToolExecutionErrorDetail::try_new(
+                        "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES),
+                    )
+                    .expect("maximally escaped bounded fixture detail"),
+                ),
+            ),
         )
         .await?;
+    for _ in 1..next_tool_count {
+        let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
+        tools
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                attempt,
+                ToolEffectClass::EffectFree,
+            )
+            .await?;
+        let authorized = tools
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        tools
+            .commit_observation(
+                authorized
+                    .executor_fence()
+                    .bind(ToolAttemptObservation::KnownFailed {
+                        error: ToolExecutionError::new(
+                            ToolExecutionErrorKind::ExecutionFailed,
+                            Some(
+                                ToolExecutionErrorDetail::try_new(
+                                    "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES),
+                                )
+                                .expect("maximally escaped bounded fixture detail"),
+                            ),
+                        ),
+                    }),
+            )
+            .await?;
+    }
+    let details: Vec<(String, String)> = sqlx::query_as(
+        "SELECT error_detail, context_error_detail FROM tool_attempt attempt
+           JOIN tool_request request USING (request_id)
+          WHERE request.producing_model_call_id = $1 ORDER BY attempt.attempt_id",
+    )
+    .bind(continuation.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(details.len(), next_tool_count);
+    for (exact, admitted) in details {
+        let detail = "\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES);
+        assert_eq!(exact, detail);
+        let marker_start = admitted
+            .find("[tool result truncated:")
+            .expect("failure marker");
+        let prefix = &admitted[..marker_start];
+        let retained = prefix.strip_suffix(' ').unwrap_or(prefix);
+        assert_eq!(retained, &detail[..retained.len()]);
+        assert_eq!(
+            &admitted[marker_start..],
+            format!(
+                "[tool result truncated: retained {} bytes; dropped {} bytes]",
+                retained.len(),
+                detail.len() - retained.len(),
+            )
+        );
+    }
     let following_call = ModelCallId::from_uuid(Uuid::now_v7());
     let checkpointed = tools
         .prepare_continuation(
@@ -5750,7 +5806,9 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
             fixture.turn,
             continuation,
             signalbox_application::ToolContinuationIdentities::new(
-                vec![SemanticTranscriptEntryId::from_uuid(Uuid::now_v7())],
+                (0..next_tool_count)
+                    .map(|_| SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()))
+                    .collect(),
                 ContextFrontierId::from_uuid(Uuid::now_v7()),
                 following_call,
                 FailedModelCallTurnIdentities::new(
