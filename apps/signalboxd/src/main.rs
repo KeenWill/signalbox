@@ -477,6 +477,7 @@ fn erase_startup_scan_cause(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShutdownOutcome {
     Clean,
+    Interrupted,
     GraceWindowExpired,
     SignalListenerFailed,
     ExecutionFailed,
@@ -509,6 +510,7 @@ enum RuntimeStopCause {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeDrainOutcome {
     Complete,
+    Interrupted,
     GraceWindowExpired,
     GuardLost,
 }
@@ -1026,13 +1028,15 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
 /// The completion accumulator lives outside the timeout-cancelled future, so a
 /// task defect or failure already reduced to a closed class survives when a
 /// different task exhausts the grace window. No task error payload is retained.
-async fn drain_runtime_tasks<GuardLoss>(
+async fn drain_runtime_tasks<GuardLoss, Interrupt>(
     runtime_tasks: &mut JoinSet<RuntimeTaskExit>,
     guard_loss: GuardLoss,
+    interrupt: Interrupt,
     grace_window: Option<Duration>,
 ) -> (RuntimeDrainOutcome, RuntimeTaskCompletion)
 where
     GuardLoss: Future<Output = ()>,
+    Interrupt: Future<Output = ()>,
 {
     let completion = Cell::new(RuntimeTaskCompletion::Clean);
     let drain = async {
@@ -1044,6 +1048,7 @@ where
     let outcome = match grace_window {
         Some(grace_window) => select! {
             () = guard_loss => RuntimeDrainOutcome::GuardLost,
+            () = interrupt => RuntimeDrainOutcome::Interrupted,
             result = timeout(grace_window, &mut drain) => match result {
                 Ok(()) => RuntimeDrainOutcome::Complete,
                 Err(_) => RuntimeDrainOutcome::GraceWindowExpired,
@@ -1051,6 +1056,7 @@ where
         },
         None => select! {
             () = guard_loss => RuntimeDrainOutcome::GuardLost,
+            () = interrupt => RuntimeDrainOutcome::Interrupted,
             () = &mut drain => RuntimeDrainOutcome::Complete,
         },
     };
@@ -1066,48 +1072,63 @@ const fn completed_runtime_outcome(
             ShutdownOutcome::GuardLost
         }
         (RuntimeStopCause::Requested, RuntimeDrainOutcome::Complete) => ShutdownOutcome::Clean,
+        (RuntimeStopCause::Requested, RuntimeDrainOutcome::Interrupted) => {
+            ShutdownOutcome::Interrupted
+        }
         (RuntimeStopCause::Requested, RuntimeDrainOutcome::GraceWindowExpired) => {
             ShutdownOutcome::GraceWindowExpired
         }
         (RuntimeStopCause::SignalListenerFailed, _) => ShutdownOutcome::SignalListenerFailed,
-        (RuntimeStopCause::ExecutionFailed, RuntimeDrainOutcome::Complete) => {
-            ShutdownOutcome::ExecutionFailed
-        }
+        (
+            RuntimeStopCause::ExecutionFailed,
+            RuntimeDrainOutcome::Complete | RuntimeDrainOutcome::Interrupted,
+        ) => ShutdownOutcome::ExecutionFailed,
         (RuntimeStopCause::ExecutionFailed, RuntimeDrainOutcome::GraceWindowExpired) => {
             ShutdownOutcome::ExecutionFailedAfterGraceWindow
         }
-        (RuntimeStopCause::RuntimeFailed, RuntimeDrainOutcome::Complete) => {
-            ShutdownOutcome::RuntimeFailed
-        }
+        (
+            RuntimeStopCause::RuntimeFailed,
+            RuntimeDrainOutcome::Complete | RuntimeDrainOutcome::Interrupted,
+        ) => ShutdownOutcome::RuntimeFailed,
         (RuntimeStopCause::RuntimeFailed, RuntimeDrainOutcome::GraceWindowExpired) => {
             ShutdownOutcome::RuntimeFailedAfterGraceWindow
         }
-        (RuntimeStopCause::RuntimeDefect, RuntimeDrainOutcome::Complete) => {
-            ShutdownOutcome::RuntimeDefect
-        }
+        (
+            RuntimeStopCause::RuntimeDefect,
+            RuntimeDrainOutcome::Complete | RuntimeDrainOutcome::Interrupted,
+        ) => ShutdownOutcome::RuntimeDefect,
         (RuntimeStopCause::RuntimeDefect, RuntimeDrainOutcome::GraceWindowExpired) => {
             ShutdownOutcome::RuntimeDefectAfterGraceWindow
         }
     }
 }
 
-async fn shutdown_requested() -> bool {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(terminate) => terminate,
-                Err(_) => return true,
-            };
-        select! {
-            result = tokio::signal::ctrl_c() => result.is_err(),
-            _ = terminate.recv() => false,
-        }
+struct TerminationSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl TerminationSignals {
+    fn new() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
     }
 
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await.is_err()
+    async fn recv(&mut self) -> bool {
+        select! {
+            result = self.interrupt.recv() => result.is_none(),
+            result = self.terminate.recv() => result.is_none(),
+        }
+    }
+}
+
+async fn shutdown_requested(signals: &mut std::io::Result<TerminationSignals>) -> bool {
+    match signals {
+        Ok(signals) => signals.recv().await,
+        Err(_) => true,
     }
 }
 
@@ -2363,12 +2384,14 @@ async fn run_hub(
         });
     }
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
+    let mut termination_signals = TerminationSignals::new();
 
+    let mut drain_interrupted = false;
     let mut outcome = {
         let guard_loss = wait_for_guard_loss(&mut database);
         pin!(guard_loss);
         let mut cause = select! {
-            listener_failed = shutdown_requested() => {
+            listener_failed = shutdown_requested(&mut termination_signals) => {
                 if listener_failed {
                     RuntimeStopCause::SignalListenerFailed
                 } else {
@@ -2481,10 +2504,19 @@ async fn run_hub(
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),
+                async {
+                    if shutdown_requested(&mut termination_signals).await {
+                        tracing::error!("termination signal listener failed during shutdown");
+                    }
+                },
                 shutdown_grace_window,
             )
             .await;
             cause = combine_runtime_stop_cause(cause, components_clean);
+            drain_interrupted = drain == RuntimeDrainOutcome::Interrupted;
+            if drain_interrupted {
+                tracing::warn!("shutdown drain interrupted");
+            }
             if drain != RuntimeDrainOutcome::Complete {
                 runtime_tasks.abort_all();
                 while runtime_tasks.join_next().await.is_some() {}
@@ -2508,7 +2540,7 @@ async fn run_hub(
         drop(blob_store_registry);
         let _ = database.close().await;
     } else {
-        let close_pool = should_close_pool(&Ok(outcome));
+        let close_pool = !drain_interrupted && should_close_pool(&Ok(outcome));
         if let Some(registry) = blob_store_registry.as_ref()
             && registry.sweep_staging().is_err()
         {
@@ -2695,6 +2727,12 @@ async fn main() -> ExitCode {
     };
 
     let exit_code = match run_hub(&telemetry_configuration).await {
+        Ok(ShutdownOutcome::Interrupted) => {
+            tracing::warn!(
+                "daemon shutdown abandoned in-flight work after the drain was interrupted"
+            );
+            ExitCode::FAILURE
+        }
         Ok(ShutdownOutcome::Clean) => {
             tracing::info!("daemon shutdown completed");
             ExitCode::SUCCESS
@@ -2808,7 +2846,7 @@ mod tests {
         SchedulerLoop,
     };
     use signalbox_domain::{SessionId, TurnId};
-    use tokio::{sync::oneshot, task::JoinSet};
+    use tokio::{sync::oneshot, task::JoinSet, time::timeout};
     use tracing_subscriber::prelude::*;
     use uuid::Uuid;
 
@@ -3700,11 +3738,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn adr0044_shutdown_drain_includes_the_configured_cleanup_window() {
+    async fn shutdown_drain_includes_the_configured_cleanup_window() {
         let (entered_sender, entered_receiver) = oneshot::channel();
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
-        let session = SessionId::from_uuid(Uuid::from_u128(1));
-        let pass_duration = Duration::from_secs(2);
+        const ARBITRARY_SESSION_ID: u128 = 1;
+        let session = SessionId::from_uuid(Uuid::from_u128(ARBITRARY_SESSION_ID));
+        let pass_duration = Duration::from_secs(3);
         let scheduler = SchedulerLoop::new(
             OneHintThenPending {
                 hints: VecDeque::from([session]),
@@ -3720,7 +3759,7 @@ mod tests {
                 shutdown_receiver.await.expect("the test requests shutdown");
                 SchedulerStopCause::Requested
             },
-            graceful_shutdown_window(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))
+            graceful_shutdown_window(Some(Duration::from_secs(2)), Some(Duration::from_secs(2)))
                 .expect("the fixture cleanup window is bounded"),
         ));
 
@@ -3730,8 +3769,7 @@ mod tests {
         shutdown_sender
             .send(())
             .expect("the scheduler still listens for shutdown");
-        tokio::time::advance(pass_duration).await;
-
+        // Let the paused clock process the pass and grace timers in deadline order.
         assert_eq!(
             runtime.await.expect("the runtime task completes"),
             ShutdownOutcome::Clean
@@ -3972,6 +4010,68 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn second_termination_signal_interrupts_bounded_and_unbounded_drains() {
+        for grace in [Some(Duration::from_secs(600)), None] {
+            let (signals, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            signals.send(()).unwrap();
+            receiver.recv().await.expect("first signal begins shutdown");
+            let mut runtime_tasks = JoinSet::new();
+            runtime_tasks.spawn(pending::<RuntimeTaskExit>());
+            let drain = drain_runtime_tasks(
+                &mut runtime_tasks,
+                pending(),
+                async {
+                    receiver.recv().await.expect("second signal interrupts");
+                },
+                grace,
+            );
+            tokio::pin!(drain);
+            assert!(timeout(Duration::from_secs(1), &mut drain).await.is_err());
+            signals.send(()).unwrap();
+            let (outcome, completion) = timeout(Duration::from_millis(1), drain).await.unwrap();
+            assert_eq!(outcome, RuntimeDrainOutcome::Interrupted);
+            assert_eq!(completion, RuntimeTaskCompletion::Clean);
+            assert_eq!(
+                completed_runtime_outcome(RuntimeStopCause::Requested, outcome),
+                ShutdownOutcome::Interrupted
+            );
+            assert!(!should_close_pool(&Ok(ShutdownOutcome::Interrupted)));
+        }
+    }
+
+    #[tokio::test]
+    async fn termination_listeners_retain_signals_between_shutdown_and_drain() {
+        let mut signals = super::TerminationSignals::new().unwrap();
+        for signal in [rustix::process::Signal::TERM, rustix::process::Signal::INT] {
+            rustix::process::kill_process(rustix::process::getpid(), signal).unwrap();
+            assert!(
+                !timeout(Duration::from_secs(5), signals.recv())
+                    .await
+                    .unwrap()
+            );
+            rustix::process::kill_process(rustix::process::getpid(), signal).unwrap();
+            // Let Tokio deliver the signal before constructing the drain wait.
+            tokio::task::yield_now().await;
+            let mut tasks = JoinSet::new();
+            tasks.spawn(pending::<RuntimeTaskExit>());
+            let (outcome, _) = timeout(
+                Duration::from_secs(5),
+                drain_runtime_tasks(
+                    &mut tasks,
+                    pending(),
+                    async {
+                        assert!(!signals.recv().await);
+                    },
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome, RuntimeDrainOutcome::Interrupted);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn runtime_task_defect_before_drain_timeout_prevents_clean_exit() {
         let mut runtime_tasks: JoinSet<RuntimeTaskExit> = JoinSet::new();
         runtime_tasks.spawn(async {
@@ -3979,8 +4079,13 @@ mod tests {
         });
         runtime_tasks.spawn(pending::<RuntimeTaskExit>());
 
-        let (drain, completion) =
-            drain_runtime_tasks(&mut runtime_tasks, pending(), Some(Duration::from_secs(5))).await;
+        let (drain, completion) = drain_runtime_tasks(
+            &mut runtime_tasks,
+            pending(),
+            pending(),
+            Some(Duration::from_secs(5)),
+        )
+        .await;
         let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
 
         assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);
@@ -3999,8 +4104,13 @@ mod tests {
         ))));
         runtime_tasks.spawn(pending::<RuntimeTaskExit>());
 
-        let (drain, completion) =
-            drain_runtime_tasks(&mut runtime_tasks, pending(), Some(Duration::from_secs(5))).await;
+        let (drain, completion) = drain_runtime_tasks(
+            &mut runtime_tasks,
+            pending(),
+            pending(),
+            Some(Duration::from_secs(5)),
+        )
+        .await;
         let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
 
         assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);
