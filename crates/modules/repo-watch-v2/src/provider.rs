@@ -307,7 +307,10 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
                 self.subject_retention,
             )
             .await
-            .map_err(RepositoryAttemptError::Observation);
+            .map_err(|error| match error {
+                ObservationError::Cache(error) => RepositoryAttemptError::Store(error),
+                error => RepositoryAttemptError::Observation(error),
+            });
         }
         let admission = crate::poll_cache::poll_with_cache(
             &client,
@@ -1024,6 +1027,48 @@ mod tests {
             assert_eq!(evidence.last_successful_observation, None);
             assert_eq!(evidence.events_recorded, 0);
         }
+        Ok(())
+    }
+
+    struct LoadedClient(GitHubClient);
+
+    impl RepositoryClientLoader for LoadedClient {
+        type Error = std::convert::Infallible;
+        async fn load_client(&self) -> Result<GitHubClient, Self::Error> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_webhook_queue_records_a_store_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = RepositorySlug::try_new("store-evidence/project".to_owned())?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")?;
+        pool.close().await;
+        let store = RepoWatchStore::new(pool);
+        // Inert fixture credentials: the closed store fails before provider I/O.
+        let client = GitHubClient::try_new("repo-watch-test", "unused-test-token")?;
+        let mut task = GitHubRepositoryTask {
+            repository: repository.clone(),
+            signal_reviewers: Vec::new(),
+            subject_retention: std::time::Duration::ZERO,
+            clients: LoadedClient(client),
+            store: store.clone(),
+        };
+        assert!(matches!(
+            task.poll(EventProducer::Webhook).await,
+            Err(RepositoryAttemptError::Store(StoreError::Database(
+                sqlx::Error::PoolClosed
+            )))
+        ));
+        let evidence = store.ingestion_measurements(&repository);
+        assert_eq!(
+            evidence.last_poll.expect("attempt recorded").outcome,
+            crate::measurements::PollOutcome::StoreFailed
+        );
+        assert_eq!(evidence.last_successful_observation, None);
+        assert_eq!(evidence.events_recorded, 0);
         Ok(())
     }
 
