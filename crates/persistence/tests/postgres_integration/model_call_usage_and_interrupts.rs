@@ -3970,7 +3970,7 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
     let ordinary_failed_assertion: String = sqlx::query_scalar(
         "SELECT pg_get_functiondef(oid)
            FROM pg_proc
-          WHERE proname = 'assert_failed_terminal_execution_before_credential_pools'",
+          WHERE proname = 'assert_failed_terminal_execution_before_credential_wait_release'",
     )
     .fetch_one(&pool)
     .await?;
