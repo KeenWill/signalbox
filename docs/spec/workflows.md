@@ -130,8 +130,10 @@ admits the program codec's exact input bytes. `program read RUN_ID` prints
 retained input, state and result as JSON after the run identity, with typed
 byte-extent markers when the process frame budget truncates input or result;
 `program cancel RUN_ID --command-id COMMAND_ID` preserves durable cancellation
-identity. Native and JavaScript runtime input decoders check the encoded input
-before program code runs.
+identity. Successful cancellation receipts carry frame-bounded result prefixes
+with typed byte-extent markers; stored results remain complete. Native and
+JavaScript runtime input decoders check the encoded input before program code
+runs.
 
 ## Native programs
 

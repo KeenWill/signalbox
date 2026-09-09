@@ -615,14 +615,16 @@ Program-run cancellation is the request
 is `applied { terminal_state: "cancelled", result: null }`, `not_found`, or
 `already_terminal { terminal_state, result }` naming the standing terminal state
 and result the command found. The terminal states are `cancelled`, `faulted` and
-`succeeded`; success carries exact result bytes as a byte array, and the other
-states carry null. The result field is required for every terminal state. An
-identical request bearing the same `command_id` replays its stored receipt even
-if the run's standing state later changes; the same identity with a different
-payload is conflicting reuse. Run-state semantics belong to
-[workflows.md](../spec/workflows.md); this pair, its version-1 encoding, and the
-closed receipt algebra belong here, and a later incompatible shape requires a
-new protocol version.
+`succeeded`; success carries a frame-bounded `result` byte prefix and a
+`result_extent` using the same complete/truncated markers as run reads. The
+prefix budget reserves the longest request identity so cancellation retries
+return identical outcomes. Other states carry null. The result field is required
+for every terminal state. An identical request bearing the same `command_id`
+replays its stored receipt even if the run's standing state later changes; the
+same identity with a different payload is conflicting reuse. Run-state semantics
+belong to [workflows.md](../spec/workflows.md); this pair, its version-1
+encoding, and the closed receipt algebra belong here, and a later incompatible
+shape requires a new protocol version.
 
 Transcript snapshot starts include nullable `repository_watch` provenance
 resolved from the retained dispatch ledger.

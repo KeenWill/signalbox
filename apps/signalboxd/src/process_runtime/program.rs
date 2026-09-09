@@ -364,9 +364,35 @@ pub(super) async fn handle_cancel_program_run<Writer: AsyncWrite + Unpin>(
             WireOutcome::AlreadyTerminal(match state {
                 State::Cancelled => ProgramRunTerminalState::Cancelled { result: () },
                 State::Faulted => ProgramRunTerminalState::Faulted { result: () },
-                State::Succeeded(result) => ProgramRunTerminalState::Succeeded {
-                    result: result.as_bytes().to_vec(),
-                },
+                State::Succeeded(retained) => {
+                    let empty = ProgramRunTerminalState::Succeeded {
+                        result: Vec::new(),
+                        result_extent: ProgramByteExtent::Truncated {
+                            total_bytes: retained.as_bytes().len() as u64,
+                        },
+                    };
+                    let frame = ServerFrame::try_new_for_version(
+                        version,
+                        request_id,
+                        ServerMessage::ProgramRunCancellationReceipt {
+                            command_id,
+                            run_id,
+                            outcome: WireOutcome::AlreadyTerminal(empty),
+                        },
+                    )
+                    .map_err(FrameEncodeError::Validation)?;
+                    let envelope = encode_server_line(&frame)?;
+                    // Reserve the longest correlation ID so command retries return the same prefix.
+                    let correlation_reserve =
+                        u64::MAX.to_string().len() - request_id.value().to_string().len();
+                    let mut budget = MAX_FRAME_BYTES - envelope.len() - correlation_reserve;
+                    let (result, result_extent) =
+                        program_byte_prefix(retained.as_bytes(), &mut budget);
+                    ProgramRunTerminalState::Succeeded {
+                        result,
+                        result_extent,
+                    }
+                }
             })
         }
         Ok(Result::ConflictingReuse) => {

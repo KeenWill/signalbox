@@ -507,7 +507,10 @@ async fn cancellation_of_success_returns_exact_result_on_every_retry() -> Result
             command_id,
             run_id,
             outcome: ProgramRunCancellationOutcome::AlreadyTerminal(
-                signalbox_process_protocol::ProgramRunTerminalState::Succeeded { result },
+                signalbox_process_protocol::ProgramRunTerminalState::Succeeded {
+                    result,
+                    result_extent: signalbox_process_protocol::ProgramByteExtent::Complete {}
+                },
             ),
         }
     );
@@ -782,6 +785,108 @@ async fn program_read_marks_large_retained_byte_prefixes_within_the_frame_budget
             "read does not truncate storage: {case}"
         );
     }
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_cancellation_of_a_large_entrypoint_result_replays_a_bounded_receipt()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_persistence::program_cancellation::{
+        self, ProgramCancellationOutcome, ProgramCancellationResult, ProgramTerminalState,
+    };
+    use signalbox_process_protocol::{
+        MAX_FRAME_BYTES, ProgramByteExtent, ProgramRunTerminalState, encode_server_line,
+    };
+    let runtime = RunningRuntime::start_programs().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let registration_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    // Five MiB of zeros expands past the eight-MiB JSON frame limit.
+    let artifact = r#"import { defineProgram } from '@signalbox/program-sdk/v1';
+        const codec = { decode(bytes) { return bytes; }, encode(value) { return value; } };
+        export default defineProgram({ input: codec, output: codec, async run() { return new Uint8Array(5 * 1024 * 1024); } });"#;
+    assert_eq!(
+        program_request(
+            &mut connection,
+            ClientRequest::RegisterProgram {
+                registration_id,
+                registration: javascript_registration(artifact)
+            }
+        )
+        .await?,
+        ServerMessage::ProgramRegistered { registration_id }
+    );
+    assert_eq!(
+        program_request(
+            &mut connection,
+            ClientRequest::StartProgramRun {
+                run_id,
+                registration_id,
+                input: vec![]
+            }
+        )
+        .await?,
+        ServerMessage::ProgramRunStarted {
+            run_id,
+            registration_id
+        }
+    );
+    let retained = program_result(&mut connection, run_id).await?;
+    assert!(matches!(
+        retained.outcome,
+        ProgramRunState::Succeeded { .. }
+    ));
+    let command_id = command()?;
+    let request = ClientRequest::CancelProgramRun { command_id, run_id };
+    connection.request(1, request.clone()).await?;
+    let first = response_within(&mut connection).await?;
+    assert!(encode_server_line(&first)?.len() <= MAX_FRAME_BYTES);
+    let ServerMessage::ProgramRunCancellationReceipt {
+        command_id: observed_command,
+        run_id: observed_run,
+        outcome:
+            ProgramRunCancellationOutcome::AlreadyTerminal(ProgramRunTerminalState::Succeeded {
+                result,
+                result_extent,
+            }),
+    } = first.message()
+    else {
+        panic!("expected successful cancellation receipt");
+    };
+    assert_eq!(*observed_command, command_id);
+    assert_eq!(*observed_run, run_id);
+    assert_eq!(
+        *result_extent,
+        ProgramByteExtent::Truncated {
+            total_bytes: 5 * 1024 * 1024
+        }
+    );
+    assert!(!result.is_empty());
+    assert!(result.len() < 5 * 1024 * 1024);
+    assert!(result.iter().all(|byte| *byte == 0));
+    // Changing only the correlation ID must not change the stored command's projection.
+    connection.request(u64::MAX, request).await?;
+    let retry = response_within(&mut connection).await?;
+    assert!(encode_server_line(&retry)?.len() <= MAX_FRAME_BYTES);
+    assert_eq!(retry.message(), first.message());
+    let stored = program_cancellation::cancel(
+        &runtime.pool,
+        program_cancellation::CancelProgramRun {
+            command_id: signalbox_domain::DurableCommandId::from_uuid(command_id.into_uuid()),
+            run_id: ProgramRunId::from_uuid(run_id.into_uuid()),
+        },
+    )
+    .await?;
+    assert_eq!(
+        stored,
+        ProgramCancellationResult::Recorded(ProgramCancellationOutcome::AlreadyTerminal(
+            ProgramTerminalState::Succeeded(signalbox_domain::InlineFramePayload::new(
+                vec![0; 5 * 1024 * 1024]
+            ))
+        ))
+    );
     drop(connection);
     runtime.stop().await
 }

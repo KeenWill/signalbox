@@ -99,9 +99,16 @@ pub enum ProgramRunCancelledState {
 
 ```rust
 pub enum ProgramRunTerminalState {
-    Cancelled { result: () },
-    Faulted { result: () },
-    Succeeded { result: vec::Vec<u8> },
+    Cancelled {
+        result: (),
+    },
+    Faulted {
+        result: (),
+    },
+    Succeeded {
+        result: vec::Vec<u8>,
+        result_extent: ProgramByteExtent,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

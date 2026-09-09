@@ -98,13 +98,14 @@ fn successful_program_cancellation_receipt_round_trips_exact_result_bytes()
         outcome: ProgramRunCancellationOutcome::AlreadyTerminal(
             ProgramRunTerminalState::Succeeded {
                 result: result.clone(),
+                result_extent: ProgramByteExtent::Complete {},
             },
         ),
     };
     let value = serde_json::to_value(&message)?;
     assert_eq!(
         value["outcome"],
-        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":result})
+        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":result,"result_extent":{"kind":"complete"}})
     );
     assert_eq!(serde_json::from_value::<ServerMessage>(value)?, message);
     Ok(())
@@ -123,8 +124,11 @@ fn already_terminal_receipts_round_trip_only_the_result_for_their_state()
             serde_json::json!({"kind":"already_terminal","terminal_state":"faulted","result":null}),
         ),
         (
-            ProgramRunTerminalState::Succeeded { result: Vec::new() },
-            serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":[]}),
+            ProgramRunTerminalState::Succeeded {
+                result: Vec::new(),
+                result_extent: ProgramByteExtent::Complete {},
+            },
+            serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":[],"result_extent":{"kind":"complete"}}),
         ),
     ] {
         let outcome = ProgramRunCancellationOutcome::AlreadyTerminal(state);
@@ -153,7 +157,7 @@ fn already_terminal_receipts_reject_missing_or_inconsistent_results()
         serde_json::json!({"kind":"already_terminal","terminal_state":"faulted","result":[0,255]}),
         serde_json::json!({"kind":"already_terminal","terminal_state":"cancelled"}),
         serde_json::json!({"kind":"already_terminal","terminal_state":"faulted"}),
-        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":[],"extra":true}),
+        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":[],"result_extent":{"kind":"complete"},"extra":true}),
     ] {
         let message = serde_json::json!({
             "type": "program_run_cancellation_receipt",
@@ -188,4 +192,29 @@ fn program_read_truncation_requires_a_total_and_rejects_unknown_markers() {
             total_bytes: 5000000
         }
     );
+}
+
+#[test]
+fn successful_program_cancellation_requires_a_typed_result_extent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let outcome = serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":[0,255],"result_extent":{"kind":"truncated","total_bytes":5242880}});
+    assert_eq!(
+        serde_json::from_value::<ProgramRunCancellationOutcome>(outcome)?,
+        ProgramRunCancellationOutcome::AlreadyTerminal(ProgramRunTerminalState::Succeeded {
+            result: vec![0, 255],
+            result_extent: ProgramByteExtent::Truncated {
+                total_bytes: 5242880
+            }
+        })
+    );
+    for malformed in [
+        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":[]}),
+        serde_json::json!({"kind":"already_terminal","terminal_state":"cancelled","result":null,"result_extent":{"kind":"complete"}}),
+    ] {
+        assert!(
+            serde_json::from_value::<ProgramRunCancellationOutcome>(malformed.clone()).is_err(),
+            "{malformed}"
+        );
+    }
+    Ok(())
 }

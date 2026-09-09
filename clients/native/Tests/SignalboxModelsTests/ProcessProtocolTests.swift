@@ -36,6 +36,30 @@ final class ProcessProtocolTests: XCTestCase {
       SignalboxProgramByteExtent.self, from: Data(#"{"kind":"complete","total_bytes":0}"#.utf8)))
   }
 
+  func testProgramCancellationDecodesBoundedSuccess() throws {
+    let json = #"{"type":"program_run_cancellation_receipt","command_id":"33333333-3333-4333-8333-333333333333","run_id":"11111111-1111-4111-8111-111111111111","outcome":{"kind":"already_terminal","terminal_state":"succeeded","result":[0,255],"result_extent":{"kind":"truncated","total_bytes":5242880}}}"#
+    let message = try SignalboxJSONCoding.decoder().decode(SignalboxProcessServerMessage.self, from: Data(json.utf8))
+    guard case .programRunCancellationReceipt(let commandID, let runID, let outcome) = message else {
+      return XCTFail("Expected a cancellation receipt")
+    }
+    XCTAssertEqual(commandID.rawValue, "33333333-3333-4333-8333-333333333333")
+    XCTAssertEqual(runID.rawValue, "11111111-1111-4111-8111-111111111111")
+    XCTAssertEqual(outcome, .alreadySucceeded(result: [0, 255], resultExtent: .truncated(totalBytes: 5242880)))
+  }
+
+  func testProgramCancellationRequiresTheExtentOnlyForSuccess() throws {
+    for json in [
+      #"{"kind":"already_terminal","terminal_state":"succeeded","result":[]}"#,
+      #"{"kind":"already_terminal","terminal_state":"cancelled","result":null,"result_extent":{"kind":"complete"}}"#,
+      #"{"kind":"applied","terminal_state":"cancelled"}"#,
+      #"{"kind":"already_terminal","terminal_state":"faulted","result":[0]}"#
+    ] {
+      XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(SignalboxProgramCancellationOutcome.self, from: Data(json.utf8)), json)
+    }
+    let cancelled = #"{"kind":"applied","terminal_state":"cancelled","result":null}"#
+    XCTAssertEqual(try SignalboxJSONCoding.decoder().decode(SignalboxProgramCancellationOutcome.self, from: Data(cancelled.utf8)), .applied)
+  }
+
   private let sessionID = "11111111-1111-4111-8111-111111111111"
   private let turnID = "22222222-2222-4222-8222-222222222222"
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"

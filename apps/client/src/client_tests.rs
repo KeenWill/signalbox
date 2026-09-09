@@ -5981,6 +5981,7 @@ async fn program_cancellation_presents_the_retained_successful_result() -> Resul
     let outcome =
         ProgramRunCancellationOutcome::AlreadyTerminal(ProgramRunTerminalState::Succeeded {
             result: retained.clone(),
+            result_extent: signalbox_process_protocol::ProgramByteExtent::Complete {},
         });
     let server = tokio::spawn(async move {
         accept_request_and_reply(
@@ -6011,7 +6012,7 @@ async fn program_cancellation_presents_the_retained_successful_result() -> Resul
     let value: serde_json::Value = serde_json::from_str(json)?;
     assert_eq!(
         value,
-        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":retained})
+        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":retained,"result_extent":{"kind":"complete"}})
     );
     server.await??;
     Ok(())

@@ -44,7 +44,7 @@ pub struct ProgramRegistrationInput {
     pub grants: Vec<ProgramGrant>,
 }
 
-/// Whether a read carries all retained bytes or a prefix bounded by its frame.
+/// Whether a response carries all retained bytes or a prefix bounded by its frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProgramByteExtent {
@@ -82,13 +82,20 @@ pub enum ProgramRunCancelledState {
     Cancelled,
 }
 
-/// Terminal states and their retained results recorded by the program journal.
+/// Terminal states and frame-bounded results projected from the program journal.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "terminal_state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProgramRunTerminalState {
-    Cancelled { result: () },
-    Faulted { result: () },
-    Succeeded { result: Vec<u8> },
+    Cancelled {
+        result: (),
+    },
+    Faulted {
+        result: (),
+    },
+    Succeeded {
+        result: Vec<u8>,
+        result_extent: ProgramByteExtent,
+    },
 }
 
 /// Closed result of a durable program cancellation command.
