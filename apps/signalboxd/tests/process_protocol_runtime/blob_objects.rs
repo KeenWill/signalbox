@@ -654,3 +654,151 @@ async fn execute_sparse_blob_turn(
     }
     Ok(())
 }
+
+struct FailedVerifiedDeliveryStore {
+    inner: Arc<dyn BlobStore>,
+    fail_after: AtomicUsize,
+    verified_opens: AtomicUsize,
+}
+
+impl BlobStore for FailedVerifiedDeliveryStore {
+    fn put<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        source: BlobReader,
+    ) -> BlobStoreFuture<'a, BlobPutOutcome> {
+        self.inner.put(expected, source)
+    }
+
+    fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob> {
+        self.inner.open(key)
+    }
+
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        Box::pin(async move {
+            let opened = self.inner.open_verified(expected, key).await?;
+            self.verified_opens.fetch_add(1, Ordering::SeqCst);
+            let prefix = opened
+                .into_reader()
+                .take(self.fail_after.load(Ordering::SeqCst) as u64);
+            Ok(OpenedBlob::new(
+                expected.byte_length(),
+                Box::new(prefix.chain(FailedDeliveryReader)),
+            ))
+        })
+    }
+
+    fn open_range<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+        offset: u64,
+        byte_length: std::num::NonZeroU64,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        self.inner.open_range(expected, key, offset, byte_length)
+    }
+}
+
+struct FailedDeliveryReader;
+
+impl tokio::io::AsyncRead for FailedDeliveryReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Err(io::Error::other("fixture verified delivery failure")))
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn blob_verified_delivery_retries_after_skip_and_page_failures() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_blob_store::BlobStoreName;
+    use signalbox_persistence::blob::{
+        BlobCatalogRepository, BlobReplicaRecord, BlobStoreBindingRecord,
+    };
+
+    let mut fixture = CommittedBlobReadFixture::start(b"verified replica fallback").await?;
+    let secondary_root = tempfile::TempDir::new()?;
+    fs::set_permissions(secondary_root.path(), fs::Permissions::from_mode(0o700))?;
+    let root = fixture
+        .runtime
+        .blob_storage_root
+        .as_ref()
+        .expect("blob fixture");
+    let configuration_text = format!(
+        "{}\n[[blob_storage.stores]]\nname = \"secondary\"\nnamespace_id = \"5a100001-0000-4000-8000-000000000002\"\nkind = \"filesystem\"\nroot_directory = \"{}\"\n",
+        root.model_configuration(),
+        secondary_root.path().display(),
+    );
+    let configuration = support::parse_model_configuration(&configuration_text)?;
+    let mut registry =
+        BlobStoreRegistry::initialize(configuration.blob_storage(), fixture.runtime.pool.clone())
+            .await?
+            .expect("configured registry");
+    let primary_name = BlobStoreName::try_new("primary")?;
+    let primary = Arc::new(FailedVerifiedDeliveryStore {
+        inner: registry
+            .recorded_store(&primary_name)
+            .expect("primary store"),
+        fail_after: AtomicUsize::new(1),
+        verified_opens: AtomicUsize::new(0),
+    });
+    assert!(registry.replace_store_for_conformance(&primary_name, primary.clone()));
+    let secondary_name = BlobStoreName::try_new("secondary")?;
+    let secondary = registry
+        .recorded_store(&secondary_name)
+        .expect("secondary store");
+    let expected = ExpectedBlob::try_new(fixture.digest, fixture.expected_length.value())?;
+    let published = secondary
+        .put(expected, Box::new(io::Cursor::new(fixture.bytes)))
+        .await?;
+    BlobCatalogRepository::new(fixture.runtime.pool.clone())
+        .register_verified_replica(
+            expected,
+            BlobStoreBindingRecord::new(
+                secondary_name.clone(),
+                registry.namespace_id(&secondary_name),
+            ),
+            BlobReplicaRecord::new(secondary_name, published.key().clone()),
+        )
+        .await?;
+    fixture.runtime.blob_store_registry = Some(Arc::new(registry));
+    fixture
+        .runtime
+        .restart_with_model_configuration(&configuration_text)
+        .await?;
+    fixture.connection = Connection::connect(fixture.runtime.socket()).await?;
+
+    for fail_after in [1, 5] {
+        primary.fail_after.store(fail_after, Ordering::SeqCst);
+        fixture
+            .connection
+            .request(
+                4,
+                ClientRequest::ReadBlobChunk {
+                    digest: fixture.wire_digest,
+                    offset_bytes: CanonicalU64::new(4),
+                    length_bytes: CanonicalU64::new(4),
+                },
+            )
+            .await?;
+        assert_eq!(
+            fixture.connection.response().await?.message(),
+            &ServerMessage::BlobChunkRead {
+                blob_length_bytes: fixture.expected_length,
+                digest: fixture.wire_digest,
+                offset_bytes: CanonicalU64::new(4),
+                bytes: BlobChunk::new(fixture.bytes[4..8].to_vec()),
+            },
+        );
+    }
+    assert_eq!(primary.verified_opens.load(Ordering::SeqCst), 2);
+    fixture.stop().await
+}

@@ -160,19 +160,56 @@ pub(crate) async fn read_blob_chunk_verified(
     let actual_length = length
         .get()
         .min(entry.expected().byte_length().saturating_sub(offset));
-    let mut reader = open_recorded_blob_verified(registry, entry).await?;
-    if actual_length == 0 {
-        return Ok(Vec::new());
+    let mut saw_missing = false;
+    let mut saw_corrupt = false;
+    let mut saw_unavailable = false;
+    for replica in entry.replicas() {
+        let Some(store) = registry.recorded_store(replica.store()) else {
+            return Err(BlobReadError::Integrity);
+        };
+        match store
+            .open_verified(entry.expected(), replica.object_key())
+            .await
+        {
+            Ok(opened) if opened.byte_length() == entry.expected().byte_length() => {
+                if actual_length == 0 {
+                    return Ok(Vec::new());
+                }
+                let mut reader = opened.into_reader();
+                if tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
+                    .await
+                    .is_err()
+                {
+                    saw_unavailable = true;
+                    continue;
+                }
+                let mut bytes =
+                    vec![0; usize::try_from(actual_length).map_err(|_| BlobReadError::Integrity)?];
+                if reader.read_exact(&mut bytes).await.is_err() {
+                    saw_unavailable = true;
+                    continue;
+                }
+                return Ok(bytes);
+            }
+            Ok(_) => saw_corrupt = true,
+            Err(error) => match error.kind() {
+                BlobStoreFailureKind::NotFound => saw_missing = true,
+                BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
+                BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
+                    saw_unavailable = true;
+                }
+            },
+        }
     }
-    tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
-        .await
-        .map_err(|_| BlobReadError::Unavailable)?;
-    let mut bytes = vec![0; usize::try_from(actual_length).map_err(|_| BlobReadError::Integrity)?];
-    reader
-        .read_exact(&mut bytes)
-        .await
-        .map_err(|_| BlobReadError::Unavailable)?;
-    Ok(bytes)
+    if saw_unavailable {
+        Err(BlobReadError::Unavailable)
+    } else if saw_corrupt {
+        Err(BlobReadError::Corrupt)
+    } else if saw_missing {
+        Err(BlobReadError::Missing)
+    } else {
+        Err(BlobReadError::Integrity)
+    }
 }
 
 /// Opens one generation-pinned stream after a single complete-object verification pass.
