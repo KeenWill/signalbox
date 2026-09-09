@@ -2551,10 +2551,11 @@ async fn submit_corruption_and_position_exhaustion_fail_closed() -> Result<(), B
         1,
         ModelSelectionOverride::UseSessionDefault,
     );
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x932));
     repository
         .handle(
             first.clone(),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x932)),
+            accepted_input,
             Some(TurnId::from_uuid(Uuid::from_u128(0xa32))),
         )
         .await?;
@@ -2573,16 +2574,23 @@ async fn submit_corruption_and_position_exhaustion_fail_closed() -> Result<(), B
     .bind(Uuid::from_u128(0x332))
     .execute(&pool)
     .await?;
-    let non_user = repository
+    let recovered = repository
         .load(first.command_id())
-        .await
-        .expect_err("domain reconstitution rejects a stored non-user actor");
-    assert!(matches!(
-        non_user,
-        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Domain(
-            SubmitInputReconstitutionFailure::StoredActorMismatch
-        ))
-    ));
+        .await?
+        .expect("recorded recovery input retains its complete receipt");
+    assert_eq!(
+        recovered.command().actor(),
+        signalbox_domain::Actor::Recovery
+    );
+    assert_eq!(
+        repository
+            .handle(first.clone(), accepted_input, None)
+            .await?,
+        SubmitInputHandlingOutcome::ConflictingReuse {
+            command_id: first.command_id(),
+        },
+        "user replay cannot claim an input attributed to recovery"
+    );
     sqlx::query(
         "UPDATE submit_input_command
             SET actor_kind = 'user'

@@ -1663,6 +1663,7 @@ async fn supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<dyn Erro
         dispatched_kind_names(&dispatched),
         [
             "session_created",
+            "session_state_changed",
             "goal_changed",
             "session_ownership_changed",
             "turn_model_settings_resolved",
@@ -1673,9 +1674,9 @@ async fn supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<dyn Erro
             "input_accepted",
         ]
     );
-    assert_eq!(dispatched[6].session(), Some(session(SESSION)));
+    assert_eq!(dispatched[7].session(), Some(session(SESSION)));
     assert_eq!(
-        dispatched[6].kind(),
+        dispatched[7].kind(),
         &DispatchedOutboxEventKind::TurnTerminal {
             turn: obsolete.turn(),
             disposition: DispatchedTurnTerminalDisposition::Retired,
@@ -1683,7 +1684,7 @@ async fn supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<dyn Erro
     );
     assert_eq!(
         acceptance_position(&dispatched, replacement.turn()),
-        Some(8)
+        Some(9)
     );
 
     assert_eq!(activate_goal_turn(&pool, 0xd31).await?, replacement.turn());
