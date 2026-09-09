@@ -21,7 +21,11 @@ use signalbox_module_repo_watch_v2::{
     WebhookDelivery, WebhookDisposition, matching_rules, plan_lifecycle_reaction_for_test,
     plan_repository_event, plan_retained_lifecycle_reaction_for_test,
 };
-use signalbox_ownership_seam::{
+use signalbox_persistence::{
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
+    disposable_test_container_labels, local_test_connection_options, migrate,
+};
+use signalbox_session_ownership::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, CreateSession,
     CreateSessionOutcome, DescendantTerminationScope, DurableCommandId, FinishCondition,
     GitHubObjectId, LabelName, LifecycleEvent, MergeableState, OffsetDateTime, PullRequestBody,
@@ -41,10 +45,6 @@ use signalbox_ownership_seam::{
     SessionCommandPayload, SessionCreated, SessionId, SessionLifecycleCommand,
     SessionLifecycleOperation, SessionOwnership, SessionTemplateName, StartGate, StopStickiness,
     WorkflowName,
-};
-use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options, migrate,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -582,7 +582,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("ci"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     assert_eq!(matching_rules(std::slice::from_ref(&rule), &event), [&rule]);
     let identity = RepoWatchEventContentIdentityV1::from_bytes([15; 32]);
@@ -592,7 +592,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("build"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let earlier_identity = RepoWatchEventContentIdentityV1::from_bytes([14; 32]);
     let earlier_occurrence = event_candidate(&earlier_event, earlier_identity);
@@ -769,7 +769,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("ci"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let replayed_occurrence = event_candidate(&replayed_event, identity);
     let replayed_earlier_event = RepoWatchEvent::branch_workflow(
@@ -777,7 +777,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("build"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let replayed_earlier_occurrence = event_candidate(&replayed_earlier_event, earlier_identity);
     assert_eq!(
@@ -894,7 +894,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("lint"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let eventful_projection_occurrence = event_candidate(
         &eventful_projection_event,
@@ -1007,7 +1007,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         complete_repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("complete-frontier"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let incomplete_occurrence = event_candidate(
         &incomplete_event,
@@ -1114,7 +1114,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
     assert_eq!(grouped[0].len(), 2);
     assert_eq!(grouped[1].len(), 1);
     assert_ne!(grouped[0][0].dispatch(), grouped[1][0].dispatch());
-    let signalbox_ownership_seam::SessionCommandPayload::CreateSession(created) =
+    let signalbox_session_ownership::SessionCommandPayload::CreateSession(created) =
         plans[0].command().clone().into_payload()
     else {
         panic!("matching dispatch action must produce create_session");
@@ -1581,7 +1581,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("build"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let preceding_occurrence = event_candidate(
         &preceding_event,
@@ -1805,7 +1805,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("recurring"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let recurring_occurrence = event_candidate(
         &recurring_event,
@@ -1870,7 +1870,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         repository.clone(),
         default_branch.clone(),
         WorkflowName::try_new(String::from("recurring"))?,
-        signalbox_ownership_seam::CheckConclusion::Success,
+        signalbox_session_ownership::CheckConclusion::Success,
     );
     let restored_occurrence = event_candidate(
         &restored_event,
@@ -2164,7 +2164,7 @@ async fn v2_ingest_is_idempotent_under_the_module_role() -> Result<(), Box<dyn E
         reactions: source.reactions().to_vec(),
     })?;
     let compacted =
-        signalbox_ownership_seam::RepoWatchMergedPullRequestBaselineV1::from_merged_state(
+        signalbox_session_ownership::RepoWatchMergedPullRequestBaselineV1::from_merged_state(
             &merged,
             comparison_baseline.signal_reviewers(),
         )?
@@ -2424,13 +2424,13 @@ fn dispatch_observation(
 #[ignore = "requires disposable PostgreSQL"]
 async fn dispatch_resumes_after_activation_and_enforces_singleton_release_and_cooldown()
 -> Result<(), Box<dyn Error>> {
-    use signalbox_ownership_seam::{
+    use signalbox_session_ownership::{
         GoalChange, GoalEventKind, LifecycleActor, LifecycleEventKind, SessionStateKind,
         SessionTerminal, SessionTerminalOutcome,
     };
     let (container, core_pool, url) = postgres().await?;
     migrate(&core_pool).await?;
-    let source = signalbox_ownership_seam::LifecycleEventSource::new(core_pool.clone());
+    let source = signalbox_session_ownership::LifecycleEventSource::new(core_pool.clone());
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&core_pool)
         .await?;
@@ -2667,7 +2667,7 @@ impl signalbox_module_repo_watch_v2::dispatch::SessionCommandSink for SettlingTh
         &mut self,
         command: SessionCommand,
     ) -> Result<signalbox_module_repo_watch_v2::dispatch::CommandSubmission, ()> {
-        use signalbox_ownership_seam::{CommandSettlement, LifecycleEventKind};
+        use signalbox_session_ownership::{CommandSettlement, LifecycleEventKind};
         let SessionCommandPayload::Lifecycle(command) = command.into_payload() else {
             panic!("fixture submits only its start release");
         };

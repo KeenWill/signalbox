@@ -74,7 +74,7 @@ skill](../signalbox-web-performance/SKILL.md) for virtualization requirements.
 
 ## Components
 
-When the active implementing specification selects shadcn/Radix, use them as
+When the committed design or specification selects shadcn/Radix, use them as
 accessible primitives, not as a mandate to retain demo-page styling. Otherwise,
 use the selected stack's accessible primitives. Compose domain components for
 Signalbox concepts such as turn, tool, approval, model call, goal, runner, PR

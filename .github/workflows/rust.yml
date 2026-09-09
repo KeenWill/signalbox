@@ -144,9 +144,9 @@ jobs:
       - name: Check migration version uniqueness
         if: ${{ !cancelled() }}
         run: python3 scripts/check_migration_versions.py
-      - name: Check ownership-seam boundaries
+      - name: Check session-ownership boundaries
         if: ${{ !cancelled() }}
-        run: python3 scripts/check_ownership_seam.py
+        run: python3 scripts/check_session_ownership.py
   domain-api-digest:
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-reports' }}
     env:
