@@ -21,6 +21,7 @@ on:
       - "tooling/summarize_coverage.py"
       - "tooling/test_summarize_coverage.py"
       - ".github/workflows/coverage.yml"
+      - ".github/actions/setup-bazel/**"
   push:
     branches: [main]
     paths:
@@ -38,6 +39,7 @@ on:
       - "tooling/summarize_coverage.py"
       - "tooling/test_summarize_coverage.py"
       - ".github/workflows/coverage.yml"
+      - ".github/actions/setup-bazel/**"
   workflow_dispatch:
 
 # Superseded runs release their slots against the public concurrency cap:
@@ -63,8 +65,6 @@ jobs:
     continue-on-error: true
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)) && 'ubuntu-latest' || 'signalbox-coverage' }}
     timeout-minutes: 90
-    env:
-      BAZEL_REMOTE_CACHE: ${{ vars.BAZEL_REMOTE_CACHE }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,16 +73,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+      - uses: ./.github/actions/setup-bazel
         with:
-          bazelisk-version: 1.29.0
+          remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
       - name: Test the coverage summarizer
         run: |
-          cache_args=()
-          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
-            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
-          fi
-          bazel test --jobs=4 --local_test_jobs=1 "${cache_args[@]}" //:test_summarize_coverage
+          bazel test --jobs=4 --local_test_jobs=1 //:test_summarize_coverage
       - name: Fetch Cargo inputs for offline diagnostic fixtures
         run: cargo fetch --locked
       - name: Install Bubblewrap
@@ -97,13 +93,9 @@ jobs:
         run: |
           report_dir="$RUNNER_TEMP/coverage"
           mkdir -p "$report_dir"
-          cache_args=()
-          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
-            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
-          fi
           rm -f bazel-out/_coverage/_coverage_report.dat
           status=0
-          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" --test_arg=--skip --test_arg=production_runner_clears_ambient_environment_when_requested //:coverage_workspace || status=$?
+          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock --test_arg=--skip --test_arg=production_runner_clears_ambient_environment_when_requested //:coverage_workspace || status=$?
           if [[ -f bazel-out/_coverage/_coverage_report.dat ]]; then
             cp bazel-out/_coverage/_coverage_report.dat "$report_dir/workspace.lcov"
           fi
@@ -114,13 +106,9 @@ jobs:
         run: |
           report_dir="$RUNNER_TEMP/coverage"
           mkdir -p "$report_dir"
-          cache_args=()
-          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
-            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
-          fi
           rm -f bazel-out/_coverage/_coverage_report.dat
           status=0
-          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" //:coverage_persistence || status=$?
+          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:coverage_persistence || status=$?
           if [[ -f bazel-out/_coverage/_coverage_report.dat ]]; then
             cp bazel-out/_coverage/_coverage_report.dat "$report_dir/persistence.lcov"
           fi
@@ -131,13 +119,9 @@ jobs:
         run: |
           report_dir="$RUNNER_TEMP/coverage"
           mkdir -p "$report_dir"
-          cache_args=()
-          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
-            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
-          fi
           rm -f bazel-out/_coverage/_coverage_report.dat
           status=0
-          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" //:coverage_signalboxd || status=$?
+          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:coverage_signalboxd || status=$?
           if [[ -f bazel-out/_coverage/_coverage_report.dat ]]; then
             cp bazel-out/_coverage/_coverage_report.dat "$report_dir/signalboxd.lcov"
           fi
@@ -148,13 +132,9 @@ jobs:
         run: |
           report_dir="$RUNNER_TEMP/coverage"
           mkdir -p "$report_dir"
-          cache_args=()
-          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && -n "$BAZEL_REMOTE_CACHE" ]]; then
-            cache_args+=(--remote_cache="$BAZEL_REMOTE_CACHE")
-          fi
           rm -f bazel-out/_coverage/_coverage_report.dat
           status=0
-          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock "${cache_args[@]}" //:coverage_terminal_client || status=$?
+          bazel coverage --keep_going --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 --test_env=DOCKER_HOST=unix:///var/run/docker.sock //:coverage_terminal_client || status=$?
           if [[ -f bazel-out/_coverage/_coverage_report.dat ]]; then
             cp bazel-out/_coverage/_coverage_report.dat "$report_dir/terminal_client.lcov"
           fi

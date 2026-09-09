@@ -17,7 +17,7 @@ async function openDetails(
   mismatch = false,
   override = false,
   creation?: WebTimelineCreationCause,
-  outcome?: 'reconciliation' | 'retired' | 'exhausted',
+  outcome?: 'reconciliation' | 'retired' | 'exhausted' | 'goal_stopped' | 'goal_settling',
   partialResult = false,
 ) {
   const items = detailItems.map((item, index) =>
@@ -33,36 +33,51 @@ async function openDetails(
             imported_evidence: null,
           },
         }
-      : outcome === 'reconciliation' && index === 4
+      : (outcome === 'goal_stopped' || outcome === 'goal_settling') && index === 4
         ? {
             ...item,
-            kind: 'turn_reconciliation_required' as const,
+            kind: 'goal_changed' as const,
             body: {
-              type: 'reconciliation' as const,
-              turn_id: detailSessionId,
-              terminal_frontier_id: detailSessionId,
-              operation: { type: 'model_call' as const, model_call_id: detailSessionId },
+              type: 'goal_event' as const,
+              session_id: detailSessionId,
+              event: {
+                type: 'user_stopped' as const,
+                generation: '1',
+                settling_turn_id: detailTurnId,
+                abandoned_actions: outcome === 'goal_stopped' ? '2' : null,
+              },
             },
           }
-        : outcome === 'retired' && index === 4
+        : outcome === 'reconciliation' && index === 4
           ? {
               ...item,
-              kind: 'goal_turn_retired' as const,
-              body: { type: 'event_fact' as const, kind: 'goal_turn_retired' as const },
+              kind: 'turn_reconciliation_required' as const,
+              body: {
+                type: 'reconciliation' as const,
+                turn_id: detailSessionId,
+                terminal_frontier_id: detailSessionId,
+                operation: { type: 'model_call' as const, model_call_id: detailSessionId },
+              },
             }
-          : outcome === 'exhausted' && index >= 3
+          : outcome === 'retired' && index === 4
             ? {
                 ...item,
-                kind: 'turn_failed' as const,
-                projected_body_bytes: 128,
-                body: {
-                  type: 'turn_lifecycle' as const,
-                  turn_id: detailTurnId,
-                  lifecycle: 'terminalized' as const,
-                  cause_code: 'failed',
-                },
+                kind: 'goal_turn_retired' as const,
+                body: { type: 'event_fact' as const, kind: 'goal_turn_retired' as const },
               }
-            : item,
+            : outcome === 'exhausted' && index >= 3
+              ? {
+                  ...item,
+                  kind: 'turn_failed' as const,
+                  projected_body_bytes: 128,
+                  body: {
+                    type: 'turn_lifecycle' as const,
+                    turn_id: detailTurnId,
+                    lifecycle: 'terminalized' as const,
+                    cause_code: 'failed',
+                  },
+                }
+              : item,
   )
   const windowItems = detailWindow.items.map((item, index) => ({
     ...item,
@@ -431,3 +446,19 @@ test('labels partial tool payloads and the final continued chunk', async ({ page
   await page.getByRole('button', { name: 'Next text page', exact: true }).click()
   await expect(output).toContainText('Text excerpt · byte 15 of 55')
 })
+
+for (const outcome of ['goal_stopped', 'goal_settling'] as const) {
+  test(`shows ${outcome} action accounting in goal-stop detail`, async ({ page }) => {
+    await openDetails(page, false, false, undefined, outcome)
+    await page.getByRole('row').filter({ hasText: 'goal changed' }).press('Enter')
+    const detail = page.getByRole('article', { name: 'goal changed detail' })
+    await expect(detail).toContainText(detailTurnId)
+    await expect(detail).toContainText('Abandoned approved actions')
+    await expect(detail).toContainText(
+      outcome === 'goal_stopped' ? 'Abandoned approved actions2' : 'settlement pending',
+    )
+    await detail.getByText('Abandoned approved actions', { exact: true }).scrollIntoViewIfNeeded()
+    await expect(detail.getByText('Abandoned approved actions', { exact: true })).toBeVisible()
+    await page.screenshot({ path: test.info().outputPath(`${outcome}.png`) })
+  })
+}

@@ -610,6 +610,7 @@ where
         )
     });
     let outcome = GoalRepository::new(services.pool.clone())
+        .with_tool_dispatch_gate(services.tool_dispatch_gate.clone())
         .handle_user_command(command, candidates, |alias| {
             services.model_configuration.resolve_alias(alias)
         })
@@ -630,9 +631,7 @@ where
             } else {
                 None
             };
-            if schedules_turn {
-                let _ = services.eligibility_nudge.nudge(session);
-            }
+            let _ = services.eligibility_nudge.nudge(session);
             write_message(
                 writer,
                 version,
@@ -654,6 +653,19 @@ where
                 ProtocolError::rejected(RejectionDetail::GoalCommandRejected {
                     session_id,
                     reason: wire_goal_command_rejection(reason),
+                }),
+            )
+            .await
+        }
+        Ok(GoalCommandHandlingOutcome::StopAwaitingApproval { turn, request }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::GoalStopAwaitingApproval {
+                    session_id,
+                    active_turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+                    tool_request_id: CanonicalUuid::from_uuid(request.into_uuid()),
                 }),
             )
             .await
@@ -878,9 +890,51 @@ pub(crate) async fn interrupt_for_committed_closure(
             ParentTerminationKind::Cancelled,
         ),
     };
-    let Ok(content) = UserContent::try_text(String::from("The session was closed.")) else {
-        return Err(());
-    };
+    interrupt_for_committed_turn(
+        pool,
+        model_configuration,
+        eligibility_nudge,
+        tool_dispatch_gate,
+        CommittedTurnInterrupt {
+            session,
+            live_turn,
+            expected_version,
+            descendant_scope,
+            cascade_root_kind,
+            command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+            content: "The session was closed.",
+        },
+    )
+    .await
+}
+
+struct CommittedTurnInterrupt {
+    session: SessionId,
+    live_turn: TurnId,
+    expected_version: SessionConfigurationDefaultsVersion,
+    descendant_scope: DescendantTerminationScope,
+    cascade_root_kind: ParentTerminationKind,
+    command_id: DurableCommandId,
+    content: &'static str,
+}
+
+async fn interrupt_for_committed_turn(
+    pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
+    eligibility_nudge: &InProcessEligibilityNudge,
+    tool_dispatch_gate: &InProcessToolDispatchGate,
+    interrupt: CommittedTurnInterrupt,
+) -> Result<(), ()> {
+    let CommittedTurnInterrupt {
+        session,
+        live_turn,
+        expected_version,
+        descendant_scope,
+        cascade_root_kind,
+        command_id,
+        content,
+    } = interrupt;
+    let content = UserContent::try_text(content.to_owned()).map_err(|_| ())?;
     let selected_model = sqlx::query_scalar::<_, uuid::Uuid>(
         "SELECT direct_selection_id
            FROM turn_origin_effective_model_configuration($1, $2)",
@@ -898,7 +952,7 @@ pub(crate) async fn interrupt_for_committed_closure(
             "closure interrupt live turn has no effective model configuration");
     })?;
     let request = SubmitInputRequest::try_new_core_interrupt(
-        DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+        command_id,
         session,
         content,
         live_turn,
@@ -1084,7 +1138,23 @@ where
             .await;
         }
     };
-    let spool_result = spool_goal_snapshot(&goal, version, request_id, session_id).await;
+    let stops = match GoalRepository::new(pool.clone())
+        .load_stop_settlements(goal.session())
+        .await
+    {
+        Ok(stops) => stops,
+        Err(error) => {
+            return write_goal_repository_error(
+                writer,
+                version,
+                request_id,
+                Some(session_id.into_uuid()),
+                error,
+            )
+            .await;
+        }
+    };
+    let spool_result = spool_goal_snapshot(&goal, &stops, version, request_id, session_id).await;
     drop(goal);
     drop(snapshot_permit);
     let mut spool = match spool_result {
@@ -1096,6 +1166,7 @@ where
 
 pub(super) async fn spool_goal_snapshot(
     goal: &Goal,
+    stops: &[signalbox_persistence::goal::GoalStopSettlement],
     version: ProtocolVersion,
     request_id: RequestId,
     session_id: CanonicalUuid,
@@ -1123,7 +1194,11 @@ pub(super) async fn spool_goal_snapshot(
     )
     .await?;
     for event in goal.events() {
-        let wire_event = wire_goal_event(event).map_err(SnapshotSpoolError::from_connection)?;
+        let wire_event = wire_goal_event(
+            event,
+            stops.iter().find(|stop| stop.event == event.ordinal()),
+        )
+        .map_err(SnapshotSpoolError::from_connection)?;
         write_spool_message(
             &mut file,
             version,
@@ -1206,6 +1281,7 @@ pub(super) fn wire_lifecycle_actor(actor: signalbox_domain::LifecycleActor) -> L
 
 pub(super) fn wire_goal_event(
     event: &GoalEvent,
+    stop: Option<&signalbox_persistence::goal::GoalStopSettlement>,
 ) -> Result<GoalHistoryEvent, ProcessConnectionError> {
     match event.kind() {
         GoalEventKind::Commissioned {
@@ -1232,9 +1308,16 @@ pub(super) fn wire_goal_event(
             turn_id: wire_uuid(provenance.turn().into_uuid()),
             tool_request_id: wire_uuid(provenance.tool_request().into_uuid()),
         }),
-        GoalEventKind::UserStopped { provenance } => Ok(GoalHistoryEvent::UserStopped {
-            command_id: wire_goal_command_id(provenance.command())?,
-        }),
+        GoalEventKind::UserStopped { provenance } => {
+            let stop = stop.ok_or(ProcessConnectionError::EncodeInvariant)?;
+            Ok(GoalHistoryEvent::UserStopped {
+                command_id: wire_goal_command_id(provenance.command())?,
+                settling_turn_id: stop
+                    .turn
+                    .map(|turn| CanonicalUuid::from_uuid(turn.into_uuid())),
+                abandoned_actions: stop.abandoned_actions.map(CanonicalU64::new),
+            })
+        }
         GoalEventKind::Superseded {
             replacement_statement,
             provenance,

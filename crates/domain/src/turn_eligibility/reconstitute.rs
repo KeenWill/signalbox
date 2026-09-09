@@ -306,6 +306,7 @@ fn reconstitute_inner(
                 if matches!(
                     &record.state,
                     AcceptedInputTurnSchedulingRecordState::Queued
+                        | AcceptedInputTurnSchedulingRecordState::Retired
                 ) {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
@@ -882,8 +883,11 @@ fn reconstitute_inner(
         consumed_inputs.insert(accepted_input, *call);
         let source_record = records_by_turn.get(&consumed.source_turn).copied();
         let source_record_matches = source_record.is_some_and(|record| {
-            !matches!(record.state, AcceptedInputTurnSchedulingRecordState::Queued)
-                && record.order.acceptance_position() < consumed.acceptance_position
+            !matches!(
+                record.state,
+                AcceptedInputTurnSchedulingRecordState::Queued
+                    | AcceptedInputTurnSchedulingRecordState::Retired
+            ) && record.order.acceptance_position() < consumed.acceptance_position
         });
         let active_tail_matches = input.active_acceptance_tail.as_ref().is_some_and(|tail| {
             tail.entries.iter().any(|candidate| {
@@ -957,7 +961,7 @@ fn reconstitute_inner(
                             });
                     let lifecycle_matches = completed_history_consumer
                         || match &record.state {
-                    AcceptedInputTurnSchedulingRecordState::Queued => false,
+                    AcceptedInputTurnSchedulingRecordState::Queued | AcceptedInputTurnSchedulingRecordState::Retired => false,
                     AcceptedInputTurnSchedulingRecordState::Active { phase, .. } => {
                         Some(model_call.attempt()) == phase.current_attempt
                             && match (&phase.state, model_call.state()) {
@@ -1193,7 +1197,8 @@ fn reconstitute_inner(
         let model_call = model_call_inputs[&call];
         let record = records_by_turn[&model_call.turn()];
         let starting_frontier = match record.state {
-            AcceptedInputTurnSchedulingRecordState::Queued => None,
+            AcceptedInputTurnSchedulingRecordState::Queued
+            | AcceptedInputTurnSchedulingRecordState::Retired => None,
             AcceptedInputTurnSchedulingRecordState::Active {
                 starting_frontier, ..
             }
@@ -1315,7 +1320,7 @@ fn reconstitute_inner(
                 .copied()
                 .is_some_and(|record| {
                     let starting_frontier = match record.state {
-                        AcceptedInputTurnSchedulingRecordState::Queued => None,
+                        AcceptedInputTurnSchedulingRecordState::Queued | AcceptedInputTurnSchedulingRecordState::Retired => None,
                         AcceptedInputTurnSchedulingRecordState::Active {
                             starting_frontier, ..
                         }
@@ -1402,7 +1407,16 @@ fn reconstitute_inner(
     let mut attempt_owners = BTreeMap::new();
     let mut claimed_continuation_rounds = BTreeSet::new();
 
-    for (index, turn) in total_order.into_iter().enumerate() {
+    for (index, turn) in total_order
+        .into_iter()
+        .filter(|turn| {
+            !matches!(
+                records_by_turn[turn].state,
+                AcceptedInputTurnSchedulingRecordState::Retired
+            )
+        })
+        .enumerate()
+    {
         let record = records_by_turn[&turn];
         let external_predecessor = preceding_non_accepted_successors.get(&turn).copied();
         if let Some(predecessor) = external_predecessor {
@@ -1450,6 +1464,7 @@ fn reconstitute_inner(
             }
         };
         let state = match &record.state {
+            AcceptedInputTurnSchedulingRecordState::Retired => continue,
             AcceptedInputTurnSchedulingRecordState::Queued => {
                 queued_seen = true;
                 ReconstitutedSchedulingState::Queued

@@ -637,6 +637,8 @@ fn goal_history_replay_accepts_supersession_lineage() -> Result<(), ClientError>
         2,
         &GoalHistoryEvent::UserStopped {
             command_id: stop_command,
+            settling_turn_id: None,
+            abandoned_actions: Some(CanonicalU64::new(0)),
         },
     )?;
 
@@ -649,7 +651,14 @@ fn goal_history_replay_rejects_an_invalid_first_transition() {
         .expect("fixture command identity is admitted");
     let mut replay = GoalHistoryReplay::default();
 
-    let result = replay.apply(1, &GoalHistoryEvent::UserStopped { command_id });
+    let result = replay.apply(
+        1,
+        &GoalHistoryEvent::UserStopped {
+            command_id,
+            settling_turn_id: None,
+            abandoned_actions: Some(CanonicalU64::new(0)),
+        },
+    );
 
     assert!(matches!(result, Err(ClientError::Protocol(_))));
 }

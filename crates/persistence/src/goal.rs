@@ -4,6 +4,9 @@
 //! replay it through the domain aggregate; no mutable current-state row exists.
 
 mod compaction;
+mod stop;
+
+pub use stop::GoalStopSettlement;
 
 use std::num::NonZeroU64;
 
@@ -17,7 +20,8 @@ use signalbox_domain::{
     GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
     GoalTransitionFailure, GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance,
     LifecycleActor, ModelAlias, ModelSelectionOverride, OriginConfiguration,
-    ReconstitutedGoalCommand, SessionClosureOutcome, SessionId, SessionTerminalOutcome, TurnId,
+    ReconstitutedGoalCommand, SessionClosureOutcome, SessionId, SessionTerminalOutcome,
+    ToolRequestId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -92,6 +96,13 @@ pub enum GoalCommandHandlingOutcome {
     TargetBusy {
         /// The competing live session.
         session: SessionId,
+    },
+    /// A stop cannot decide or bypass this approval wait; the command is unspent.
+    StopAwaitingApproval {
+        /// The active turn that retains the wait.
+        turn: TurnId,
+        /// The pending request the caller must deny before stopping.
+        request: ToolRequestId,
     },
 }
 
@@ -212,12 +223,26 @@ impl From<GoalCorruption> for GoalRepositoryError {
 #[derive(Clone, Debug)]
 pub struct GoalRepository {
     pool: PgPool,
+    tool_dispatch_gate: Option<signalbox_application::InProcessToolDispatchGate>,
 }
 
 impl GoalRepository {
     /// Uses the supplied pool for independent goal transactions.
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            tool_dispatch_gate: None,
+        }
+    }
+
+    /// Shares immediate-stop ordering with the daemon's tool dispatcher.
+    #[must_use]
+    pub fn with_tool_dispatch_gate(
+        mut self,
+        gate: signalbox_application::InProcessToolDispatchGate,
+    ) -> Self {
+        self.tool_dispatch_gate = Some(gate);
+        self
     }
 
     /// Loads the durable operator-required cause for one failed goal turn.
@@ -306,66 +331,85 @@ impl GoalRepository {
         SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     {
         let command_id = command.command_id();
-        let mut transaction = self.pool.begin().await?;
-        if let Some(kind) = inspect_registry(&mut transaction, command_id).await? {
-            let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
-            transaction.rollback().await?;
-            return Ok(outcome);
-        }
-        if command.action().starts_pursuit()
-            && let Some(session) =
-                crate::commissioned_dispatch::lock_competing_pull_request_session(
-                    &mut transaction,
-                    command.session(),
-                )
-                .await?
-        {
-            transaction.rollback().await?;
-            return Ok(GoalCommandHandlingOutcome::TargetBusy { session });
-        }
+        let (mut transaction, _dispatch_permit, session_exists) = loop {
+            let mut transaction = self.pool.begin().await?;
+            let guarded_turn = if matches!(command.action(), GoalUserAction::Stop { .. }) {
+                stop::active_turn(&mut transaction, command.session()).await?
+            } else {
+                None
+            };
+            let permit = match (&self.tool_dispatch_gate, guarded_turn) {
+                (Some(gate), Some(turn)) => Some(gate.acquire(turn).await),
+                _ => None,
+            };
+            if let Some(kind) = inspect_registry(&mut transaction, command_id).await? {
+                let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
+                transaction.rollback().await?;
+                return Ok(outcome);
+            }
+            if command.action().starts_pursuit()
+                && let Some(session) =
+                    crate::commissioned_dispatch::lock_competing_pull_request_session(
+                        &mut transaction,
+                        command.session(),
+                    )
+                    .await?
+            {
+                transaction.rollback().await?;
+                return Ok(GoalCommandHandlingOutcome::TargetBusy { session });
+            }
 
-        let issuer = crate::command_registry::issuer_columns(principal);
-        let claimed = sqlx::query(
-            "INSERT INTO durable_command
+            let issuer = crate::command_registry::issuer_columns(principal);
+            let claimed = sqlx::query(
+                "INSERT INTO durable_command
                 (command_id, command_kind, storage_version, claimed_at,
                  issuer_kind, issuer_module)
              VALUES ($1, $2, $3, transaction_timestamp(), $4, $5)
              ON CONFLICT DO NOTHING",
-        )
-        .bind(durable_command_id_to_uuid(command_id))
-        .bind(GOAL_KIND)
-        .bind(STORAGE_VERSION)
-        .bind(issuer.0)
-        .bind(issuer.1)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected()
-            == 1;
-        if !claimed {
-            let kind = inspect_registry(&mut transaction, command_id)
-                .await?
-                .ok_or(GoalCorruption::Inconsistent(
-                    "winner command claim disappeared",
-                ))?;
-            let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
-            transaction.rollback().await?;
-            return Ok(outcome);
-        }
-
-        if matches!(
-            command.action(),
-            GoalUserAction::Stop {
-                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            )
+            .bind(durable_command_id_to_uuid(command_id))
+            .bind(GOAL_KIND)
+            .bind(STORAGE_VERSION)
+            .bind(issuer.0)
+            .bind(issuer.1)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected()
+                == 1;
+            if !claimed {
+                let kind = inspect_registry(&mut transaction, command_id)
+                    .await?
+                    .ok_or(GoalCorruption::Inconsistent(
+                        "winner command claim disappeared",
+                    ))?;
+                let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
+                transaction.rollback().await?;
+                return Ok(outcome);
             }
-        ) {
-            sqlx::query(crate::lock_inventory::DELEGATION_TERMINATION_SESSION_FRONTIER)
-                .bind(session_id_to_uuid(command.session()))
-                .bind("stopped")
-                .execute(&mut *transaction)
-                .await?;
-        }
 
-        let session_exists = lock_session(&mut transaction, command.session()).await?;
+            if matches!(
+                command.action(),
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                }
+            ) {
+                sqlx::query(crate::lock_inventory::DELEGATION_TERMINATION_SESSION_FRONTIER)
+                    .bind(session_id_to_uuid(command.session()))
+                    .bind("stopped")
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+
+            let session_exists = lock_session(&mut transaction, command.session()).await?;
+
+            if matches!(command.action(), GoalUserAction::Stop { .. })
+                && stop::active_turn(&mut transaction, command.session()).await? != guarded_turn
+            {
+                transaction.rollback().await?;
+                continue;
+            }
+            break (transaction, permit, session_exists);
+        };
 
         // An automatic resume names the block it answers; a park taken since is
         // the same "the lineage moved under us" case, and lifting it would undo
@@ -409,6 +453,24 @@ impl GoalRepository {
                 }
             }
         };
+        if matches!(command.action(), GoalUserAction::Stop { .. })
+            && matches!(&result, GoalCommandResult::Applied(_))
+            && let Some((turn, request)) = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT turn_id, approval_tool_request_id FROM turn_lifecycle
+                  WHERE session_id = $1 AND state_kind = 'active'
+                    AND active_phase_kind = 'awaiting_tool_approval'
+                    AND NOT delegation_runtime_terminal",
+            )
+            .bind(session_id_to_uuid(command.session()))
+            .fetch_optional(&mut *transaction)
+            .await?
+        {
+            transaction.rollback().await?;
+            return Ok(GoalCommandHandlingOutcome::StopAwaitingApproval {
+                turn: turn_id_from_uuid(turn),
+                request: tool_request_id_from_uuid(request),
+            });
+        }
         let starts_pursuit = match &result {
             GoalCommandResult::Applied(event) => event_starts_pursuit(event),
             GoalCommandResult::Rejected(_) => false,
@@ -505,6 +567,11 @@ impl GoalRepository {
             .bind(durable_command_id_to_uuid(command_id))
             .execute(&mut *transaction)
             .await?;
+        if let GoalCommandResult::Applied(event) = &result
+            && matches!(command.action(), GoalUserAction::Stop { .. })
+        {
+            stop::admit_interrupt(&mut transaction, command.session(), event.ordinal()).await?;
+        }
         commit(transaction).await?;
         Ok(GoalCommandHandlingOutcome::Recorded(result))
     }

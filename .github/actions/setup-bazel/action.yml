@@ -1,0 +1,17 @@
+name: Set up Bazel
+description: Install Bazelisk and configure shared build and download caching.
+inputs:
+  remote-cache:
+    description: Optional gRPC cache endpoint for self-hosted runners.
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+      with:
+        bazelisk-version: 1.29.0
+        bazelrc: |
+          ${{ runner.environment == 'self-hosted' && inputs.remote-cache != '' && format('build --remote_cache="{0}"', inputs.remote-cache) || '' }}
+          ${{ runner.environment == 'self-hosted' && inputs.remote-cache != '' && format('build --experimental_remote_downloader="{0}"', inputs.remote-cache) || '' }}
+          build --experimental_remote_downloader_local_fallback
