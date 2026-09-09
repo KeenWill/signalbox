@@ -158,18 +158,24 @@ composed and a watched repository configures `push_credential_file`; execution
 resolves that session's retained dispatch and current repository configuration
 on every call. The transport pushes without force to the configured repository
 URL and confirms the remote branch equals the resolved commit before
-acknowledging success. Before pushing a merge, the executor compares each
-zero-context hunk relative to its merged base parent against the branch's hunks
-relative to the parents' merge base, ignoring line offsets. Rename detection
-correlates source and destination paths in both diffs and maps the base parent's
-renames onto the branch's paths before comparing hunks. A hunk absent from the
-branch diff refuses the push with `MergeDroppedBaseChanges`. Its bounded JSON
-detail lists filenames before hunk previews, marks each shortened preview with
-`truncated`, and counts omitted filenames and previews explicitly when they
-cannot fit. Filenames use bytewise Git path quoting. Verification supports
-two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
-the parent count before traversing ancestry. It retains only the first dropped
-hunk per file. Non-merge pushes are unaffected.
+acknowledging success. For a two-parent merge, exactly one parent must equal or
+descend from the retained-head fence; it is the branch parent, regardless of
+parent order. A missing or ambiguous fence binding refuses the push with
+`UnprovenMergeParents`. Multiple merge bases refuse it with
+`AmbiguousMergeBases`, listing base object IDs and an omitted count when the
+detail cannot fit them all; verification does not construct a virtual merge
+base. Before pushing a merge, the executor compares each zero-context hunk
+relative to its merged base parent against the branch's hunks relative to the
+parents' merge base, ignoring line offsets. Rename detection correlates source
+and destination paths in both diffs and maps the base parent's renames onto the
+branch's paths before comparing hunks. A hunk absent from the branch diff
+refuses the push with `MergeDroppedBaseChanges`. Its bounded JSON detail lists
+filenames before hunk previews, marks each shortened preview with `truncated`,
+and counts omitted filenames and previews explicitly when they cannot fit.
+Filenames use bytewise Git path quoting. Verification supports two-parent merges
+and refuses larger merges with `UnsupportedMergeShape` naming the parent count
+before traversing ancestry. It retains only the first dropped hunk per file.
+Non-merge pushes are unaffected.
 
 The seven local Git tools perform no remote operation.
 

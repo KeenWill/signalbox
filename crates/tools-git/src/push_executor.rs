@@ -125,6 +125,20 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
                     detail: Some(detail),
                 }
             }
+            Err(GitPushFailure::UnprovenMergeParents) => {
+                let detail = ToolExecutionErrorDetail::try_new(
+                    "UnprovenMergeParents: the retained-head fence must identify exactly one branch parent".to_owned(),
+                )
+                .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))?;
+                ToolExecutorEvidence::KnownFailed {
+                    detail: Some(detail),
+                }
+            }
+            Err(GitPushFailure::AmbiguousMergeBases { bases }) => {
+                ToolExecutorEvidence::KnownFailed {
+                    detail: Some(ambiguous_merge_bases_detail(&bases)?),
+                }
+            }
             Err(GitPushFailure::MergeDroppedBaseChanges(files)) => {
                 let detail = merge_dropped_detail(&files)?;
                 ToolExecutorEvidence::KnownFailed {
@@ -151,6 +165,8 @@ pub(super) enum GitPushFailure {
     Rejected,
     MergeDroppedBaseChanges(Vec<crate::push_merge::DroppedBaseChanges>),
     UnsupportedMergeShape { parents: usize },
+    UnprovenMergeParents,
+    AmbiguousMergeBases { bases: Vec<git2::Oid> },
     PreDispatchInfrastructure,
     DispatchUnknown,
     PostDispatchInvalid,
@@ -215,7 +231,7 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
                     .parent_count()
                     > 1
                 {
-                    crate::push_merge::verify_merge(&authority, target, deadline)?;
+                    crate::push_merge::verify_merge(&authority, target, fence, deadline)?;
                 }
                 Ok((snapshot, target))
             },
@@ -305,6 +321,25 @@ const fn push_infrastructure(certainty: PushCommitCertainty) -> GitPushExecutorE
     GitPushExecutorError {
         class: OperatorFailureClass::Infrastructure { commit_ambiguous },
     }
+}
+
+fn ambiguous_merge_bases_detail(
+    bases: &[git2::Oid],
+) -> Result<ToolExecutionErrorDetail, GitPushExecutorError> {
+    let mut detail = format!("AmbiguousMergeBases: {} bases", bases.len());
+    let suffix_bytes = format!("; omitted_bases={}", bases.len()).len();
+    let mut omitted = bases.len();
+    for base in bases {
+        let entry = format!("; {base}");
+        if detail.len() + entry.len() + suffix_bytes > ToolExecutionErrorDetail::MAX_UTF8_BYTES {
+            break;
+        }
+        detail.push_str(&entry);
+        omitted -= 1;
+    }
+    detail.push_str(&format!("; omitted_bases={omitted}"));
+    ToolExecutionErrorDetail::try_new(detail)
+        .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))
 }
 
 #[derive(Serialize)]
@@ -399,7 +434,7 @@ fn encode_merge_dropped_detail(
 
 #[cfg(test)]
 mod tests {
-    use super::merge_dropped_detail;
+    use super::{ambiguous_merge_bases_detail, merge_dropped_detail};
     use crate::push_merge::DroppedBaseChanges;
 
     #[test]
@@ -499,5 +534,44 @@ mod tests {
                 { "file": "visible.txt", "first_dropped_hunk": "-keep\n", "truncated": false },
             ])
         );
+    }
+    #[test]
+    fn ambiguous_merge_base_detail_names_complete_object_ids() {
+        let first = git2::Oid::from_bytes(&[1; 20]).expect("first object ID");
+        let second = git2::Oid::from_bytes(&[2; 20]).expect("second object ID");
+
+        let detail = ambiguous_merge_bases_detail(&[first, second]).expect("typed detail");
+
+        assert_eq!(
+            detail.as_str(),
+            format!("AmbiguousMergeBases: 2 bases; {first}; {second}; omitted_bases=0")
+        );
+    }
+
+    #[test]
+    fn ambiguous_merge_base_detail_omits_whole_ids_when_the_detail_is_full() {
+        use signalbox_domain::ToolExecutionErrorDetail;
+
+        let bases: Vec<_> = (0..ToolExecutionErrorDetail::MAX_UTF8_BYTES / 40 + 1)
+            .map(|index| git2::Oid::from_str(&format!("{index:040x}")).expect("object ID"))
+            .collect();
+
+        let detail = ambiguous_merge_bases_detail(&bases).expect("bounded typed detail");
+
+        let parts: Vec<_> = detail.as_str().split("; ").collect();
+        let omitted: usize = parts
+            .last()
+            .expect("omission count")
+            .strip_prefix("omitted_bases=")
+            .expect("explicit omissions")
+            .parse()
+            .expect("count");
+        let listed: Vec<_> = parts[1..parts.len() - 1]
+            .iter()
+            .map(|part| git2::Oid::from_str(part).expect("complete object ID"))
+            .collect();
+        assert!(omitted > 0);
+        assert_eq!(listed, bases[..bases.len() - omitted]);
+        assert!(detail.as_str().len() <= ToolExecutionErrorDetail::MAX_UTF8_BYTES);
     }
 }

@@ -27,6 +27,7 @@ fn repository_failure<T>(_: T) -> GitPushFailure {
 pub(super) fn verify_merge(
     authority: &PinnedRepository,
     target: Oid,
+    fence: Option<Oid>,
     deadline: Instant,
 ) -> Result<(), GitPushFailure> {
     // A separate shell keeps the push snapshot's shallow dispatch fence intact.
@@ -47,7 +48,7 @@ pub(super) fn verify_merge(
     if merge.parent_count() < 2 {
         return Ok(());
     }
-    let branch = merge.parent_id(0).map_err(repository_failure)?;
+    let fence = fence.ok_or(GitPushFailure::UnprovenMergeParents)?;
     let mut commits: Vec<_> = merge.parent_ids().collect();
     let mut visited = HashSet::new();
     while let Some(oid) = commits.pop() {
@@ -65,11 +66,32 @@ pub(super) fn verify_merge(
                 .parent_ids(),
         );
     }
-    let mut dropped = BTreeMap::new();
-    let base = merge.parent_id(1).map_err(repository_failure)?;
-    let ancestor = repository
-        .merge_base(branch, base)
+    let first = merge.parent_id(0).map_err(repository_failure)?;
+    let second = merge.parent_id(1).map_err(repository_failure)?;
+    let contains_fence = |parent| {
+        if parent == fence {
+            Ok(true)
+        } else {
+            repository
+                .graph_descendant_of(parent, fence)
+                .map_err(repository_failure)
+        }
+    };
+    let (branch, base) = match (contains_fence(first)?, contains_fence(second)?) {
+        (true, false) => (first, second),
+        (false, true) => (second, first),
+        _ => return Err(GitPushFailure::UnprovenMergeParents),
+    };
+    let ancestors = repository
+        .merge_bases(branch, base)
         .map_err(repository_failure)?;
+    if ancestors.len() > 1 {
+        let mut bases = ancestors.to_vec();
+        bases.sort_unstable();
+        return Err(GitPushFailure::AmbiguousMergeBases { bases });
+    }
+    let ancestor = *ancestors.first().ok_or(GitPushFailure::Repository)?;
+    let mut dropped = BTreeMap::new();
     let mut trees = Vec::new();
     for commit in [target, branch, base, ancestor] {
         trees.push(
@@ -112,26 +134,33 @@ pub(super) fn verify_merge(
     detect_renames(&mut base_changes, &mut source, &database)?;
     detect_renames(&mut carried, &mut source, &database)?;
     detect_renames(&mut own, &mut source, &database)?;
+    let base_renames: BTreeMap<_, _> = base_changes
+        .deltas()
+        .filter(|delta| delta.status() == Delta::Renamed)
+        .map(|delta| {
+            Ok((
+                delta.old_file().path().ok_or(GitPushFailure::Repository)?,
+                delta.new_file().path().ok_or(GitPushFailure::Repository)?,
+            ))
+        })
+        .collect::<Result<_, GitPushFailure>>()?;
+    let mut own_by_path = BTreeMap::new();
+    for (index, delta) in own.deltas().enumerate() {
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .ok_or(GitPushFailure::Repository)?;
+        let path = base_renames.get(path).copied().unwrap_or(path);
+        own_by_path.entry(path).or_insert(index);
+    }
     for (index, delta) in carried.deltas().enumerate() {
         let path = delta
             .new_file()
             .path()
             .or_else(|| delta.old_file().path())
             .ok_or(GitPushFailure::Repository)?;
-        let own_index = own.deltas().position(|candidate| {
-            let candidate_path = candidate
-                .new_file()
-                .path()
-                .or_else(|| candidate.old_file().path());
-            base_changes
-                .deltas()
-                .find(|rename| {
-                    rename.status() == Delta::Renamed && rename.old_file().path() == candidate_path
-                })
-                .and_then(|rename| rename.new_file().path())
-                .or(candidate_path)
-                == Some(path)
-        });
+        let own_index = own_by_path.get(path).copied();
         // Capture compared paths only, in addition to the rename candidates.
         for delta in std::iter::once(delta).chain(own_index.and_then(|index| own.get_delta(index)))
         {
