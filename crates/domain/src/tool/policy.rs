@@ -56,7 +56,7 @@ pub enum ToolDecisionSource {
     SessionOverride,
     /// A checked delegate-model decision.
     Delegate,
-    /// The provider credential boundary suppressed executable arguments.
+    /// Runtime controls denied suppressed arguments or an expired human wait.
     RuntimeSafety,
     /// A committed session closure denied a parked request before interrupting
     /// the live turn.
