@@ -378,7 +378,7 @@ and oversized bytes are never persisted. The result-text and error-detail bounds
 constrain every executor's capture policy; no executor widens the durable bound
 or converts an otherwise bounded success into a failure because it omitted
 additional result members. A crash-lost attempt has durable `KnownFailed`
-evidence and projects an execution result during ordinary continuation;
+evidence and projects an execution result in the terminal failure suffix;
 reconciliation projects `ToolClosed`. Attempt evidence commits as soon as
 execution ends, independently of semantic projection.
 
