@@ -683,6 +683,16 @@ mod tests {
     }
 
     #[test]
+    fn production_options_accept_an_explicit_empty_password() {
+        production_connection_options_with_environment(
+            "postgres://signalbox@database.example/signalbox?password=",
+            no_ambient_variables,
+            no_default_passfile,
+        )
+        .expect("an explicit empty password disables password-file lookup");
+    }
+
+    #[test]
     fn local_test_options_disable_tls_explicitly() {
         let options = local_test_connection_options(DATABASE_URL).expect("valid database URL");
 
