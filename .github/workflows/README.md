@@ -20,14 +20,14 @@ The self-hosted ARC scale sets are managed outside this repository. Only
 `signalbox-integration-tests`, `signalbox-coverage`, and `signalbox-smokes`
 provide Docker.
 
-`rust.yml` calls `bazel.yml` for ordinary Rust tests on `signalbox-builds` and
-manifest PostgreSQL suites on `signalbox-integration-tests`. Its
-`validate-checks` aggregation uses orchestration; final `validate` stays on
-builds because it also executes two Cargo contract checks. The web job uses
-builds with declared browser runtimes and fonts. Report-tier jobs and Docker
-live smokes limit Cargo compilation to two jobs; the API digest also limits
-Bazel to two jobs. Docker sidecar CPU allowances are separate from runner
-compilation budgets.
+`rust.yml` calls `bazel.yml` for ordinary Rust tests and manifest PostgreSQL
+suites on `signalbox-integration-tests`. The ordinary suite includes a sparse
+blob session test requiring PostgreSQL. Its `validate-checks` aggregation uses
+orchestration; final `validate` stays on builds because it also executes two
+Cargo contract checks. The web job uses builds with declared browser runtimes
+and fonts. Report-tier jobs and Docker live smokes limit Cargo compilation to
+two jobs; the API digest also limits Bazel to two jobs. Docker sidecar CPU
+allowances are separate from runner compilation budgets.
 
 ## The routing rule
 

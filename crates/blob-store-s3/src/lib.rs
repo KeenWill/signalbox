@@ -715,7 +715,8 @@ impl S3BlobStore {
         if response.status() == StatusCode::NOT_FOUND {
             return Err(classify_absence(response, "get S3 object range").await);
         }
-        if response.status() != StatusCode::PARTIAL_CONTENT {
+        let partial_content = response.status() == StatusCode::PARTIAL_CONTENT;
+        if !partial_content && response.status() != StatusCode::RANGE_NOT_SATISFIABLE {
             return Err(BlobStoreError::unavailable(
                 "validate S3 object range response",
             ));
@@ -728,6 +729,16 @@ impl S3BlobStore {
         let Some((range, observed_length)) = content_range else {
             return Err(BlobStoreError::unavailable("read S3 content range"));
         };
+        let expected_range = if partial_content {
+            format!("bytes {offset}-{end}")
+        } else {
+            String::from("bytes *")
+        };
+        if range != expected_range {
+            return Err(BlobStoreError::unavailable(
+                "validate S3 object range response",
+            ));
+        }
         let observed_length = observed_length
             .parse::<u64>()
             .map_err(|_| BlobStoreError::unavailable("read S3 object length"))?;
@@ -737,7 +748,7 @@ impl S3BlobStore {
                 BlobVerificationFailure::new(expected, None, observed_length),
             ));
         }
-        if range != format!("bytes {offset}-{end}") {
+        if !partial_content {
             return Err(BlobStoreError::unavailable(
                 "validate S3 object range response",
             ));
