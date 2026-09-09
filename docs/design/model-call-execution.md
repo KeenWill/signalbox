@@ -68,7 +68,7 @@ operation's output contract, the runtime enforces it, and the turn's outcome
 payload validates against the schema or the turn reports its failure. The
 runtime operation already carries an optional output contract; the session path
 into it does not exist. The program side is owned by
-[program-substrate](../spec/program-substrate.md).
+[workflows](../spec/workflows.md).
 
 The durable per-call provenance schema is undecided in
 [open-questions](../open-questions.md), so the evidence row and the rules that

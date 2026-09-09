@@ -53,8 +53,7 @@ inside triggers are stated in the migrations that define them.
 A program journal append locks that run's sequence FOR UPDATE, inserts the
 frame, and advances the sequence. An effect's consequence can commit before its
 answer; recovery adopts a proven outcome, reissues a declared-idempotent
-operation, or journals ambiguity as [program substrate](program-substrate.md)
-defines.
+operation, or journals ambiguity as [workflows](workflows.md) defines.
 
 Reconstitution turns rows back into domain values and returns one complete value
 or a typed corruption error. Failures that reach an operator are classified in

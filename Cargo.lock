@@ -4668,21 +4668,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "signalbox-program-runtime"
-version = "0.0.0"
-dependencies = [
- "deno_core",
- "deno_error",
- "serde",
- "signalbox-domain",
- "signalbox-persistence",
- "sqlx",
- "testcontainers-modules",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "signalbox-runner"
 version = "0.0.0"
 dependencies = [
@@ -4848,6 +4833,7 @@ dependencies = [
  "signalbox-tool-contract",
  "signalbox-tools-workspace",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -4960,6 +4946,21 @@ dependencies = [
  "serde",
  "serde_json",
  "signalbox-application",
+ "uuid",
+]
+
+[[package]]
+name = "signalbox-workflow-runtime"
+version = "0.0.0"
+dependencies = [
+ "deno_core",
+ "deno_error",
+ "serde",
+ "signalbox-domain",
+ "signalbox-persistence",
+ "sqlx",
+ "testcontainers-modules",
+ "tokio",
  "uuid",
 ]
 

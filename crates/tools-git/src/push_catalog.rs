@@ -82,25 +82,10 @@ impl<Transport> GitPushTools<Transport> {
         if identity_after_root_open != repository_identity {
             return Err(GitPushToolsConstructionError::Repository);
         }
-        let invalid_detail = detail("invalid bounded Git tool arguments")?;
         let repository_detail = detail("injected Git repository was rejected")?;
         let unresolved_detail = detail(PUSH_UNRESOLVED_DETAIL)?;
         let rejected_detail = detail(PUSH_REJECTED_DETAIL)?;
-        let definition = compile_contract_definition::<PushContract>(
-            ToolPermissionDefault::AlwaysConfirm,
-            ToolEffectClass::ExternalEffect,
-        )
-        .map_err(|error| match error {
-            ToolContractCompileError::Name => GitPushToolsConstructionError::Name,
-            ToolContractCompileError::Schema => GitPushToolsConstructionError::Schema,
-        })?;
-        let catalog = CompiledToolCatalog::try_new(vec![CompiledTool::new(
-            definition,
-            GitPushArgumentValidator {
-                detail: invalid_detail,
-            },
-        )])
-        .map_err(|_| GitPushToolsConstructionError::Duplicate)?;
+        let catalog = git_push_catalog()?;
         Ok(Self {
             catalog,
             executor: GitPushExecutor::new(
@@ -121,6 +106,26 @@ impl<Transport> GitPushTools<Transport> {
     pub fn into_parts(self) -> (CompiledToolCatalog, GitPushExecutor<Transport>) {
         (self.catalog, self.executor)
     }
+}
+
+/// Compiles the configured push declaration without binding a session workspace.
+pub fn git_push_catalog() -> Result<CompiledToolCatalog, GitPushToolsConstructionError> {
+    let invalid_detail = detail("invalid bounded Git tool arguments")?;
+    let definition = compile_contract_definition::<PushContract>(
+        ToolPermissionDefault::AlwaysConfirm,
+        ToolEffectClass::ExternalEffect,
+    )
+    .map_err(|error| match error {
+        ToolContractCompileError::Name => GitPushToolsConstructionError::Name,
+        ToolContractCompileError::Schema => GitPushToolsConstructionError::Schema,
+    })?;
+    CompiledToolCatalog::try_new(vec![CompiledTool::new(
+        definition,
+        GitPushArgumentValidator {
+            detail: invalid_detail,
+        },
+    )])
+    .map_err(|_| GitPushToolsConstructionError::Duplicate)
 }
 
 fn detail(value: &str) -> Result<ToolExecutionErrorDetail, GitPushToolsConstructionError> {

@@ -9,8 +9,8 @@
       "rationale": "The request pushes another branch than the complete context permits."
     },
     {
-      "disposition": "escalate_to_human",
-      "rationale": "The commissioned goal is absent, so the request remains parked for the user."
+      "disposition": "approve",
+      "rationale": "The frozen prompt grants this workspace read without a commissioned goal."
     }
   ]
 }

@@ -5,10 +5,9 @@ the committed evaluation work that binds present code.
 
 ## Goal
 
-Run approval-judge evaluations on the
-[program substrate](../spec/program-substrate.md) with durable evaluation
-provenance and digest-pinned reference artifacts, then retire the judge-specific
-recording tables.
+Run approval-judge evaluations on the [workflows](../spec/workflows.md) layer
+with durable evaluation provenance and digest-pinned reference artifacts, then
+retire the judge-specific recording tables.
 
 ## Design
 
