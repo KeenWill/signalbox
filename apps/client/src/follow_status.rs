@@ -234,10 +234,12 @@ pub(crate) fn write_assistant_texts(
 enum OperatorStatusPhase {
     LifecycleWeeks,
     LifecycleDeadlineViolations,
+    RepositoryIngestion,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct OperatorStatusCounts {
+    repository_ingestion: u64,
     lifecycle_weeks: u64,
     lifecycle_deadline_violations: u64,
 }
@@ -268,6 +270,10 @@ pub(crate) async fn status(
         let frame = connection.frame().await?;
         let item_phase = match frame.message() {
             ServerMessage::OperatorStatus(message) => match message.as_ref() {
+                OperatorStatusMessage::RepositoryIngestion(_) => {
+                    counts.repository_ingestion = status_increment(counts.repository_ingestion)?;
+                    Some(OperatorStatusPhase::RepositoryIngestion)
+                }
                 OperatorStatusMessage::LifecycleWeek(_) => {
                     counts.lifecycle_weeks = status_increment(counts.lifecycle_weeks)?;
                     Some(OperatorStatusPhase::LifecycleWeeks)
@@ -280,6 +286,7 @@ pub(crate) async fn status(
                 OperatorStatusMessage::End(item)
                     if counts
                         == (OperatorStatusCounts {
+                            repository_ingestion: item.repository_ingestion_count.value(),
                             lifecycle_weeks: item.lifecycle_week_count.value(),
                             lifecycle_deadline_violations: item
                                 .lifecycle_deadline_violation_count

@@ -497,11 +497,14 @@ configuration, the database pool, or explicit credential and transport values;
 no tool family discovers ambient authority.
 
 The deployment paths are accepted without I/O at environment parsing; the
-selected catalogs and template prompt contents are validated during startup.
-Provider and integration credential files are never read at boot, so a missing
-or unsynced one cannot block startup or the recovery scan. The credential of a
-currently routed S3 blob store is the sole exception, read after the recovery
-scan and before socket admission, as [blob storage](blob-storage.md) requires.
+selected catalogs and template prompt contents are validated during startup. At
+startup, reload, and each resolution, model-provider and integration credential
+files, including repository polling, push, and webhook secrets, must resolve to
+regular files owned by the daemon's effective user, with no group or other
+permission bits and at most 64 KiB, or fail with a typed error naming the
+credential reference and failed check without secret contents. The credential of
+a currently routed S3 blob store is read after the recovery scan and before
+socket admission, as [blob storage](blob-storage.md) requires.
 
 Unauthenticated session, search, usage, attention, and blob reads require a
 loopback `Host` authority; another authority receives a 403
@@ -509,10 +512,9 @@ loopback `Host` authority; another authority receives a 403
 browser DTO. Application errors are a separate error kind and are never inferred
 from HTTP status alone.
 
-Blob descriptor, content, and download routes reject
-`Sec-Fetch-Site: cross-site` with a 403 `cross_site_blob_request_rejected`
-before storage access. This rejection precedes the loopback authority check.
-Other or absent fetch-site values pass this gate.
+Every `/api` route rejects `Sec-Fetch-Site: cross-site` with a 403
+`cross_site_api_request_rejected` before the loopback authority check or storage
+access, while other or absent fetch-site values pass this gate.
 
 Browser mutation routes use POST, require `application/json`, and when `Origin`
 is supplied require its host and effective port to equal the request `Host`

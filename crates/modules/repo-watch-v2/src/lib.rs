@@ -34,6 +34,7 @@ pub mod dispatch;
 mod event_decode;
 pub mod github;
 pub mod ingest;
+pub mod measurements;
 mod observation_decode;
 pub mod poll_cache;
 pub mod provider;
@@ -667,6 +668,7 @@ impl From<sqlx::Error> for StoreError {
 #[derive(Clone, Debug)]
 pub struct RepoWatchStore {
     pool: PgPool,
+    measurements: measurements::Measurements,
 }
 
 #[derive(sqlx::FromRow)]
@@ -677,8 +679,19 @@ struct WebhookReplayRecord {
 
 impl RepoWatchStore {
     /// Uses a pool already confined to the repository-watch role and schema.
-    pub const fn new(module_pool: PgPool) -> Self {
-        Self { pool: module_pool }
+    pub fn new(module_pool: PgPool) -> Self {
+        Self {
+            pool: module_pool,
+            measurements: measurements::Measurements::default(),
+        }
+    }
+
+    /// Returns this process's ingestion evidence for one repository.
+    pub fn ingestion_measurements(
+        &self,
+        repository: &RepositorySlug,
+    ) -> measurements::IngestionMeasurements {
+        self.measurements.read(repository)
     }
 
     /// Atomically admits the delivery metadata, body, and pending disposition.
@@ -728,6 +741,15 @@ impl RepoWatchStore {
             .execute(&mut *transaction)
             .await?;
             transaction.commit().await?;
+            self.measurements.update(delivery.repository, |value| {
+                value.last_accepted_webhook = Some(
+                    value
+                        .last_accepted_webhook
+                        .map_or(delivery.received_at, |prior| {
+                            prior.max(delivery.received_at)
+                        }),
+                )
+            });
             return Ok(WebhookAdmission::Inserted);
         }
 

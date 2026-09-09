@@ -1672,6 +1672,17 @@ pub(crate) const fn test_frontier(value: u128) -> TranscriptFrontier {
     }
 }
 
+/// The daemon-local workspace selected when a session binds its tools.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionWorkspaceRootKind {
+    /// A directory supplied at the session's derived location.
+    Derived,
+    /// The shared deployment-configured root.
+    Configured,
+    /// A checkout provisioned for this session's repository dispatch.
+    Provisioned,
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;

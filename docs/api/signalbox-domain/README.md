@@ -32,7 +32,7 @@
 | review_workflow | 83 | 0 | 1 | [review_workflow](review_workflow.md) |
 | runner | 80 | 0 | 0 | [runner](runner.md) |
 | semantic_entry | 8 | 0 | 0 | [semantic_entry](semantic_entry.md) |
-| session | 22 | 0 | 0 | [session](session.md) |
+| session | 23 | 0 | 0 | [session](session.md) |
 | session_delegation | 37 | 0 | 3 | [session_delegation](session_delegation.md) |
 | session_lifecycle | 23 | 0 | 0 | [session_lifecycle](session_lifecycle.md) |
 | session_lifecycle_command | 9 | 0 | 0 | [session_lifecycle_command](session_lifecycle_command.md) |

@@ -14,8 +14,8 @@ pub(super) async fn validate_loopback_host(request: Request, next: Next) -> Resp
     next.run(request).await
 }
 
-pub(super) async fn validate_blob_fetch_site(request: Request, next: Next) -> Response {
-    if request.uri().path().starts_with("/api/blobs/")
+pub(super) async fn validate_api_fetch_site(request: Request, next: Next) -> Response {
+    if (request.uri().path() == "/api" || request.uri().path().starts_with("/api/"))
         && request
             .headers()
             .get("sec-fetch-site")
@@ -23,8 +23,8 @@ pub(super) async fn validate_blob_fetch_site(request: Request, next: Next) -> Re
     {
         return transport_error(
             StatusCode::FORBIDDEN,
-            "cross_site_blob_request_rejected",
-            "cross-site browser requests cannot read blobs",
+            "cross_site_api_request_rejected",
+            "cross-site browser requests cannot access the API",
         );
     }
     next.run(request).await

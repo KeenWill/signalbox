@@ -94,6 +94,7 @@ const useDeterministicSession = (page: Page) =>
       json: {
         session_id: sessionEvidenceFixture.id,
         repository_watch: null,
+        workspace_root_kind: null,
         sizes: {
           item_count: sessionEvidenceFixture.itemCount,
           projected_text_bytes: '48000000',

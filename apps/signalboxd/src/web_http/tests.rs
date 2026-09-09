@@ -1998,7 +1998,7 @@ async fn cross_site_blob_rejection_precedes_host_rejection() {
             let body: serde_json::Value =
                 serde_json::from_slice(&response_body(response).await).expect("rejection is JSON");
             assert_eq!(
-                body["error"]["code"], "cross_site_blob_request_rejected",
+                body["error"]["code"], "cross_site_api_request_rejected",
                 "{host} {path}"
             );
         }
@@ -2006,8 +2006,8 @@ async fn cross_site_blob_rejection_precedes_host_rejection() {
 }
 
 #[tokio::test]
-async fn cross_site_metadata_preserves_the_host_error_outside_blob_routes() {
-    let request = Request::get("/api/bootstrap")
+async fn cross_site_metadata_preserves_the_host_error_outside_api_routes() {
+    let request = Request::get("/")
         .header(header::HOST, "attacker.example")
         .header("sec-fetch-site", "cross-site")
         .body(Body::empty())
@@ -2290,4 +2290,103 @@ async fn deterministic_page_uses_real_transport_routes() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("fetch(\"/api/bootstrap\")"));
     assert!(body.contains("fetch(\"/api/test/stream\")"));
+}
+
+#[tokio::test]
+async fn api_routes_reject_cross_site_fetch_metadata() {
+    for path in [
+        "/api",
+        "/api/bootstrap",
+        "/api/sessions",
+        "/api/search",
+        "/api/unknown",
+    ] {
+        let request = Request::get(path)
+            .header(header::HOST, "127.0.0.1:37231")
+            .header("sec-fetch-site", "cross-site")
+            .body(Body::empty())
+            .expect("request constructs");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("router responds");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response_body(response).await).expect("rejection is JSON");
+        assert_eq!(
+            body["error"]["code"], "cross_site_api_request_rejected",
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn blob_content_rejects_cross_site_image_embeds() {
+    let request = Request::get(BLOB_READ_PATHS[1])
+        .header(header::HOST, "127.0.0.1:37231")
+        .header("sec-fetch-site", "cross-site")
+        .header("sec-fetch-mode", "no-cors")
+        .header("sec-fetch-dest", "image")
+        .body(Body::empty())
+        .expect("image request constructs");
+    let response = production_router(None, None, None, None, None)
+        .oneshot(request)
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn api_admits_same_origin_fetch_metadata() {
+    let request = Request::get("/api/bootstrap")
+        .header(header::HOST, "localhost")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::empty())
+        .expect("request constructs");
+    let response = production_router(None, None, None, None, None)
+        .oneshot(request)
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn api_admits_same_site_fetch_metadata() {
+    let request = Request::get("/api/bootstrap")
+        .header(header::HOST, "localhost")
+        .header("sec-fetch-site", "same-site")
+        .body(Body::empty())
+        .expect("request constructs");
+    let response = production_router(None, None, None, None, None)
+        .oneshot(request)
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn api_admits_none_fetch_metadata() {
+    let request = Request::get("/api/bootstrap")
+        .header(header::HOST, "localhost")
+        .header("sec-fetch-site", "none")
+        .body(Body::empty())
+        .expect("request constructs");
+    let response = production_router(None, None, None, None, None)
+        .oneshot(request)
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn api_admits_absent_fetch_metadata() {
+    let request = Request::get("/api/bootstrap")
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("request constructs");
+    let response = production_router(None, None, None, None, None)
+        .oneshot(request)
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::OK);
 }
