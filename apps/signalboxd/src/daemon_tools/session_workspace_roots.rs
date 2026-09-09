@@ -37,6 +37,9 @@ pub(super) const MAX_RETAINED_SESSION_WORKSPACES: usize = 8;
 /// Administration directory the Git family requires immediately inside a root.
 pub(super) const GIT_ADMINISTRATION_DIRECTORY: &str = ".git";
 
+pub(super) const SESSION_WORKSPACE_BINDING_EVIDENCE_DETAIL: &str =
+    "session workspace binding evidence could not be recorded";
+
 pub(super) const SESSION_WORKSPACE_COMPOSITION_DETAIL: &str =
     "session workspace could not be composed";
 

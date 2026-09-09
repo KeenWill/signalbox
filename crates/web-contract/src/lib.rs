@@ -1689,7 +1689,6 @@ pub enum WebSessionTimelineDetailBody {
         kind: WebSessionTimelineEventKind,
     },
     SessionCreated {
-        #[serde(deserialize_with = "deserialize_present_option")]
         workspace_root_kind: Option<WebSessionWorkspaceRootKind>,
         cause: WebTimelineCreationCause,
         imported_evidence: Option<WebTimelineImportedEvidence>,
@@ -5307,6 +5306,15 @@ pub enum WebRepositoryWatchEventKind {
     ReactionChanged,
 }
 
+/// Path-free daemon-local workspace binding evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionWorkspaceRootKind {
+    Derived,
+    Configured,
+    Provisioned,
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -5539,13 +5547,4 @@ pub enum WebTimelineSessionOutcome {
 pub enum WebTimelineOwnershipTransition {
     Adopted,
     Released,
-}
-
-/// Path-free daemon-local workspace binding evidence.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebSessionWorkspaceRootKind {
-    Derived,
-    Configured,
-    Provisioned,
 }

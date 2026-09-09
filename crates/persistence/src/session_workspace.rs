@@ -26,9 +26,13 @@ pub async fn record_binding(
         }
     };
     let row = sqlx::query(
-        "UPDATE session SET workspace_root_kind = CASE
-        WHEN $2 = 'derived' AND dispatch_ref = $3 THEN 'provisioned' ELSE $2 END
-        WHERE session_id = $1 RETURNING workspace_root_kind",
+        "INSERT INTO session_workspace_binding (session_id, workspace_root_kind)
+        SELECT session_id, CASE
+            WHEN $2 = 'derived' AND dispatch_ref = $3 THEN 'provisioned' ELSE $2 END
+        FROM session WHERE session_id = $1
+        ON CONFLICT (session_id) DO UPDATE
+            SET workspace_root_kind = EXCLUDED.workspace_root_kind
+        RETURNING workspace_root_kind",
     )
     .bind(session.into_uuid())
     .bind(session_workspace_root_kind_to_str(selected))
@@ -42,10 +46,14 @@ pub(crate) async fn read_binding(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<Option<SessionWorkspaceRootKind>, sqlx::Error> {
-    let row = sqlx::query("SELECT workspace_root_kind FROM session WHERE session_id = $1")
-        .bind(session.into_uuid())
-        .fetch_one(connection)
-        .await?;
+    let row = sqlx::query(
+        "SELECT binding.workspace_root_kind FROM session
+         LEFT JOIN session_workspace_binding AS binding USING (session_id)
+         WHERE session.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(connection)
+    .await?;
     decode(row.try_get("workspace_root_kind")?)
 }
 

@@ -139,11 +139,11 @@ Conflicting identity reuse returns HTTP 409, and storage failures return HTTP
 intervening frontier commit.
 
 Operator status reports each configured repository's last successful
-observation, last periodic poll start and outcome (including in progress and
-cancelled), last newly accepted webhook delivery, and events recorded in the
-current process. These measurements reset at process startup and survive
-configuration reloads; replayed events and deliveries do not advance their
-counts or delivery timestamp.
+observation, last poll start and outcome, last newly accepted webhook delivery,
+and events recorded in the current process. Poll evidence includes
+webhook-triggered fetches. These measurements reset at process startup and
+survive configuration reloads; replayed events and deliveries do not advance
+their counts or delivery timestamp.
 
 The module's repository task serializes polling and webhook wakes. Poll
 intervals are start-to-start; a wake received during an attempt waits for that

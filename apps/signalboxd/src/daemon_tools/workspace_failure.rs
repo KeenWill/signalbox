@@ -1,9 +1,10 @@
 use super::{
     DaemonToolsConstructionError,
     session_workspace_roots::{
-        SESSION_WORKSPACE_COMPOSITION_DETAIL, SESSION_WORKSPACE_OBJECT_FORMAT_DETAIL,
-        SESSION_WORKSPACE_REPLACED_DETAIL, SESSION_WORKSPACE_SHARED_DETAIL,
-        SESSION_WORKSPACE_UNRESOLVABLE_DETAIL, SESSION_WORKSPACE_UNVERIFIABLE_CONFIGURED_DETAIL,
+        SESSION_WORKSPACE_BINDING_EVIDENCE_DETAIL, SESSION_WORKSPACE_COMPOSITION_DETAIL,
+        SESSION_WORKSPACE_OBJECT_FORMAT_DETAIL, SESSION_WORKSPACE_REPLACED_DETAIL,
+        SESSION_WORKSPACE_SHARED_DETAIL, SESSION_WORKSPACE_UNRESOLVABLE_DETAIL,
+        SESSION_WORKSPACE_UNVERIFIABLE_CONFIGURED_DETAIL,
     },
 };
 use signalbox_domain::ToolExecutionErrorDetail;
@@ -11,6 +12,8 @@ use signalbox_domain::ToolExecutionErrorDetail;
 /// Why one session's workspace-bound tools could not be composed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SessionWorkspaceFailure {
+    /// The selected root could not be recorded in the session evidence store.
+    BindingEvidenceUnavailable,
     /// The derived root, its repository layout, or its supervisor binding was
     /// rejected by the family that binds it.
     Composition(DaemonToolsConstructionError),
@@ -35,6 +38,7 @@ impl SessionWorkspaceFailure {
     /// Names the failure for startup-free runtime telemetry.
     pub(super) const fn discriminant(self) -> &'static str {
         match self {
+            Self::BindingEvidenceUnavailable => "binding_evidence_unavailable",
             Self::Composition(_) => "composition_rejected",
             Self::ObjectFormatDisagreement => "object_format_disagreement",
             Self::UnresolvableRoot => "derived_root_unresolvable",
@@ -55,6 +59,7 @@ impl SessionWorkspaceFailure {
 /// closed reason, so nothing about the deployment's paths reaches the model.
 #[derive(Clone, Debug)]
 pub(super) struct SessionWorkspaceFailureDetails {
+    binding_evidence: ToolExecutionErrorDetail,
     composition: ToolExecutionErrorDetail,
     object_format: ToolExecutionErrorDetail,
     unresolvable_root: ToolExecutionErrorDetail,
@@ -70,6 +75,7 @@ impl SessionWorkspaceFailureDetails {
                 .map_err(|_| DaemonToolsConstructionError::SessionWorkspaceDetail)
         };
         Ok(Self {
+            binding_evidence: detail(SESSION_WORKSPACE_BINDING_EVIDENCE_DETAIL)?,
             composition: detail(SESSION_WORKSPACE_COMPOSITION_DETAIL)?,
             object_format: detail(SESSION_WORKSPACE_OBJECT_FORMAT_DETAIL)?,
             unresolvable_root: detail(SESSION_WORKSPACE_UNRESOLVABLE_DETAIL)?,
@@ -82,6 +88,7 @@ impl SessionWorkspaceFailureDetails {
     /// Names the closed reason one failure carries into the tool result.
     pub(super) fn detail(&self, failure: SessionWorkspaceFailure) -> ToolExecutionErrorDetail {
         match failure {
+            SessionWorkspaceFailure::BindingEvidenceUnavailable => self.binding_evidence.clone(),
             SessionWorkspaceFailure::Composition(_) => self.composition.clone(),
             SessionWorkspaceFailure::ObjectFormatDisagreement => self.object_format.clone(),
             SessionWorkspaceFailure::UnresolvableRoot => self.unresolvable_root.clone(),

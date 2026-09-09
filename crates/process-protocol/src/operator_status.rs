@@ -180,7 +180,7 @@ const fn operator_status_days_in_month(year: i64, month: u32) -> u32 {
     }
 }
 
-/// Outcome of the most recently started periodic repository poll.
+/// Outcome of the most recently started repository poll.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryPollOutcome {
@@ -193,7 +193,7 @@ pub enum RepositoryPollOutcome {
     Cancelled,
 }
 
-/// One periodic poll's UTC start and outcome.
+/// One repository poll's UTC start and outcome.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryPollAttempt {

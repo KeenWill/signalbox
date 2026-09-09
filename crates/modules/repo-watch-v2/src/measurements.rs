@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Outcome of the most recently started periodic poll.
+/// Outcome of the most recently started repository poll.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PollOutcome {
     InProgress,
@@ -18,7 +18,7 @@ pub enum PollOutcome {
     Cancelled,
 }
 
-/// One periodic poll's start and current outcome.
+/// One repository poll's start and current outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PollAttempt {
     pub attempted_at: OffsetDateTime,

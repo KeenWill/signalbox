@@ -1,3 +1,7 @@
--- Session-owned binding evidence; retained with its session and containing no path.
-ALTER TABLE session ADD COLUMN workspace_root_kind text
-    CHECK (workspace_root_kind IN ('derived', 'configured', 'provisioned'));
+-- growth: one mutable row per session that binds daemon-local workspace tools.
+-- release: deletion of the owning session.
+CREATE TABLE session_workspace_binding (
+    session_id uuid PRIMARY KEY REFERENCES session(session_id) ON DELETE CASCADE,
+    workspace_root_kind text NOT NULL
+        CHECK (workspace_root_kind IN ('derived', 'configured', 'provisioned'))
+);

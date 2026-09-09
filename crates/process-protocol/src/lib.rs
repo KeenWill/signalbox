@@ -42,6 +42,15 @@ pub use settings::*;
 pub use transcript::*;
 pub use user_input::*;
 
+/// Path-free daemon-local workspace binding evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionWorkspaceRootKind {
+    Derived,
+    Configured,
+    Provisioned,
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -54,12 +63,3 @@ pub use credential_pool::{
     CredentialPoolExclusion, CredentialPoolMemberEvidence, MAX_HEADROOM_RESERVE_PERCENT,
     valid_credential_pool_evidence, valid_credential_pool_members,
 };
-
-/// Path-free daemon-local workspace binding evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionWorkspaceRootKind {
-    Derived,
-    Configured,
-    Provisioned,
-}

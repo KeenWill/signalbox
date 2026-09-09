@@ -3027,7 +3027,7 @@ fn optional_nonnegative(
 }
 
 const DESCRIPTOR_SQL: &str = r#"
-SELECT session.session_id, session.workspace_root_kind,
+SELECT session.session_id, workspace.workspace_root_kind,
        facts.session_id IS NOT NULL AS facts_present,
        facts.item_count, facts.first_sequence,
        facts.latest_sequence,
@@ -3037,6 +3037,7 @@ SELECT session.session_id, session.workspace_root_kind,
        (SELECT last_sequence FROM outbox_sequence_state WHERE singleton) AS last_sequence
   FROM session
   LEFT JOIN session_timeline_fact AS facts USING (session_id)
+  LEFT JOIN session_workspace_binding AS workspace USING (session_id)
  WHERE session.session_id = $1
 "#;
 

@@ -1722,6 +1722,22 @@ fn repository_watch_origin_dto(
     }
 }
 
+fn workspace_root_kind_dto(
+    kind: signalbox_domain::SessionWorkspaceRootKind,
+) -> signalbox_web_contract::WebSessionWorkspaceRootKind {
+    match kind {
+        signalbox_domain::SessionWorkspaceRootKind::Derived => {
+            signalbox_web_contract::WebSessionWorkspaceRootKind::Derived
+        }
+        signalbox_domain::SessionWorkspaceRootKind::Configured => {
+            signalbox_web_contract::WebSessionWorkspaceRootKind::Configured
+        }
+        signalbox_domain::SessionWorkspaceRootKind::Provisioned => {
+            signalbox_web_contract::WebSessionWorkspaceRootKind::Provisioned
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1800,21 +1816,5 @@ mod tests {
                 ..
             }
         ));
-    }
-}
-
-fn workspace_root_kind_dto(
-    kind: signalbox_domain::SessionWorkspaceRootKind,
-) -> signalbox_web_contract::WebSessionWorkspaceRootKind {
-    match kind {
-        signalbox_domain::SessionWorkspaceRootKind::Derived => {
-            signalbox_web_contract::WebSessionWorkspaceRootKind::Derived
-        }
-        signalbox_domain::SessionWorkspaceRootKind::Configured => {
-            signalbox_web_contract::WebSessionWorkspaceRootKind::Configured
-        }
-        signalbox_domain::SessionWorkspaceRootKind::Provisioned => {
-            signalbox_web_contract::WebSessionWorkspaceRootKind::Provisioned
-        }
     }
 }
