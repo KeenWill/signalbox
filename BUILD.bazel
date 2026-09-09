@@ -687,6 +687,7 @@ rust_postgres_suite(
         "//crates/workflow-runtime:unit_tests": "signalbox_workflow_runtime",
         "//crates/workflow-runtime:workflow_host_postgres": "workflow_host_postgres",
     },
+    tags = [],
 )
 
 DAEMON_TEST_BINARIES = {
