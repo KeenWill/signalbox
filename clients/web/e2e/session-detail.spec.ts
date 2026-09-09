@@ -416,10 +416,22 @@ test('shows reconciliation-required turn outcomes with events hidden', async ({ 
   await page.screenshot({ path: test.info().outputPath('reconciliation-outcome.png') })
 })
 
-test('shows automatic reconciliation exhaustion as awaiting an operator decision', async ({
+test('shows automatic reconciliation exhaustion in conversation and expanded details', async ({
   page,
 }) => {
   await openDetails(page, false, false, undefined, 'reconciliation_exhausted')
+  const events = page.getByRole('checkbox', { name: 'Events', exact: true })
+  await events.uncheck()
+  const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
+  await expect(
+    conversation.getByText(
+      'Automatic reconciliation exhausted. Waiting for an operator decision.',
+      { exact: true },
+    ),
+  ).toBeVisible()
+  await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
+  await page.screenshot({ path: test.info().outputPath('exhaustion-conversation.png') })
+  await events.check()
   await page
     .getByRole('row')
     .filter({ hasText: 'automatic reconciliation exhausted' })

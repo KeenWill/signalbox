@@ -60,6 +60,12 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
     return <p className="session-turn-outcome">Turn {body.cause_code.replaceAll('_', ' ')}</p>
   if (body.type === 'event_fact' && body.kind === 'goal_turn_retired')
     return <p className="session-turn-outcome">Goal turn retired</p>
+  if (body.type === 'event_fact' && body.kind === 'automatic_reconciliation_exhausted')
+    return (
+      <p className="session-turn-outcome">
+        Automatic reconciliation exhausted. Waiting for an operator decision.
+      </p>
+    )
   const excerpt =
     body.type === 'user_input' ? body.text : body.type === 'model_call' ? body.response : null
   if (!excerpt)
