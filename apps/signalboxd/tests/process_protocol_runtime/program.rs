@@ -99,7 +99,10 @@ async fn program_javascript_admission_retries_preserve_input_and_result()
     assert_eq!(retained.input, input);
     assert_eq!(
         retained.outcome,
-        ProgramRunState::Succeeded { result: input }
+        ProgramRunState::Succeeded {
+            result: input,
+            result_extent: signalbox_process_protocol::ProgramByteExtent::Complete {}
+        }
     );
     assert_eq!(
         program_request(&mut connection, start).await?,
@@ -238,7 +241,7 @@ async fn program_native_key_resolves_daemon_code_and_checks_input() -> Result<()
         },
     )
     .await?;
-    let ProgramRunState::Succeeded { result } =
+    let ProgramRunState::Succeeded { result, .. } =
         program_result(&mut connection, run_id).await?.outcome
     else {
         panic!("native clock must complete")
@@ -334,7 +337,7 @@ async fn program_registration_effect_cannot_widen_user_assigned_grants()
         },
     )
     .await?;
-    let ProgramRunState::Succeeded { result } =
+    let ProgramRunState::Succeeded { result, .. } =
         program_result(&mut connection, run_id).await?.outcome
     else {
         panic!("program retains the refusal result")
@@ -515,6 +518,270 @@ async fn cancellation_of_success_returns_exact_result_on_every_retry() -> Result
         response_within(&mut connection).await?.message(),
         first.message()
     );
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_registration_rejects_nul_text_before_persistence() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_programs().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let registration_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let valid = javascript_registration("");
+    let mut name = valid.clone();
+    name.name.push('\0');
+    let mut revision = valid.clone();
+    revision.revision.push('\0');
+    let artifact = javascript_registration("\0");
+    let mut native_entry = valid.clone();
+    native_entry.executable = ProgramExecutableInput::Native {
+        entry: "clock\0".into(),
+        revision: "1".into(),
+    };
+    let mut native_revision = valid.clone();
+    native_revision.executable = ProgramExecutableInput::Native {
+        entry: "clock".into(),
+        revision: "1\0".into(),
+    };
+    for (field, registration) in [
+        ("name", name),
+        ("revision", revision),
+        ("artifact", artifact),
+        ("native entry", native_entry),
+        ("native revision", native_revision),
+    ] {
+        assert!(
+            matches!(
+                program_request(
+                    &mut connection,
+                    ClientRequest::RegisterProgram {
+                        registration_id,
+                        registration
+                    }
+                )
+                .await?,
+                ServerMessage::Error {
+                    code: ErrorCode::InvalidRequest,
+                    ..
+                }
+            ),
+            "{field}"
+        );
+    }
+    let mut registration = valid;
+    // Source is binary content; only text fields exclude NUL.
+    registration.executable = ProgramExecutableInput::JavaScript {
+        source: vec![0],
+        artifact: String::new(),
+    };
+    assert_eq!(
+        program_request(
+            &mut connection,
+            ClientRequest::RegisterProgram {
+                registration_id,
+                registration
+            }
+        )
+        .await?,
+        ServerMessage::ProgramRegistered { registration_id }
+    );
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_start_reports_commit_ambiguity_when_the_runner_wake_is_closed()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_stopped_programs().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let registration_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    assert_eq!(
+        program_request(
+            &mut connection,
+            ClientRequest::RegisterProgram {
+                registration_id,
+                registration: javascript_registration("")
+            }
+        )
+        .await?,
+        ServerMessage::ProgramRegistered { registration_id }
+    );
+    let input = vec![0, 255, 128]; // Exact stored bytes survive the post-commit wake failure.
+    let request = ClientRequest::StartProgramRun {
+        run_id,
+        registration_id,
+        input: input.clone(),
+    };
+    for attempt in ["initial start", "equal retry"] {
+        assert!(
+            matches!(
+                program_request(&mut connection, request.clone()).await?,
+                ServerMessage::Error {
+                    code: ErrorCode::CommitAmbiguous,
+                    ..
+                }
+            ),
+            "{attempt}"
+        );
+    }
+    let ServerMessage::ProgramRunRead { run, .. } =
+        program_request(&mut connection, ClientRequest::ReadProgramRun { run_id }).await?
+    else {
+        panic!("committed run is readable");
+    };
+    assert_eq!(run.input, input);
+    assert_eq!(run.outcome, ProgramRunState::Running {});
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_start_without_a_service_is_unavailable_before_admission()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    assert!(matches!(
+        program_request(
+            &mut connection,
+            ClientRequest::StartProgramRun {
+                run_id,
+                registration_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+                input: vec![]
+            }
+        )
+        .await?,
+        ServerMessage::Error {
+            code: ErrorCode::Unavailable,
+            ..
+        }
+    ));
+    assert!(
+        ProgramJournalRepository::new(runtime.pool.clone())
+            .load(ProgramRunId::from_uuid(run_id.into_uuid()))
+            .await?
+            .is_none()
+    );
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn program_read_marks_large_retained_byte_prefixes_within_the_frame_budget()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        ProgramRegistrationId,
+        program_registration::{ProgramGrants, ProgramRegistrationRequest},
+    };
+    use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+    use signalbox_process_protocol::{MAX_FRAME_BYTES, ProgramByteExtent, encode_server_line};
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let registrations = ProgramRegistrationRepository::new(runtime.pool.clone());
+    let registration_id = ProgramRegistrationId::from_uuid(Uuid::now_v7());
+    registrations
+        .register_user(
+            registration_id,
+            ProgramRegistrationRequest {
+                name: "large-retained-read".into(),
+                revision: "1".into(),
+                source: vec![],
+                artifact: String::new(),
+                grants: ProgramGrants::new([]),
+            },
+        )
+        .await?;
+    // JSON decimal byte arrays exceed 8 MiB for these retained payloads.
+    for (case, input, result, input_extent, result_extent) in [
+        (
+            "one-digit result",
+            vec![0, 255],
+            vec![0; 5 * 1024 * 1024],
+            ProgramByteExtent::Complete {},
+            ProgramByteExtent::Truncated {
+                total_bytes: 5 * 1024 * 1024,
+            },
+        ),
+        (
+            "three-digit result",
+            vec![0, 255],
+            vec![255; 3 * 1024 * 1024],
+            ProgramByteExtent::Complete {},
+            ProgramByteExtent::Truncated {
+                total_bytes: 3 * 1024 * 1024,
+            },
+        ),
+        (
+            "oversized retained input",
+            vec![255; 3 * 1024 * 1024],
+            vec![255; 3],
+            ProgramByteExtent::Truncated {
+                total_bytes: 3 * 1024 * 1024,
+            },
+            ProgramByteExtent::Truncated { total_bytes: 3 },
+        ),
+    ] {
+        let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+        let run = ProgramRunId::from_uuid(run_id.into_uuid());
+        registrations
+            .start_run(run, registration_id, &input)
+            .await?;
+        let journal = ProgramJournalRepository::new(runtime.pool.clone());
+        journal
+            .complete_if_tail(
+                run,
+                0,
+                signalbox_domain::InlineFramePayload::new(result.clone()),
+            )
+            .await?
+            .expect("retained success");
+        connection
+            .request(u64::MAX, ClientRequest::ReadProgramRun { run_id })
+            .await?;
+        let frame = response_within(&mut connection).await?;
+        assert!(
+            encode_server_line(&frame)?.len() <= MAX_FRAME_BYTES,
+            "{case}"
+        );
+        let ServerMessage::ProgramRunRead { run: observed, .. } = frame.message() else {
+            panic!("expected bounded read: {case}");
+        };
+        assert_eq!(observed.input_extent, input_extent, "{case}");
+        assert_eq!(observed.input, input[..observed.input.len()], "{case}");
+        let ProgramRunState::Succeeded {
+            result: prefix,
+            result_extent: extent,
+        } = &observed.outcome
+        else {
+            panic!("expected retained success: {case}");
+        };
+        assert_eq!(*extent, result_extent, "{case}");
+        assert_eq!(*prefix, result[..prefix.len()], "{case}");
+        connection
+            .request(u64::MAX, ClientRequest::ReadProgramRun { run_id })
+            .await?;
+        assert_eq!(
+            response_within(&mut connection).await?,
+            frame,
+            "read retries retain the same prefix: {case}"
+        );
+        assert_eq!(
+            journal
+                .load(run)
+                .await?
+                .expect("retained journal")
+                .result()
+                .expect("retained result")
+                .as_bytes(),
+            result,
+            "read does not truncate storage: {case}"
+        );
+    }
     drop(connection);
     runtime.stop().await
 }

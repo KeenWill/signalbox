@@ -6027,8 +6027,10 @@ async fn program_read_presents_retained_input_and_exact_result() -> Result<(), B
     let run = ProgramRun {
         registration_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
         input: vec![0, 255],
+        input_extent: signalbox_process_protocol::ProgramByteExtent::Complete {},
         outcome: ProgramRunState::Succeeded {
             result: vec![128, 0],
+            result_extent: signalbox_process_protocol::ProgramByteExtent::Complete {},
         },
     };
     let expected = serde_json::to_value(&run)?;
@@ -6052,6 +6054,59 @@ async fn program_read_presents_retained_input_and_exact_result() -> Result<(), B
     let (identity, json) = text.split_once(' ').expect("run and retained state");
     assert_eq!(identity, format!("run={run_id}"));
     assert_eq!(serde_json::from_str::<serde_json::Value>(json)?, expected);
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn program_read_presents_typed_truncation_markers() -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{ProgramRun, ProgramRunState};
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let run = ProgramRun {
+        registration_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+        input: vec![0, 255],
+        input_extent: signalbox_process_protocol::ProgramByteExtent::Truncated {
+            total_bytes: 5000000,
+        },
+        outcome: ProgramRunState::Succeeded {
+            result: vec![128, 0],
+            result_extent: signalbox_process_protocol::ProgramByteExtent::Truncated {
+                total_bytes: 5000000,
+            },
+        },
+    };
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &ClientRequest::ReadProgramRun { run_id },
+            ServerMessage::ProgramRunRead { run_id, run },
+        )
+        .await
+    });
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    crate::program::execute(
+        &mut ProcessClient::new(socket),
+        &mut Output::new(&mut stdout, &mut stderr, false),
+        crate::arguments::ProgramCommand::Read { run_id },
+    )
+    .await?;
+    let text = String::from_utf8(stdout)?;
+    let (identity, json) = text.split_once(' ').expect("run and retained state");
+    assert_eq!(identity, format!("run={run_id}"));
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    assert_eq!(
+        value["input_extent"],
+        serde_json::json!({"kind": "truncated", "total_bytes": 5000000})
+    );
+    assert_eq!(
+        value["outcome"]["result_extent"],
+        serde_json::json!({"kind": "truncated", "total_bytes": 5000000})
+    );
+    assert_eq!(value["outcome"]["result"], serde_json::json!([128, 0]));
     server.await??;
     Ok(())
 }

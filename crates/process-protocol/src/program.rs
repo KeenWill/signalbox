@@ -44,6 +44,14 @@ pub struct ProgramRegistrationInput {
     pub grants: Vec<ProgramGrant>,
 }
 
+/// Whether a read carries all retained bytes or a prefix bounded by its frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProgramByteExtent {
+    Complete {},
+    Truncated { total_bytes: u64 },
+}
+
 /// Retained execution state, independent of executable availability.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
@@ -51,7 +59,10 @@ pub enum ProgramRunState {
     Running {},
     Cancelled {},
     Faulted {},
-    Succeeded { result: Vec<u8> },
+    Succeeded {
+        result: Vec<u8>,
+        result_extent: ProgramByteExtent,
+    },
 }
 
 /// Immutable run admission and its observed journal outcome.
@@ -60,6 +71,7 @@ pub enum ProgramRunState {
 pub struct ProgramRun {
     pub registration_id: crate::CanonicalUuid,
     pub input: Vec<u8>,
+    pub input_extent: ProgramByteExtent,
     pub outcome: ProgramRunState,
 }
 

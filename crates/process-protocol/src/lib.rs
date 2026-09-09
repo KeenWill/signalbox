@@ -55,7 +55,7 @@ pub enum SessionWorkspaceRootKind {
 mod tests;
 
 pub use program::{
-    ProgramExecutableInput, ProgramGrant, ProgramRegistrationInput, ProgramRun,
+    ProgramByteExtent, ProgramExecutableInput, ProgramGrant, ProgramRegistrationInput, ProgramRun,
     ProgramRunCancellationOutcome, ProgramRunCancelledState, ProgramRunState,
     ProgramRunTerminalState,
 };

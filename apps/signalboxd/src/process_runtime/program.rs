@@ -22,7 +22,8 @@ use signalbox_persistence::program_registration::{
     ProgramRegistrationError, ProgramRegistrationRepository,
 };
 use signalbox_process_protocol::{
-    ProgramExecutableInput, ProgramGrant, ProgramRegistrationInput, ProgramRun, ProgramRunState,
+    ProgramByteExtent, ProgramExecutableInput, ProgramGrant, ProgramRegistrationInput, ProgramRun,
+    ProgramRunState,
 };
 
 pub(super) async fn handle_register_program<Writer: AsyncWrite + Unpin>(
@@ -33,6 +34,24 @@ pub(super) async fn handle_register_program<Writer: AsyncWrite + Unpin>(
     registration: ProgramRegistrationInput,
     services: &ConnectionServices,
 ) -> std::result::Result<(), ProcessConnectionError> {
+    let executable_has_nul = match &registration.executable {
+        ProgramExecutableInput::JavaScript { artifact, .. } => artifact.contains('\0'),
+        ProgramExecutableInput::Native { entry, revision } => {
+            entry.contains('\0') || revision.contains('\0')
+        }
+    };
+    if registration.name.contains('\0')
+        || registration.revision.contains('\0')
+        || executable_has_nul
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    }
     let result = async {
         let service = services
             .workflows
@@ -100,21 +119,28 @@ pub(super) async fn handle_start_program<Writer: AsyncWrite + Unpin>(
     input: Vec<u8>,
     services: &ConnectionServices,
 ) -> std::result::Result<(), ProcessConnectionError> {
-    let result = async {
-        services
-            .workflows
-            .as_ref()
-            .ok_or(WorkflowRuntimeError::Stopped)?
-            .start(
-                ProgramRunId::from_uuid(run_id.into_uuid()),
-                ProgramRegistrationId::from_uuid(registration_id.into_uuid()),
-                &input,
-            )
-            .await
-    }
-    .await;
+    let Some(service) = services.workflows.as_ref() else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::Unavailable),
+        )
+        .await;
+    };
+    let result = service
+        .start(
+            ProgramRunId::from_uuid(run_id.into_uuid()),
+            ProgramRegistrationId::from_uuid(registration_id.into_uuid()),
+            &input,
+        )
+        .await;
     if let Err(error) = result {
-        return write_error(writer, version, request_id, workflow_error(error)).await;
+        let error = match error {
+            WorkflowRuntimeError::Stopped => ProtocolError::mutation_commit_ambiguous(),
+            error => workflow_error(error),
+        };
+        return write_error(writer, version, request_id, error).await;
     }
     write_message(
         writer,
@@ -135,7 +161,7 @@ pub(super) async fn handle_read_program<Writer: AsyncWrite + Unpin>(
     run_id: CanonicalUuid,
     services: &ConnectionServices,
 ) -> std::result::Result<(), ProcessConnectionError> {
-    let result = read_program(&services.pool, run_id).await;
+    let result = read_program(&services.pool, version, request_id, run_id).await;
     match result {
         Ok(run) => {
             write_message(
@@ -152,6 +178,8 @@ pub(super) async fn handle_read_program<Writer: AsyncWrite + Unpin>(
 
 async fn read_program(
     pool: &PgPool,
+    version: ProtocolVersion,
+    request_id: RequestId,
     run_id: CanonicalUuid,
 ) -> std::result::Result<ProgramRun, ProtocolError> {
     let run = ProgramRunId::from_uuid(run_id.into_uuid());
@@ -188,7 +216,10 @@ async fn read_program(
             })?;
     let outcome = if let Some(result) = journal.result() {
         ProgramRunState::Succeeded {
-            result: result.as_bytes().to_vec(),
+            result: Vec::new(),
+            result_extent: ProgramByteExtent::Truncated {
+                total_bytes: result.as_bytes().len() as u64,
+            },
         }
     } else {
         match journal
@@ -200,11 +231,63 @@ async fn read_program(
             None => ProgramRunState::Running {},
         }
     };
-    Ok(ProgramRun {
+    let mut run = ProgramRun {
         registration_id: CanonicalUuid::from_uuid(registration.id.into_uuid()),
-        input: input.as_bytes().to_vec(),
+        input: Vec::new(),
+        input_extent: ProgramByteExtent::Truncated {
+            total_bytes: input.as_bytes().len() as u64,
+        },
         outcome,
-    })
+    };
+    let frame = ServerFrame::try_new_for_version(
+        version,
+        request_id,
+        ServerMessage::ProgramRunRead {
+            run_id,
+            run: run.clone(),
+        },
+    )
+    .map_err(|_| ProtocolError::without_detail(ErrorCode::Internal))?;
+    let envelope = encode_server_line(&frame)
+        .map_err(|_| ProtocolError::without_detail(ErrorCode::Internal))?;
+    let mut budget = MAX_FRAME_BYTES - envelope.len();
+    (run.input, run.input_extent) = program_byte_prefix(input.as_bytes(), &mut budget);
+    if let (
+        Some(retained),
+        ProgramRunState::Succeeded {
+            result,
+            result_extent,
+        },
+    ) = (journal.result(), &mut run.outcome)
+    {
+        (*result, *result_extent) = program_byte_prefix(retained.as_bytes(), &mut budget);
+    }
+    Ok(run)
+}
+
+fn program_byte_prefix(bytes: &[u8], budget: &mut usize) -> (Vec<u8>, ProgramByteExtent) {
+    let mut length = 0;
+    for byte in bytes {
+        let digits = match byte {
+            0..=9 => 1,
+            10..=99 => 2,
+            _ => 3,
+        };
+        let cost = digits + usize::from(length > 0); // JSON decimal byte and separating comma.
+        if cost > *budget {
+            break;
+        }
+        *budget -= cost;
+        length += 1;
+    }
+    let extent = if length == bytes.len() {
+        ProgramByteExtent::Complete {}
+    } else {
+        ProgramByteExtent::Truncated {
+            total_bytes: bytes.len() as u64,
+        }
+    };
+    (bytes[..length].to_vec(), extent)
 }
 
 fn workflow_error(error: WorkflowRuntimeError) -> ProtocolError {

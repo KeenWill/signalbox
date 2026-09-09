@@ -265,6 +265,12 @@ where
 
 pub(crate) type RuntimeEligibilitySweep = WitnessedEligibilitySweep<PostgresEligibilitySweep>;
 
+enum WorkflowFixtureMode {
+    Disabled,
+    Running,
+    Stopped,
+}
+
 pub(crate) struct RunningRuntime {
     workflow_task: Option<JoinHandle<Result<(), signalboxd::workflows::WorkflowRuntimeError>>>,
     pub(crate) container: TestDatabase,
@@ -336,14 +342,31 @@ impl RunningRuntime {
             blob_storage,
             configuration_override,
             nudge_capacity,
-            false,
+            WorkflowFixtureMode::Disabled,
         )
         .await
     }
 
     pub(crate) async fn start_programs() -> Result<Self, Box<dyn Error>> {
-        Self::start_with_workflow_options(None, BlobStorageFixtureMode::Disabled, None, None, true)
-            .await
+        Self::start_with_workflow_options(
+            None,
+            BlobStorageFixtureMode::Disabled,
+            None,
+            None,
+            WorkflowFixtureMode::Running,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_stopped_programs() -> Result<Self, Box<dyn Error>> {
+        Self::start_with_workflow_options(
+            None,
+            BlobStorageFixtureMode::Disabled,
+            None,
+            None,
+            WorkflowFixtureMode::Stopped,
+        )
+        .await
     }
 
     async fn start_with_workflow_options(
@@ -351,7 +374,7 @@ impl RunningRuntime {
         blob_storage: BlobStorageFixtureMode,
         configuration_override: Option<&str>,
         nudge_capacity: Option<std::num::NonZeroUsize>,
-        programs: bool,
+        programs: WorkflowFixtureMode,
     ) -> Result<Self, Box<dyn Error>> {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
@@ -412,15 +435,25 @@ impl RunningRuntime {
         }
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
-        let workflow_task = if programs {
-            let (service, workflows) = signalboxd::workflows::WorkflowRuntime::new(pool.clone())?;
-            runtime = runtime.with_workflows(service);
-            let mut stopped = shutdown_receiver.clone();
-            Some(tokio::spawn(workflows.run(async move {
-                let _ = stopped.changed().await;
-            })))
-        } else {
-            None
+        let workflow_task = match programs {
+            WorkflowFixtureMode::Disabled => None,
+            WorkflowFixtureMode::Running | WorkflowFixtureMode::Stopped => {
+                let (service, workflows) =
+                    signalboxd::workflows::WorkflowRuntime::new(pool.clone())?;
+                runtime = runtime.with_workflows(service);
+                match programs {
+                    WorkflowFixtureMode::Running => {
+                        let mut stopped = shutdown_receiver.clone();
+                        Some(tokio::spawn(workflows.run(async move {
+                            let _ = stopped.changed().await;
+                        })))
+                    }
+                    _ => {
+                        drop(workflows);
+                        None
+                    }
+                }
+            }
         };
         let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
         Ok(Self {

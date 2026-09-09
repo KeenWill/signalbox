@@ -594,15 +594,20 @@ Program commands use ordinary user authority from the owner-private socket.
 `register_program { registration_id, registration }` accepts name, revision,
 grants and a JavaScript source/artifact pair or compiled native entry/revision;
 the daemon supplies the native binary digest. It returns
-`program_registered { registration_id }`.
+`program_registered { registration_id }`. NUL bytes in registration name,
+revision, artifact text or native entry/revision return `invalid_request`.
 `start_program_run { run_id, registration_id, input }` retains exact encoded
-input bytes and returns `program_run_started { run_id, registration_id }`. Equal
+input bytes and returns `program_run_started { run_id, registration_id }`. A
+failed runner wake after admission returns `commit_ambiguous`. Equal
 registration and start retries return the same admission; conflicting identity
 reuse returns `conflicting_reuse`, and an unavailable native key returns
 `invalid_request`. `read_program_run { run_id }` returns
-`program_run_read { run_id, run }`, with registration identity, exact input
-bytes, and an outcome tagged by `state`: `running`, `cancelled`, `faulted`, or
-`succeeded` with exact `result` bytes. Missing reads return `not_found`.
+`program_run_read { run_id, run }`, with registration identity, `input` bytes,
+`input_extent`, and an outcome tagged by `state`: `running`, `cancelled`,
+`faulted`, or `succeeded` with `result` bytes and `result_extent`. Each extent
+is `{ kind: "complete" }` or `{ kind: "truncated", total_bytes }`. Reads fit the
+frame byte budget by returning byte prefixes, input first and then result;
+truncation leaves stored data intact. Missing reads return `not_found`.
 
 Program-run cancellation is the request
 `cancel_program_run { run_id, command_id }` and the receipt

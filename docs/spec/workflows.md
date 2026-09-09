@@ -127,7 +127,8 @@ are not composed. The process protocol and CLI expose registration, start, read
 and cancellation. `program register REGISTRATION_ID REGISTRATION_JSON` reads a
 registration description; `program start RUN_ID REGISTRATION_ID --input FILE`
 admits the program codec's exact input bytes. `program read RUN_ID` prints
-retained input, state and result as JSON after the run identity;
+retained input, state and result as JSON after the run identity, with typed
+byte-extent markers when the process frame budget truncates input or result;
 `program cancel RUN_ID --command-id COMMAND_ID` preserves durable cancellation
 identity. Native and JavaScript runtime input decoders check the encoded input
 before program code runs.

@@ -49,6 +49,16 @@ pub struct ProgramRegistrationInput {
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
 
+## ProgramByteExtent
+
+```rust
+pub enum ProgramByteExtent {
+    Complete {},
+    Truncated { total_bytes: u64 },
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## ProgramRunState
 
 ```rust
@@ -56,7 +66,10 @@ pub enum ProgramRunState {
     Running {},
     Cancelled {},
     Faulted {},
-    Succeeded { result: vec::Vec<u8> },
+    Succeeded {
+        result: vec::Vec<u8>,
+        result_extent: ProgramByteExtent,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
@@ -67,6 +80,7 @@ pub enum ProgramRunState {
 pub struct ProgramRun {
     pub registration_id: CanonicalUuid,
     pub input: vec::Vec<u8>,
+    pub input_extent: ProgramByteExtent,
     pub outcome: ProgramRunState,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>

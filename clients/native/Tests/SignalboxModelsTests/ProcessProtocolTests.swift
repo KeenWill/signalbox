@@ -5,7 +5,7 @@ import XCTest
 
 final class ProcessProtocolTests: XCTestCase {
   func testProgramReadRetainsExactResultBytes() throws {
-    let json = #"{"type":"program_run_read","run_id":"11111111-1111-4111-8111-111111111111","run":{"registration_id":"22222222-2222-4222-8222-222222222222","input":[0,255],"outcome":{"state":"succeeded","result":[128,0]}}}"#
+    let json = #"{"type":"program_run_read","run_id":"11111111-1111-4111-8111-111111111111","run":{"registration_id":"22222222-2222-4222-8222-222222222222","input":[0,255],"input_extent":{"kind":"complete"},"outcome":{"state":"succeeded","result":[128,0],"result_extent":{"kind":"complete"}}}}"#
     let message = try SignalboxJSONCoding.decoder().decode(
       SignalboxProcessServerMessage.self, from: Data(json.utf8))
     guard case .programRunRead(let runID, let run) = message else {
@@ -14,7 +14,8 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(runID.rawValue, "11111111-1111-4111-8111-111111111111")
     XCTAssertEqual(run.registrationID.rawValue, "22222222-2222-4222-8222-222222222222")
     XCTAssertEqual(run.input, [0, 255])
-    XCTAssertEqual(run.outcome, .succeeded(result: [128, 0]))
+    XCTAssertEqual(run.inputExtent, .complete)
+    XCTAssertEqual(run.outcome, .succeeded(result: [128, 0], resultExtent: .complete))
   }
 
   func testProgramSuccessRequiresResultAndRejectsUnknownFields() throws {
@@ -22,6 +23,17 @@ final class ProcessProtocolTests: XCTestCase {
       SignalboxProgramRunState.self, from: Data(#"{"state":"succeeded"}"#.utf8)))
     XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(
       SignalboxProgramRunState.self, from: Data(#"{"state":"cancelled","result":[]}"#.utf8)))
+  }
+
+  func testProgramReadDecodesTruncatedByteExtents() throws {
+    let json = #"{"registration_id":"22222222-2222-4222-8222-222222222222","input":[255],"input_extent":{"kind":"truncated","total_bytes":3000000},"outcome":{"state":"succeeded","result":[],"result_extent":{"kind":"truncated","total_bytes":5000000}}}"#
+    let run = try SignalboxJSONCoding.decoder().decode(SignalboxProgramRun.self, from: Data(json.utf8))
+    XCTAssertEqual(run.inputExtent, .truncated(totalBytes: 3000000))
+    XCTAssertEqual(run.outcome, .succeeded(result: [], resultExtent: .truncated(totalBytes: 5000000)))
+    XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(
+      SignalboxProgramByteExtent.self, from: Data(#"{"kind":"truncated"}"#.utf8)))
+    XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(
+      SignalboxProgramByteExtent.self, from: Data(#"{"kind":"complete","total_bytes":0}"#.utf8)))
   }
 
   private let sessionID = "11111111-1111-4111-8111-111111111111"

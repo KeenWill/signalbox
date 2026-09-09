@@ -29,8 +29,10 @@ fn program_run_read_requires_result_only_for_success() -> Result<(), Box<dyn std
         run: ProgramRun {
             registration_id: uuid(2),
             input: vec![0, 255],
+            input_extent: ProgramByteExtent::Complete {},
             outcome: ProgramRunState::Succeeded {
                 result: vec![128, 0],
+                result_extent: ProgramByteExtent::Complete {},
             },
         },
     };
@@ -163,4 +165,27 @@ fn already_terminal_receipts_reject_missing_or_inconsistent_results()
         );
     }
     Ok(())
+}
+
+#[test]
+fn program_read_truncation_requires_a_total_and_rejects_unknown_markers() {
+    for malformed in [
+        serde_json::json!({"kind": "truncated"}),
+        serde_json::json!({"kind": "complete", "total_bytes": 0}),
+        serde_json::json!({"kind": "unknown"}),
+    ] {
+        assert!(
+            serde_json::from_value::<ProgramByteExtent>(malformed.clone()).is_err(),
+            "{malformed}"
+        );
+    }
+    assert_eq!(
+        serde_json::from_value::<ProgramByteExtent>(
+            serde_json::json!({"kind":"truncated","total_bytes":5000000})
+        )
+        .expect("typed truncation"),
+        ProgramByteExtent::Truncated {
+            total_bytes: 5000000
+        }
+    );
 }

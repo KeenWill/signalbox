@@ -1315,16 +1315,38 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
 
 }
 
+public enum SignalboxProgramByteExtent: Decodable, Equatable, Sendable {
+  case complete
+  case truncated(totalBytes: UInt64)
+
+  public init(from decoder: Decoder) throws {
+    let kind: String = try decoder.decode("kind")
+    let tagged = try SignalboxUntaggedPayload(from: decoder)
+    switch kind {
+    case "complete":
+      try tagged.rejectUnadmittedFields(["kind"], decoder: decoder)
+      self = .complete
+    case "truncated":
+      try tagged.rejectUnadmittedFields(["kind", "total_bytes"], decoder: decoder)
+      self = .truncated(totalBytes: try decoder.decode("total_bytes"))
+    default:
+      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown program byte extent."))
+    }
+  }
+}
+
 public struct SignalboxProgramRun: Decodable, Equatable, Sendable {
   public let registrationID: SignalboxCanonicalUUID
   public let input: [UInt8]
+  public let inputExtent: SignalboxProgramByteExtent
   public let outcome: SignalboxProgramRunState
 
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxUntaggedPayload(from: decoder)
-    try tagged.rejectUnadmittedFields(["registration_id", "input", "outcome"], decoder: decoder)
+    try tagged.rejectUnadmittedFields(["registration_id", "input", "input_extent", "outcome"], decoder: decoder)
     registrationID = try decoder.decode("registration_id")
     input = try decoder.decode("input")
+    inputExtent = try decoder.decode("input_extent")
     outcome = try decoder.decode("outcome")
   }
 }
@@ -1333,7 +1355,7 @@ public enum SignalboxProgramRunState: Decodable, Equatable, Sendable {
   case running
   case cancelled
   case faulted
-  case succeeded(result: [UInt8])
+  case succeeded(result: [UInt8], resultExtent: SignalboxProgramByteExtent)
 
   public init(from decoder: Decoder) throws {
     let state: String = try decoder.decode("state")
@@ -1347,8 +1369,8 @@ public enum SignalboxProgramRunState: Decodable, Equatable, Sendable {
       default: self = .faulted
       }
     case "succeeded":
-      try tagged.rejectUnadmittedFields(["state", "result"], decoder: decoder)
-      self = .succeeded(result: try decoder.decode("result"))
+      try tagged.rejectUnadmittedFields(["state", "result", "result_extent"], decoder: decoder)
+      self = .succeeded(result: try decoder.decode("result"), resultExtent: try decoder.decode("result_extent"))
     default:
       throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown program run state."))
     }
