@@ -645,6 +645,13 @@ impl PostgresGoalPassDisposition {
         Ok(count)
     }
 
+    /// Nudges the ordinary goal disposition and arms any execution-failure block
+    /// when ownership is adopted.
+    pub fn arm_adopted_goal_resumption(&self, session: SessionId) {
+        let _ = self.eligibility_nudge.nudge(session);
+        self.arm_blocked_goal_resumption(session);
+    }
+
     /// Arms automatic resumption for the execution-failure block an adopted session
     /// holds: ownership brings the obligation an unmonitored block was not owed.
     pub fn arm_blocked_goal_resumption(&self, session: SessionId) {
