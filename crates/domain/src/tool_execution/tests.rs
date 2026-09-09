@@ -11,9 +11,10 @@ use super::*;
 use crate::{
     DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
     DelegationProvenanceReconstitutionInput, DurableCommandId, NormalizedToolArguments,
-    ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptReconstitutionInput,
-    ToolAttemptReconstitutionState, ToolDecisionSource, ToolDispatchGeneration, ToolName,
-    ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent, ToolResultText,
+    ReconstitutedToolAttempt, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDecisionSource,
+    ToolDispatchGeneration, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+    ToolResultContent, ToolResultText,
     test_support::{
         context_frontier_id, model_call_id, semantic_transcript_entry_id, session_id,
         tool_attempt_id, tool_request_id, turn_attempt_id, turn_id,
@@ -799,14 +800,14 @@ fn foreground_child_wait_resumes_and_projects_typed_result() {
         .prepare_delegation_result_projection(
             vec![semantic_transcript_entry_id(16)],
             context_frontier_id(17),
-            outcome.clone(),
+            [(awaited.id(), outcome.clone())].into(),
         )
         .expect("the delivered child result closes the logical request");
     let interrupted = waiting
         .prepare_delegation_cancellation_projection(
             vec![semantic_transcript_entry_id(18)],
             context_frontier_id(19),
-            None,
+            Default::default(),
         )
         .expect("a parent-only interrupt closes the child wait without a result");
 
@@ -1313,4 +1314,209 @@ fn placement_loss_retires_prepared_attempt_and_preserves_dispatched_attempt() {
         .end_placement_lost()
         .expect_err("loss cannot rewrite a dispatched attempt");
     assert_eq!(rejection.attempt(), &dispatched);
+}
+
+struct ForegroundWaitFixture {
+    request: ToolRequest,
+    spawning_request: ToolRequestId,
+    child: crate::SessionId,
+    attempt: ReconstitutedToolAttempt,
+}
+
+// Arbitrary identities descend for requests so identity order differs from proposal order.
+fn foreground_wait_fixture(ordinal: u32) -> ForegroundWaitFixture {
+    let seed = u128::from(ordinal);
+    let request = request(100 - seed, ordinal);
+    let spawning_request = tool_request_id(300 + seed);
+    let child = session_id(200 + seed);
+    let attempt = ToolAttemptReconstitutionInput::new(
+        tool_attempt_id(500 + seed),
+        request.id(),
+        session_id(1),
+        turn_id(2),
+        turn_attempt_id(400 + seed),
+        ToolEffectClass::EffectFree,
+        ToolDispatchGeneration::first(),
+        ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::AwaitingChild {
+            spawning_request,
+            child,
+        }),
+    )
+    .reconstitute()
+    .expect("the recorded wait has an exact dispatch");
+    ForegroundWaitFixture {
+        request,
+        spawning_request,
+        child,
+        attempt,
+    }
+}
+
+fn foreground_batch_input(
+    waits: &[ForegroundWaitFixture],
+    phase: ToolBatchPhaseReconstitutionInput,
+) -> ToolBatchReconstitutionInput {
+    ToolBatchReconstitutionInput::new(
+        session_id(1),
+        turn_id(2),
+        model_call_id(3),
+        yielded_snapshot(),
+        waits.iter().map(|wait| wait.request.clone()).collect(),
+        waits
+            .iter()
+            .map(|wait| automatic_approval(wait.request.id()))
+            .collect(),
+        waits.iter().map(|wait| wait.attempt.clone()).collect(),
+        phase,
+    )
+}
+
+#[test]
+fn later_foreground_wait_reconstitutes_after_an_earlier_delivery() {
+    let waits = [foreground_wait_fixture(0), foreground_wait_fixture(1)];
+    let second = &waits[1];
+    let batch = foreground_batch_input(
+        &waits,
+        ToolBatchPhaseReconstitutionInput::AwaitingChild {
+            request: second.request.id(),
+            spawning_request: second.spawning_request,
+            child: second.child,
+        },
+    )
+    .reconstitute()
+    .expect("an earlier delivered wait remains in the same batch");
+    assert_eq!(
+        batch.phase(),
+        ToolBatchPhase::AwaitingChild {
+            request: second.request.id(),
+            spawning_request: second.spawning_request,
+            child: second.child,
+        }
+    );
+}
+
+#[test]
+fn foreground_results_follow_proposal_order_with_each_child_outcome() {
+    let waits = [foreground_wait_fixture(0), foreground_wait_fixture(1)];
+    let batch = foreground_batch_input(
+        &waits,
+        ToolBatchPhaseReconstitutionInput::Executing {
+            turn_attempt: turn_attempt_id(600),
+        },
+    )
+    .reconstitute()
+    .expect("both waits resumed under a fresh turn attempt");
+    let completed = DelegationOutcome::reconstitute(
+        DelegationOutcomeKind::ResultReturned,
+        Some(
+            DelegationContent::try_new(String::from("first child result")).expect("bounded result"),
+        ),
+        DelegationOutcomeReason::ChildCompleted,
+        DelegationProvenanceReconstitutionInput::ChildTurn {
+            session: waits[0].child,
+            turn: turn_id(610),
+        },
+    )
+    .expect("completed child has exact provenance");
+    let failed = DelegationOutcome::reconstitute(
+        DelegationOutcomeKind::ChildFailed,
+        None,
+        DelegationOutcomeReason::ChildResultUnavailable,
+        DelegationProvenanceReconstitutionInput::ChildTurn {
+            session: waits[1].child,
+            turn: turn_id(611),
+        },
+    )
+    .expect("failed child has exact provenance");
+    let projection = batch
+        .prepare_delegation_result_projection(
+            vec![
+                semantic_transcript_entry_id(620),
+                semantic_transcript_entry_id(621),
+            ],
+            context_frontier_id(630),
+            [
+                (waits[1].request.id(), failed.clone()),
+                (waits[0].request.id(), completed.clone()),
+            ]
+            .into(),
+        )
+        .expect("both child results close in proposal order");
+    assert_eq!(projection.entries().len(), waits.len());
+    for ((entry, wait), expected) in projection
+        .entries()
+        .iter()
+        .zip(&waits)
+        .zip([completed, failed])
+    {
+        assert_eq!(
+            entry.payload(),
+            &SemanticTranscriptEntryPayload::DelegationResult {
+                awaiting_request: wait.request.id(),
+                spawning_request: wait.spawning_request,
+                child: wait.child,
+                mode: crate::DelegationWaitMode::Foreground,
+                delivery_sequence: None,
+                outcome: Box::new(expected),
+            },
+            "await request {:?}",
+            wait.request.id()
+        );
+    }
+}
+
+#[test]
+fn cancelling_later_wait_preserves_the_earlier_delivered_result() {
+    let waits = [foreground_wait_fixture(0), foreground_wait_fixture(1)];
+    let second = &waits[1];
+    let batch = foreground_batch_input(
+        &waits,
+        ToolBatchPhaseReconstitutionInput::AwaitingChild {
+            request: second.request.id(),
+            spawning_request: second.spawning_request,
+            child: second.child,
+        },
+    )
+    .reconstitute()
+    .expect("the second child is still awaited");
+    let delivered = DelegationOutcome::reconstitute(
+        DelegationOutcomeKind::ResultReturned,
+        Some(
+            DelegationContent::try_new(String::from("delivered before stop"))
+                .expect("bounded result"),
+        ),
+        DelegationOutcomeReason::ChildCompleted,
+        DelegationProvenanceReconstitutionInput::ChildTurn {
+            session: waits[0].child,
+            turn: turn_id(640),
+        },
+    )
+    .expect("the earlier child result has exact provenance");
+    let projection = batch
+        .prepare_delegation_cancellation_projection(
+            vec![
+                semantic_transcript_entry_id(650),
+                semantic_transcript_entry_id(651),
+            ],
+            context_frontier_id(660),
+            [(waits[0].request.id(), delivered.clone())].into(),
+        )
+        .expect("stop preserves delivered results and closes the unresolved wait");
+    assert_eq!(
+        projection.entries()[0].payload(),
+        &SemanticTranscriptEntryPayload::DelegationResult {
+            awaiting_request: waits[0].request.id(),
+            spawning_request: waits[0].spawning_request,
+            child: waits[0].child,
+            mode: crate::DelegationWaitMode::Foreground,
+            delivery_sequence: None,
+            outcome: Box::new(delivered),
+        }
+    );
+    assert_eq!(
+        projection.entries()[1].payload(),
+        &SemanticTranscriptEntryPayload::ToolClosed {
+            request: second.request.id(),
+        }
+    );
 }
