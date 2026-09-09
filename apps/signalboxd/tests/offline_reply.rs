@@ -1098,6 +1098,7 @@ struct UnmonitoredGoalCompletion {
     session: SessionId,
     first_turn: GoalTurnCandidates,
     disposition: PostgresGoalPassDisposition,
+    nudge: signalbox_application::InProcessEligibilityNudge,
     work_source: InProcessEligibilityWorkSource<PostgresEligibilitySweep>,
 }
 
@@ -1172,7 +1173,7 @@ async fn complete_released_goal_turn() -> Result<UnmonitoredGoalCompletion, Box<
     let disposition = PostgresGoalPassDisposition::new(
         pool.clone(),
         configuration,
-        nudge,
+        nudge.clone(),
         GoalModeNumericBounds::new(None, None, None, None, None),
     );
     let mut activation = StartEligibleTurnService::new(
@@ -1221,6 +1222,7 @@ async fn complete_released_goal_turn() -> Result<UnmonitoredGoalCompletion, Box<
         session,
         first_turn,
         disposition,
+        nudge,
         work_source,
     })
 }
@@ -1239,6 +1241,7 @@ async fn adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), B
         first_turn,
         disposition,
         mut work_source,
+        ..
     } = complete_released_goal_turn().await?;
     let goal_repository = GoalRepository::new(pool.clone());
     adopt_session(&pool, session).await?;
@@ -1285,6 +1288,7 @@ async fn startup_recovers_adoption_committed_before_its_scheduler_nudge()
         first_turn,
         disposition,
         work_source,
+        ..
     } = complete_released_goal_turn().await?;
     adopt_session(&pool, session).await?;
     // No adoption hook runs before the old in-process scheduler is dropped.
@@ -1321,6 +1325,91 @@ async fn startup_recovers_adoption_committed_before_its_scheduler_nudge()
         queued.len(),
         1,
         "startup queues exactly one successor after committed adoption"
+    );
+    assert_ne!(queued[0], first_turn.turn().into_uuid());
+    assert_eq!(
+        GoalRepository::new(pool.clone())
+            .recovery_progress(session)
+            .await?
+            .turns(),
+        2
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Module adoption wakes a pursuing goal through the ordinary goal hook.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn module_adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_application::{EligibilityPass, EligibilityWorkSource};
+    use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
+    use std::sync::Arc;
+
+    let UnmonitoredGoalCompletion {
+        database: container,
+        pool,
+        session,
+        first_turn,
+        disposition,
+        nudge,
+        mut work_source,
+    } = complete_released_goal_turn().await?;
+    let mut sink = signalboxd::repo_watch_dispatch::RepositoryWatchCommandSink {
+        goal_resumption: disposition.clone(),
+        checkout_runner: None,
+        pool: pool.clone(),
+        models: Arc::new(support::parse_model_configuration(
+            GOAL_MODEL_CONFIGURATION,
+        )?),
+        eligibility_nudge: nudge,
+        tool_dispatch_gate: InProcessToolDispatchGate::default(),
+    };
+    let command = signalbox_session_ownership::SessionCommand::lifecycle(
+        signalbox_domain::SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            signalbox_domain::SessionLifecycleOperation::Adopt {
+                finish_condition: None,
+            },
+        ),
+    )
+    .expect("the ownership seam admits adoption");
+    assert!(matches!(
+        sink.submit(command.clone()).await.expect("module adoption"),
+        CommandSubmission::Accepted
+    ));
+    let hint = timeout(Duration::from_secs(10), work_source.next()).await??;
+    assert_eq!(
+        hint, session,
+        "module adoption wakes the ordinary scheduler without periodic sweeps"
+    );
+    let mut pass = GoalAwareEligibilityPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        disposition.clone(),
+    );
+    pass.run(hint).await?;
+    assert!(matches!(
+        sink.submit(command).await.expect("module adoption replay"),
+        CommandSubmission::Accepted
+    ));
+    disposition.reconcile_success(session).await?;
+    let queued: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'queued'",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        queued.len(),
+        1,
+        "module adoption queues exactly one successor"
     );
     assert_ne!(queued[0], first_turn.turn().into_uuid());
     assert_eq!(
