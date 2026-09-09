@@ -86,12 +86,15 @@ workspace dependency graph also serves the program host's insertion-ordered JSON
 requirements.
 
 The shared image digest, migrations, and example configuration are declared
-compilation inputs. PostgreSQL targets are manual and external: compilation is
-cacheable, tests always execute. The runtime partitions libtest's ignored-test
-inventory across each target's manifest-derived shards. CI gives each manifest
-shard its own matrix worker; each worker runs one partition per binary at a time
-with 16 test threads. The Rust workflow calls `bazel.yml` and binds its ordinary
-and PostgreSQL results to `validate` under the Rust change-scope gate.
+compilation inputs. The manual `//:postgres_workflow_runtime` suite caches
+successful test results, including in the shared remote cache. Its tests create
+fresh databases from the pinned image. Other PostgreSQL suites retain the
+`external` tag: compilation is cacheable, tests always execute. The runtime
+partitions libtest's ignored-test inventory across each target's
+manifest-derived shards. CI gives each manifest shard its own matrix worker;
+each worker runs one partition per binary at a time with 16 test threads. The
+Rust workflow calls `bazel.yml` and binds its ordinary and PostgreSQL results to
+`validate` under the Rust change-scope gate.
 
 The checker job runs its Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
