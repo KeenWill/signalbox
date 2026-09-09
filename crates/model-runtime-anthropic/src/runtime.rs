@@ -950,7 +950,7 @@ async fn finish_error(
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
     let body = match collect_response_body(response, cancellation).await {
-        None => return exchange_loss(LossCause::CancellationRequested, exchange),
+        None => Vec::new(),
         Some(Err(cause)) => {
             return TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange,
@@ -1104,6 +1104,62 @@ mod tests {
         process_streamed_chunk, without_unproven_refusal,
     };
     use crate::stream::StreamDecoder;
+
+    #[tokio::test]
+    async fn cancellation_during_error_body_read_preserves_received_status() {
+        use signalbox_model_runtime::ProviderErrorKind;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        for (status, kind) in [
+            (401, ProviderErrorKind::CredentialRejected),
+            (429, ProviderErrorKind::RateLimited),
+            (529, ProviderErrorKind::Overloaded),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback socket binds");
+            let address = listener.local_addr().expect("bound address");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("fixture request");
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.expect("request header byte"));
+                }
+                // One advertised byte keeps the body pending after headers arrive.
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 {status} Fixture\r\nContent-Length: 1\r\n\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .expect("error headers sent");
+                let mut byte = [0];
+                assert_eq!(socket.read(&mut byte).await.expect("client closes"), 0);
+            });
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("fixture HTTP client")
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .expect("error headers received");
+            let exchange = ExchangeFacts {
+                http_status: Some(response.status().as_u16()),
+                ..ExchangeFacts::default()
+            };
+            let mut cancellation = CancellationSignal::when(async {});
+            let evidence = super::finish_error(response, exchange, status, &mut cancellation).await;
+            let TerminalEvidence::ProviderError(error) = evidence else {
+                panic!("HTTP {status} remains definitive when the body read is cancelled");
+            };
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.exchange.http_status, Some(status));
+            assert!(!error.non_acceptance_proven);
+            server.await.expect("fixture completed");
+        }
+    }
 
     #[test]
     fn beta_header_follows_enabled_request_features() {
