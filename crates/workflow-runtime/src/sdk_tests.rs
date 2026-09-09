@@ -552,6 +552,42 @@ async fn session_wrapper_refuses_invalid_input_before_requesting_effect() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn answer_wrappers_refuse_extra_success_fields() {
+    const IDENTITY: &str = "12345678-1234-1234-1234-123456789abc";
+    let turn_answer = serde_json::json!({ "session": IDENTITY, "turn": IDENTITY,
+        "accepted_input": IDENTITY, "digest": vec![0; 32], "outcome": "completed" });
+    let mut extended_turn_answer = turn_answer.clone();
+    extended_turn_answer["unexpected"] = serde_json::json!(true);
+    for (call, payload) in [
+        (
+            "sdk.session.create({ command: identity, model: identity })",
+            turn_answer,
+        ),
+        (
+            "sdk.register({ id: identity, name: 'example', revision: 'revision', source: [], artifact: 'export {};', grants: [] })",
+            serde_json::json!({ "registration": IDENTITY, "unexpected": true }),
+        ),
+        (
+            "sdk.session.turn({ command: identity, session: identity, text: 'hello', defaults_version: '1' })",
+            extended_turn_answer,
+        ),
+    ] {
+        let (result, requests) = sdk_script(
+            &format!("const identity = {IDENTITY:?}; await {call};"),
+            [IsolateDelivery::Answer {
+                payload: serde_json::to_vec(&payload).expect("JSON answer fixture"),
+            }],
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "{call} must refuse unexpected success fields in {payload}"
+        );
+        assert_eq!(requests.len(), 1, "{call} must reach answer validation");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn answer_wrappers_refuse_inherited_fields() {
     for (fields, call) in [
         (

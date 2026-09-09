@@ -154,6 +154,7 @@
       const payload = encodeJson({ command: uuid(input.command), model: uuid(input.model) });
       return answer(effect("session", "create", payload), (value) => {
         if (refusedOrAmbiguous(value)) return { outcome: value.outcome };
+        if (objectKeys(value).length !== 1) throw new CodecTypeError("invalid session creation answer fields");
         return { session: uuid(value.session) };
       });
     },
@@ -174,6 +175,7 @@
       for (let index = 0; index < suffix.length; index++) payload[prefixLength + index] = charCodeAt(suffix, index);
       return answer(effect("session", "turn", payload), (value) => {
         if (refusedOrAmbiguous(value)) return { outcome: value.outcome };
+        if (objectKeys(value).length !== 5) throw new CodecTypeError("invalid session turn answer fields");
         if (!contains(["completed", "refused", "failed", "cancelled", "retired", "ambiguous"], value.outcome)) {
           throw new CodecTypeError("invalid session disposition");
         }
@@ -205,6 +207,7 @@
         artifact: string(input.artifact), grants });
       return answer(effect("register", "register", payload), (value) => {
         if (value.outcome === "ambiguous" && objectKeys(value).length === 1) return { outcome: value.outcome };
+        if (objectKeys(value).length !== 1) throw new CodecTypeError("invalid registration answer fields");
         return { registration: uuid(value.registration) };
       });
     },

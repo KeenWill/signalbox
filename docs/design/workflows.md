@@ -57,9 +57,7 @@ Read returns retained run state and terminal result bytes.
 Rust's `NativeProgram` has associated `Input` and `Output` types with checked
 encoding and decoding and an async `run(context, input)` entry. The catalog
 erases concrete types only after admission, and input decoding precedes program
-code. TypeScript's `defineProgram` takes a runtime input decoder and result
-encoder; strict `tsc` checking and type stripping happen before registration.
-The emitted artifact is one module importing only `@signalbox/program-sdk/v1`.
+code.
 
 Effect method input/output records have checked Rust and TypeScript codecs;
 full-width integer identities use decimal strings and exact payloads use byte
