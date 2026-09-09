@@ -6453,15 +6453,24 @@ const schemas = {
         "type": "string"
       },
       "WebTimelineToolFailureCause": {
-        "enum": [
-          "preauthorization_rejected",
-          "unknown_tool",
-          "invalid_arguments",
-          "execution_failed",
-          "result_too_large",
-          "crash_lost"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "preauthorization_rejected",
+              "unknown_tool",
+              "invalid_arguments",
+              "execution_failed",
+              "result_too_large",
+              "crash_lost"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "result_contains_null",
+            "description": "Successful content contained U+0000.",
+            "type": "string"
+          }
+        ]
       },
       "WebTimelineToolSandboxPosture": {
         "enum": [

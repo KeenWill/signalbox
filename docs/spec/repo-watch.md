@@ -269,10 +269,10 @@ unavailable because that destination is the watched repository.
 
 ## Boundary contracts
 
-The v2 crate depends on the ownership seam as its only Signalbox dependency. It
-consumes the seam's lifecycle events and emits only the seam's checked session
-commands. It cannot import core persistence, qualify `public` tables, or name
-another module schema.
+The v2 crate depends on the session ownership crate as its only Signalbox
+dependency. It consumes the seam's lifecycle events and emits only the seam's
+checked session commands. It cannot import core persistence, qualify `public`
+tables, or name another module schema.
 
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
 GET requests and GraphQL observation queries. It receives no database handle.
@@ -296,7 +296,7 @@ settles from its `SessionCreated` event.
 Contracts this page relies on but does not own: module-state pruning and outbox
 retention permission in [persistence protocol](persistence-protocol.md), session
 command behavior, and the module event/command/database boundary in the
-[ownership seam](ownership-seam.md).
+[session ownership](session-ownership.md).
 
 Reload stops and joins ingestion and active convergence attempts before rule
 activation, then publishes the selected catalogs before reconciling convergence

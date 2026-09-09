@@ -11,7 +11,7 @@ use signalbox_module_repo_watch_v2::{
     ReloadIntentInput, RepoWatchStore, RepositoryRuleSet, RuleReconciliationAdmission,
     ingest::run_repository_task, provider::GitHubRepositoryTask,
 };
-use signalbox_ownership_seam::{LifecycleEventSource, OffsetDateTime};
+use signalbox_session_ownership::{LifecycleEventSource, OffsetDateTime};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{
     sync::{Mutex, Notify, watch},
@@ -168,8 +168,8 @@ impl RepositoryWatchRuntime {
         };
         store
             .origin_for_create_command(
-                signalbox_ownership_seam::RepoWatchDispatchId::from_uuid(dispatch),
-                signalbox_ownership_seam::DurableCommandId::from_uuid(command),
+                signalbox_session_ownership::RepoWatchDispatchId::from_uuid(dispatch),
+                signalbox_session_ownership::DurableCommandId::from_uuid(command),
             )
             .await?
             .map(Some)

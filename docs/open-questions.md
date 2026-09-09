@@ -1,10 +1,11 @@
 # Open questions
 
 This is the inventory of unresolved foundational questions. A "leaning" guides
-exploration but is not a decision. Closing a question requires an
-maintainer-accepted pull request or, at foundation weight, a foundation
-specification diff. Accepted cross-component and wire contracts live in the
-[living specification](spec/README.md).
+exploration but is not a decision. Closing a question requires a
+maintainer-accepted pull request. Foundation-weight changes propose a design
+document at the bottom of the implementing stack; the spec page changes with the
+code that builds the design. Built cross-component and wire contracts live in
+the [living specification](spec/README.md).
 
 ## Identity representation
 
@@ -722,12 +723,11 @@ and ordering.
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
   pass, finding, external-link, and store contracts. The caller-driven
   application commands, durable retry receipts, run/pass projection, and
-  workflow-facing local process protocol are implemented. Automatic pass
-  scheduling, durable hold or atomic accepted-input creation,
-  code-host/model/workspace adapter seams, prompts, automatic publication,
-  repair, conflict escalation, and merge-based stack propagation remain to be
-  designed and implemented above that surface. Blocks automatic end-to-end
-  review workflows.
+  workflow-facing local process protocol are implemented. Conflict escalation
+  and merge-based stack propagation remain undecided. Concrete adapters,
+  blocked-repair resumption, and post-publication import have committed
+  [review workflows design](design/review-workflows.md). Blocks automatic
+  end-to-end review workflows.
 - **Independent session-link relationship.** Links between sessions that
   delegation did not create require their own foundation decision. Blocks
   session linking and visibility authority.
