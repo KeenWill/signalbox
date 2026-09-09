@@ -24,7 +24,9 @@ use signalbox_workflow_runtime::{
 use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{CLOCK_ENTRY, CLOCK_REVISION, WorkflowService, compiled_catalog};
+use super::WorkflowService;
+#[cfg(target_os = "linux")]
+use super::{CLOCK_ENTRY, CLOCK_REVISION, compiled_catalog};
 
 #[derive(Debug, signalbox_derive::OperatorError)]
 pub enum WorkflowRuntimeError {
@@ -54,6 +56,29 @@ impl From<ProgramRegistrationError> for WorkflowRuntimeError {
     }
 }
 
+impl WorkflowRuntimeError {
+    /// Operator-safe classification without program payloads or isolate exception text.
+    pub fn cause_code(&self) -> &'static str {
+        match self {
+            Self::Registration(_) => "workflow_registration_failed",
+            Self::Runtime(_) => "workflow_runtime_failed",
+            Self::Catalog(_) => "workflow_catalog_failed",
+            Self::NativeUnavailable => "workflow_native_unavailable",
+            Self::Stopped => "workflow_runner_stopped",
+            Self::Join(_) => "workflow_runner_join_failed",
+            Self::Attempt { source, .. } => match source.as_ref() {
+                WorkflowHostError::Journal(_) => "workflow_journal_failed",
+                WorkflowHostError::Registration(_) => "workflow_registration_failed",
+                WorkflowHostError::JournalMissing(_) => "workflow_journal_missing",
+                WorkflowHostError::Isolate(_) => "workflow_isolate_failed",
+                WorkflowHostError::LiveDelivery(_) => "workflow_delivery_failed",
+                WorkflowHostError::Nondeterminism { .. } => "workflow_nondeterminism",
+                WorkflowHostError::Protocol(_) => "workflow_host_protocol_failed",
+            },
+        }
+    }
+}
+
 /// One runner per fenced daemon; only this runner starts its run attempts.
 pub struct WorkflowRuntime {
     host: WorkflowHost,
@@ -63,12 +88,17 @@ pub struct WorkflowRuntime {
 
 impl WorkflowRuntime {
     pub fn new(pool: PgPool) -> Result<(WorkflowService, Self), WorkflowRuntimeError> {
-        let catalog = compiled_catalog()?;
-        let clock_executable = catalog
-            .executable(CLOCK_ENTRY, CLOCK_REVISION)
-            .ok_or(WorkflowRuntimeError::NativeUnavailable)?;
-        let host = WorkflowHost::new(ProgramJournalRepository::new(pool.clone()))
-            .with_native_catalog(catalog);
+        let host = WorkflowHost::new(ProgramJournalRepository::new(pool.clone()));
+        #[cfg(target_os = "linux")]
+        let (host, clock_executable) = {
+            let catalog = compiled_catalog()?;
+            let executable = catalog
+                .executable(CLOCK_ENTRY, CLOCK_REVISION)
+                .ok_or(WorkflowRuntimeError::NativeUnavailable)?;
+            (host.with_native_catalog(catalog), Some(executable))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let clock_executable = None;
         let registrations = ProgramRegistrationRepository::new(pool);
         let (wake, receiver) = mpsc::unbounded_channel();
         Ok((
@@ -245,7 +275,7 @@ mod tests {
         assert!((before..=after).contains(&seconds));
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(all(feature = "test-support", target_os = "linux"))]
     mod postgres {
         use super::*;
         use crate::workflows::{ClockInput, ClockResult};
@@ -312,7 +342,7 @@ mod tests {
                 entry,
                 revision,
                 binary_digest,
-            } = service.clock_executable().clone()
+            } = service.clock_executable().unwrap().clone()
             else {
                 panic!("compiled clock identity")
             };

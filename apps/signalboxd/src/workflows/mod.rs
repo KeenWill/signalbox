@@ -2,17 +2,19 @@
 
 pub mod runtime;
 
+#[cfg(target_os = "linux")]
+use signalbox_domain::InlineFramePayload;
 use signalbox_domain::{
-    InlineFramePayload, ProgramRegistrationId, ProgramRunId,
+    ProgramRegistrationId, ProgramRunId,
     program_registration::{
         NativeProgramRegistrationRequest, ProgramExecutable, ProgramRegistration,
         ProgramRegistrationRequest,
     },
 };
 use signalbox_persistence::program_registration::ProgramRegistrationRepository;
-use signalbox_workflow_runtime::native::{
-    NativeCatalog, NativeProgram, NativeProgramError, NativeValue, WorkflowContext,
-};
+#[cfg(target_os = "linux")]
+use signalbox_workflow_runtime::native::{NativeCatalog, NativeProgram, WorkflowContext};
+use signalbox_workflow_runtime::native::{NativeProgramError, NativeValue};
 use tokio::sync::mpsc;
 
 pub use runtime::{WorkflowRuntime, WorkflowRuntimeError};
@@ -27,12 +29,12 @@ pub const CLOCK_REVISION: &str = "1";
 pub struct WorkflowService {
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedSender<ProgramRunId>,
-    clock_executable: ProgramExecutable,
+    clock_executable: Option<ProgramExecutable>,
 }
 
 impl WorkflowService {
-    pub fn clock_executable(&self) -> &ProgramExecutable {
-        &self.clock_executable
+    pub fn clock_executable(&self) -> Option<&ProgramExecutable> {
+        self.clock_executable.as_ref()
     }
 
     pub async fn register_javascript(
@@ -49,7 +51,7 @@ impl WorkflowService {
         id: ProgramRegistrationId,
         request: NativeProgramRegistrationRequest,
     ) -> Result<ProgramRegistration, WorkflowRuntimeError> {
-        if request.clone().into_content().executable != self.clock_executable {
+        if Some(&request.clone().into_content().executable) != self.clock_executable.as_ref() {
             return Err(WorkflowRuntimeError::NativeUnavailable);
         }
         Ok(self.registrations.register_native_user(id, request).await?)
@@ -73,6 +75,7 @@ impl WorkflowService {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn compiled_catalog() -> Result<NativeCatalog, WorkflowRuntimeError> {
     let mut catalog = NativeCatalog::new().map_err(WorkflowRuntimeError::Runtime)?;
     catalog
@@ -121,7 +124,9 @@ impl NativeValue for ClockResult {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct ClockProgram;
+#[cfg(target_os = "linux")]
 impl NativeProgram for ClockProgram {
     type Input = ClockInput;
     type Output = ClockResult;

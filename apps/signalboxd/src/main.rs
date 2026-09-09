@@ -1013,7 +1013,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
             RuntimeTaskCompletion::Failed
         }
         Ok(RuntimeTaskExit::Workflows(Err(error))) => {
-            tracing::error!(cause = %error, "workflow runtime failed");
+            tracing::error!(cause = error.cause_code(), "workflow runtime failed");
             RuntimeTaskCompletion::Failed
         }
         Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
@@ -2400,7 +2400,7 @@ async fn run_hub(
                     Some(Ok(RuntimeTaskExit::Workflows(result))) => {
                         match result {
                             Ok(()) => tracing::error!("workflow runtime completed before shutdown"),
-                            Err(error) => tracing::error!(cause = %error, "workflow runtime failed"),
+                            Err(error) => tracing::error!(cause = error.cause_code(), "workflow runtime failed"),
                         }
                         RuntimeStopCause::RuntimeFailed
                     }
