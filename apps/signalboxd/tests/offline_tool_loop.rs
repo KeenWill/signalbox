@@ -2425,6 +2425,105 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_parked_turn_defers_instruction_discovery_until_release() -> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{
+        DispatchingModule, InstructionPath, LifecycleActor, SessionParkCause, SessionParkResponder,
+    };
+    use signalbox_persistence::workspace_instructions::{
+        TurnInstructionManifestPreflight, WorkspaceInstructionRepository,
+    };
+
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let workspace = tempdir()?;
+    fs::write(
+        workspace.path().join("AGENTS.md"),
+        "Fixture workspace instructions.\n",
+    )?;
+    let instructions = WorkspaceInstructionRepository::new(fixture.pool.clone());
+    assert!(matches!(
+        instructions
+            .preflight_turn_start(fixture.session, fixture.turn)
+            .await?,
+        TurnInstructionManifestPreflight::Absent,
+    ));
+    let lifecycle = signalbox_persistence::session_lifecycle::SessionLifecycleRepository::new(
+        fixture.pool.clone(),
+    );
+    lifecycle
+        .adopt(fixture.session, LifecycleActor::Operator)
+        .await?;
+    lifecycle
+        .park(
+            fixture.session,
+            SessionParkCause::ModulePark,
+            SessionParkResponder::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+            None,
+            LifecycleActor::Module {
+                module: DispatchingModule::RepositoryWatch,
+            },
+        )
+        .await?;
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution(
+        [completion_script("completed after discovery")],
+        catalog([]),
+        executor.clone(),
+    );
+    let execution =
+        execution.with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+            fixture.pool.clone(),
+            None,
+            vec![InstructionPath::try_new(
+                workspace
+                    .path()
+                    .to_str()
+                    .expect("UTF-8 fixture path")
+                    .to_owned(),
+            )?],
+        ));
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let evidence: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM instruction_discovery WHERE session_id = $1 AND turn_id = $2),
+            (SELECT count(*) FROM turn_instruction_manifest WHERE session_id = $1 AND turn_id = $2)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        evidence,
+        (0, 0),
+        "a park must precede discovery and manifest preparation"
+    );
+    assert!(runtime.received_operations().is_empty());
+    assert!(executor.events().is_empty());
+
+    lifecycle.resume(fixture.session).await?;
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let manifests: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_instruction_manifest WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        manifests, 1,
+        "restoration must prepare the deferred manifest"
+    );
+    assert_eq!(runtime.received_operations().len(), 1);
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 struct ParkingExecutor {
     inner: RecordingExecutor,

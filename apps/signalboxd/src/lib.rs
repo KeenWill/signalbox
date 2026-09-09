@@ -3033,6 +3033,21 @@ where
         let workspace_instructions = self.workspace_instructions.clone();
         let mut shutdown_checkpoint = self.shutdown_checkpoint.clone();
         Box::pin(async move {
+            let session_is_parked = || async {
+                model_repository
+                    .session_is_parked(session)
+                    .await
+                    .map_err(|error| {
+                        PostgresProviderToolLoopExecutionError::Model(Box::new(
+                            RetainedModelExecutionError::Primary(ModelCallExecutionError::Prepare(
+                                error,
+                            )),
+                        ))
+                    })
+            };
+            if session_is_parked().await? {
+                return Ok(());
+            }
             if let Some(workspace_instructions) = workspace_instructions
                 && !workspace_instructions
                     .prepare(session, turn)
@@ -3061,18 +3076,6 @@ where
             );
             let mut run_tools = true;
             let mut return_if_tools_absent = false;
-            let session_is_parked = || async {
-                model_repository
-                    .session_is_parked(session)
-                    .await
-                    .map_err(|error| {
-                        PostgresProviderToolLoopExecutionError::Model(Box::new(
-                            RetainedModelExecutionError::Primary(ModelCallExecutionError::Prepare(
-                                error,
-                            )),
-                        ))
-                    })
-            };
 
             // Every stage this loop completes ends at a committed durable
             // boundary a successor pass resumes from: a checkpointed attempt or
