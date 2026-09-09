@@ -663,6 +663,8 @@ retaining registration and history.
 
 ## Planned
 
+- Successive fenced runtime incarnations after database guard loss; see
+  [daemon survival design](../design/daemon-survival.md).
 - Retiring an unacknowledged workspace release:
   [persistence-protocol design](../design/persistence-protocol.md).
 - General runner operation-failure evidence stored before acknowledgement:
