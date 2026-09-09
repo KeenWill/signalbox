@@ -22,8 +22,9 @@ impl cmp::Eq for program_cancellation::CancelProgramRun {}
 pub enum ProgramTerminalState {
     Cancelled,
     Faulted,
+    Succeeded(signalbox_domain::InlineFramePayload),
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ProgramCancellationOutcome
@@ -34,7 +35,7 @@ pub enum ProgramCancellationOutcome {
     NotFound,
     AlreadyTerminal(program_cancellation::ProgramTerminalState),
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ProgramCancellationResult
@@ -44,7 +45,7 @@ pub enum ProgramCancellationResult {
     Recorded(program_cancellation::ProgramCancellationOutcome),
     ConflictingReuse,
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```
 
 ## ProgramCancellationError

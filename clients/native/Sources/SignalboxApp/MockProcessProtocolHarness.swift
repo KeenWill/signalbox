@@ -629,6 +629,7 @@ private actor MockProcessProtocolState {
     var messages: [[String: Any]] = [
       [
         "type": "transcript_snapshot_start",
+        "workspace_root_kind": NSNull(),
         "repository_watch": NSNull(),
         "session_id": session.id,
         "cursor": cursor,

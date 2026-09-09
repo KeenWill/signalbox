@@ -47,6 +47,8 @@ rust_unit_test(
     name = "unit_tests",
     compile_data = ["tests/support/protocol_peer.rs"],
     crate = ":signalbox_model_runtime_codex_cli",
+    data = ["tests/support/version_probe.sh"],
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/model-runtime-codex-cli"},
     # These tests execute host shell or process utilities.
     tags = ["external"],
     deps = ["//crates/test-bin:signalbox_test_bin"],

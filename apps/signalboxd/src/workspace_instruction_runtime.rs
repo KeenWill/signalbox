@@ -323,12 +323,6 @@ fn outcome_is_available(
 }
 
 /// Records the scan evidence the sanitized cause code cannot carry.
-///
-/// `DiscoveryIncomplete` reaches an operator as one cause code on the
-/// scheduler's record, which cannot say which of the fixed bounds stopped the
-/// scan, what it had already consumed, or which roots it was walking. All of
-/// that is on the snapshot this decision discards, so it is recorded here
-/// rather than left to be reconstructed from the durable evidence tables.
 fn record_incomplete_discovery(
     session: SessionId,
     turn: TurnId,
@@ -345,12 +339,6 @@ fn record_incomplete_discovery(
             | InstructionDiscoveryFindingKind::NonUtf8Source
             | InstructionDiscoveryFindingKind::InvalidSkill => None,
         });
-    let roots = snapshot
-        .roots()
-        .iter()
-        .map(|root| root.path().as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
     tracing::error!(
         session_id = %session.as_uuid(),
         turn_id = %turn.as_uuid(),
@@ -362,7 +350,7 @@ fn record_incomplete_discovery(
         finding_count = snapshot.findings().len(),
         candidate_source_bytes = snapshot.candidate_source_bytes(),
         elapsed_millis = snapshot.elapsed_millis(),
-        roots = %roots,
+        root_count = snapshot.roots().len(),
         "workspace instruction discovery stopped at a fixed limit"
     );
 }
@@ -373,4 +361,30 @@ fn instruction_path(path: &Path) -> Result<InstructionPath, WorkspaceInstruction
         .ok_or(WorkspaceInstructionRuntimeError::InvalidWorkspacePath)?;
     InstructionPath::try_new(value.to_owned())
         .map_err(|_| WorkspaceInstructionRuntimeError::InvalidWorkspacePath)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_telemetry_records_root_count_without_host_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("private-instruction-root");
+        let snapshot = discover_workspace_instructions(vec![InstructionDiscoveryRoot::new(
+            InstructionDiscoveryRootKind::Configured,
+            InstructionPath::try_new(root.to_str().unwrap().to_owned()).unwrap(),
+        )]);
+        let captured = crate::process_runtime::tests::capture_telemetry(|| {
+            record_incomplete_discovery(
+                SessionId::from_uuid(Uuid::now_v7()),
+                TurnId::from_uuid(Uuid::now_v7()),
+                &snapshot,
+            );
+        });
+        assert!(captured.contains("root_count=1"));
+        assert!(captured.contains("finding_count=1"));
+        assert!(!captured.contains(directory.path().to_str().unwrap()));
+        assert!(!captured.contains("private-instruction-root"));
+    }
 }

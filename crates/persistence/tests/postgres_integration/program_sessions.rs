@@ -28,7 +28,11 @@ async fn registered_session_run(
         )
         .await?;
     Ok(registrations
-        .start_run(ProgramRunId::from_uuid(Uuid::now_v7()), registration.id)
+        .start_run(
+            ProgramRunId::from_uuid(Uuid::now_v7()),
+            registration.id,
+            &[],
+        )
         .await?)
 }
 

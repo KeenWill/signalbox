@@ -181,7 +181,10 @@ async fn isolate_replays_then_transitions_to_live_at_the_durable_tail() -> Resul
         .await
         .expect("partial-journal execution must reach live and complete");
 
-    assert_eq!(first_outcome, ProgramExecutionOutcome::Completed);
+    assert_eq!(
+        first_outcome,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
     assert_eq!(
         live.observed_outstanding,
         vec![
@@ -196,7 +199,7 @@ async fn isolate_replays_then_transitions_to_live_at_the_durable_tail() -> Resul
         .load(run)
         .await?
         .expect("the created journal stream exists");
-    assert_eq!(after_live.entries().len(), 6);
+    assert_eq!(after_live.entries().len(), 8);
     assert_eq!(
         after_live.entries()[0].frame(),
         &JournalFrame::Request(recorded_request)
@@ -230,7 +233,10 @@ async fn isolate_replays_then_transitions_to_live_at_the_durable_tail() -> Resul
         .await
         .expect("complete-journal replay must complete");
 
-    assert_eq!(replay_outcome, ProgramExecutionOutcome::Completed);
+    assert_eq!(
+        replay_outcome,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
     assert!(replay_must_not_go_live.observed_outstanding.is_empty());
     let after_replay = repository
         .load(run)
@@ -324,7 +330,10 @@ globalThis.__signalboxProgramRequest === undefined || (() => { throw new Error("
         .execute_unregistered(run, &artifact, &mut live_must_not_run)
         .await?;
 
-    assert_eq!(outcome, ProgramExecutionOutcome::Completed);
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
     assert!(live_must_not_run.observed_outstanding.is_empty());
 
     pool.close().await;
@@ -388,13 +397,17 @@ now(new Uint8Array([{FIRST_LIVE_REQUEST_BYTE}]));
 
     let outcome = host.execute_unregistered(run, &artifact, &mut live).await?;
 
-    assert_eq!(outcome, ProgramExecutionOutcome::Completed);
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
     assert_eq!(live.observed_outstanding, vec![vec![expected_request]]);
     let journal = repository
         .load(run)
         .await?
         .expect("the created journal stream exists");
-    assert_eq!(journal.entries().len(), 2);
+    assert_eq!(journal.entries().len(), 4);
+    assert_eq!(journal.result(), Some(&InlineFramePayload::default()));
 
     pool.close().await;
     drop(container);
@@ -464,7 +477,10 @@ typeof localeSensitiveMethods === "undefined" || (() => { throw new Error("a boo
         .execute_unregistered(run, &artifact, &mut live_must_not_run)
         .await?;
 
-    assert_eq!(outcome, ProgramExecutionOutcome::Completed);
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
     assert!(live_must_not_run.observed_outstanding.is_empty());
 
     pool.close().await;
@@ -745,6 +761,7 @@ async fn registration_fixture(
         .start_run(
             signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
             registration.id,
+            &[],
         )
         .await?)
 }
@@ -808,7 +825,7 @@ async fn registered_run_executes_its_stored_artifact() -> Result<(), Box<dyn Err
         WorkflowHost::new(journal.clone())
             .execute_registered(run, &mut deliveries, &mut effects)
             .await?,
-        ProgramExecutionOutcome::Completed,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default()),
     );
     assert_eq!(
         deliveries.observed_outstanding,
@@ -821,7 +838,7 @@ async fn registered_run_executes_its_stored_artifact() -> Result<(), Box<dyn Err
             .expect("registered journal")
             .entries()
             .len(),
-        2
+        4
     );
     pool.close().await;
     Ok(())
@@ -858,7 +875,11 @@ async fn registered_run(
         )
         .await?;
     Ok(repository
-        .start_run(ProgramRunId::from_uuid(Uuid::now_v7()), registration.id)
+        .start_run(
+            ProgramRunId::from_uuid(Uuid::now_v7()),
+            registration.id,
+            &[],
+        )
         .await?)
 }
 
@@ -914,7 +935,7 @@ async fn ungranted_effect_is_journaled_as_refused_without_calling_the_executor()
     assert_eq!(
         host.execute_registered(run, &mut primitives, &mut effects)
             .await?,
-        ProgramExecutionOutcome::Completed
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
     );
     assert_eq!(effects.executions, 0);
     assert_eq!(effects.adoptions, 0);
@@ -924,7 +945,7 @@ async fn ungranted_effect_is_journaled_as_refused_without_calling_the_executor()
         .await?
         .expect("registered run has a journal");
     assert!(
-        matches!(loaded.entries().last().expect("refusal journaled").frame(), JournalFrame::Delivery(delivery) if matches!(delivery.kind(), DeliveryKind::Reject { reason: RejectReason::CapabilityDenied, .. }))
+        matches!(loaded.entries().get(1).expect("effect delivery precedes completion").frame(), JournalFrame::Delivery(delivery) if matches!(delivery.kind(), DeliveryKind::Reject { reason: RejectReason::CapabilityDenied, .. }))
     );
     pool.close().await;
     Ok(())
@@ -967,7 +988,11 @@ async fn recover_effect(
     host.execute_registered(run, &mut primitives, &mut effects)
         .await?;
     let loaded = journal.load(run).await?.expect("registered journal exists");
-    let JournalFrame::Delivery(delivery) = loaded.entries().last().expect("answer exists").frame()
+    let JournalFrame::Delivery(delivery) = loaded
+        .entries()
+        .get(1)
+        .expect("effect delivery precedes completion")
+        .frame()
     else {
         panic!("expected delivery")
     };
@@ -1059,7 +1084,7 @@ async fn program_registration_widening_is_refused_in_the_journal() -> Result<(),
     assert_eq!(registrations, 1);
     let loaded = journal.load(run).await?.expect("registered journal exists");
     assert!(
-        matches!(loaded.entries().last().expect("refusal exists").frame(), JournalFrame::Delivery(delivery) if matches!(delivery.kind(), DeliveryKind::Reject { reason: RejectReason::CapabilityDenied, .. }))
+        matches!(loaded.entries().get(1).expect("effect delivery precedes completion").frame(), JournalFrame::Delivery(delivery) if matches!(delivery.kind(), DeliveryKind::Reject { reason: RejectReason::CapabilityDenied, .. }))
     );
     assert_eq!(effects.executions, 0);
     pool.close().await;
@@ -1124,7 +1149,11 @@ async fn registration_recovery_adopts_the_matching_immutable_row() -> Result<(),
         .execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
         .await?;
     let loaded = journal.load(run).await?.expect("registered journal exists");
-    let JournalFrame::Delivery(delivery) = loaded.entries().last().expect("answer exists").frame()
+    let JournalFrame::Delivery(delivery) = loaded
+        .entries()
+        .get(1)
+        .expect("effect delivery precedes completion")
+        .frame()
     else {
         panic!("expected delivery")
     };
@@ -1314,11 +1343,14 @@ async fn execute_session_creation(attempt: SessionEffectAttempt) -> Result<(), B
     assert_eq!(
         host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
             .await?,
-        ProgramExecutionOutcome::Completed
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
     );
     let loaded = journal.load(run).await?.expect("run journal exists");
-    let JournalFrame::Delivery(delivery) =
-        loaded.entries().last().expect("creation answer").frame()
+    let JournalFrame::Delivery(delivery) = loaded
+        .entries()
+        .get(1)
+        .expect("effect delivery precedes completion")
+        .frame()
     else {
         panic!("creation answer")
     };
@@ -1347,7 +1379,7 @@ async fn execute_session_creation(attempt: SessionEffectAttempt) -> Result<(), B
     assert_eq!(
         host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
             .await?,
-        ProgramExecutionOutcome::Completed
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM session")
         .fetch_one(&pool)
@@ -1471,7 +1503,10 @@ if (answer.kind !== "answer") throw new Error("turn refused");
         tokio::try_join!(execute, stop)
     })
     .await??;
-    assert_eq!(execution, ProgramExecutionOutcome::Completed);
+    assert_eq!(
+        execution,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
+    );
     let receipt = SubmitInputRepository::new(pool.clone())
         .load(command)
         .await?
@@ -1481,7 +1516,11 @@ if (answer.kind !== "answer") throw new Error("turn refused");
         panic!("turn origin")
     };
     let loaded = journal.load(run).await?.expect("run journal");
-    let JournalFrame::Delivery(delivery) = loaded.entries().last().expect("turn answer").frame()
+    let JournalFrame::Delivery(delivery) = loaded
+        .entries()
+        .get(1)
+        .expect("effect delivery precedes completion")
+        .frame()
     else {
         panic!("turn answer")
     };
@@ -1502,7 +1541,7 @@ if (answer.kind !== "answer") throw new Error("turn refused");
     assert_eq!(
         host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
             .await?,
-        ProgramExecutionOutcome::Completed
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
     );
     assert_eq!(journal.load(run).await?.expect("replayed journal"), loaded);
     pool.close().await;
@@ -1589,10 +1628,14 @@ if (answer.kind !== "answer") throw new Error("expected a session refusal answer
     assert_eq!(
         host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
             .await?,
-        ProgramExecutionOutcome::Completed
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
     );
     let loaded = journal.load(run).await?.expect("registered journal");
-    let JournalFrame::Delivery(delivery) = loaded.entries().last().expect("refusal answer").frame()
+    let JournalFrame::Delivery(delivery) = loaded
+        .entries()
+        .get(1)
+        .expect("effect delivery precedes completion")
+        .frame()
     else {
         panic!("refusal answer")
     };
@@ -1603,7 +1646,7 @@ if (answer.kind !== "answer") throw new Error("expected a session refusal answer
     assert_eq!(
         host.execute_registered(run, &mut ScriptedDeliveries::new([]), &mut effects)
             .await?,
-        ProgramExecutionOutcome::Completed
+        ProgramExecutionOutcome::Completed(InlineFramePayload::default())
     );
     assert_eq!(journal.load(run).await?.expect("replayed journal"), loaded);
     Ok(())
@@ -1674,7 +1717,7 @@ async fn malformed_registration_requests_are_durably_rejected() -> Result<(), Bo
                 .await?;
             let loaded = journal.load(run).await?.expect("registered journal exists");
             assert!(
-                matches!(loaded.entries().last().expect("rejection exists").frame(),
+                matches!(loaded.entries().get(1).expect("effect delivery precedes completion").frame(),
                 JournalFrame::Delivery(delivery) if matches!(delivery.kind(),
                     DeliveryKind::Reject { reason: RejectReason::UnsupportedOperation, .. }))
             );
@@ -1783,6 +1826,48 @@ async fn a_cancellation_after_the_initial_load_outranks_successful_completion()
             .len(),
         1
     );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retained_success_loads_without_executable_code_or_live_work() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let artifact = ProgramArtifact::new("invalid JavaScript syntax !!!");
+    let run = registered_run(
+        &pool,
+        &artifact,
+        signalbox_domain::program_registration::ProgramGrants::new([]),
+    )
+    .await?;
+    let result = payload(b"typed retained result");
+    repository
+        .complete_if_tail(run, 0, result.clone())
+        .await?
+        .expect("success");
+    let host = WorkflowHost::new(repository.clone());
+    let mut live = ScriptedDeliveries::new([]);
+    assert_eq!(
+        host.execute_unregistered(run, &artifact, &mut live).await?,
+        ProgramExecutionOutcome::Completed(result.clone())
+    );
+    let mut effects = EffectProbe {
+        policy: signalbox_workflow_runtime::effects::EffectRecovery::Ambiguous,
+        adopted: None,
+        executions: 0,
+        adoptions: 0,
+    };
+    assert_eq!(
+        host.execute_registered(run, &mut live, &mut effects)
+            .await?,
+        ProgramExecutionOutcome::Completed(result)
+    );
+    assert!(live.observed_outstanding.is_empty());
+    assert_eq!(effects.executions, 0);
+    assert_eq!(effects.adoptions, 0);
     pool.close().await;
     Ok(())
 }

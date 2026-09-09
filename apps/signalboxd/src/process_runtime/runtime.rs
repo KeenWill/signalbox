@@ -215,6 +215,7 @@ impl ProcessRuntime {
             shutdown.clone(),
         );
         let connection_dependencies = ConnectionDependencies {
+            metrics: self.metrics.clone(),
             configuration_reload: self.configuration_reload,
             recovery_reporter: self.recovery_reporter,
             oauth_service: self.oauth_service,

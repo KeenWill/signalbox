@@ -134,6 +134,7 @@ pub struct CreateSessionRepository {
     pool: PgPool,
     credential_pin: crate::SessionCredentialPin,
     principal: signalbox_domain::CommandPrincipal,
+    checkout_provisioning_pending: bool,
 }
 
 impl CreateSessionRepository {
@@ -143,12 +144,20 @@ impl CreateSessionRepository {
             pool,
             credential_pin,
             principal: signalbox_domain::CommandPrincipal::Operator,
+            checkout_provisioning_pending: false,
         }
     }
 
     /// Records this explicit issuer on newly claimed creation commands.
     pub fn with_principal(mut self, principal: signalbox_domain::CommandPrincipal) -> Self {
         self.principal = principal;
+        self
+    }
+
+    /// Holds new-session turn activation until the daemon records checkout completion.
+    /// Public start and ownership releases do not clear this provisioning hold.
+    pub fn with_checkout_provisioning(mut self) -> Self {
+        self.checkout_provisioning_pending = true;
         self
     }
 
@@ -296,6 +305,13 @@ impl CreateSessionRepository {
         {
             transaction.rollback().await?;
             return Err(error);
+        }
+
+        if self.checkout_provisioning_pending {
+            sqlx::query("UPDATE session_lifecycle SET checkout_provisioning_pending = true WHERE session_id = $1")
+                .bind(session_id_to_uuid(result.session()))
+                .execute(&mut *transaction)
+                .await?;
         }
 
         transaction

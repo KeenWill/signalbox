@@ -23,6 +23,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     os::fd::AsFd,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 pub(super) struct PushObjectSnapshot {
@@ -30,14 +31,29 @@ pub(super) struct PushObjectSnapshot {
 }
 
 impl PushObjectSnapshot {
+    #[cfg(test)]
     pub(super) fn capture(
         authority: &PinnedRepository,
         target: Oid,
         fence: Option<Oid>,
     ) -> Result<Self, LocalGitFailure> {
+        Self::capture_before_deadline(
+            authority,
+            target,
+            fence,
+            Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
+        )
+    }
+
+    pub(super) fn capture_before_deadline(
+        authority: &PinnedRepository,
+        target: Oid,
+        fence: Option<Oid>,
+        deadline: Instant,
+    ) -> Result<Self, LocalGitFailure> {
         let repository = authority.open_repository_shell()?;
         let database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
-        let mut source = ObjectSource::open(authority)?;
+        let mut source = ObjectSource::open(authority, deadline)?;
         let mut excluded = HashSet::new();
         if let Some(fence) = fence {
             source.capture(&database, fence)?;
@@ -46,6 +62,7 @@ impl PushObjectSnapshot {
                 .map_err(|_| LocalGitFailure::Operation)?;
             let mut trees = vec![commit.tree_id()];
             while let Some(tree) = trees.pop() {
+                source.check_deadline()?;
                 if !excluded.insert(tree) {
                     continue;
                 }
@@ -74,6 +91,7 @@ impl PushObjectSnapshot {
         let mut visited = HashSet::new();
         let mut trees = Vec::new();
         while let Some(commit) = commits.pop() {
+            source.check_deadline()?;
             if !visited.insert(commit) {
                 continue;
             }
@@ -94,6 +112,7 @@ impl PushObjectSnapshot {
             return Err(LocalGitFailure::Operation);
         }
         while let Some(tree) = trees.pop() {
+            source.check_deadline()?;
             if !excluded.insert(tree) {
                 continue;
             }
@@ -154,6 +173,7 @@ pub(super) struct ObjectSource {
     packs: Vec<Pack>,
     format: ObjectFormat,
     captured_bytes: usize,
+    deadline: Instant,
 }
 
 fn rejected<T>(_: T) -> LocalGitFailure {
@@ -185,7 +205,10 @@ fn open_child(root: &File, path: &Path) -> Result<File, LocalGitFailure> {
 }
 
 impl ObjectSource {
-    pub(super) fn open(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
+    pub(super) fn open(
+        authority: &PinnedRepository,
+        deadline: Instant,
+    ) -> Result<Self, LocalGitFailure> {
         authority.validate_object_layout()?;
         let objects = File::from(
             openat(
@@ -217,9 +240,11 @@ impl ObjectSource {
             packs: Vec::new(),
             format: authority.object_format,
             captured_bytes: 0,
+            deadline,
         };
         let mut scanned = 0usize;
         for entry in fs::read_dir(pack_path).map_err(rejected)? {
+            source.check_deadline()?;
             scanned += 1;
             if scanned > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitFailure::Repository);
@@ -285,6 +310,14 @@ impl ObjectSource {
         Ok(source)
     }
 
+    // Stop timed-out blocking work between bounded reads and decodes.
+    fn check_deadline(&self) -> Result<(), LocalGitFailure> {
+        if Instant::now() >= self.deadline {
+            return Err(LocalGitFailure::Repository);
+        }
+        Ok(())
+    }
+
     fn open_file(&mut self, path: &Path) -> Result<usize, LocalGitFailure> {
         let parent = path.parent().ok_or(LocalGitFailure::Repository)?;
         let directory = if let Some(index) = self
@@ -347,6 +380,7 @@ impl ObjectSource {
         offset: usize,
         length: usize,
     ) -> Result<Vec<u8>, LocalGitFailure> {
+        self.check_deadline()?;
         if length > MAX_OBJECT_DATABASE_BYTES {
             return Err(LocalGitFailure::Repository);
         }
@@ -372,6 +406,7 @@ impl ObjectSource {
     }
 
     pub(super) fn capture(&mut self, database: &Odb<'_>, oid: Oid) -> Result<(), LocalGitFailure> {
+        self.check_deadline()?;
         if database.exists(oid) {
             return Ok(());
         }
@@ -485,6 +520,7 @@ impl ObjectSource {
         let mut selected = HashSet::new();
         let mut entries = Vec::new();
         loop {
+            self.check_deadline()?;
             if !selected.insert(offset) || selected.len() > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitFailure::Repository);
             }
@@ -572,6 +608,7 @@ impl ObjectSource {
         pack.extend_from_slice(&(entries.len() as u32).to_be_bytes());
         let mut previous_offset = 0;
         for (kind, content) in entries.into_iter().rev() {
+            self.check_deadline()?;
             let offset = pack.len();
             let mut size = content.len();
             let first = ((if kind >= 6 { 6 } else { kind }) << 4) | (size & 15) as u8;
@@ -627,6 +664,7 @@ impl ObjectSource {
             return Err(LocalGitFailure::Repository);
         }
         for entry in &self.directories {
+            self.check_deadline()?;
             let current = File::from(
                 openat(
                     &self.objects,
@@ -643,6 +681,7 @@ impl ObjectSource {
             }
         }
         for entry in &self.files {
+            self.check_deadline()?;
             let current = File::from(
                 openat(
                     self.directories[entry.directory].directory.as_fd(),

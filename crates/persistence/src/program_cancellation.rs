@@ -21,14 +21,15 @@ impl PartialEq for CancelProgramRun {
 impl Eq for CancelProgramRun {}
 
 /// Standing terminal state of a retained journal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProgramTerminalState {
     Cancelled,
     Faulted,
+    Succeeded(InlineFramePayload),
 }
 
 /// The immutable result a cancellation command records.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProgramCancellationOutcome {
     Applied,
     NotFound,
@@ -36,7 +37,7 @@ pub enum ProgramCancellationOutcome {
 }
 
 /// A recorded result or conflicting reuse of the command identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProgramCancellationResult {
     Recorded(ProgramCancellationOutcome),
     ConflictingReuse,
@@ -94,7 +95,9 @@ pub async fn cancel(
         if run != command.run_id.into_uuid() {
             return Ok(ProgramCancellationResult::ConflictingReuse);
         }
-        return Ok(ProgramCancellationResult::Recorded(decode_outcome(&row)?));
+        return Ok(ProgramCancellationResult::Recorded(
+            decode_outcome(&row, &mut tx, command.run_id).await?,
+        ));
     }
     let journal =
         ProgramJournalRepository::load_locked_in_transaction(&mut tx, command.run_id).await?;
@@ -107,6 +110,15 @@ pub async fn cancel(
             ),
             Some(DeliveryKind::Fault(_)) => (
                 ProgramCancellationOutcome::AlreadyTerminal(ProgramTerminalState::Faulted),
+                None,
+            ),
+            Some(DeliveryKind::Answer { .. }) => (
+                ProgramCancellationOutcome::AlreadyTerminal(ProgramTerminalState::Succeeded(
+                    journal
+                        .result()
+                        .ok_or(ProgramCancellationError::Corruption)?
+                        .clone(),
+                )),
                 None,
             ),
             Some(_) => return Err(ProgramCancellationError::Corruption),
@@ -132,7 +144,10 @@ pub async fn cancel(
             }
         },
     };
-    let (kind, state) = match outcome {
+    let (kind, state) = match &outcome {
+        ProgramCancellationOutcome::AlreadyTerminal(ProgramTerminalState::Succeeded(_)) => {
+            ("already_terminal", Some("succeeded"))
+        }
         ProgramCancellationOutcome::Applied => ("applied", Some("cancelled")),
         ProgramCancellationOutcome::NotFound => ("not_found", None),
         ProgramCancellationOutcome::AlreadyTerminal(ProgramTerminalState::Cancelled) => {
@@ -155,8 +170,10 @@ pub async fn cancel(
     Ok(ProgramCancellationResult::Recorded(outcome))
 }
 
-fn decode_outcome(
+async fn decode_outcome(
     row: &sqlx::postgres::PgRow,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run: ProgramRunId,
 ) -> Result<ProgramCancellationOutcome, ProgramCancellationError> {
     let outcome: String = row.try_get("outcome")?;
     let state: Option<String> = row.try_get("terminal_state")?;
@@ -169,6 +186,19 @@ fn decode_outcome(
         ("already_terminal", Some("faulted")) => Ok(ProgramCancellationOutcome::AlreadyTerminal(
             ProgramTerminalState::Faulted,
         )),
+        ("already_terminal", Some("succeeded")) => {
+            let journal = ProgramJournalRepository::load_locked_in_transaction(tx, run)
+                .await?
+                .ok_or(ProgramCancellationError::Corruption)?;
+            Ok(ProgramCancellationOutcome::AlreadyTerminal(
+                ProgramTerminalState::Succeeded(
+                    journal
+                        .result()
+                        .ok_or(ProgramCancellationError::Corruption)?
+                        .clone(),
+                ),
+            ))
+        }
         _ => Err(ProgramCancellationError::Corruption),
     }
 }

@@ -141,6 +141,7 @@ test('selects a bounded image view and keeps an animation-capable original downl
   await page.goto('/scenario/blobs')
   const image = page.getByRole('img', { name: 'Preview of orbital-map.png' })
   await expect(image).toBeVisible()
+  await expect(image).toHaveAttribute('src', /^blob:/)
   expect((await previewResponse).headers()['content-type']).toContain('image/png')
   expect(
     await page.evaluate(

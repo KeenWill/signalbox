@@ -65,6 +65,10 @@ Pack-index lookups do not count unrelated entries against the push-range
 inspection bound. The transport disables delta compression against omitted
 historical blobs.
 
+Push layout validation, reference resolution, and object capture run off the
+async worker with a 300-second preparation deadline; expiry returns
+`PreDispatchInfrastructure` without invoking the transport.
+
 Minting a destination is a human act, and a session cannot mint a workspace or a
 destination; pushing to a minted destination is an approval-gated agent act.
 

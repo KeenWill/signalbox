@@ -91,7 +91,10 @@ impl RepositoryShell {
         &self,
         authority: &PinnedRepository,
     ) -> Result<(), LocalGitFailure> {
-        *self.selected_objects.borrow_mut() = Some(ObjectSource::open(authority)?);
+        *self.selected_objects.borrow_mut() = Some(ObjectSource::open(
+            authority,
+            std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
+        )?);
         Ok(())
     }
 

@@ -10,7 +10,9 @@ import {
 import {
   artifactOriginalIds,
   artifactPreviewIds,
+  DERIVED_IMAGE_MAX_BYTES,
   documentAttachment,
+  fetchVerifiedDerivedImage,
   fetchVerifiedSingleFrameJpeg,
   INLINE_ORIGINAL_MAX_BYTES,
   imageArtifact,
@@ -321,6 +323,53 @@ describe('artifact renderer compatibility', () => {
     expect(isSingleFrameJpegBytes(new Uint8Array([]))).toBe(false)
   })
 
+  it('refuses derived views advertised beyond the client ceiling before fetching', async () => {
+    let requests = 0
+    const fetchStub = (async () => {
+      requests += 1
+      return new Response()
+    }) as typeof fetch
+    const view = { ...imagePreviewView, byte_length: String(DERIVED_IMAGE_MAX_BYTES + 1n) }
+    await expect(fetchVerifiedDerivedImage(view, fetchStub)).rejects.toThrow(
+      'derived image exceeds the inline admission ceiling',
+    )
+    expect(requests).toBe(0)
+  })
+
+  it('cancels a derived stream as soon as it exceeds its admitted length', async () => {
+    let canceled = false
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(5))
+      },
+      cancel() {
+        canceled = true
+      },
+    })
+    const view = { ...imagePreviewView, byte_length: '4' }
+    const fetchStub = (async () => new Response(stream)) as typeof fetch
+    await expect(fetchVerifiedDerivedImage(view, fetchStub)).rejects.toThrow(
+      'derived image bytes exceed the advertised byte length',
+    )
+    expect(canceled).toBe(true)
+  })
+
+  it('rejects truncated derived content before producing a decoder blob', async () => {
+    const view = { ...imagePreviewView, byte_length: '4' }
+    const fetchStub = (async () => new Response(new Uint8Array(3))) as typeof fetch
+    await expect(fetchVerifiedDerivedImage(view, fetchStub)).rejects.toThrow(
+      'derived image bytes do not match the advertised byte length',
+    )
+  })
+
+  it('admits a derived response exactly at the client byte ceiling', async () => {
+    const bytes = new Uint8Array(Number(DERIVED_IMAGE_MAX_BYTES))
+    const view = { ...imagePreviewView, byte_length: String(bytes.length) }
+    const fetchStub = (async () => new Response(bytes)) as typeof fetch
+    const blob = await fetchVerifiedDerivedImage(view, fetchStub)
+    expect(blob.size).toBe(bytes.length)
+    expect(blob.type).toBe(view.media_type)
+  })
   it('admits fetched original bytes with the JPEG signature and advertised length', async () => {
     const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
     const view = { ...jpegOriginalView, byte_length: String(jpegBytes.byteLength) }

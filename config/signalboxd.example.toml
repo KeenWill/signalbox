@@ -21,6 +21,10 @@
 version = 1
 
 [numeric_bounds]
+# Time to complete a client frame after its first byte arrives.
+client_frame_deadline = "30s"
+# Time a client socket write may remain blocked without sending bytes.
+client_write_progress_deadline = "30s"
 # Seven days from authenticated webhook receipt to its durable expiry.
 repository_watch_webhook_retention = "604800s"
 # Physical database sessions established before daemon work begins.
