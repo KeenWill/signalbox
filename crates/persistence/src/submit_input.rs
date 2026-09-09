@@ -218,9 +218,13 @@ pub enum SubmitInputCorruption {
 }
 
 #[derive(signalbox_derive::OperatorError)]
-/// A database failure, wrong purpose-specific load, or integrity failure.
+/// A transient admission refusal, database failure, wrong purpose-specific load, or integrity failure.
 #[derive(Debug)]
 pub enum SubmitInputRepositoryError {
+    #[error("SubmitInput awaits repository-watch kickoff during checkout provisioning")]
+    /// Client input is deferred without claiming its command identity while
+    /// the repository-watch kickoff owns the first input under the provisioning hold.
+    CheckoutProvisioningPending,
     #[error("SubmitInput database failure: {field_0}")]
     /// PostgreSQL failed before any commit could have succeeded.
     Database(#[source] sqlx::Error),

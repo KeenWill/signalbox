@@ -690,7 +690,10 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let protocol_error = match error {
-        SubmitInputRepositoryError::Database(_) => ProtocolError::mutation_unavailable(false),
+        SubmitInputRepositoryError::Database(_)
+        | SubmitInputRepositoryError::CheckoutProvisioningPending => {
+            ProtocolError::mutation_unavailable(false)
+        }
         SubmitInputRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_unavailable(true),
         SubmitInputRepositoryError::ModelExecution(error) => {
             submit_input_model_execution_diagnostic(error.as_ref()).into_protocol_error(session_id)

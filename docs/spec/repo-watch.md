@@ -372,6 +372,10 @@ requests a reviewable diff in a plain pull request reply, leaving unresolved
 threads open for the owner to apply the diff. The publication instruction is
 retained with the kickoff command identity and remains unchanged on replay.
 
+During checkout provisioning, non-repository-watch input admission is deferred
+without claiming its command identity, so the kickoff is the first queued input.
+Clients can retry the same command after provisioning completes.
+
 ## Planned
 
 - Repository-watch orchestration through [workflows](../design/workflows.md)
