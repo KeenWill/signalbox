@@ -16,7 +16,6 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use std::{
-    collections::BTreeSet,
     ffi::CString,
     io::{Seek as _, SeekFrom},
     mem::MaybeUninit,
@@ -51,7 +50,6 @@ const UPLOADS_DIRECTORY: &str = "uploads-v1";
 const NAMESPACE_MARKER: &str = ".signalbox-blob-namespace-v1";
 const MAX_NAMESPACE_MARKER_BYTES: u64 = 128;
 const TEMPORARY_NAME_ATTEMPTS: usize = 16;
-const MAX_BACKING_DEVICE_NODES: usize = 64;
 const MAX_MOUNTINFO_BYTES: u64 = 1_048_576;
 
 struct TemporaryBlobFile {
@@ -168,22 +166,7 @@ impl std::fmt::Debug for OpenedFilesystemBlobRoot {
 impl OpenedFilesystemBlobRoot {
     /// Opens and authenticates one root without creating, changing, or sweeping children.
     pub fn open(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        Self::open_with_locality_policy(root, true)
-    }
-
-    /// Opens a fixture root without host-locality classification.
-    #[cfg(feature = "test-support")]
-    pub fn open_without_locality_check_for_test(
-        root: PathBuf,
-    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        Self::open_with_locality_policy(root, false)
-    }
-
-    fn open_with_locality_policy(
-        root: PathBuf,
-        require_local_backing: bool,
-    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        let (descriptor, identity) = open_validated_root(&root, require_local_backing)?;
+        let (descriptor, identity) = open_validated_root(&root)?;
         Ok(Self {
             configured_path: root,
             descriptor,
@@ -213,24 +196,7 @@ impl std::fmt::Debug for FilesystemBlobStaging {
 impl FilesystemBlobStaging {
     /// Opens the configured staging root and removes proven crash leftovers.
     pub fn try_new(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        Self::try_new_with_locality_policy(root, true)
-    }
-
-    /// Opens a fixture staging namespace without host-locality classification.
-    #[cfg(feature = "test-support")]
-    pub fn try_new_without_locality_check_for_test(
-        root: PathBuf,
-    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        Self::try_new_with_locality_policy(root, false)
-    }
-
-    fn try_new_with_locality_policy(
-        root: PathBuf,
-        require_local_backing: bool,
-    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        let opened =
-            OpenedFilesystemBlobRoot::open_with_locality_policy(root, require_local_backing)?;
-        Self::from_opened(opened)
+        Self::from_opened(OpenedFilesystemBlobRoot::open(root)?)
     }
 
     /// Prepares and sweeps a root only after its identity has been compared.
@@ -345,7 +311,20 @@ impl std::fmt::Debug for FilesystemBlobStore {
 impl FilesystemBlobStore {
     /// Constructs a store at an absolute existing directory.
     pub fn try_new(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        Self::try_new_with_locality_policy(root, true)
+        let (root_descriptor, _) = open_validated_root(&root)?;
+        let root_descriptor = Arc::new(root_descriptor);
+        let publication_directory = Arc::new(
+            prepare_publication_directory(&root_descriptor).map_err(|source| {
+                FilesystemBlobStoreConstructionError::PreparePublicationDirectory {
+                    root: root.clone(),
+                    source,
+                }
+            })?,
+        );
+        Ok(Self {
+            root: root_descriptor,
+            publication_directory,
+        })
     }
 
     /// Opens one configured store and establishes or verifies its namespace marker.
@@ -368,50 +347,6 @@ impl FilesystemBlobStore {
         binding_state: NamespaceBindingState,
     ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
         Self::from_opened_bound_inner(opened, namespace_id, binding_state)
-    }
-
-    /// Opens a conformance namespace while retaining every check except host
-    /// backing-device locality, which shared CI cannot establish.
-    #[cfg(feature = "test-support")]
-    pub fn try_new_bound_for_conformance(
-        root: PathBuf,
-        namespace_id: Uuid,
-        binding_state: NamespaceBindingState,
-    ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
-        Self::from_opened_bound(
-            OpenedFilesystemBlobRoot::open_without_locality_check_for_test(root)?,
-            namespace_id,
-            binding_state,
-        )
-    }
-
-    /// Constructs a conformance fixture while retaining every check except
-    /// host backing-device locality, which shared CI cannot establish.
-    #[cfg(feature = "test-support")]
-    pub fn try_new_for_conformance(
-        root: PathBuf,
-    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        Self::try_new_with_locality_policy(root, false)
-    }
-
-    fn try_new_with_locality_policy(
-        root: PathBuf,
-        require_local_backing: bool,
-    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        let (root_descriptor, _) = open_validated_root(&root, require_local_backing)?;
-        let root_descriptor = Arc::new(root_descriptor);
-        let publication_directory = Arc::new(
-            prepare_publication_directory(&root_descriptor).map_err(|source| {
-                FilesystemBlobStoreConstructionError::PreparePublicationDirectory {
-                    root: root.clone(),
-                    source,
-                }
-            })?,
-        );
-        Ok(Self {
-            root: root_descriptor,
-            publication_directory,
-        })
     }
 
     fn from_opened_bound_inner(
@@ -1053,7 +988,6 @@ fn object_file_name(key: &BlobObjectKey) -> Option<OsString> {
 
 fn open_validated_root(
     root: &Path,
-    require_local_backing: bool,
 ) -> Result<(fs::File, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
     if !root.is_absolute() {
         return Err(FilesystemBlobStoreConstructionError::NotAbsolute {
@@ -1082,15 +1016,6 @@ fn open_validated_root(
         return Err(FilesystemBlobStoreConstructionError::NotPrivate {
             root: root.to_path_buf(),
         });
-    }
-    let positively_local = !require_local_backing
-        || positively_classified_local_filesystem(&root_descriptor).map_err(inspect)?;
-    if !positively_local {
-        return Err(
-            FilesystemBlobStoreConstructionError::UnclassifiedFilesystem {
-                root: root.to_path_buf(),
-            },
-        );
     }
     let canonical_path = fs::canonicalize(root).map_err(inspect)?;
     let canonical_descriptor = open(
@@ -1703,90 +1628,6 @@ fn private_regular_file_metadata(_metadata: &fs::Metadata) -> bool {
     false
 }
 
-#[cfg(target_os = "linux")]
-fn positively_classified_local_filesystem(root: &fs::File) -> io::Result<bool> {
-    const EXT_SUPER_MAGIC: u32 = 0x0000_ef53;
-    const XFS_SUPER_MAGIC: u32 = 0x5846_5342;
-    const BTRFS_SUPER_MAGIC: u32 = 0x9123_683e;
-    const ZFS_SUPER_MAGIC: u32 = 0x2fc1_2fc1;
-    const F2FS_SUPER_MAGIC: u32 = 0xf2f5_2010;
-    let filesystem = rustix::fs::fstatfs(root).map_err(io::Error::from)?.f_type as u32;
-    if !matches!(
-        filesystem,
-        EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | BTRFS_SUPER_MAGIC | ZFS_SUPER_MAGIC | F2FS_SUPER_MAGIC
-    ) {
-        return Ok(false);
-    }
-    positively_classified_local_backing_devices(root.metadata()?.dev())
-}
-
-#[cfg(target_os = "linux")]
-fn positively_classified_local_backing_devices(device: u64) -> io::Result<bool> {
-    let major = rustix::fs::major(device);
-    let minor = rustix::fs::minor(device);
-    let mut pending = vec![PathBuf::from(format!("/sys/dev/block/{major}:{minor}"))];
-    let mut visited = BTreeSet::new();
-    while let Some(device_path) = pending.pop() {
-        let canonical = fs::canonicalize(device_path)?;
-        if !visited.insert(canonical.clone()) {
-            continue;
-        }
-        if visited.len() > MAX_BACKING_DEVICE_NODES {
-            return Ok(false);
-        }
-        let slaves_path = canonical.join("slaves");
-        let slaves = match fs::read_dir(slaves_path) {
-            Ok(slaves) => Some(slaves),
-            Err(source) if source.kind() == io::ErrorKind::NotFound => None,
-            Err(source) => return Err(source),
-        };
-        let mut has_slave = false;
-        if let Some(slaves) = slaves {
-            for slave in slaves {
-                has_slave = true;
-                pending.push(slave?.path());
-                if pending.len() + visited.len() > MAX_BACKING_DEVICE_NODES {
-                    return Ok(false);
-                }
-            }
-        }
-        if !has_slave && !local_block_transport_leaf(&canonical) {
-            return Ok(false);
-        }
-    }
-    Ok(!visited.is_empty())
-}
-
-#[cfg(target_os = "linux")]
-fn local_block_transport_leaf(path: &Path) -> bool {
-    if !path.starts_with("/sys/devices") || path.starts_with("/sys/devices/virtual") {
-        return false;
-    }
-    if path.components().any(|component| {
-        let std::path::Component::Normal(component) = component else {
-            return false;
-        };
-        component.as_encoded_bytes().starts_with(b"vhci_hcd")
-    }) {
-        return false;
-    }
-    path.components().any(|component| {
-        let std::path::Component::Normal(component) = component else {
-            return false;
-        };
-        let component = component.as_encoded_bytes();
-        component.starts_with(b"ata")
-            || component.starts_with(b"mmc")
-            || component.starts_with(b"nvme")
-            || component.starts_with(b"usb")
-    })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn positively_classified_local_filesystem(_root: &fs::File) -> io::Result<bool> {
-    Ok(false)
-}
-
 /// Why a filesystem store root was rejected.
 pub enum FilesystemBlobStoreConstructionError {
     /// The configured root was not absolute.
@@ -1797,8 +1638,6 @@ pub enum FilesystemBlobStoreConstructionError {
     NotDirectory { root: PathBuf },
     /// The configured root was not owned by the effective user with mode 0700.
     NotPrivate { root: PathBuf },
-    /// The host could not positively classify the root as local kernel storage.
-    UnclassifiedFilesystem { root: PathBuf },
     /// The configured path changed generations while startup authenticated it.
     UnstableIdentity { root: PathBuf },
     /// The backend namespace marker could not be established or authenticated.
@@ -1816,9 +1655,6 @@ impl std::fmt::Debug for FilesystemBlobStoreConstructionError {
             Self::Inspect { .. } => "FilesystemBlobStoreConstructionError::Inspect",
             Self::NotDirectory { .. } => "FilesystemBlobStoreConstructionError::NotDirectory",
             Self::NotPrivate { .. } => "FilesystemBlobStoreConstructionError::NotPrivate",
-            Self::UnclassifiedFilesystem { .. } => {
-                "FilesystemBlobStoreConstructionError::UnclassifiedFilesystem"
-            }
             Self::UnstableIdentity { .. } => {
                 "FilesystemBlobStoreConstructionError::UnstableIdentity"
             }
@@ -1850,8 +1686,6 @@ impl std::fmt::Display for FilesystemBlobStoreConstructionError {
             Self::NotPrivate { .. } => {
                 formatter.write_str("filesystem blob-store root is not private")
             }
-            Self::UnclassifiedFilesystem { .. } => formatter
-                .write_str("filesystem blob-store root is not positively classified as local"),
             Self::UnstableIdentity { .. } => {
                 formatter.write_str("filesystem blob-store root identity changed during startup")
             }
@@ -1877,7 +1711,6 @@ impl std::error::Error for FilesystemBlobStoreConstructionError {
             Self::NotAbsolute { .. }
             | Self::NotDirectory { .. }
             | Self::NotPrivate { .. }
-            | Self::UnclassifiedFilesystem { .. }
             | Self::UnstableIdentity { .. } => None,
         }
     }
@@ -1899,8 +1732,7 @@ mod tests {
         (FilesystemBlobStore, FilesystemNamespaceIdentity),
         FilesystemBlobStoreConstructionError,
     > {
-        let opened =
-            OpenedFilesystemBlobRoot::open_with_locality_policy(root.to_path_buf(), false)?;
+        let opened = OpenedFilesystemBlobRoot::open(root.to_path_buf())?;
         FilesystemBlobStore::from_opened_bound(opened, Uuid::from_u128(namespace), state)
     }
 
@@ -1921,9 +1753,8 @@ mod tests {
         fs::set_permissions(&sentinel, fs::Permissions::from_mode(FILE_MODE))
             .expect("the sentinel is private");
 
-        let opened =
-            OpenedFilesystemBlobRoot::open_with_locality_policy(root.path().to_path_buf(), false)
-                .expect("the private root can be inspected");
+        let opened = OpenedFilesystemBlobRoot::open(root.path().to_path_buf())
+            .expect("the private root can be inspected");
 
         assert_eq!(opened.identity().canonical_path(), root.path());
         assert_eq!(
@@ -2033,9 +1864,8 @@ mod tests {
         fs::set_permissions(&spool, fs::Permissions::from_mode(FILE_MODE))
             .expect("the orphan spool is private");
 
-        let staging =
-            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
-                .expect("the staging namespace opens");
+        let staging = FilesystemBlobStaging::try_new(root.path().to_path_buf())
+            .expect("the staging namespace opens");
 
         assert!(!spool.exists());
         assert_eq!(staging.identity().canonical_path(), root.path());
@@ -2046,9 +1876,8 @@ mod tests {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
-        let staging =
-            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
-                .expect("the staging namespace opens");
+        let staging = FilesystemBlobStaging::try_new(root.path().to_path_buf())
+            .expect("the staging namespace opens");
         let spool = root.path().join(UPLOADS_DIRECTORY).join("active-upload");
         fs::write(&spool, b"partial upload").expect("the fixture creates an active spool");
         fs::set_permissions(&spool, fs::Permissions::from_mode(FILE_MODE))
@@ -2066,9 +1895,8 @@ mod tests {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
-        let staging =
-            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
-                .expect("the staging namespace opens");
+        let staging = FilesystemBlobStaging::try_new(root.path().to_path_buf())
+            .expect("the staging namespace opens");
         let mut upload = staging
             .create_upload()
             .await
@@ -2109,9 +1937,8 @@ mod tests {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
-        let staging =
-            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
-                .expect("the staging namespace opens");
+        let staging = FilesystemBlobStaging::try_new(root.path().to_path_buf())
+            .expect("the staging namespace opens");
         let mut upload = staging
             .create_upload()
             .await
@@ -2137,9 +1964,8 @@ mod tests {
         let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
             .expect("the fixture root is private");
-        let staging =
-            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
-                .expect("the staging namespace opens");
+        let staging = FilesystemBlobStaging::try_new(root.path().to_path_buf())
+            .expect("the staging namespace opens");
         let spool = root
             .path()
             .join(UPLOADS_DIRECTORY)
@@ -2267,23 +2093,6 @@ mod tests {
             error.kind(),
             signalbox_blob_store::BlobStoreFailureKind::NotFound
         );
-    }
-
-    #[test]
-    fn filesystem_accepts_only_explicitly_local_block_transport_leaves() {
-        let local = Path::new("/sys/devices/pci0000:00/0000:00:01.0/nvme/nvme0/nvme0n1");
-        let usb_ip = Path::new(
-            "/sys/devices/platform/vhci_hcd.0/usb2/2-1/2-1:1.0/host7/target7:0:0/7:0:0:0/block/sdb",
-        );
-        let virtio = Path::new("/sys/devices/pci0000:00/0000:00:02.0/virtio1/block/vda");
-        let network_block = Path::new("/sys/devices/virtual/block/nbd0");
-        let iscsi = Path::new("/sys/devices/platform/host2/session1/target2:0:0/2:0:0:0/block/sdb");
-
-        assert!(local_block_transport_leaf(local));
-        assert!(!local_block_transport_leaf(usb_ip));
-        assert!(!local_block_transport_leaf(virtio));
-        assert!(!local_block_transport_leaf(network_block));
-        assert!(!local_block_transport_leaf(iscsi));
     }
 
     #[test]
