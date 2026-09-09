@@ -114,11 +114,11 @@ owner's private repositories may be named as provenance, not cited as rules.
   statement (a claim the code or the page's own text contradicts), a broken link
   or cross-reference, a contradiction within the pull request's own files,
   undecided material presented as committed, a failing gating check, a defect in
-  the pull request's own behavior. Decline everything else in one line and
-  resolve the thread: restorations of inventories the code already owns
-  (producer lists, lock orders, dispatch correlations, admission-rule lists),
-  constants, grammars, conventions, hedges, tone, and new content. Reviewers
-  reward building less.
+  the pull request's own behavior, or a mechanism the task does not need.
+  Decline everything else in one line and resolve the thread: restorations of
+  inventories the code already owns (producer lists, lock orders, dispatch
+  correlations, admission-rule lists), constants, grammars, conventions, hedges,
+  tone, and new content. Reviewers reward building less.
 - Request bot review after validation passes, never while a review is pending.
   Limit bot review to five waves per pull request.
 - Stacks: each pull request targets the branch below it and is reviewed against

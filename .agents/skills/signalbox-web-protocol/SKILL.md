@@ -9,10 +9,11 @@ Use this skill for browser endpoints and transports, DTOs, decoders,
 synchronization reducers, commands, read models, stream handling, retries, and
 recovery.
 
-This bootstrap does not decide open browser transport, client language, wire,
-or cross-component questions. Each implementing stack records foundation-weight
-choices in its owning living specification and ordinary choices in its
-pull-request description before this guidance applies.
+This bootstrap does not decide open browser transport, client language, wire, or
+cross-component questions. Each implementing stack records foundation-weight
+choices in a design document at its bottom and ordinary choices in its
+pull-request description before implementation. The owning specification changes
+with the code that builds the design.
 
 ## Separate representations
 
@@ -95,5 +96,5 @@ handling.
 
 Block changes that invent server facts, weaken command replay, conflate durable
 and ephemeral state, expose secrets or private storage detail, silently
-truncate, or require unbounded client materialization. Exact new semantics
+truncate, or require unbounded client materialization. Exact built semantics
 belong in the implementing stack's owning living specification.
