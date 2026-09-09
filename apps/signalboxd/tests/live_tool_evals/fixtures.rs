@@ -1,12 +1,8 @@
 //! Shared evaluation driver, snapshots, and outcomes.
 
 use crate::*;
+use signalbox_persistence::test_support::postgres::TestDatabase;
 
-pub(crate) const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-pub(crate) const DATABASE_NAME: &str = "signalbox_live_tool_evals";
-pub(crate) const DATABASE_USER: &str = "signalbox";
-pub(crate) const DATABASE_PASSWORD: &str = "signalbox-test-only";
-pub(crate) const POSTGRES_PORT: u16 = 5432;
 pub(crate) const POSTGRES_POOL_CONNECTIONS: u32 = 8;
 pub(crate) const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 pub(crate) const FAMILY_VARIABLE: &str = "SIGNALBOX_TOOL_EVAL_FAMILY";
@@ -1473,7 +1469,7 @@ pub(crate) fn eval_receipt(content: &str) -> Option<String> {
 }
 
 pub(crate) struct EvalDatabase {
-    pub(crate) _container: ContainerAsync<Postgres>,
+    pub(crate) _container: TestDatabase,
     pub(crate) pool: PgPool,
     pub(crate) selection: DirectModelSelection,
     pub(crate) targets: ModelTargetCatalog,
@@ -1483,25 +1479,11 @@ pub(crate) struct EvalDatabase {
 
 impl EvalDatabase {
     pub(crate) async fn start(model: &str) -> EvalResult<Self> {
-        let container = Postgres::default()
-            .with_db_name(DATABASE_NAME)
-            .with_user(DATABASE_USER)
-            .with_password(DATABASE_PASSWORD)
-            .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-            .with_tag(POSTGRES_IMAGE_TAG)
-            .with_labels(disposable_test_container_labels())
-            .start()
+        let (container, pool, _database_url) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(
+                POSTGRES_POOL_CONNECTIONS,
+            )
             .await?;
-        let host = container.get_host().await?;
-        let port = container.get_host_port_ipv4(POSTGRES_PORT).await?;
-        let database_url =
-            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-        let pool = PgPoolOptions::new()
-            .max_connections(POSTGRES_POOL_CONNECTIONS)
-            .connect_with(local_test_connection_options(&database_url)?)
-            .await?;
-        migrate(&pool).await?;
         let selection =
             DirectModelSelection::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_SELECTION_ID));
         let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(

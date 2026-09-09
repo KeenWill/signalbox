@@ -40,8 +40,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options, migrate,
+    local_test_connection_options,
     outbox::{
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
@@ -61,10 +60,6 @@ use signalbox_persistence::{
     submit_input::SubmitInputRepository,
 };
 use sqlx::{PgConnection, PgPool, postgres::PgPoolOptions, types::Uuid};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
 
 #[path = "../support/mod.rs"]
 mod support;

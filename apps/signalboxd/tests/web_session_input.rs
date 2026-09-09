@@ -15,17 +15,8 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SettingOverlay, TranscriptAncestry, UserContent,
 };
-use signalbox_persistence::{
-    create_session::CreateSessionRepository, disposable_postgres_server_args,
-    disposable_postgres_state_tmpfs_from_example, disposable_test_container_labels,
-    local_test_connection_options,
-};
-use sqlx::postgres::PgPoolOptions;
+use signalbox_persistence::create_session::CreateSessionRepository;
 use std::error::Error;
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ImageExt, runners::AsyncRunner},
-};
 use tower::ServiceExt as _;
 use uuid::Uuid;
 const MODEL_CONFIGURATION: &str = r#"
@@ -101,26 +92,8 @@ fn submission(session: SessionId, command: Uuid, message: &str) -> Request<Body>
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn web_input_uses_operator_identity_and_retries_one_durable_acceptance()
 -> Result<(), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name("signalbox_web")
-        .with_user("signalbox")
-        .with_password("signalbox-test-only")
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag("18.4-alpine3.23")
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let url = format!(
-        "postgres://signalbox:signalbox-test-only@{}:{}/signalbox_web",
-        container.get_host().await?,
-        container.get_host_port_ipv4(5432).await?
-    );
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(local_test_connection_options(&url)?)
-        .await?;
-    signalbox_persistence::migrate(&pool).await?;
+    let (container, pool, _url) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(8).await?;
 
     let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let session = SessionId::from_uuid(Uuid::from_u128(27));

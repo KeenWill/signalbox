@@ -33,7 +33,11 @@ cargo_build_script(
 
 rust_library(
     name = "signalbox_persistence",
-    compile_data = glob(["migrations/*.sql"]) + ["//:config/signalboxd.example.toml"],
+    compile_data = glob(["migrations/*.sql"]) + [
+        "//:config/signalboxd.example.toml",
+        "//:tooling/postgres_test_image.rs",
+        "//:tooling/postgres_test_container.py",
+    ],
     crate_features = CRATE_FEATURES,
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     deps = [

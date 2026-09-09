@@ -1,6 +1,7 @@
 use super::*;
 use signalbox_application::{InProcessEligibilityWorkSource, InProcessToolDispatchGate};
 use signalbox_persistence::scheduler::PostgresEligibilitySweep;
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ProcessEnvironment, ProcessOutcome, ProcessOutput,
     ProcessRequest, ProcessRunResult, ProcessRunner,
@@ -176,7 +177,7 @@ impl ProcessRunner for PausingCloneRunner {
 }
 
 struct CheckoutFixture {
-    _container: ContainerAsync<Postgres>,
+    _container: TestDatabase,
     _files: tempfile::TempDir,
     core: PgPool,
     module: PgPool,
@@ -1600,7 +1601,7 @@ async fn removal_migration_settles_existing_checkouts_without_inventing_location
             .into(),
         ..sqlx::migrate::Migrator::DEFAULT
     };
-    let (container, core, url) = postgres().await?;
+    let (container, core, url) = unmigrated_postgres().await?;
     parent.run(&core).await?;
     sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
         .execute(&core)
