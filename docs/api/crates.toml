@@ -21,7 +21,7 @@ crates = [
     "signalbox-ownership-seam",
     "signalbox-persistence",
     "signalbox-process-protocol",
-    "signalbox-program-runtime",
+    "signalbox-workflow-runtime",
     "signalbox-runner-wire",
     "signalbox-tool-contract",
     "signalbox-tools-basic",

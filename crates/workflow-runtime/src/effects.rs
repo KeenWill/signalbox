@@ -14,8 +14,8 @@ use signalbox_persistence::program_registration::{
 };
 
 use crate::{
-    LiveDeliveryFailure, LiveDeliverySource, ProgramArtifact, ProgramExecutionOutcome, ProgramHost,
-    ProgramHostError,
+    LiveDeliveryFailure, LiveDeliverySource, ProgramArtifact, ProgramExecutionOutcome,
+    WorkflowHost, WorkflowHostError,
 };
 
 /// How an operation with no durable answer may be attempted after a crash.
@@ -49,7 +49,7 @@ pub trait EffectExecutor {
     ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>>;
 }
 
-impl ProgramHost {
+impl WorkflowHost {
     /// Loads the pinned artifact and grants before starting or replaying the isolate.
     #[allow(
         clippy::result_large_err,
@@ -60,12 +60,12 @@ impl ProgramHost {
         run: ProgramRunId,
         primitives: &mut impl LiveDeliverySource,
         effects: &mut impl EffectExecutor,
-    ) -> Result<ProgramExecutionOutcome, ProgramHostError> {
+    ) -> Result<ProgramExecutionOutcome, WorkflowHostError> {
         let journal = self
             .journal
             .load(run)
             .await?
-            .ok_or(ProgramHostError::JournalMissing(run))?;
+            .ok_or(WorkflowHostError::JournalMissing(run))?;
         let registrations = self.journal.registrations();
         let registration = registrations
             .for_run(run)

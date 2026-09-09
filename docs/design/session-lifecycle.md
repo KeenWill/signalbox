@@ -37,14 +37,14 @@ deadline named in its cause. The daemon reads the active-stall bound from
 configuration, and the pass parks an active or recovering session whose stall
 exceeds it, with the cause selected from the state: active-stall deadline
 expired from active, recovering deadline expired from recovering. Modules and
-the program substrate subscribe to those events and run no timer over a session
-of their own. A module that needs a deadline core does not arm asks for a new
+the workflows layer subscribe to those events and run no timer over a session of
+their own. A module that needs a deadline core does not arm asks for a new
 deadline kind in core.
 
 The lifecycle actor vocabulary gains a run-scoped program-run actor, a reference
 to the program run rather than a module name, for commands issued by a
-registered program's run, as [program substrate](../spec/program-substrate.md)
-and [identity and commands](../spec/identity-and-commands.md) commit it. Storage
+registered program's run, as [workflows](../spec/workflows.md) and
+[identity and commands](../spec/identity-and-commands.md) commit it. Storage
 admits the new discriminator with a run reference beside it, and classification
 treats a program-run principal as it treats a module principal: it wins over the
 domain actor.

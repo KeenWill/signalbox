@@ -107,7 +107,7 @@ pub enum ProgramExecutionOutcome {
 
 /// A program execution attempt failed before producing an outcome.
 #[derive(Debug)]
-pub enum ProgramHostError {
+pub enum WorkflowHostError {
     Journal(ProgramJournalRepositoryError),
     Registration(ProgramRegistrationError),
     JournalMissing(ProgramRunId),
@@ -118,10 +118,10 @@ pub enum ProgramHostError {
         observed: Box<RequestFrame>,
         fault: DeliveryFrame,
     },
-    Protocol(ProgramHostProtocolError),
+    Protocol(WorkflowHostProtocolError),
 }
 
-impl fmt::Display for ProgramHostError {
+impl fmt::Display for WorkflowHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Registration(error) => write!(formatter, "program registration failed: {error}"),
@@ -146,7 +146,7 @@ impl fmt::Display for ProgramHostError {
     }
 }
 
-impl Error for ProgramHostError {
+impl Error for WorkflowHostError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Registration(error) => Some(error),
@@ -159,39 +159,39 @@ impl Error for ProgramHostError {
     }
 }
 
-impl From<ProgramRegistrationError> for ProgramHostError {
+impl From<ProgramRegistrationError> for WorkflowHostError {
     fn from(error: ProgramRegistrationError) -> Self {
         Self::Registration(error)
     }
 }
 
-impl From<ProgramJournalRepositoryError> for ProgramHostError {
+impl From<ProgramJournalRepositoryError> for WorkflowHostError {
     fn from(error: ProgramJournalRepositoryError) -> Self {
         Self::Journal(error)
     }
 }
 
-impl From<deno_core::error::CoreError> for ProgramHostError {
+impl From<deno_core::error::CoreError> for WorkflowHostError {
     fn from(error: deno_core::error::CoreError) -> Self {
         Self::Isolate(error)
     }
 }
 
-impl From<LiveDeliveryFailure> for ProgramHostError {
+impl From<LiveDeliveryFailure> for WorkflowHostError {
     fn from(error: LiveDeliveryFailure) -> Self {
         Self::LiveDelivery(error)
     }
 }
 
-impl From<ProgramHostProtocolError> for ProgramHostError {
-    fn from(error: ProgramHostProtocolError) -> Self {
+impl From<WorkflowHostProtocolError> for WorkflowHostError {
+    fn from(error: WorkflowHostProtocolError) -> Self {
         Self::Protocol(error)
     }
 }
 
 /// An invariant between the isolate, replay cursor, and delivery source failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProgramHostProtocolError {
+pub enum WorkflowHostProtocolError {
     RequestOrdinalExhausted,
     DeliveryPending,
     DuplicateOutstandingRequest,
@@ -204,7 +204,7 @@ pub enum ProgramHostProtocolError {
     Stalled,
 }
 
-impl fmt::Display for ProgramHostProtocolError {
+impl fmt::Display for WorkflowHostProtocolError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::RequestOrdinalExhausted => "request ordinal exhausted",
@@ -224,15 +224,15 @@ impl fmt::Display for ProgramHostProtocolError {
     }
 }
 
-impl Error for ProgramHostProtocolError {}
+impl Error for WorkflowHostProtocolError {}
 
 /// Executes JavaScript modules against a durable journal and replay cursor.
 #[derive(Clone, Debug)]
-pub struct ProgramHost {
+pub struct WorkflowHost {
     journal: ProgramJournalRepository,
 }
 
-impl ProgramHost {
+impl WorkflowHost {
     pub const fn new(journal: ProgramJournalRepository) -> Self {
         Self { journal }
     }
@@ -261,12 +261,12 @@ impl ProgramHost {
         run: ProgramRunId,
         artifact: &ProgramArtifact,
         live_deliveries: &mut impl LiveDeliverySource,
-    ) -> Result<ProgramExecutionOutcome, ProgramHostError> {
+    ) -> Result<ProgramExecutionOutcome, WorkflowHostError> {
         let journal = self
             .journal
             .load(run)
             .await?
-            .ok_or(ProgramHostError::JournalMissing(run))?;
+            .ok_or(WorkflowHostError::JournalMissing(run))?;
         self.execute_loaded(
             run,
             journal,
@@ -286,7 +286,7 @@ impl ProgramHost {
         journal: ProgramJournal,
         artifact: &ProgramArtifact,
         live_deliveries: &mut impl LiveDeliverySource,
-    ) -> Result<ProgramExecutionOutcome, ProgramHostError> {
+    ) -> Result<ProgramExecutionOutcome, WorkflowHostError> {
         // A run that already ended has its outcome in the journal, whatever
         // frames precede the terminal delivery, so this asks before anything
         // about the attempt exists. Replaying to rediscover a recorded outcome
@@ -378,7 +378,7 @@ impl ProgramHost {
                 ReplayInstruction::AwaitRequest => {
                     if let Some(result) = completed_evaluation.take() {
                         result?;
-                        return Err(ProgramHostProtocolError::Stalled.into());
+                        return Err(WorkflowHostProtocolError::Stalled.into());
                     }
                     false
                 }
@@ -387,17 +387,17 @@ impl ProgramHost {
             match runtime_status {
                 Poll::Ready(result) => {
                     if completed_evaluation.is_none() {
-                        return Err(ProgramHostProtocolError::Stalled.into());
+                        return Err(WorkflowHostProtocolError::Stalled.into());
                     }
                     result?;
                     let Some(result) = completed_evaluation.take() else {
-                        return Err(ProgramHostProtocolError::Stalled.into());
+                        return Err(WorkflowHostProtocolError::Stalled.into());
                     };
                     result?;
                     if at_live_tail {
                         return Ok(ProgramExecutionOutcome::Completed);
                     }
-                    return Err(ProgramHostProtocolError::Stalled.into());
+                    return Err(WorkflowHostProtocolError::Stalled.into());
                 }
                 Poll::Pending => {
                     tokio::select! {
@@ -407,21 +407,21 @@ impl ProgramHost {
                                 &mut completed_evaluation,
                             ).await;
                             if completed_evaluation.is_none() {
-                                return Err(ProgramHostProtocolError::Stalled.into());
+                                return Err(WorkflowHostProtocolError::Stalled.into());
                             }
                             result?;
                             let Some(result) = completed_evaluation.take() else {
-                                return Err(ProgramHostProtocolError::Stalled.into());
+                                return Err(WorkflowHostProtocolError::Stalled.into());
                             };
                             result?;
                             if at_live_tail {
                                 return Ok(ProgramExecutionOutcome::Completed);
                             }
-                            return Err(ProgramHostProtocolError::Stalled.into());
+                            return Err(WorkflowHostProtocolError::Stalled.into());
                         }
                         request = request_receiver.recv() => {
                             let request = request.ok_or(
-                                ProgramHostProtocolError::IsolateRequestChannelClosed,
+                                WorkflowHostProtocolError::IsolateRequestChannelClosed,
                             )?;
                             self.accept_request(run, &mut execution, request).await?;
                             continue;
@@ -441,7 +441,7 @@ impl ProgramHost {
         run: ProgramRunId,
         execution: &mut ExecutionState,
         request: IsolateRequest,
-    ) -> Result<(), ProgramHostError> {
+    ) -> Result<(), WorkflowHostError> {
         let frame = execution.frame_for(request.kind)?;
         match execution.cursor.submit_request(frame.clone()) {
             Ok(ReplayedRequest::Matched) => execution.insert_pending(frame, request.reply)?,
@@ -455,15 +455,15 @@ impl ProgramHost {
                         frame.kind().clone(),
                     )
                     .await?
-                    .ok_or(ProgramHostProtocolError::JournalTailChanged)?;
+                    .ok_or(WorkflowHostProtocolError::JournalTailChanged)?;
                 if persisted != frame {
-                    return Err(ProgramHostProtocolError::LiveRequestWasNotAppendedExactly.into());
+                    return Err(WorkflowHostProtocolError::LiveRequestWasNotAppendedExactly.into());
                 }
                 execution.advance_durable_tail()?;
                 execution.insert_pending(persisted, request.reply)?;
             }
             Ok(ReplayedRequest::DeliveryPending) => {
-                return Err(ProgramHostProtocolError::DeliveryPending.into());
+                return Err(WorkflowHostProtocolError::DeliveryPending.into());
             }
             Err(divergence) => {
                 return Err(self
@@ -482,15 +482,15 @@ impl ProgramHost {
         &self,
         divergence: NondeterminismError,
         durable_tail: u64,
-    ) -> Result<ProgramHostError, ProgramHostError> {
+    ) -> Result<WorkflowHostError, WorkflowHostError> {
         let expected = Box::new(divergence.expected().clone());
         let observed = Box::new(divergence.observed().clone());
         let fault = self
             .journal
             .append_nondeterminism_fault_if_tail(divergence, durable_tail)
             .await?
-            .ok_or(ProgramHostProtocolError::JournalTailChanged)?;
-        Ok(ProgramHostError::Nondeterminism {
+            .ok_or(WorkflowHostProtocolError::JournalTailChanged)?;
+        Ok(WorkflowHostError::Nondeterminism {
             expected,
             observed,
             fault,
@@ -506,7 +506,7 @@ impl ProgramHost {
         run: ProgramRunId,
         execution: &mut ExecutionState,
         live_deliveries: &mut impl LiveDeliverySource,
-    ) -> Result<Option<ProgramExecutionOutcome>, ProgramHostError> {
+    ) -> Result<Option<ProgramExecutionOutcome>, WorkflowHostError> {
         let outstanding = execution.outstanding_frames();
         if outstanding.is_empty() {
             return Ok(None);
@@ -517,7 +517,7 @@ impl ProgramHost {
             .journal
             .append_delivery_if_tail(run, execution.durable_tail(), kind)
             .await?
-            .ok_or(ProgramHostProtocolError::JournalTailChanged)?;
+            .ok_or(WorkflowHostProtocolError::JournalTailChanged)?;
         execution.advance_durable_tail()?;
         execution.apply_delivery(delivery).map_err(Into::into)
     }
@@ -695,24 +695,24 @@ impl ExecutionState {
         self.durable_tail
     }
 
-    fn advance_durable_tail(&mut self) -> Result<(), ProgramHostProtocolError> {
+    fn advance_durable_tail(&mut self) -> Result<(), WorkflowHostProtocolError> {
         self.durable_tail = self
             .durable_tail
             .checked_add(1)
-            .ok_or(ProgramHostProtocolError::JournalPositionExhausted)?;
+            .ok_or(WorkflowHostProtocolError::JournalPositionExhausted)?;
         Ok(())
     }
 
     fn frame_for(
         &mut self,
         kind: IsolateRequestKind,
-    ) -> Result<RequestFrame, ProgramHostProtocolError> {
+    ) -> Result<RequestFrame, WorkflowHostProtocolError> {
         let ordinal = RequestOrdinal::try_from_u64(self.next_request_ordinal)
-            .ok_or(ProgramHostProtocolError::RequestOrdinalExhausted)?;
+            .ok_or(WorkflowHostProtocolError::RequestOrdinalExhausted)?;
         self.next_request_ordinal = self
             .next_request_ordinal
             .checked_add(1)
-            .ok_or(ProgramHostProtocolError::RequestOrdinalExhausted)?;
+            .ok_or(WorkflowHostProtocolError::RequestOrdinalExhausted)?;
         Ok(RequestFrame::new(ordinal, None, kind.into_domain()))
     }
 
@@ -720,14 +720,14 @@ impl ExecutionState {
         &mut self,
         frame: RequestFrame,
         reply: oneshot::Sender<IsolateDelivery>,
-    ) -> Result<(), ProgramHostProtocolError> {
+    ) -> Result<(), WorkflowHostProtocolError> {
         let ordinal = frame.ordinal();
         if self
             .pending
             .insert(ordinal, PendingRequest { frame, reply })
             .is_some()
         {
-            return Err(ProgramHostProtocolError::DuplicateOutstandingRequest);
+            return Err(WorkflowHostProtocolError::DuplicateOutstandingRequest);
         }
         Ok(())
     }
@@ -743,10 +743,10 @@ impl ExecutionState {
             .collect()
     }
 
-    fn validate_delivery(&self, kind: &DeliveryKind) -> Result<(), ProgramHostProtocolError> {
+    fn validate_delivery(&self, kind: &DeliveryKind) -> Result<(), WorkflowHostProtocolError> {
         match kind.resolves() {
             Some(ordinal) if !self.pending.contains_key(&ordinal) => {
-                Err(ProgramHostProtocolError::UnknownResolvedRequest)
+                Err(WorkflowHostProtocolError::UnknownResolvedRequest)
             }
             Some(_) | None => Ok(()),
         }
@@ -755,7 +755,7 @@ impl ExecutionState {
     fn apply_delivery(
         &mut self,
         delivery: DeliveryFrame,
-    ) -> Result<Option<ProgramExecutionOutcome>, ProgramHostProtocolError> {
+    ) -> Result<Option<ProgramExecutionOutcome>, WorkflowHostProtocolError> {
         match delivery.kind() {
             DeliveryKind::Answer { resolves, payload } => {
                 self.resolve(
@@ -801,15 +801,15 @@ impl ExecutionState {
         &mut self,
         ordinal: RequestOrdinal,
         delivery: IsolateDelivery,
-    ) -> Result<(), ProgramHostProtocolError> {
+    ) -> Result<(), WorkflowHostProtocolError> {
         let pending = self
             .pending
             .remove(&ordinal)
-            .ok_or(ProgramHostProtocolError::UnknownResolvedRequest)?;
+            .ok_or(WorkflowHostProtocolError::UnknownResolvedRequest)?;
         pending
             .reply
             .send(delivery)
-            .map_err(|_| ProgramHostProtocolError::DeliveryReceiverClosed)
+            .map_err(|_| WorkflowHostProtocolError::DeliveryReceiverClosed)
     }
 }
 

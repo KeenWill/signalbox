@@ -9,15 +9,14 @@ when the work lands.
 Eight capabilities extend the session and transcript subsystem.
 Instruction-aware defaults replacement keeps a session's model selection
 compatible with its admitted workspace instructions. Program creation causes let
-registered programs create sessions under the
-[program substrate](../spec/program-substrate.md). The timeline reports
-referenced blob facts from a durable relation. Search producers publish
-attachment and derived-text classes through the projection-writer port. A
-relocation boundary entry records every session move in the transcript.
-Delegation result sealing consumes a durable reconstituted terminal result. A
-static eligible-failure producer terminalizes a turn at eligibility, and a
-wait-transition failure producer terminalizes a turn whose predecessor model
-call already issued.
+registered programs create sessions under the [workflows](../spec/workflows.md)
+layer. The timeline reports referenced blob facts from a durable relation.
+Search producers publish attachment and derived-text classes through the
+projection-writer port. A relocation boundary entry records every session move
+in the transcript. Delegation result sealing consumes a durable reconstituted
+terminal result. A static eligible-failure producer terminalizes a turn at
+eligibility, and a wait-transition failure producer terminalizes a turn whose
+predecessor model call already issued.
 
 ## Design
 
@@ -40,7 +39,7 @@ and their order, belong to the lock protocol in
 Program creation causes. The creation-cause vocabulary gains an eval variant
 naming the creating program run and the trial identity the
 [evaluation system](../spec/eval-system.md) defines. It is constructible only by
-the program substrate's host-side session capability.
+the workflows host-side session capability.
 
 Timeline blob relation. A durable timeline-to-blob relation supplies the
 referenced blob count and byte length reported by the session summary read. The

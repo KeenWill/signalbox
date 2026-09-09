@@ -12,6 +12,6 @@
 | limits | 0 | 0 | 0 | [limits](limits.md) |
 | names | 0 | 0 | 0 | [names](names.md) |
 | push_arguments | 1 | 0 | 0 | [push_arguments](push_arguments.md) |
-| push_catalog | 2 | 0 | 0 | [push_catalog](push_catalog.md) |
+| push_catalog | 2 | 0 | 1 | [push_catalog](push_catalog.md) |
 | push_executor | 2 | 0 | 0 | [push_executor](push_executor.md) |
 | push_transport | 6 | 1 | 0 | [push_transport](push_transport.md) |

@@ -257,8 +257,8 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertTrue(any("always()" in failure for failure in self.disagreements(rust=text)))
 
     def test_postgres_needs_docker_pool(self):
-        text = (ROOT / ".github/workflows/bazel.yml").read_text().replace("'signalbox-docker'", "'signalbox'")
-        self.assertTrue(any("signalbox-docker" in failure for failure in self.disagreements(bazel=text)))
+        text = (ROOT / ".github/workflows/bazel.yml").read_text().replace("'signalbox-integration-tests'", "'signalbox-builds'")
+        self.assertTrue(any("signalbox-integration-tests" in failure for failure in self.disagreements(bazel=text)))
 
 
 class SuiteExecutionTests(unittest.TestCase):
