@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::SessionReader;
 use signalbox_domain::{
-    CommissionedDispatchId, DirectModelSelection, DispatchingModule, ModelAlias,
+    CommissionedDispatchId, DirectModelSelection, DispatchingModule, DurableCommandId, ModelAlias,
     ModelSelectionRequest, ModuleDispatch, RepoWatchDispatchId, Session,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
     SessionCreationProvenance, SessionId, SessionPlacementEventKind, SessionPlacementVersion,
@@ -83,6 +83,15 @@ impl From<SessionCorruption> for SessionRepositoryError {
     }
 }
 
+/// Core-owned identities linking a repository-watch session to its creation dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepositoryWatchCreationDispatch {
+    /// The repository-watch dispatch retained by session creation.
+    pub dispatch: RepoWatchDispatchId,
+    /// The durable command that created this session.
+    pub command: DurableCommandId,
+}
+
 /// PostgreSQL implementation of the current-session load boundary.
 #[derive(Clone, Debug)]
 pub struct SessionRepository {
@@ -93,6 +102,35 @@ impl SessionRepository {
     /// Uses the supplied pool for database-consistent current-session loads.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Loads creation identities for a repository-watch-dispatched session.
+    /// Returns `None` when the session has no repository-watch creation command.
+    pub async fn repository_watch_creation_dispatch(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<RepositoryWatchCreationDispatch>, SessionRepositoryError> {
+        #[derive(sqlx::FromRow)]
+        struct CreationDispatchRow {
+            dispatch: Uuid,
+            command: Uuid,
+        }
+        let row: Option<CreationDispatchRow> = sqlx::query_as(
+            "SELECT session.dispatch_ref AS dispatch, creation.command_id AS command
+               FROM session
+               JOIN create_session_command AS creation
+                 ON creation.created_session_id = session.session_id
+              WHERE session.session_id = $1
+                AND session.creation_cause = 'module_dispatched'
+                AND session.dispatching_module = 'repo_watch'",
+        )
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| RepositoryWatchCreationDispatch {
+            dispatch: RepoWatchDispatchId::from_uuid(row.dispatch),
+            command: DurableCommandId::from_uuid(row.command),
+        }))
     }
 
     /// Loads one complete current session, or `None` only when its session row

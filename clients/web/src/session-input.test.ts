@@ -352,7 +352,7 @@ it('rejects an oversized draft before serialization or network I/O', async () =>
         command_id: '00000000-0000-0000-0000-000000000992',
         message: 'x'.repeat(MAX_SESSION_MESSAGE_LENGTH * 100),
       }),
-    ).rejects.toThrow('draft length limit')
+    ).rejects.toThrow('Message is too long.')
     expect(stringify).not.toHaveBeenCalled()
     expect(fetch).not.toHaveBeenCalled()
   } finally {

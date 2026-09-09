@@ -260,7 +260,7 @@ fn wire_oauth_outcome(
     reason = "request execution keeps connection I/O and durable correlation explicit"
 )]
 pub(super) async fn handle_request<Writer>(
-    reader: &mut BufReader<OwnedReadHalf>,
+    reader: &mut ClientReader,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,

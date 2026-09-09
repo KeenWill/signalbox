@@ -4,6 +4,25 @@ import XCTest
 @testable import SignalboxNative
 
 final class SessionSynchronizationTests: XCTestCase {
+  func testAutomaticReconciliationExhaustionRefreshesAuthoritativeRecoveryState() throws {
+    for kind in [SignalboxReconciliationOperationKind.modelCall, .toolAttempt] {
+      var transport = try SynchronizationFixture.synchronizedTransport(
+        cursor: SynchronizationFixture.initialCursor)
+      let sessionID = try SynchronizationFixture.sessionID()
+      let turnID = try SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
+      let operationID = try SignalboxCanonicalUUID(validating: "33333333-3333-4333-8333-333333333333")
+      let event = SignalboxFollowedSessionEvent(
+        cursor: .init(rawValue: SynchronizationFixture.unknownCursor), sessionID: sessionID,
+        event: .automaticReconciliationExhausted(
+          turnID: turnID, operationKind: kind, operationID: operationID))
+      let effects = transport.send(.frame(
+        generation: SynchronizationFixture.initialGeneration, message: .sessionEvent(event)))
+      XCTAssertEqual(SynchronizationFixture.effectNames(effects),
+        ["publish_event", "request_side_snapshot", "arm_deadline"])
+      XCTAssertNil(SignalboxProcessTranscriptProjector().projectUnrecognizedFollowedEvent(event))
+    }
+  }
+
   func testDelegationAndRetirementEventsPublishWithoutFullRefresh() throws {
     let parent = try SynchronizationFixture.sessionID()
     let child = try SignalboxCanonicalUUID(validating: "22222222-2222-4222-8222-222222222222")
@@ -3412,6 +3431,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "workspace_root_kind":null,
         "repository_watch":null,
         "session_id":"\(session)",
         "cursor":"\(cursor)",
@@ -3426,6 +3446,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "workspace_root_kind":null,
         "repository_watch":null,
         "session_id":"\(session)",
         "cursor":"\(cursor)",
@@ -3468,6 +3489,7 @@ private enum SynchronizationFixture {
       """
       {
         "type":"transcript_snapshot_start",
+        "workspace_root_kind":null,
         "repository_watch":null,
         "session_id":17,
         "cursor":"10",

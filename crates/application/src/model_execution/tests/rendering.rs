@@ -971,6 +971,8 @@ fn frontier_rendering_resolves_exact_tool_roles_in_source_order() {
             },
         ),
     ];
+    let admitted_text = ToolResultText::try_new(String::from("bounded context text"))
+        .expect("fixture context text is valid");
     let evidence = [
         ResolvedToolConversationEntry::AssistantToolUse {
             source: completed_use_source,
@@ -979,6 +981,7 @@ fn frontier_rendering_resolves_exact_tool_roles_in_source_order() {
         ResolvedToolConversationEntry::ExecutionResult {
             source: completed_result_source,
             request: completed_request.clone(),
+            context_text: Some(admitted_text.clone()),
             attempt: completed_attempt,
         },
         ResolvedToolConversationEntry::AssistantToolUse {
@@ -1019,7 +1022,7 @@ fn frontier_rendering_resolves_exact_tool_roles_in_source_order() {
             ModelConversationMessage::ToolResult {
                 source: completed_result_source,
                 request: completed_request.id(),
-                content: ModelToolResultContent::Success(completed_result),
+                content: ModelToolResultContent::Success(ToolResultContent::Text(admitted_text)),
             },
             ModelConversationMessage::AssistantToolUse {
                 source: denied_use_source,
@@ -1084,6 +1087,12 @@ fn frontier_rendering_rejects_cross_turn_tool_result_evidence() {
     let evidence = ResolvedToolConversationEntry::ExecutionResult {
         source,
         request,
+        context_text: match cross_turn_attempt.end() {
+            ToolAttemptEnd::Completed {
+                result: ToolResultContent::Text(text),
+            } => Some(text.clone()),
+            _ => panic!("fixture has a completed text result"),
+        },
         attempt: cross_turn_attempt,
     };
 

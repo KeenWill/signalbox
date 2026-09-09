@@ -101,7 +101,10 @@ The fenced daemon owns one local workflow runner. User-authorized registration
 and start admission retain executable identity, grants and exact input before
 waking it. Startup resumes registered runs without a terminal outcome, and an
 active run has one attempt at a time. Shutdown drops attempts; restart replays
-the retained requests and deliveries.
+the retained requests and deliveries. JavaScript loading or execution errors,
+stalled programs and unavailable granted effects record a per-run `ProgramError`
+fault; other runs continue and restart retains that outcome. A concurrent
+terminal outcome is preserved.
 
 The Linux compiled catalog includes `clock` revision `1`: its input is a
 big-endian u64, and its result concatenates that input and a journaled

@@ -489,6 +489,9 @@ WITH turn_events AS (
     SELECT event_sequence FROM turn_activated_outbox_event
      WHERE session_id = $1 AND turn_id = $2
     UNION ALL
+    SELECT event_sequence FROM automatic_reconciliation_exhausted_outbox_event
+     WHERE session_id = $1 AND turn_id = $2
+    UNION ALL
     SELECT event_sequence FROM turn_terminal_outbox_event
      WHERE session_id = $1 AND turn_id = $2
     UNION ALL
@@ -1381,6 +1384,10 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                         }
                     };
                     (SessionTimelineDetailBody::Ownership { transition }, None)
+                }
+                DispatchedOutboxEventKind::AutomaticReconciliationExhausted(_) => {
+                    require_no_body_cursor(cursor)?;
+                    (SessionTimelineDetailBody::EventFact { kind }, None)
                 }
                 DispatchedOutboxEventKind::CredentialPoolExhausted(evidence) => {
                     terminal_turn_body(TurnId::from_uuid(evidence.turn_id), "failed", cursor)?
@@ -2963,6 +2970,9 @@ fn response_excerpt(
 
 fn dispatched_event_kind(kind: &DispatchedOutboxEventKind) -> SessionTimelineEventKind {
     match kind {
+        DispatchedOutboxEventKind::AutomaticReconciliationExhausted(_) => {
+            SessionTimelineEventKind::AutomaticReconciliationExhausted
+        }
         DispatchedOutboxEventKind::CredentialPoolExhausted(_) => {
             SessionTimelineEventKind::TurnFailed
         }
@@ -3246,6 +3256,9 @@ fn decode_kind(
         (_, None) => None,
     };
     let kind = match (discriminator, disposition) {
+        (OutboxEventDiscriminator::AutomaticReconciliationExhausted, _) => {
+            SessionTimelineEventKind::AutomaticReconciliationExhausted
+        }
         (OutboxEventDiscriminator::CredentialPoolExhausted, _) => {
             SessionTimelineEventKind::TurnFailed
         }

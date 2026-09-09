@@ -2938,33 +2938,45 @@ public enum SignalboxRepositoryWatchEventKind: String, Decodable, Equatable, Sen
   case reactionChanged = "reaction_changed"
 }
 
+public enum SignalboxSessionWorkspaceRootKind: String, Decodable, Equatable, Sendable {
+  case derived
+  case configured
+  case provisioned
+}
+
 public struct SignalboxTranscriptSnapshotBoundary: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let cursor: SignalboxCanonicalUInt64
   public let runner: SignalboxRunnerProjection?
   public let repositoryWatch: SignalboxRepositoryWatchProvenance?
+  public let workspaceRootKind: SignalboxSessionWorkspaceRootKind?
 
   public init(
     sessionID: SignalboxCanonicalUUID,
     cursor: SignalboxCanonicalUInt64,
     runner: SignalboxRunnerProjection?,
-    repositoryWatch: SignalboxRepositoryWatchProvenance?
+    repositoryWatch: SignalboxRepositoryWatchProvenance?,
+    workspaceRootKind: SignalboxSessionWorkspaceRootKind?
   ) {
     self.sessionID = sessionID
     self.cursor = cursor
     self.runner = runner
     self.repositoryWatch = repositoryWatch
+    self.workspaceRootKind = workspaceRootKind
   }
 
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
-    let fields: Set<String> = ["type", "session_id", "cursor", "runner", "repository_watch"]
+    let fields: Set<String> = [
+      "type", "session_id", "cursor", "runner", "repository_watch", "workspace_root_kind",
+    ]
     try tagged.rejectUnadmittedFields(fields, decoder: decoder)
-    try tagged.requireFields(["runner", "repository_watch"], decoder: decoder)
+    try tagged.requireFields(["runner", "repository_watch", "workspace_root_kind"], decoder: decoder)
     sessionID = try decoder.decode("session_id")
     cursor = try decoder.decode("cursor")
     runner = try decoder.decodeIfPresent("runner")
     repositoryWatch = try decoder.decodeIfPresent("repository_watch")
+    workspaceRootKind = try decoder.decodeIfPresent("workspace_root_kind")
   }
 }
 
@@ -4423,7 +4435,16 @@ private struct SignalboxTurnModelSettingsEvidence: Decodable {
   }
 }
 
+public enum SignalboxReconciliationOperationKind: String, Decodable, Equatable, Sendable {
+  case modelCall = "model_call"
+  case toolAttempt = "tool_attempt"
+}
+
 public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
+  case automaticReconciliationExhausted(
+    turnID: SignalboxCanonicalUUID,
+    operationKind: SignalboxReconciliationOperationKind,
+    operationID: SignalboxCanonicalUUID)
   case goalTurnRetired(turnID: SignalboxCanonicalUUID)
   case childSpawned(spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, relationship: SignalboxDelegationPolicy)
   case childWaiting(awaitRequestID: SignalboxCanonicalUUID, spawningRequestID: SignalboxCanonicalUUID, childSessionID: SignalboxCanonicalUUID, mode: SignalboxDelegationWaitMode)
@@ -4491,6 +4512,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     do {
       switch tagged.kind {
+      case "automatic_reconciliation_exhausted":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "operation_kind", "operation_id"], decoder: decoder)
+        self = .automaticReconciliationExhausted(
+          turnID: try decoder.decode("turn_id"),
+          operationKind: try decoder.decode("operation_kind"),
+          operationID: try decoder.decode("operation_id"))
       case "goal_turn_retired":
         try tagged.rejectUnadmittedFields(["type", "turn_id"], decoder: decoder)
         self = .goalTurnRetired(
