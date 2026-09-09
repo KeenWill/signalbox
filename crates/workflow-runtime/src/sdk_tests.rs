@@ -195,7 +195,22 @@ const define = Object.defineProperty;
 const remove = Reflect.deleteProperty;
 const fromCode = String.fromCharCode;
 const TestError = Error;
-const nativeCall = descriptor(Function.prototype, "call");
+const nativeApply = Reflect.apply;
+let tamperedRequests = 0;
+Reflect.defineProperty(Function.prototype, "call", {
+  value: function (receiver, ...args) {
+    const request = args[1];
+    if (request !== null && typeof request === "object" && typeof request.kind === "string") {
+      tamperedRequests++;
+      request.payload = [1];
+      if (request.kind === "effect") {
+        request.capability = "blob";
+        request.method = "tampered";
+      }
+    }
+    return nativeApply(this, receiver, args);
+  },
+});
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const byteLength = Function.prototype.call.bind(descriptor(typedArrayPrototype, "length").get);
 const input = new Uint8Array([34, 233, 155, 170, 240, 159, 152, 128, 34]);
@@ -228,8 +243,8 @@ const targets = [
   [Object, "freeze"], [Object, "create"], [Object, "defineProperty"],
   [Object, "getPrototypeOf"], [Object, "setPrototypeOf"],
   [Object, "getOwnPropertyDescriptor"], [Object, "hasOwn"], [Object, "is"], [Object, "keys"],
-  [Reflect, "ownKeys"], [Set.prototype, "has"], [Set.prototype, "add"],
-  [Set.prototype, "delete"], [Function.prototype, "call"], [Function.prototype, "bind"],
+  [Reflect, "ownKeys"], [Reflect, "apply"], [Set.prototype, "has"], [Set.prototype, "add"],
+  [Set.prototype, "delete"], [Function.prototype, "apply"], [Function.prototype, "bind"],
   [globalThis, "JSON"], [globalThis, "Uint8Array"], [globalThis, "Object"],
   [globalThis, "Array"], [globalThis, "String"], [globalThis, "Number"],
   [globalThis, "Set"], [globalThis, "TypeError"], [globalThis, "BigInt"], [globalThis, "RegExp"],
@@ -269,8 +284,6 @@ try {
     try { invalidCalls[index](); } catch { rejected = true; }
     if (!rejected) throw new TestError("replaced globals bypassed wrapper validation for case " + index);
   }
-  // Deno's async-op bridge uses Function.prototype.call to invoke its native op.
-  define(Function.prototype, "call", nativeCall);
   const turn = await sdk.session.turn({ command: identity, session: identity,
     text: "雪😀", defaults_version: "18446744073709551615" });
   if (turn.kind !== "answer" || turn.value.outcome !== "completed" || turn.value.digest[31] !== 255) {
@@ -288,6 +301,7 @@ try {
   await sdk.random(raw);
   await sdk.sleep(raw);
   await sdk.awaitEvent(raw);
+  if (tamperedRequests !== 0) throw new TestError("replaced call intercepted native request dispatch");
 } finally {
   for (let index = 0; index < targets.length; index++) {
     if (saved[index] === undefined) remove(targets[index][0], targets[index][1]);

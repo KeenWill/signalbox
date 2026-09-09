@@ -194,14 +194,16 @@ workflow-runtime crate resolves that specifier alone and rejects every other
 import, including relative files and the unversioned name.
 
 The SDK's `defineProgram` decodes input bytes before calling the program body
-and encodes its result through explicit runtime codecs. `jsonCodec` checks JSON
-values during decoding and encoding. Both pass a frozen snapshot of own data
-properties to the validator. Encoding serializes a frozen snapshot of validated
-own data properties; SDK payload intrinsics are captured before program
-evaluation. Typed `register`, `session.create`, and `session.turn` wrappers
-validate method inputs and answer records; refusals and cancellation remain
-typed deliveries. Session defaults versions are decimal strings in TypeScript
-and encode as exact JSON integers without conversion through `Number`.
+and encodes its result through explicit runtime codecs. `jsonCodec` declarations
+reject statically non-JSON values; decoding and encoding also check values at
+runtime. Both pass a frozen snapshot of own data properties to the validator.
+Encoding serializes a frozen snapshot of validated own data properties; SDK
+payload intrinsics are captured before program evaluation, and
+`Function.prototype.call` is immutable for native request dispatch. Typed
+`register`, `session.create`, and `session.turn` wrappers validate method inputs
+and answer records; refusals and cancellation remain typed deliveries. Session
+defaults versions are decimal strings in TypeScript and encode as exact JSON
+integers without conversion through `Number`.
 
 [`tooling/programs`](../../tooling/programs/package.json) owns SDK declarations
 and strict TypeScript examples. `pnpm --dir tooling/programs run check` checks
