@@ -71,6 +71,12 @@ impl program_journal::ProgramJournalRepository {
         program_journal::ProgramJournalWake,
         program_journal::ProgramJournalRepositoryError,
     >;
+    pub async fn listen_all(
+        &self,
+    ) -> result::Result<
+        program_journal::ProgramJournalWake,
+        program_journal::ProgramJournalRepositoryError,
+    >;
     pub async fn next_event(
         &self,
         wait: signalbox_domain::program_primitives::AwaitProgramEvent,
