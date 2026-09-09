@@ -197,8 +197,8 @@ store I/O is owned by
 
 A model-call attachment check binds its cancellation to the call's authoritative
 cancellation; upload work binds cancellation to connection loss and daemon
-shutdown. Authoritative cancellation aborts store I/O without relabeling the
-cancellation as an attachment failure.
+shutdown. Authoritative cancellation ends the daemon's wait for store I/O
+without relabeling the cancellation as an attachment failure.
 
 Ingest publishes and verifies the object before it records the catalog rows,
 with no database transaction open across store I/O, as
