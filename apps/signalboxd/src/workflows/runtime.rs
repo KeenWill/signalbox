@@ -139,8 +139,11 @@ impl WorkflowRuntime {
         shutdown: impl Future<Output = ()>,
         primitives: impl Fn() -> P + Send + 'static,
     ) -> Result<(), WorkflowRuntimeError> {
-        // Dropping this sender on outer-task cancellation also stops the local executor.
         let (stop, stopped) = oneshot::channel();
+        let stop = StopWorkflow {
+            stop: Some(stop),
+            host: self.host.clone(),
+        };
         let mut worker = tokio::task::spawn_blocking(move || {
             let executor = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -156,7 +159,7 @@ impl WorkflowRuntime {
         tokio::select! {
             result = &mut worker => result.map_err(WorkflowRuntimeError::Join)?,
             () = shutdown => {
-                let _ = stop.send(());
+                drop(stop);
                 worker.await.map_err(WorkflowRuntimeError::Join)?
             }
         }
@@ -194,9 +197,24 @@ impl WorkflowRuntime {
             }
         };
         tokio::select! {
+            biased;
             _ = stopped => Ok(()),
             result = execution => result,
         }
+    }
+}
+
+struct StopWorkflow {
+    stop: Option<oneshot::Sender<()>>,
+    host: WorkflowHost,
+}
+
+impl Drop for StopWorkflow {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        self.host.interrupt();
     }
 }
 
@@ -214,6 +232,9 @@ fn attempt<P: LiveDeliverySource + 'static>(
         else {
             return Ok(run);
         };
+        if host.is_interrupted() {
+            return Ok(run);
+        }
         let program_failure = matches!(
             source,
             WorkflowHostError::Isolate(_)
@@ -312,7 +333,7 @@ struct UnavailableEffects {
 }
 impl EffectExecutor for UnavailableEffects {
     fn recovery(&self, _: &EffectRequest) -> EffectRecovery {
-        EffectRecovery::Ambiguous
+        EffectRecovery::Idempotent
     }
     fn adopt<'a>(
         &'a mut self,
@@ -427,7 +448,6 @@ mod tests {
         ) -> Result<signalbox_domain::ProgramJournal, Box<dyn Error>> {
             let (_database, pool, _) =
                 signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
-            let journal = ProgramJournalRepository::new(pool.clone());
             let (service, runner) = WorkflowRuntime::new(pool.clone())?;
             let failed_registration = service
                 .register_javascript(
@@ -441,6 +461,24 @@ mod tests {
                     },
                 )
                 .await?;
+            let failed_run = ProgramRunId::from_uuid(Uuid::now_v7());
+            service
+                .start(failed_run, failed_registration.id, &[])
+                .await?;
+            let failed = assert_run_failure_isolated(&pool, service, runner, failed_run).await?;
+            pool.close().await;
+            Ok(failed)
+        }
+
+        /// Runs an already admitted failure, then verifies continued service and terminal replay.
+        async fn assert_run_failure_isolated(
+            pool: &PgPool,
+            service: WorkflowService,
+            runner: WorkflowRuntime,
+            failed_run: ProgramRunId,
+        ) -> Result<signalbox_domain::ProgramJournal, Box<dyn Error>> {
+            let journal = ProgramJournalRepository::new(pool.clone());
+            let failed_registration = service.registrations.for_run(failed_run).await?.unwrap();
             let healthy_registration = service
                 .register_javascript(
                     ProgramRegistrationId::from_uuid(Uuid::now_v7()),
@@ -457,10 +495,6 @@ mod tests {
             let task = tokio::spawn(runner.run(async {
                 let _ = stopped.await;
             }));
-            let failed_run = ProgramRunId::from_uuid(Uuid::now_v7());
-            service
-                .start(failed_run, failed_registration.id, &[])
-                .await?;
             let failed_journal = tokio::time::timeout(TEST_TIMEOUT, async {
                 loop {
                     let loaded = journal.load(failed_run).await.unwrap().unwrap();
@@ -514,8 +548,204 @@ mod tests {
             stop.send(()).unwrap();
             task.await??;
             assert_eq!(journal.load(failed_run).await?.unwrap(), failed_journal);
-            pool.close().await;
             Ok(failed_journal)
+        }
+
+        /// Identity and revision are arbitrary; artifact and grants define the behavior.
+        fn javascript_request(
+            artifact: String,
+            grants: ProgramGrants,
+        ) -> ProgramRegistrationRequest {
+            ProgramRegistrationRequest {
+                name: Uuid::now_v7().to_string(),
+                revision: Uuid::now_v7().to_string(),
+                source: artifact.as_bytes().to_vec(),
+                artifact,
+                grants,
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_recovered_unavailable_effect_retains_a_fault()
+        -> Result<(), Box<dyn Error>> {
+            let (_database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+            let journal = ProgramJournalRepository::new(pool.clone());
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let registration = service.register_javascript(
+                ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                javascript_request(
+                    "import { effect } from '@signalbox/program-sdk/v1'; await effect('blob', 'unavailable', new Uint8Array());".into(),
+                    ProgramGrants::new([ProgramCapability::Blob]),
+                ),
+            ).await?;
+            let run = ProgramRunId::from_uuid(Uuid::now_v7());
+            service.start(run, registration.id, &[]).await?;
+            // Crash boundary: the request is durable, but execution recorded no delivery.
+            let request = journal
+                .append_request(
+                    run,
+                    None,
+                    RequestKind::Effect(EffectRequest::new(
+                        ProgramCapability::Blob,
+                        "unavailable".into(),
+                        InlineFramePayload::default(),
+                    )),
+                )
+                .await?;
+            let failed = assert_run_failure_isolated(&pool, service, runner, run).await?;
+            assert_eq!(
+                failed.entries().len(),
+                2,
+                "one retained request and its fault"
+            );
+            assert_eq!(failed.entries()[0].frame(), &JournalFrame::Request(request));
+            pool.close().await;
+            Ok(())
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_child_registration_conflict_does_not_stop_the_daemon()
+        -> Result<(), Box<dyn Error>> {
+            let (_database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let existing = service
+                .register_javascript(
+                    ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                    javascript_request(String::new(), ProgramGrants::new([])),
+                )
+                .await?;
+            let input = serde_json::to_vec(&serde_json::json!({
+                "id": existing.id.into_uuid().to_string(),
+                "name": existing.content.name,
+                "revision": existing.content.revision,
+                "source": [],
+                "artifact": "throw new Error('changed child');",
+                "grants": [],
+            }))?;
+            let parent = service.register_javascript(
+                ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                javascript_request(
+                    format!("import {{ effect }} from '@signalbox/program-sdk/v1'; await effect('register', 'register', new Uint8Array({input:?}));"),
+                    ProgramGrants::new([ProgramCapability::Register]),
+                ),
+            ).await?;
+            let run = ProgramRunId::from_uuid(Uuid::now_v7());
+            service.start(run, parent.id, &[]).await?;
+            let failed = assert_run_failure_isolated(&pool, service, runner, run).await?;
+            assert_eq!(
+                failed.entries().len(),
+                2,
+                "registration request and its conflict fault"
+            );
+            assert!(
+                matches!(failed.entries()[0].frame(), JournalFrame::Request(request)
+                if matches!(request.kind(), RequestKind::Effect(effect) if effect.capability() == ProgramCapability::Register))
+            );
+            assert_eq!(
+                ProgramRegistrationRepository::new(pool.clone())
+                    .find(&existing.content)
+                    .await?,
+                Some(existing)
+            );
+            pool.close().await;
+            Ok(())
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_registration_database_failure_remains_a_runtime_error()
+        -> Result<(), Box<dyn Error>> {
+            let (_database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let input = serde_json::to_vec(&serde_json::json!({
+                "id": Uuid::now_v7().to_string(),
+                "name": Uuid::now_v7().to_string(),
+                "revision": Uuid::now_v7().to_string(),
+                "source": [], "artifact": "", "grants": [],
+            }))?;
+            let registration = service.register_javascript(
+                ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                javascript_request(
+                    format!("import {{ effect }} from '@signalbox/program-sdk/v1'; await effect('register', 'register', new Uint8Array({input:?}));"),
+                    ProgramGrants::new([ProgramCapability::Register]),
+                ),
+            ).await?;
+            let run = ProgramRunId::from_uuid(Uuid::now_v7());
+            service.start(run, registration.id, &[]).await?;
+            // Force a database error after admission, only for the child's insert.
+            sqlx::query("ALTER TABLE program_registration ADD CONSTRAINT test_refuse_new_registration CHECK (false) NOT VALID")
+                .execute(&pool).await?;
+            let error = tokio::time::timeout(TEST_TIMEOUT, runner.run(std::future::pending()))
+                .await?
+                .expect_err("database failure must propagate");
+            assert!(matches!(error, WorkflowRuntimeError::Attempt { source, .. }
+                if matches!(source.as_ref(), WorkflowHostError::LiveDelivery(_))));
+            let journal = ProgramJournalRepository::new(pool.clone())
+                .load(run)
+                .await?
+                .unwrap();
+            assert_eq!(
+                journal.entries().len(),
+                1,
+                "the failed database operation has no answer"
+            );
+            assert!(journal.terminal_delivery().is_none());
+            pool.close().await;
+            Ok(())
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_shutdown_interrupts_non_yielding_javascript()
+        -> Result<(), Box<dyn Error>> {
+            let (_database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+            let journal = ProgramJournalRepository::new(pool.clone());
+            let (service, runner) = WorkflowRuntime::new(pool.clone())?;
+            let cleanup = runner.host.clone();
+            let registration = service.register_javascript(
+                ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+                javascript_request(
+                    "import { now } from '@signalbox/program-sdk/v1'; await now(new Uint8Array()); while (true) {}".into(),
+                    ProgramGrants::new([ProgramCapability::Time]),
+                ),
+            ).await?;
+            let run = ProgramRunId::from_uuid(Uuid::now_v7());
+            service.start(run, registration.id, &[]).await?;
+            let (stop, stopped) = oneshot::channel();
+            let mut task = tokio::spawn(runner.run(async {
+                let _ = stopped.await;
+            }));
+            tokio::time::timeout(TEST_TIMEOUT, async {
+                loop {
+                    if journal.load(run).await.unwrap().unwrap().entries().len() == 2 {
+                        break;
+                    }
+                    assert!(!task.is_finished());
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+            })
+            .await?;
+            // Let the answered await resume into the synchronous loop before requesting stop.
+            tokio::time::sleep(POLL_INTERVAL).await;
+            stop.send(()).unwrap();
+            let stopped = tokio::time::timeout(TEST_TIMEOUT, &mut task).await;
+            // Release the blocking worker even if shutdown wiring regresses.
+            cleanup.interrupt();
+            stopped???;
+            let retained = journal.load(run).await?.unwrap();
+            assert_eq!(retained.entries().len(), 2);
+            assert!(
+                retained.terminal_delivery().is_none(),
+                "shutdown leaves the run recoverable"
+            );
+            pool.close().await;
+            Ok(())
         }
 
         #[tokio::test(flavor = "multi_thread")]

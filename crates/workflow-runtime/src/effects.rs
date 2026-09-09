@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, future::Future, pin::Pin};
 use deno_core::serde_json;
 use serde::Deserialize;
 use signalbox_domain::{
-    DeliveryKind, EffectRequest, InlineFramePayload, JournalFrame, ProgramCapability,
+    DeliveryKind, EffectRequest, InlineFramePayload, JournalFrame, ProgramCapability, ProgramFault,
     ProgramRegistrationId, ProgramRunId, RejectReason, RequestFrame, RequestKind, RequestOrdinal,
     program_registration::{ProgramExecutable, ProgramGrants, ProgramRegistrationRequest},
 };
@@ -287,11 +287,19 @@ impl<P, E> GrantedDeliveries<'_, P, E> {
             grants,
         };
         let registration = match attempt {
-            EffectAttempt::Live => self
+            EffectAttempt::Live => match self
                 .registrations
                 .register_child(self.run, registration_id, input)
                 .await
-                .map_err(registration_failure)?,
+            {
+                Ok(registration) => registration,
+                Err(error @ ProgramRegistrationError::RegistrationConflict { .. }) => {
+                    return Ok(DeliveryKind::Fault(ProgramFault::ProgramError(
+                        InlineFramePayload::new(error.to_string().into_bytes()),
+                    )));
+                }
+                Err(error) => return Err(registration_failure(error)),
+            },
             EffectAttempt::Recovered => {
                 let Some(registration) = self
                     .registrations
