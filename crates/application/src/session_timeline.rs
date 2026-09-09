@@ -243,6 +243,8 @@ pub struct SessionWorkFacts {
 /// Lightweight authoritative description of one session read projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTimelineDescriptor {
+    /// Last recorded daemon-local workspace binding, absent before binding.
+    pub workspace_root_kind: Option<signalbox_domain::SessionWorkspaceRootKind>,
     /// Session described by these facts.
     pub session: SessionId,
     /// Lifetime size facts maintained for bounded policy decisions.
@@ -774,6 +776,7 @@ pub enum SessionTimelineDetailBody {
 
     /// Session creation provenance, including an imported frontier when present.
     SessionCreated {
+        workspace_root_kind: Option<signalbox_domain::SessionWorkspaceRootKind>,
         cause: SessionCreationCause,
         imported_evidence: Option<TimelineImportedEvidence>,
     },

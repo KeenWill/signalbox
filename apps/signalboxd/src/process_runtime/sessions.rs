@@ -1059,16 +1059,20 @@ pub(super) async fn handle_operator_status<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    pool: &PgPool,
+    services: &ConnectionServices,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let spool_result = spool_operator_status(
-        ProcessOperatorStatusRepository::new(pool.clone()),
+        ProcessOperatorStatusRepository::new(services.pool.clone()),
         version,
         request_id,
+        match &services.configuration_reload {
+            Some(reload) => reload.repository_ingestion_measurements(),
+            None => Vec::new(),
+        },
     )
     .await;
     drop(snapshot_permit);
@@ -1340,6 +1344,10 @@ pub(super) async fn spool_operator_status(
     repository: ProcessOperatorStatusRepository,
     version: ProtocolVersion,
     request_id: RequestId,
+    ingestion: Vec<(
+        signalbox_domain::RepositorySlug,
+        signalbox_module_repo_watch_v2::measurements::IngestionMeasurements,
+    )>,
 ) -> Result<SessionListSpool, OperatorStatusSpoolError> {
     let mut reader = repository
         .open()
@@ -1371,6 +1379,19 @@ pub(super) async fn spool_operator_status(
         .await
         .map_err(OperatorStatusSpoolError::Spool)?;
     }
+    let ingestion_count = ingestion.len() as u64;
+    for (repository, measurements) in ingestion {
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::RepositoryIngestion(
+                Box::new(wire_ingestion_measurements(repository, measurements)),
+            ))),
+        )
+        .await
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    }
     let counts = reader
         .counts()
         .ok_or(SnapshotSpoolError::EncodeInvariant)
@@ -1381,6 +1402,7 @@ pub(super) async fn spool_operator_status(
         request_id,
         ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
             OperatorStatusEndMessage {
+                repository_ingestion_count: CanonicalU64::new(ingestion_count),
                 lifecycle_week_count: CanonicalU64::new(counts.lifecycle_weeks()),
                 lifecycle_deadline_violation_count: CanonicalU64::new(
                     counts.lifecycle_deadline_violations(),
@@ -2008,19 +2030,6 @@ pub(super) async fn handle_replace_session_metadata<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    if configured_usize(model_configuration, "max_session_metadata_tags")
-        .is_some_and(|maximum| metadata.tags().len() > maximum)
-        || configured_usize(model_configuration, "max_session_metadata_attributes")
-            .is_some_and(|maximum| metadata.attributes().len() > maximum)
-    {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    }
     let replacement = SessionMetadataContent::try_new(
         metadata.title().map(str::to_owned),
         metadata.tags().map(str::to_owned).collect(),
@@ -2053,9 +2062,46 @@ where
         )
         .await;
     };
-    let mut service =
-        ReplaceSessionMetadataService::new(SessionMetadataRepository::new(pool.clone()));
-    match service.execute(request).await {
+    let repository = SessionMetadataRepository::new(pool.clone());
+    let outcome = match repository.load_command(request.command_id()).await {
+        Ok(Some(recorded)) => {
+            let command = signalbox_domain::ReplaceSessionMetadata::new(
+                request.command_id(),
+                request.session(),
+                request.replacement().clone(),
+            );
+            Ok(if recorded.command() == &command {
+                ReplaceSessionMetadataOutcome::Recorded(recorded.result().clone())
+            } else {
+                ReplaceSessionMetadataOutcome::ConflictingReuse {
+                    command_id: request.command_id(),
+                }
+            })
+        }
+        Err(SessionMetadataRepositoryError::DifferentCommandKind { command_id }) => {
+            Ok(ReplaceSessionMetadataOutcome::ConflictingReuse { command_id })
+        }
+        Err(error) => Err(error),
+        Ok(None) => {
+            if configured_usize(model_configuration, "max_session_metadata_tags")
+                .is_some_and(|maximum| metadata.tags().len() > maximum)
+                || configured_usize(model_configuration, "max_session_metadata_attributes")
+                    .is_some_and(|maximum| metadata.attributes().len() > maximum)
+            {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
+            ReplaceSessionMetadataService::new(repository)
+                .execute(request)
+                .await
+        }
+    };
+    match outcome {
         Ok(ReplaceSessionMetadataOutcome::Recorded(ReplaceSessionMetadataResult::Applied(
             applied,
         ))) => {
@@ -2695,4 +2741,32 @@ where
         ),
     };
     write_error(writer, version, request_id, response).await
+}
+
+fn wire_ingestion_measurements(
+    repository: signalbox_domain::RepositorySlug,
+    value: signalbox_module_repo_watch_v2::measurements::IngestionMeasurements,
+) -> signalbox_process_protocol::OperatorStatusRepositoryIngestion {
+    use signalbox_module_repo_watch_v2::measurements::PollOutcome;
+    use signalbox_process_protocol::{
+        OperatorStatusRepositoryIngestion, RepositoryPollAttempt, RepositoryPollOutcome,
+    };
+    OperatorStatusRepositoryIngestion {
+        repository: repository.as_str().to_owned(),
+        last_successful_observation: value.last_successful_observation.map(|at| at.to_string()),
+        last_accepted_webhook: value.last_accepted_webhook.map(|at| at.to_string()),
+        events_recorded: CanonicalU64::new(value.events_recorded),
+        last_poll: value.last_poll.map(|poll| RepositoryPollAttempt {
+            attempted_at: poll.attempted_at.to_string(),
+            outcome: match poll.outcome {
+                PollOutcome::InProgress => RepositoryPollOutcome::InProgress,
+                PollOutcome::Succeeded => RepositoryPollOutcome::Succeeded,
+                PollOutcome::ClientFailed => RepositoryPollOutcome::ClientFailed,
+                PollOutcome::ObservationFailed => RepositoryPollOutcome::ObservationFailed,
+                PollOutcome::StoreFailed => RepositoryPollOutcome::StoreFailed,
+                PollOutcome::FrontierConflict => RepositoryPollOutcome::FrontierConflict,
+                PollOutcome::Cancelled => RepositoryPollOutcome::Cancelled,
+            },
+        }),
+    }
 }

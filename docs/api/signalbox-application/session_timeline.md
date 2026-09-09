@@ -190,6 +190,7 @@ pub struct SessionWorkFacts {
 
 ```rust
 pub struct SessionTimelineDescriptor {
+    pub workspace_root_kind: option::Option<signalbox_domain::SessionWorkspaceRootKind>,
     pub session: signalbox_domain::SessionId,
     pub sizes: SessionTimelineSizeFacts,
     pub bounds: SessionTimelineBounds,
@@ -772,6 +773,7 @@ pub enum SessionTimelineDetailBody {
         transition: TimelineOwnershipTransition,
     },
     SessionCreated {
+        workspace_root_kind: option::Option<signalbox_domain::SessionWorkspaceRootKind>,
         cause: signalbox_domain::SessionCreationCause,
         imported_evidence: option::Option<TimelineImportedEvidence>,
     },

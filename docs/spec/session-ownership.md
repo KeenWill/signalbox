@@ -1,4 +1,4 @@
-# Ownership seam
+# Session ownership
 
 Compiled-in ownership modules contact daemon core through one crate boundary.
 The boundary exposes eight lifecycle event families from a module-specific
@@ -25,11 +25,11 @@ tables may use mutable projections or delete releasable state; they do not
 reference core tables and can be rebuilt from core events and the external
 source.
 
-Module crates depend on `signalbox-ownership-seam`, not the domain, application,
-or persistence crates. The ownership-seam checker rejects those dependency and
-import edges, module SQL that names `public` relations, and core SQL that names
-`mod_` relations. PostgreSQL grants independently deny direct core-table reads,
-core-function execution, and cross-schema references.
+Module crates depend on `signalbox-session-ownership`, not the domain,
+application, or persistence crates. The session-ownership checker rejects those
+dependency and import edges, module SQL that names `public` relations, and core
+SQL that names `mod_` relations. PostgreSQL grants independently deny direct
+core-table reads, core-function execution, and cross-schema references.
 
 The reload-intent input carries the command identity, checked per-repository
 rule sets, and rule-set digest. The module activates the set atomically and

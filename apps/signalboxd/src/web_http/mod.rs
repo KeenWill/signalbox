@@ -689,7 +689,7 @@ fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
     };
     router
         .layer(middleware::from_fn(validate_loopback_host))
-        .layer(middleware::from_fn(origin::validate_blob_fetch_site))
+        .layer(middleware::from_fn(origin::validate_api_fetch_site))
 }
 
 #[derive(Clone, Debug)]

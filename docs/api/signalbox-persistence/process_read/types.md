@@ -125,6 +125,9 @@ impl process_read::ProcessReadRepository {
 pub struct ProcessTranscriptReader {/* private */}
 // derives: fmt::Debug
 impl process_read::ProcessTranscriptReader {
+    pub const fn workspace_root_kind(
+        &self,
+    ) -> option::Option<signalbox_domain::SessionWorkspaceRootKind>;
     pub const fn session(&self) -> signalbox_domain::SessionId;
     pub const fn runner(&self) -> option::Option<&process_read::ProcessRunnerProjection>;
     pub const fn cursor(&self) -> u64;

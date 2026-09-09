@@ -71,7 +71,7 @@ large content.
 
 On failure retain the artifacts supported by the selected browser-test stack:
 
-- browser-runner trace, such as a Playwright trace when the implementing
+- browser-runner trace, such as a Playwright trace when the committed design or
   specification selects Playwright;
 - screenshot;
 - console messages and page errors;

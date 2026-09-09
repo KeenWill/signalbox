@@ -1,11 +1,42 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { commandById, globalHotkeySequenceBindings, invokeCommand } from './commands'
-import { productCommandRegistry } from './productCommands'
+import {
+  invokeProductCommand,
+  productCommandAvailable,
+  productCommandRegistry,
+} from './productCommands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
   afterEach(() => vi.unstubAllGlobals())
 
+  it('uses retained navigation availability for both command registries and invocation', () => {
+    const navigate = vi.fn()
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+      openNavigation: () => undefined,
+      navigate,
+      navigationLocked: true,
+    }
+    for (const command of productCommandRegistry.filter((candidate) =>
+      candidate.id.startsWith('navigate.'),
+    )) {
+      expect(productCommandAvailable(command.id, context)).toBe(false)
+      invokeProductCommand(command.id, context)
+    }
+    expect(commandById('navigate.settings').available(context)).toBe(false)
+    invokeCommand('navigate.settings', context)
+    expect(navigate).not.toHaveBeenCalled()
+    const unlocked = { ...context, navigationLocked: false }
+    expect(productCommandAvailable('navigate.settings', unlocked)).toBe(true)
+    invokeProductCommand('navigate.settings', unlocked)
+    expect(navigate).toHaveBeenCalledWith('/settings')
+  })
   it('removes a composer attachment only in a context that supplies removal', () => {
     const removeAttachment = vi.fn()
     const context = {

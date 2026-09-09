@@ -159,6 +159,7 @@ async function sessionApi(
       json: {
         session_id: selectedSessionId,
         repository_watch: origin,
+        workspace_root_kind: null,
         sizes: {
           item_count: state.grown ? '3' : '2',
           projected_text_bytes: String(
@@ -563,6 +564,7 @@ test('keeps earlier text reachable after live appending evicts a text-page entry
       json: {
         session_id: sessionId,
         repository_watch: null,
+        workspace_root_kind: null,
         sizes: {
           item_count: String(latest()),
           projected_text_bytes: String(latest() * 7),
@@ -709,9 +711,9 @@ for (const growth of [false, true]) {
     await expect(
       page
         .getByRole('region', { name: sessionId, exact: true })
-        .getByRole('definition')
+        .getByRole('definition', { includeHidden: true })
         .filter({ hasText: /^44$/ }),
-    ).toBeVisible()
+    ).toHaveText('44')
     await expect(page.getByText(initialMessage, { exact: true })).toBeVisible()
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeInViewport()
     await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeInViewport()

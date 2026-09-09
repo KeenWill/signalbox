@@ -2,7 +2,7 @@
 
 use crate::{RepoWatchStore, StoreError};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     CommitSha, DurableCommandId, RepoWatchDispatchId, RepoWatchEvent, RepoWatchEventId, SessionId,
 };
 use uuid::Uuid;

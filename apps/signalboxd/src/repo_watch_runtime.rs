@@ -11,7 +11,7 @@ use signalbox_module_repo_watch_v2::{
     ReloadIntentInput, RepoWatchStore, RepositoryRuleSet, RuleReconciliationAdmission,
     ingest::run_repository_task, provider::GitHubRepositoryTask,
 };
-use signalbox_ownership_seam::{LifecycleEventSource, OffsetDateTime};
+use signalbox_session_ownership::{LifecycleEventSource, OffsetDateTime};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{
     sync::{Mutex, Notify, watch},
@@ -101,6 +101,7 @@ pub async fn connect_repository_watch_pool(
 /// A reload handle and one serialized command worker for the compiled-in module.
 #[derive(Clone)]
 pub struct RepositoryWatchRuntime {
+    measurements_store: RepoWatchStore,
     state: Arc<Mutex<RuntimeState>>,
 }
 
@@ -140,6 +141,12 @@ pub(crate) struct PreparedRepositoryWatchReload {
 }
 
 impl RepositoryWatchRuntime {
+    pub(crate) fn ingestion_measurements(
+        &self,
+        repository: &RepositorySlug,
+    ) -> signalbox_module_repo_watch_v2::measurements::IngestionMeasurements {
+        self.measurements_store.ingestion_measurements(repository)
+    }
     pub(crate) async fn session_origin(
         &self,
         session: signalbox_domain::SessionId,
@@ -168,8 +175,8 @@ impl RepositoryWatchRuntime {
         };
         store
             .origin_for_create_command(
-                signalbox_ownership_seam::RepoWatchDispatchId::from_uuid(dispatch),
-                signalbox_ownership_seam::DurableCommandId::from_uuid(command),
+                signalbox_session_ownership::RepoWatchDispatchId::from_uuid(dispatch),
+                signalbox_session_ownership::DurableCommandId::from_uuid(command),
             )
             .await?
             .map(Some)
@@ -246,7 +253,9 @@ impl RepositoryWatchRuntime {
     /// Composes the idle supervisor without activating on-disk rules before recovery.
     pub fn unstarted(module_pool: PgPool, services: RepositoryWatchServices) -> Self {
         let (repository_shutdown, _) = watch::channel(false);
+        let store = RepoWatchStore::new(module_pool.clone());
         Self {
+            measurements_store: store.clone(),
             state: Arc::new(Mutex::new(RuntimeState {
                 workers: WorkerState::Prepared,
                 paused: true,
@@ -257,7 +266,7 @@ impl RepositoryWatchRuntime {
                 sweep: None,
                 prepared_sweep: None,
                 commands: None,
-                store: RepoWatchStore::new(module_pool.clone()),
+                store,
                 module_pool,
                 lifecycle: LifecycleEventSource::new(services.core_pool.clone()),
                 factory: RepositoryWatchCommandFactory(services.templates),

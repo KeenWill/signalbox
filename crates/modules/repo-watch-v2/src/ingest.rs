@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::Value;
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     BranchName, CommitSha, OffsetDateTime, PullRequestNumber,
     RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
     RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
@@ -123,7 +123,7 @@ impl RepoWatchStore {
                     Some(number) => RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
                         identity,
                         sequence,
-                        signalbox_ownership_seam::PullRequestNumber::new(
+                        signalbox_session_ownership::PullRequestNumber::new(
                             number
                                 .to_u64()
                                 .and_then(std::num::NonZeroU64::new)
@@ -247,15 +247,39 @@ impl RepoWatchStore {
                 content_identity: occurrence.content_identity(),
             })
             .collect::<Vec<_>>();
-        self.commit_frontier_candidate(
-            &projection,
-            baseline.generation,
-            &frontier.entries().collect::<Vec<_>>(),
-            &events,
-            producer,
-            observed.observed_at,
-        )
-        .await
+        let admission = self
+            .commit_frontier_candidate(
+                &projection,
+                baseline.generation,
+                &frontier.entries().collect::<Vec<_>>(),
+                &events,
+                producer,
+                observed.observed_at,
+            )
+            .await?;
+        let recorded = match &admission {
+            FrontierEventAdmission::Committed { events, .. } => Some(
+                events
+                    .iter()
+                    .filter(|event| **event == crate::EventAdmission::Inserted)
+                    .count() as u64,
+            ),
+            FrontierEventAdmission::Unchanged => Some(0),
+            FrontierEventAdmission::Stale | FrontierEventAdmission::ConflictingReuse => None,
+        };
+        if let Some(recorded) = recorded {
+            self.measurements.update(&observed.repository, |value| {
+                value.last_successful_observation = Some(
+                    value
+                        .last_successful_observation
+                        .map_or(observed.observed_at, |prior| {
+                            prior.max(observed.observed_at)
+                        }),
+                );
+                value.events_recorded += recorded;
+            });
+        }
+        Ok(admission)
     }
 }
 

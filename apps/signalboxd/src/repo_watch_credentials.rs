@@ -12,6 +12,9 @@ use signalbox_module_repo_watch_v2::github::{GitHubClient, GitHubClientError};
 
 use crate::{FileCredentialAccess, WatchedRepositoryConfiguration};
 
+/// Non-secret reference for the repository-scoped push transport.
+pub(crate) const GIT_PUSH_CREDENTIAL_REFERENCE: &str = "repository-watch-git-push";
+
 /// Resolves only the credential assigned to one configured repository.
 #[derive(Clone, Debug)]
 pub struct RepositoryWatchClientLoader {
@@ -52,7 +55,7 @@ impl RepositoryWatchClientLoader {
     }
 
     pub(crate) fn for_git_push(path: PathBuf) -> Self {
-        let reference = CredentialReference::new("repository-watch-git-push");
+        let reference = CredentialReference::new(GIT_PUSH_CREDENTIAL_REFERENCE);
         Self {
             credentials: FileCredentialAccess::new(path, reference.clone()),
             reference,
@@ -217,6 +220,8 @@ mod tests {
         };
         assert!(loader.load().await.is_err());
         std::fs::write(&path, "fixture-token\r\n").expect("write terminated token");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .expect("private credential fixture");
         assert!(loader.load().await.is_ok());
         std::fs::write(&path, "invalid\nheader").expect("rotate to invalid token");
         let error = loader.load().await.err().expect("invalid token rejected");

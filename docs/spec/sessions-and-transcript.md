@@ -31,6 +31,13 @@ imported ancestry also records whether the client resumed or forked from that
 point. Resume declares a continuation and fork declares a branch, and the
 relationship records creation-time intent only.
 
+Daemon-local workspace binding records a path-free `workspace_root_kind`:
+`derived`, `configured`, or `provisioned` when the checkout marker matches the
+session's retained dispatch. Transcript snapshots, browser session descriptors,
+and browser creation evidence project the recorded kind; it is absent until
+binding. The workspace guard logs the kind when it binds, and a process restart
+records the root it binds in that process.
+
 Two durable command families create sessions from outside a turn, and a
 delegation spawn creates a child session from inside one. `CreateSession`
 creates a session with no ancestry, from explicit defaults or from a named
@@ -529,11 +536,12 @@ workspace record budget and projected-byte page budget; discarded records
 consume both budgets. The scan and retained-content item budgets are clamped
 independently to the advertised limit. The continuation remains available when
 either budget is exhausted. An empty detail page stops the scan and preserves
-its unreturned-item continuation. The conversation shows user and assistant
-text, tool arguments and output, and unsuccessful turn outcomes in event order.
-Repeated terminal outcomes for the same turn and cause appear once. Bookkeeping
-is hidden until Events is selected. The last bounded raw detail page is retained
-separately from conversation content to validate body continuations.
+its unreturned-item continuation. The conversation shows user and assistant text
+and attachment references, tool arguments and output, and unsuccessful turn
+outcomes in event order. Repeated terminal outcomes for the same turn and cause
+appear once. Bookkeeping is hidden until Events is selected. The last bounded
+raw detail page is retained separately from conversation content to validate
+body continuations.
 
 The session timeline descriptor includes nullable repository-watch provenance
 resolved from the retained dispatch ledger.

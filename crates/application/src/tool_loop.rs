@@ -1918,7 +1918,9 @@ fn admit_executor_evidence(
                     ToolResultTextFailure::TooLarge { .. } => {
                         ToolExecutionErrorKind::ResultTooLarge
                     }
-                    ToolResultTextFailure::ContainsNull => ToolExecutionErrorKind::ExecutionFailed,
+                    ToolResultTextFailure::ContainsNull => {
+                        ToolExecutionErrorKind::ResultContainsNull
+                    }
                 };
                 ToolAttemptObservation::KnownFailed {
                     error: ToolExecutionError::new(kind, None),
@@ -4105,17 +4107,14 @@ mod tests {
         );
     }
 
-    /// a result carrying U+0000 is admitted as a detail-less `ExecutionFailed`. The tool-loop
-    /// specification names a replacement kind for the size bound only, so this test pins the
-    /// implemented mapping for the null-bearing arm rather than a specified one.
     #[test]
-    fn result_containing_null_is_replaced_by_execution_failed() {
+    fn result_containing_null_is_replaced_by_result_contains_null() {
         let observation = completed_text_admission(String::from("head\0tail"));
 
         assert_eq!(
             observation.observation(),
             &ToolAttemptObservation::KnownFailed {
-                error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+                error: ToolExecutionError::new(ToolExecutionErrorKind::ResultContainsNull, None),
             }
         );
     }
@@ -4160,10 +4159,25 @@ mod tests {
         );
     }
 
-    /// the substitution is what the hub durably commits — the ended attempt carries the typed
-    /// `ResultTooLarge` failure, so oversized executor bytes never become durable result evidence.
     #[tokio::test]
     async fn committed_oversized_result_ends_the_attempt_known_failed() {
+        assert_committed_result_failure(
+            "r".repeat(OVERSIZED_RESULT_BYTES),
+            ToolExecutionErrorKind::ResultTooLarge,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn committed_null_result_ends_the_attempt_known_failed() {
+        assert_committed_result_failure(
+            String::from("head\0tail"),
+            ToolExecutionErrorKind::ResultContainsNull,
+        )
+        .await;
+    }
+
+    async fn assert_committed_result_failure(text: String, kind: ToolExecutionErrorKind) {
         let effect_class = ToolEffectClass::EffectFree;
         let (batch, _) = prepared_batch("{}", effect_class);
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -4192,9 +4206,7 @@ mod tests {
             ToolExecutionInvocation::try_new(batch.requests()[0].clone(), definition, authorized)
                 .expect("fixture invocation matches durable authority");
         let executor = FixedEvidenceExecutor {
-            evidence: Some(invocation.bind(ToolExecutorEvidence::CompletedText(
-                "r".repeat(OVERSIZED_RESULT_BYTES),
-            ))),
+            evidence: Some(invocation.bind(ToolExecutorEvidence::CompletedText(text))),
         };
         let mut service = ToolExecutionService::new(
             FixedIds::new(),
@@ -4207,7 +4219,7 @@ mod tests {
         let outcome = service
             .execute(batch.session(), batch.turn())
             .await
-            .expect("an oversized result is an ordinary typed failure, not an error");
+            .expect("rejected result content commits an ordinary typed failure");
         let ToolExecutionServiceOutcome::ObservationCommitted(ended) = outcome else {
             panic!("an admitted observation commits");
         };
@@ -4215,7 +4227,7 @@ mod tests {
         assert_eq!(
             ended.end(),
             &signalbox_domain::ToolAttemptEnd::KnownFailed {
-                error: ToolExecutionError::new(ToolExecutionErrorKind::ResultTooLarge, None),
+                error: ToolExecutionError::new(kind, None),
             }
         );
         assert_eq!(*events.lock().expect("event lock"), ["authorize", "commit"]);
