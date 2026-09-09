@@ -2425,9 +2425,9 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn a_parked_turn_defers_instruction_discovery_until_release() -> Result<(), Box<dyn Error>> {
+async fn assert_park_defers_instruction_discovery(
+    through_wrapper: bool,
+) -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{
         DispatchingModule, InstructionPath, LifecycleActor, SessionParkCause, SessionParkResponder,
     };
@@ -2473,21 +2473,29 @@ async fn a_parked_turn_defers_instruction_discovery_until_release() -> Result<()
         catalog([]),
         executor.clone(),
     );
-    let execution =
-        execution.with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
-            fixture.pool.clone(),
-            None,
-            vec![InstructionPath::try_new(
-                workspace
-                    .path()
-                    .to_str()
-                    .expect("UTF-8 fixture path")
-                    .to_owned(),
-            )?],
-        ));
-    execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
+    let workspace_instructions = signalboxd::WorkspaceInstructionRuntime::new(
+        fixture.pool.clone(),
+        None,
+        vec![InstructionPath::try_new(
+            workspace
+                .path()
+                .to_str()
+                .expect("UTF-8 fixture path")
+                .to_owned(),
+        )?],
+    );
+    let execution = execution.with_workspace_instructions(workspace_instructions.clone());
+    let wrapped = signalboxd::WorkspaceInstructionPreparedExecution::new(
+        execution.clone(),
+        workspace_instructions,
+    );
+    if through_wrapper {
+        wrapped.execute(Box::new(fixture.activated.clone())).await?;
+    } else {
+        execution
+            .execute(Box::new(fixture.activated.clone()))
+            .await?;
+    }
     let evidence: (i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM instruction_discovery WHERE session_id = $1 AND turn_id = $2),
@@ -2506,9 +2514,13 @@ async fn a_parked_turn_defers_instruction_discovery_until_release() -> Result<()
     assert!(executor.events().is_empty());
 
     lifecycle.resume(fixture.session).await?;
-    execution
-        .execute(Box::new(fixture.activated.clone()))
-        .await?;
+    if through_wrapper {
+        wrapped.execute(Box::new(fixture.activated.clone())).await?;
+    } else {
+        execution
+            .execute(Box::new(fixture.activated.clone()))
+            .await?;
+    }
     let manifests: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM turn_instruction_manifest WHERE session_id = $1 AND turn_id = $2",
     )
@@ -2522,6 +2534,18 @@ async fn a_parked_turn_defers_instruction_discovery_until_release() -> Result<()
     );
     assert_eq!(runtime.received_operations().len(), 1);
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_parked_turn_defers_instruction_discovery_until_release() -> Result<(), Box<dyn Error>> {
+    assert_park_defers_instruction_discovery(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_instruction_wrapper_defers_discovery_while_parked() -> Result<(), Box<dyn Error>> {
+    assert_park_defers_instruction_discovery(true).await
 }
 
 #[derive(Clone, Debug)]

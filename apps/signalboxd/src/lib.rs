@@ -402,6 +402,13 @@ where
         let execution = self.execution.clone();
         let workspace_instructions = self.workspace_instructions.clone();
         async move {
+            if workspace_instructions
+                .session_is_parked(activated.session())
+                .await
+                .map_err(WorkspaceInstructionPreparedExecutionError::WorkspaceInstructions)?
+            {
+                return Ok(());
+            }
             if !workspace_instructions
                 .prepare(activated.session(), activated.turn())
                 .await
