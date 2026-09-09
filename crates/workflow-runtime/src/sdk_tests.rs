@@ -212,6 +212,57 @@ if (decoded.correct !== true || Object.hasOwn(decoded, "corrupted")) {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn json_codec_refuses_inherited_serialization_hooks() {
+    for (setup, value) in [
+        (
+            "Object.prototype.toJSON = () => null;",
+            "({ correct: true })",
+        ),
+        ("Object.prototype.toJSON = () => null;", "[true]"),
+        (
+            "Array.prototype.toJSON = () => null;",
+            "({ nested: [true] })",
+        ),
+        (
+            "Object.defineProperty(Object.prototype, 'toJSON', { get() { throw new Error('hook was invoked'); } });",
+            "({ correct: true })",
+        ),
+    ] {
+        let (result, requests) = sdk_script(
+            &format!("{setup}\nsdk.jsonCodec(value => value).encode({value});"),
+            [],
+        )
+        .await;
+        let error = result.expect_err("inherited serialization hooks must fail encoding");
+        assert!(
+            error
+                .to_string()
+                .contains("inherited JSON serialization hook"),
+            "{setup} must be refused before serializing {value} or invoking the hook: {error}"
+        );
+        assert!(requests.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn json_codec_decoding_uses_the_preloaded_uri_decoder() {
+    let (result, requests) = sdk_script(
+        r#"
+globalThis.decodeURIComponent = () => '{"corrupted":true}';
+const codec = sdk.jsonCodec(value => value);
+const decoded = codec.decode(Uint8Array.from('{"correct":true}', c => c.charCodeAt(0)));
+if (decoded.correct !== true || Object.hasOwn(decoded, "corrupted")) {
+  throw new Error("program code must not replace the SDK URI decoder");
+}
+"#,
+        [],
+    )
+    .await;
+    result.expect("decoding must read the input bytes after decodeURIComponent is reassigned");
+    assert!(requests.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn json_codec_refuses_values_that_json_cannot_preserve() {
     for value in [
         "NaN",

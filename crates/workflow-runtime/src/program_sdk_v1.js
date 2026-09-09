@@ -2,6 +2,7 @@
   const request = globalThis.__signalboxProgramRequest;
   Reflect.deleteProperty(globalThis, "__signalboxProgramRequest");
   const { stringify: jsonStringify, parse: jsonParse } = JSON;
+  const decodeUriComponent = decodeURIComponent;
 
   const call = (kind, payload) => {
     if (!(payload instanceof Uint8Array)) {
@@ -47,6 +48,9 @@
     if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) {
       throw new TypeError("expected a JSON record or array");
     }
+    if (!Object.hasOwn(value, "toJSON") && "toJSON" in value) {
+      throw new TypeError("inherited JSON serialization hook is not supported");
+    }
     const keys = Reflect.ownKeys(value);
     if (array) {
       if (keys.length !== value.length + 1) throw new TypeError("expected a dense JSON array without extra properties");
@@ -74,7 +78,7 @@
       (character) => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0")),
       (character) => character.charCodeAt(0));
   };
-  const decodeJson = (value) => jsonParse(decodeURIComponent(Array.from(bytes(value),
+  const decodeJson = (value) => jsonParse(decodeUriComponent(Array.from(bytes(value),
     (byte) => "%" + byte.toString(16).padStart(2, "0")).join("")));
   const jsonCodec = (decode) => Object.freeze({
     decode(value) { return decode(decodeJson(value)); },
