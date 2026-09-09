@@ -132,13 +132,14 @@ host drops the JavaScript isolate or native root future; the daemon retains only
 the outstanding requests until a delivery is recorded, then reconstructs the run
 by replay. Event waits share one PostgreSQL listener per runtime and catch up
 from retained state on each broadcast hint. Cancellation wakes and drops blocked
-host operations. Shutdown interrupts non-yielding JavaScript and drains
-attempts; restart replays the retained requests and deliveries. JavaScript
-loading or execution errors, stalled programs, child registration conflicts and
-unavailable granted effects record a per-run `ProgramError` fault; other runs
-continue and restart retains that outcome. Recovery retries an unanswered
-unavailable effect into the same fault. A concurrent terminal outcome is
-preserved.
+host operations. An ambiguous cancellation commit replays the same durable
+command identity before signalling the attempt. Shutdown interrupts non-yielding
+JavaScript and drains attempts; restart replays the retained requests and
+deliveries. JavaScript loading or execution errors, stalled programs, child
+registration conflicts and unavailable granted effects record a per-run
+`ProgramError` fault; other runs continue and restart retains that outcome.
+Recovery retries an unanswered unavailable effect into the same fault. A
+concurrent terminal outcome is preserved.
 
 The Linux compiled catalog includes `clock` revision `1`: its input is a
 big-endian u64, and its result concatenates that input and a journaled

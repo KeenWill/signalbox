@@ -860,6 +860,32 @@ mod tests {
         #[ignore = "requires ephemeral PostgreSQL"]
         async fn workflows_cancellation_drops_a_blocked_delivery_before_wake()
         -> Result<(), Box<dyn Error>> {
+            assert_cancellation_drops_blocked_delivery(CancellationCommit::Confirmed).await
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_ambiguous_committed_cancellation_interrupts_a_blocked_delivery()
+        -> Result<(), Box<dyn Error>> {
+            assert_cancellation_drops_blocked_delivery(CancellationCommit::ReplyLost).await
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires ephemeral PostgreSQL"]
+        async fn workflows_ambiguous_rolled_back_cancellation_retries_the_same_command()
+        -> Result<(), Box<dyn Error>> {
+            assert_cancellation_drops_blocked_delivery(CancellationCommit::RolledBack).await
+        }
+
+        enum CancellationCommit {
+            Confirmed,
+            ReplyLost,
+            RolledBack,
+        }
+
+        async fn assert_cancellation_drops_blocked_delivery(
+            commit: CancellationCommit,
+        ) -> Result<(), Box<dyn Error>> {
             use signalbox_domain::DurableCommandId;
             use signalbox_persistence::program_cancellation::{self, CancelProgramRun};
             let (_database, pool, _) =
@@ -887,15 +913,40 @@ mod tests {
             let release = tokio::time::timeout(TEST_TIMEOUT, selection.recv())
                 .await?
                 .unwrap();
-            program_cancellation::cancel(
-                &pool,
-                CancelProgramRun {
-                    command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
-                    run_id: run,
-                },
-            )
-            .await?;
-            service.cancelled(run);
+            let command = CancelProgramRun {
+                command_id: DurableCommandId::from_uuid(Uuid::now_v7()),
+                run_id: run,
+            };
+            let attempt = match commit {
+                CancellationCommit::Confirmed => {
+                    program_cancellation::cancel(&pool, command.clone()).await
+                }
+                CancellationCommit::ReplyLost | CancellationCommit::RolledBack => {
+                    if matches!(commit, CancellationCommit::ReplyLost) {
+                        program_cancellation::cancel(&pool, command.clone()).await?;
+                    }
+                    Err(
+                        program_cancellation::ProgramCancellationError::CommitAmbiguous(
+                            sqlx::Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+                        ),
+                    )
+                }
+            };
+            assert_eq!(
+                service
+                    .complete_cancellation(&pool, command.clone(), attempt)
+                    .await?,
+                program_cancellation::ProgramCancellationResult::Recorded(
+                    program_cancellation::ProgramCancellationOutcome::Applied,
+                ),
+            );
+            assert_eq!(
+                program_cancellation::cancel(&pool, command).await?,
+                program_cancellation::ProgramCancellationResult::Recorded(
+                    program_cancellation::ProgramCancellationOutcome::Applied,
+                ),
+                "reconciliation preserves the command's receipt",
+            );
             tokio::time::timeout(TEST_TIMEOUT, completion.recv())
                 .await?
                 .unwrap();
