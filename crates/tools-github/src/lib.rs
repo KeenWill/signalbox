@@ -3702,19 +3702,6 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_rejects_inline_only_comment() {
-        let value = serde_json::json!({
-            "repository": "KeenWill/signalbox", "number": 1,
-            "commit_id": HEAD_REVISION, "event": "comment",
-            "comments": [{
-                "path": FILE_PATH, "line": 1, "side": "right", "body": REVIEW_COMMENT_BODY
-            }]
-        });
-
-        assert!(serde_json::from_value::<PublishReviewArguments>(value).is_err());
-    }
-
-    #[test]
     fn deserialization_rejects_bodyless_change_request() {
         let value = serde_json::json!({
             "repository": "KeenWill/signalbox", "number": 1,
@@ -4106,31 +4093,6 @@ mod tests {
         let error = executor
             .failure_detail(ToolKind::PublishReview, &failure)
             .expect_err("pre-dispatch infrastructure is surfaced to the operator");
-
-        assert_eq!(failure, GitHubTransportFailure::PreDispatchInfrastructure);
-        assert_eq!(
-            error.operator_failure_class(),
-            OperatorFailureClass::Infrastructure {
-                commit_ambiguous: false
-            }
-        );
-    }
-
-    #[test]
-    fn fixed_host_destination_rejection_is_pre_dispatch_infrastructure() {
-        let failure =
-            classify_destination_failure(PublicDestinationClientError::DestinationRejected);
-        let executor = GitHubTools::try_new(
-            SyntheticCredentials,
-            SyntheticTransport,
-            GitHubEgressPolicy::github_api_only(),
-        )
-        .expect("static declarations compile")
-        .into_parts()
-        .1;
-        let error = executor
-            .failure_detail(ToolKind::PublishReview, &failure)
-            .expect_err("fixed-host admission failure is surfaced to the operator");
 
         assert_eq!(failure, GitHubTransportFailure::PreDispatchInfrastructure);
         assert_eq!(

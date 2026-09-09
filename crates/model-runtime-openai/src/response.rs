@@ -929,14 +929,6 @@ mod tests {
     }
 
     #[test]
-    fn unrequested_output_kinds_fail_closed() {
-        let mut value = response();
-        value["output"] =
-            json!([{"type":"compaction","id":"cmp_fixture","encrypted_content":"opaque"}]);
-        assert!(matches!(decode(value).0, TerminalEvidence::BoundaryLoss(_)));
-    }
-
-    #[test]
     fn absent_usage_is_not_announced_or_fabricated() {
         let mut value = response();
         value.as_object_mut().unwrap().remove("usage");

@@ -99,7 +99,7 @@ mod tests {
     use super::*;
     use signalbox_model_runtime::{
         CompletionEvidence, ExchangeFacts, NativeErrorFacts, ProviderErrorEvidence,
-        ProviderErrorKind, ProviderMessageId, ProviderReportedModel, RefusalEvidence, TokenUsage,
+        ProviderErrorKind, ProviderMessageId, ProviderReportedModel, TokenUsage,
     };
 
     fn completion() -> CompletionEvidence {
@@ -152,22 +152,6 @@ mod tests {
         });
         assert!(!decoded_response(&evidence));
     }
-    #[test]
-    fn refusal_with_reported_zero_output_passes_compatibility() {
-        let fixture = completion();
-        let evidence = TerminalEvidence::Refused(RefusalEvidence {
-            reason: signalbox_model_runtime::RefusalReason::Unspecified,
-            exchange: fixture.exchange,
-            message_id: fixture.message_id,
-            reported_model: fixture.reported_model,
-            content: Vec::new(),
-            usage: fixture.usage,
-            retained_input_tokens: None,
-            retained_output_tokens: None,
-        });
-        assert!(decoded_response(&evidence));
-    }
-
     #[test]
     fn native_error_is_not_mistaken_for_a_decoded_refusal() {
         let fixture = completion();

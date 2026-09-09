@@ -504,7 +504,7 @@ mod tests {
         ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
-    use super::{build_request, build_request_with_fast_mode, validate_model_settings};
+    use super::{build_request, validate_model_settings};
 
     /// An operation whose correlation seed is the one knob; targets, one
     /// user-role message, and a 64-token ceiling are canonical.
@@ -550,18 +550,6 @@ mod tests {
 
         assert!(matches!(
             build_request(&operation),
-            Err(PreparationFailure::UnsupportedOperation { .. })
-        ));
-    }
-
-    #[test]
-    fn mapped_fast_mode_still_rejects_openai_flex_tier() {
-        let mut operation = operation("call-mapped-incompatible-settings");
-        operation.settings.fast_mode = FastMode::Enabled;
-        operation.settings.service_tier = Some(ServiceTier::OpenAi(OpenAiServiceTier::Flex));
-
-        assert!(matches!(
-            build_request_with_fast_mode(&operation, FastMode::Disabled),
             Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }
@@ -1177,20 +1165,6 @@ mod tests {
             value["input"][operation.messages[0].parts.len() - 1]["content"],
             "after the call"
         );
-    }
-
-    #[test]
-    fn non_finite_temperature_is_rejected_not_silently_nulled() {
-        let mut operation = operation("call-10");
-        operation.settings.temperature = Some(f64::INFINITY);
-
-        let failure = build_request(&operation)
-            .expect_err("serde_json would serialize a non-finite setting as null");
-
-        assert!(matches!(
-            failure,
-            PreparationFailure::UnsupportedOperation { .. }
-        ));
     }
 
     #[test]

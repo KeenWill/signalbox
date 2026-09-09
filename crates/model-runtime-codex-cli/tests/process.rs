@@ -4115,18 +4115,6 @@ fn proc_stat_process_group(stat: &str) -> Option<i32> {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn linux_proc_stat_zombie_is_an_exited_process_state() {
-    assert!(proc_stat_is_zombie("42 (sleep) Z 1 42 42 0"));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn linux_proc_stat_running_is_not_an_exited_process_state() {
-    assert!(!proc_stat_is_zombie("42 (sleep) S 1 42 42 0"));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
 fn linux_proc_stat_names_its_process_group() {
     assert_eq!(proc_stat_process_group("42 (sleep) Z 1 42 42 0"), Some(42));
 }

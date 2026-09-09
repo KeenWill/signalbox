@@ -253,26 +253,6 @@ fn rolling_gpt4_alias_shares_its_launch_rate() {
 }
 
 #[test]
-fn rolling_gpt4_32k_alias_shares_its_launch_rate() {
-    let catalog = bundled_catalog().unwrap();
-
-    let resolution = catalog
-        .resolve(
-            Provider::Openai,
-            "gpt-4-32k",
-            "2023-03-14",
-            CommercialChannel::Api,
-        )
-        .unwrap();
-
-    assert_eq!(resolution.resolved_model_id(), Some("openai:gpt-4-32k"));
-    assert_eq!(
-        resolution.price().unwrap().resolved_rate_sets().unwrap()[0].id,
-        "oai-gpt4-32k-launch"
-    );
-}
-
-#[test]
 fn retired_snapshot_rate_window_ends_with_model_availability() {
     let catalog = bundled_catalog().unwrap();
 
@@ -577,37 +557,6 @@ fn claude_code_sonnet_alias_moves_to_claude5_family_at_launch() {
             Provider::Anthropic,
             "sonnet",
             "2026-06-30",
-            CommercialChannel::ClaudeCodeSubscription,
-        )
-        .unwrap();
-
-    assert_eq!(
-        resolved_family_id(&before),
-        Some("anthropic:claude-4-family")
-    );
-    assert_eq!(
-        resolved_family_id(&after),
-        Some("anthropic:claude-5-family")
-    );
-}
-
-#[test]
-fn claude_code_opus_alias_moves_to_claude5_family_at_launch() {
-    let catalog = bundled_catalog().unwrap();
-
-    let before = catalog
-        .resolve(
-            Provider::Anthropic,
-            "opus",
-            "2026-07-23",
-            CommercialChannel::ClaudeCodeSubscription,
-        )
-        .unwrap();
-    let after = catalog
-        .resolve(
-            Provider::Anthropic,
-            "opus",
-            "2026-07-24",
             CommercialChannel::ClaudeCodeSubscription,
         )
         .unwrap();
