@@ -37,7 +37,6 @@ fi
 
 CMD=(
 	xcodebuild
-	-quiet
 	-project "$ROOT/SignalboxNative.xcodeproj"
 	-scheme "SignalboxNative"
 	-configuration "Debug"
