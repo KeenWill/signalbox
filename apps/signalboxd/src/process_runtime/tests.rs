@@ -1153,7 +1153,7 @@ pub(crate) mod tests {
         );
         let budget = Arc::new(Semaphore::new(1));
         let (mut client, server) = duplex(8);
-        let mut reader = BufReader::new(server);
+        let mut reader = BufReader::new(super::client_io::ArrivalReader::new(server));
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
         let acquire = read_admitted_frame(
             &mut reader,

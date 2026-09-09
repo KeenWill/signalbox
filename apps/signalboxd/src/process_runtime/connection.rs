@@ -1,3 +1,4 @@
+use super::client_io::ArrivalReader;
 use super::*;
 
 pub(super) struct ConnectionDependencies {
@@ -242,7 +243,7 @@ pub(super) async fn serve_connection(
         writer,
         bounds.duration("client_write_progress_deadline").flatten(),
     );
-    let mut reader = BufReader::with_capacity(INBOUND_READ_AHEAD_BYTES, reader);
+    let mut reader = BufReader::with_capacity(INBOUND_READ_AHEAD_BYTES, ArrivalReader::new(reader));
     let mut pending_import = None;
     let mut pending_blob_upload = None;
 
@@ -523,13 +524,13 @@ pub(super) async fn wait_for_deadline(deadline: Option<Instant>) {
 }
 
 pub(super) async fn read_admitted_frame<Reader>(
-    reader: &mut Reader,
+    reader: &mut BufReader<ArrivalReader<Reader>>,
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
     frame_deadline: Option<Duration>,
 ) -> Result<Option<(OwnedSemaphorePermit, IncomingLine)>, ProcessConnectionError>
 where
-    Reader: AsyncBufRead + Unpin,
+    Reader: tokio::io::AsyncRead + Unpin,
 {
     let input_ready = tokio::select! {
         () = wait_for_shutdown(shutdown) => false,
@@ -538,7 +539,8 @@ where
     if !input_ready {
         return Ok(None);
     }
-    let deadline = frame_deadline.map(|duration| Instant::now() + duration);
+    // fill_buf refills only an empty buffer, so retained bytes share its arrival time.
+    let deadline = frame_deadline.map(|duration| reader.get_ref().received_at + duration);
     tokio::select! {
         biased;
         () = wait_for_deadline(deadline) => {
@@ -1151,7 +1153,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn partial_frame_expires_even_when_more_bytes_arrive() {
         let (mut client, server) = tokio::io::duplex(32);
-        let mut reader = BufReader::new(server);
+        let mut reader = BufReader::new(ArrivalReader::new(server));
         let budget = Arc::new(Semaphore::new(1));
         let (_shutdown, mut shutdown) = watch::channel(false);
         client.write_all(b"{").await.unwrap();
@@ -1176,9 +1178,67 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn pipelined_frame_deadline_includes_previous_request_handling() {
+        let (mut client, server) = tokio::io::duplex(32);
+        let mut reader = BufReader::new(ArrivalReader::new(server));
+        let budget = Arc::new(Semaphore::new(1));
+        let (_shutdown, mut shutdown) = watch::channel(false);
+        let bound = Duration::from_secs(1);
+        client.write_all(b"{}\n{\n{").await.unwrap();
+        let received_at = Instant::now();
+        for expected in [b"{}\n".as_slice(), b"{\n".as_slice()] {
+            let (permit, line) =
+                read_admitted_frame(&mut reader, budget.clone(), &mut shutdown, Some(bound))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(matches!(line, IncomingLine::Complete(bytes) if bytes == expected));
+            drop(permit);
+            // Each preceding request takes time while later input stays buffered.
+            tokio::time::advance(Duration::from_millis(400)).await;
+        }
+        assert_eq!(reader.buffer(), b"{");
+        let error = read_admitted_frame(&mut reader, budget, &mut shutdown, Some(bound))
+            .await
+            .err()
+            .expect("pipelined partial frame times out");
+        assert!(
+            matches!(error, ProcessConnectionError::PeerIo(error) if error.kind() == io::ErrorKind::TimedOut)
+        );
+        assert_eq!(received_at.elapsed(), bound);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn next_frame_uses_its_refill_arrival_after_an_idle_gap() {
+        let (mut client, server) = tokio::io::duplex(32);
+        let mut reader = BufReader::new(ArrivalReader::new(server));
+        let budget = Arc::new(Semaphore::new(1));
+        let (_shutdown, mut shutdown) = watch::channel(false);
+        let bound = Duration::from_secs(1);
+        client.write_all(b"{}\n").await.unwrap();
+        let first = read_admitted_frame(&mut reader, budget.clone(), &mut shutdown, Some(bound))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(first);
+        assert!(reader.buffer().is_empty());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        client.write_all(b"{").await.unwrap();
+        let received_at = Instant::now();
+        let error = read_admitted_frame(&mut reader, budget, &mut shutdown, Some(bound))
+            .await
+            .err()
+            .expect("fresh partial frame times out after its own bound");
+        assert!(
+            matches!(error, ProcessConnectionError::PeerIo(error) if error.kind() == io::ErrorKind::TimedOut)
+        );
+        assert_eq!(received_at.elapsed(), bound);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn frame_deadline_includes_waiting_for_admission() {
         let (mut client, server) = tokio::io::duplex(32);
-        let mut reader = BufReader::new(server);
+        let mut reader = BufReader::new(ArrivalReader::new(server));
         let budget = Arc::new(Semaphore::new(0));
         let (_shutdown, mut shutdown) = watch::channel(false);
         client.write_all(b"{}\n").await.unwrap();
@@ -1199,7 +1259,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn idle_connection_can_send_a_frame_after_the_deadline_duration() {
         let (mut client, server) = tokio::io::duplex(32);
-        let mut reader = BufReader::new(server);
+        let mut reader = BufReader::new(ArrivalReader::new(server));
         let budget = Arc::new(Semaphore::new(1));
         let (_shutdown, mut shutdown) = watch::channel(false);
         let frame = read_admitted_frame(

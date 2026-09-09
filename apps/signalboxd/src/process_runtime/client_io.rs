@@ -1,4 +1,4 @@
-//! Client write-progress deadlines for the local process protocol.
+//! Client input arrival and write-progress deadlines for the local process protocol.
 
 use std::{
     future::Future,
@@ -8,9 +8,40 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::AsyncWrite,
-    time::{Sleep, sleep},
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    time::{Instant, Sleep, sleep},
 };
+
+/// Records when a read-ahead buffer receives bytes, including pipelined frames.
+pub(super) struct ArrivalReader<Reader> {
+    reader: Reader,
+    pub(super) received_at: Instant,
+}
+
+impl<Reader> ArrivalReader<Reader> {
+    pub(super) fn new(reader: Reader) -> Self {
+        Self {
+            reader,
+            received_at: Instant::now(),
+        }
+    }
+}
+
+impl<Reader: AsyncRead + Unpin> AsyncRead for ArrivalReader<Reader> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let filled = buffer.filled().len();
+        let result = Pin::new(&mut this.reader).poll_read(cx, buffer);
+        if matches!(result, Poll::Ready(Ok(()))) && buffer.filled().len() > filled {
+            this.received_at = Instant::now();
+        }
+        result
+    }
+}
 
 /// Bounds a blocked socket write without timing the idle gaps between writes.
 pub(super) struct ProgressWriter<Writer> {
