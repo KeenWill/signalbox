@@ -128,6 +128,7 @@ pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
+max_git_object_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
@@ -6204,4 +6205,28 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
             HubModelConfigurationError::InvalidNumericBound { field: FIELD }
         );
     }
+}
+
+#[test]
+fn checked_in_example_parses_unbounded_git_object_content() {
+    let configuration =
+        super::checked_in_example_configuration().expect("checked-in example parses");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_git_object_bytes"),
+        Some(None)
+    );
+    let configured = CONFIGURATION.replace(
+        "max_git_object_bytes = \"none\"",
+        "max_git_object_bytes = 1048576",
+    );
+    let configuration =
+        HubModelConfiguration::parse(&configured).expect("finite Git object policy parses");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_git_object_bytes"),
+        Some(Some(1048576))
+    );
 }

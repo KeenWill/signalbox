@@ -39,6 +39,7 @@ mod result;
 mod rollback;
 mod status;
 mod status_reference;
+mod streamed_object;
 #[cfg(test)]
 mod tests;
 

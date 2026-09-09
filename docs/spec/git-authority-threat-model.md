@@ -20,10 +20,11 @@ implementations, and the typed Git library.
 A suite has two layers. The authority layer opens the live repository
 administration tree through pinned directory descriptors and captures
 configuration, references, lock state, and object data into private snapshots;
-the typed Git library, `git2`, works only on those snapshots. Status, diff, and
-log capture objects on demand into a private database and revalidate their
-source bindings before returning; unrelated historical object contents are not
-copied.
+the typed Git library, `git2`, works only on those snapshots. All operations
+capture objects on demand into a private database and revalidate their source
+bindings before returning; unrelated historical object contents are not copied.
+Blob decoding, delta reconstruction, worktree reads, checkout, and object
+publication use temporary files and fixed-size I/O buffers.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
 destination is a remote the deployment configured, never one the caller chose. A
@@ -101,10 +102,12 @@ the final validation or after an operation returns. Descriptor pinning does not
 sandbox a hostile same-UID process, stop writes through pre-existing hard links
 or open descriptors, or survive a compromised kernel or library.
 
-Bounded scans and bounded content limit Signalbox's own work and do not
-guarantee repository availability. Unsupported layouts and formats, exhausted
-bounds, allocation failure, and host I/O failure are rejected, and the tool does
-not repair a corrupt repository. Decoded object-content limits apply to the
+Scans and result text remain bounded; worktree, staging, and object-database
+content have no aggregate byte ceiling. Patches preview bounded content prefixes
+with truncation markers, and status identifies renames by exact object identity.
+Unsupported layouts and formats, exhausted bounds, allocation failure, and host
+I/O failure are rejected, and the tool does not repair a corrupt repository. The
+configured `max_git_object_bytes` limit (`"none"` for unbounded) applies to the
 objects an operation reads, including packed delta bases, intermediate results,
 and delta instructions, not to unrelated objects retained in its history.
 

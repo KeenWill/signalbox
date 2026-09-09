@@ -8,12 +8,13 @@ use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 use crate::arguments::{GitStageArguments, LocalOperation};
 use crate::catalog::LocalGitTools;
 use crate::failure::LocalGitFailure;
-use crate::limits::{GITLINK_MODE, MAX_STAGE_FILE_BYTES};
+use crate::limits::GITLINK_MODE;
 use crate::tests::planting::plant_aggregate_stage_files;
+use crate::tests::support::TEST_OBJECT_BYTES as MAX_OBJECT_BYTES;
 use crate::tests::support::{
     CHANGED_CONTENT, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE, NESTED_TRACKED_DIRECTORY,
-    NESTED_TRACKED_PATH, SUBMODULE_PATH, TRACKED_PATH, UNTRACKED_PATH, commit_all,
-    count_loose_objects, execute, identity, install_deleted_conflict, install_gitlink,
+    NESTED_TRACKED_PATH, SUBMODULE_PATH, TRACKED_PATH, UNTRACKED_PATH, commit_all, execute,
+    identity, install_deleted_conflict, install_gitlink,
 };
 
 #[test]
@@ -178,13 +179,12 @@ fn stage_deleted_path_removes_every_conflict_stage() {
 }
 
 #[test]
-fn stage_rejects_aggregate_limit_before_writing_objects() {
+fn stage_publishes_large_aggregate_content() {
     let fixture = Fixture::new();
     let paths = plant_aggregate_stage_files(fixture.root());
-    let objects_before = count_loose_objects(fixture.root());
     let executor = fixture.executor();
 
-    let failure = executor
+    let result = executor
         .stage(
             &executor
                 .repository_authority
@@ -194,18 +194,14 @@ fn stage_rejects_aggregate_limit_before_writing_objects() {
                 paths: paths.clone(),
             },
         )
-        .expect_err("aggregate staging limit rejects");
+        .expect("aggregate staging succeeds");
     let repository = Repository::open(fixture.root()).expect("fixture repository reopens");
     let index = repository.index().expect("fixture index reopens");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
-    assert!(index.get_path(Path::new(&paths[0]), 0).is_none());
-    assert!(
-        index
-            .get_path(Path::new(&paths[paths.len() - 1]), 0)
-            .is_none()
-    );
-    assert_eq!(count_loose_objects(fixture.root()), objects_before);
+    assert_eq!(result.staged_paths, paths.len());
+    for path in &paths {
+        assert!(index.get_path(Path::new(path), 0).is_some());
+    }
 }
 
 #[test]
@@ -213,7 +209,7 @@ fn stage_rejects_a_file_larger_than_the_object_read_limit() {
     let fixture = Fixture::new();
     let oversized = fixture.root().join(UNTRACKED_PATH);
     let file = fs::File::create(&oversized).expect("oversized fixture creates");
-    file.set_len((MAX_STAGE_FILE_BYTES + 1) as u64)
+    file.set_len((MAX_OBJECT_BYTES + 1) as u64)
         .expect("oversized fixture length sets");
     let executor = fixture.executor();
 

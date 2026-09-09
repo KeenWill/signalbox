@@ -90,6 +90,7 @@ where
         commit: signalbox_domain::CommitSha,
         runner: ExecRunner,
         filesystem: &FileSystem,
+        max_git_object_bytes: Option<usize>,
     ) -> Result<
         signalbox_tools_git::GitPushExecutor<super::git_push::ProcessGitPushTransport<ExecRunner>>,
         DaemonToolsConstructionError,
@@ -112,6 +113,7 @@ where
         let (_, executor) =
             signalbox_tools_git::GitPushTools::try_new(filesystem, root, remote, transport)
                 .map_err(|_| DaemonToolsConstructionError::LocalGit)?
+                .with_max_object_bytes(max_git_object_bytes)
                 .into_parts();
         Ok(executor
             .with_branch_fence(branch.as_str().to_owned())
@@ -130,6 +132,7 @@ where
         exec_runner: ExecRunner,
         cargo_registry_cache: Option<&Path>,
         sandbox: &signalbox_tools_exec::SandboxConfiguration,
+        max_git_object_bytes: Option<usize>,
     ) -> Result<Self, DaemonToolsConstructionError> {
         // Each family below resolves the same pathname independently, so a
         // rename or replacement between two of them would leave one family
@@ -151,6 +154,7 @@ where
                 );
                 DaemonToolsConstructionError::LocalGit
             })?;
+        let local_git = local_git.with_max_object_bytes(max_git_object_bytes);
         let git_object_format = local_git.object_format();
         let pinned_directories = local_git.pinned_directories();
         let sandboxed_exec = match cargo_registry_cache {
@@ -247,6 +251,7 @@ pub(super) struct ConfiguredWorkspaceComposition<
     pub(super) exec_runner: ExecRunner,
     pub(super) cargo_registry_cache: Option<PathBuf>,
     pub(super) sandbox: signalbox_tools_exec::SandboxConfiguration,
+    pub(super) max_git_object_bytes: Option<usize>,
 }
 
 /// Credential channels required by the daemon's base tool composition.

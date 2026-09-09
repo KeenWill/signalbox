@@ -28,7 +28,7 @@ pub struct GitPushExecutor<Transport> {
     root: WorkspaceRoot,
     root_path: PathBuf,
     repository_identity: RepositoryIdentity,
-    repository_authority: Arc<PinnedRepository>,
+    pub(super) repository_authority: Arc<PinnedRepository>,
     remote: ConfiguredGitRemote,
     branch_fence: Option<String>,
     commit_fence: Option<String>,

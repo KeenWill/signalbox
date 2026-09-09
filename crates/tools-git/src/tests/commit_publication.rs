@@ -157,20 +157,19 @@ fn commit_rejects_a_generated_tree_over_the_recursive_budget() {
 }
 
 #[test]
-fn commit_rejects_indexed_blob_bytes_over_the_tree_budget() {
+fn commit_publishes_large_aggregate_index_content() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     plant_index_over_blob_budget(&repository);
     let executor = fixture.executor();
 
-    let failure = executor
+    executor
         .execute_operation(LocalOperation::Commit(GitCommitArguments {
             message: MODEL_MESSAGE.to_owned(),
         }))
-        .expect_err("aggregate indexed blobs reject before packing");
+        .expect("large aggregate index commits");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
-    assert_eq!(
+    assert_ne!(
         repository.head().expect("HEAD exists").target(),
         Some(fixture.initial)
     );

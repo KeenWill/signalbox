@@ -118,6 +118,7 @@ fn local_git_construction_telemetry_omits_the_workspace_path() {
                 runner,
                 None,
                 &Default::default(),
+                None,
             ),
             Err(DaemonToolsConstructionError::LocalGit)
         ));
@@ -322,6 +323,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
             process_runner.clone(),
             None,
             &Default::default(),
+            None,
         )
         .expect("workspace-bound tools compile"),
         roots: SessionWorkspaceRoots::try_new(workspace).expect("session workspace roots derive"),
@@ -329,6 +331,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
         exec_runner: process_runner,
         cargo_registry_cache: None,
         sandbox: Default::default(),
+        max_git_object_bytes: None,
     };
     let conversations = ConversationTools::try_new(OfflineConversationPort)
         .expect("offline conversation tools compile");
@@ -412,6 +415,7 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
         &std::env::current_exe().expect("test executable path is available"),
         None,
         &Default::default(),
+        None,
         WebFetchEgressPolicy::deny_all(),
     )
     .expect("production daemon tools compile");

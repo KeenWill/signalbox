@@ -6,11 +6,12 @@ use git2::Repository;
 
 use crate::arguments::{GitDiffArguments, LocalOperation};
 use crate::failure::LocalGitFailure;
-use crate::limits::{MAX_INDEX_BYTES, MAX_REVISION_BYTES, MAX_STAGE_FILE_BYTES};
+use crate::limits::{MAX_INDEX_BYTES, MAX_REVISION_BYTES};
 use crate::tests::planting::{
     plant_over_budget_directory, plant_over_budget_entries, plant_over_budget_worktree,
     plant_status_over_byte_budget,
 };
+use crate::tests::support::TEST_OBJECT_BYTES as MAX_OBJECT_BYTES;
 use crate::tests::support::{
     CHANGED_CONTENT, EMBEDDED_REPOSITORY_PATH, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE,
     MODEL_MESSAGE, NESTED_TRACKED_DIRECTORY, NESTED_TRACKED_PATH, TRACKED_PATH, commit_all,
@@ -83,16 +84,13 @@ fn status_rejects_worktree_over_discovery_budget() {
 }
 
 #[test]
-fn status_rejects_aggregate_worktree_bytes_over_budget() {
+fn status_reads_large_aggregate_worktree_content() {
     let fixture = Fixture::new();
     plant_status_over_byte_budget(&fixture);
     let executor = fixture.executor();
 
-    let failure = executor
-        .execute_operation(LocalOperation::Status)
-        .expect_err("aggregate status byte budget rejects");
-
-    assert_eq!(failure, LocalGitFailure::Operation);
+    let result = execute(&executor, LocalOperation::Status);
+    assert_eq!(result["entries"], serde_json::json!([]));
 }
 
 #[test]
@@ -313,7 +311,7 @@ fn status_never_opens_an_oversized_repository_exclude() {
         .open(fixture.root().join(".git/info/exclude"))
         .expect("repository exclude fixture opens");
     exclude
-        .set_len((MAX_STAGE_FILE_BYTES + 1) as u64)
+        .set_len((MAX_OBJECT_BYTES + 1) as u64)
         .expect("oversized sparse repository exclude sets length");
 
     let status = execute(&executor, LocalOperation::Status);

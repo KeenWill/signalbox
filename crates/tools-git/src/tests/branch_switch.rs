@@ -495,6 +495,7 @@ fn branch_switch_preserves_a_prepared_target_rewritten_before_publication() {
     commit_all(&repository, "nested source");
     let executor = fixture.executor();
 
+    let foreign_path = std::cell::RefCell::new(None);
     let failure = executor
         .branch_switch_with_target_publish_hook(
             GitBranchSwitchArguments {
@@ -502,11 +503,12 @@ fn branch_switch_preserves_a_prepared_target_rewritten_before_publication() {
             },
             || {
                 let prepared_target = cleanup_file(fixture.root(), Path::new("src"));
+                foreign_path.replace(Some(prepared_target.clone()));
                 fs::write(prepared_target, foreign_content).expect("foreign target bytes write");
             },
         )
         .expect_err("in-place prepared target rewrite rejects publication");
-    let retained_foreign = cleanup_file(fixture.root(), Path::new("src"));
+    let retained_foreign = foreign_path.into_inner().expect("rewritten path records");
 
     assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
@@ -1159,7 +1161,7 @@ fn branch_switch_rejects_a_target_tree_over_the_checkout_budget() {
 }
 
 #[test]
-fn branch_switch_rejects_target_tree_blob_bytes_over_the_aggregate_budget() {
+fn branch_switch_checks_out_large_aggregate_tree_content() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let oversized = aggregate_blob_tree_commit(&repository, fixture.initial);
@@ -1171,7 +1173,7 @@ fn branch_switch_rejects_target_tree_blob_bytes_over_the_aggregate_budget() {
         .expect("aggregate-tree fixture branch creates");
     let executor = fixture.executor();
 
-    let failure = executor
+    let result = executor
         .branch_switch(
             &executor
                 .repository_authority
@@ -1181,12 +1183,12 @@ fn branch_switch_rejects_target_tree_blob_bytes_over_the_aggregate_budget() {
                 name: FIX_BRANCH.to_owned(),
             },
         )
-        .expect_err("aggregate target-tree bytes reject");
+        .expect("large aggregate tree checks out");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(result.head, oversized.id().to_string());
     assert_eq!(
         repository.head().expect("fixture HEAD remains").target(),
-        Some(fixture.initial)
+        Some(oversized.id())
     );
 }
 

@@ -1418,6 +1418,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
+ "libz-sys",
  "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
@@ -4811,6 +4812,7 @@ name = "signalbox-tools-git"
 version = "0.0.0"
 dependencies = [
  "bstr",
+ "crc32fast",
  "flate2",
  "git2",
  "gix-hash",

@@ -30,7 +30,7 @@ use crate::limits::{
     MAX_REFERENCE_BYTES, MAX_REVISION_BYTES, MAX_STAGE_PATHS,
 };
 use crate::pack_install::{OBJECT_PUBLICATION_LOCK, ObjectPublicationLock};
-use crate::pinning::{PinnedObjectDatabase, parse_pack_index};
+use crate::pinning::PinnedObjectDatabase;
 use crate::reflog::ReferenceLogLock;
 use crate::rollback::{
     CheckoutRollbackContext, WorktreeRollbackIdentities, atomic_restore_checkout_path,
@@ -729,8 +729,15 @@ fn failed_checkout_preserves_a_same_content_replacement_after_notification() {
     let replacement = fixture.root().join("foreign-replacement");
     fs::write(&replacement, CHANGED_CONTENT).expect("foreign content writes");
 
+    let shell = executor
+        .repository_authority
+        .open_repository_shell()
+        .expect("rollback shell opens");
+    shell
+        .capture_objects_on_read(&executor.repository_authority)
+        .expect("rollback source binds");
     let failure = checkout_tree_with_rollback(
-        &repository,
+        &shell,
         Some(&current_tree),
         &target_tree,
         &updated_paths,
@@ -1036,18 +1043,35 @@ fn sha256_status_recognizes_an_unchanged_worktree_blob() {
 }
 
 #[test]
-fn real_git_sha256_pack_index_matches_the_bounded_parser() {
+fn real_git_sha256_pack_index_resolves_each_fixture_object() {
+    use std::io::{Seek, SeekFrom, Write};
+    let fixture = Sha256Fixture::new();
     let index = real_git_sha256_pack_index();
     let checksum = real_git_sha256_pack_checksum();
     let expected = real_git_sha256_pack_object_ids();
-
-    let parsed = parse_pack_index(&index, checksum, ObjectFormat::Sha256)
-        .expect("real Git SHA-256 pack index parses");
-
-    assert_eq!(
-        parsed.into_iter().map(|(oid, _)| oid).collect::<Vec<_>>(),
-        expected
-    );
+    let pack_directory = fixture.root().join(".git/objects/pack");
+    fs::write(pack_directory.join(format!("pack-{checksum}.idx")), index)
+        .expect("fixture index writes");
+    let mut pack =
+        fs::File::create(pack_directory.join(format!("pack-{checksum}.pack"))).expect("pack opens");
+    pack.write_all(b"PACK\0\0\0\x02")
+        .expect("pack header writes");
+    pack.write_all(&(expected.len() as u32).to_be_bytes())
+        .expect("object count writes");
+    // Index lookups need the header and trailer, not decoded object content.
+    pack.seek(SeekFrom::Start(1024 * 1024))
+        .expect("sparse pack seeks");
+    pack.write_all(checksum.as_bytes())
+        .expect("pack trailer writes");
+    let executor = fixture.executor();
+    let source = crate::push_objects::ObjectSource::open(
+        &executor.repository_authority,
+        std::time::Instant::now() + std::time::Duration::from_secs(60),
+    )
+    .expect("source opens");
+    for oid in expected {
+        assert!(source.contains(oid).expect("index lookup succeeds"));
+    }
 }
 
 #[test]
@@ -1349,7 +1373,7 @@ fn stage_rejects_when_a_captured_live_object_disappears_before_publication() {
         .get_path(Path::new(TRACKED_PATH), 0)
         .expect("original index entry exists")
         .id;
-    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    fs::write(fixture.root().join("added.txt"), CHANGED_CONTENT).expect("fixture change writes");
     let executor = fixture.executor();
 
     let failure = executor
@@ -1359,7 +1383,7 @@ fn stage_rejects_when_a_captured_live_object_disappears_before_publication() {
                 .open_repository_shell()
                 .expect("repository shell opens"),
             GitStageArguments {
-                paths: vec![TRACKED_PATH.to_owned()],
+                paths: vec!["added.txt".to_owned()],
             },
             || fs::remove_file(&initial_blob_path).expect("captured live blob removes"),
             || {},

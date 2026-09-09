@@ -104,6 +104,7 @@ pub(super) struct SessionWorkspaceExecutors<
     exec_runner: ExecRunner,
     cargo_registry_cache: Option<PathBuf>,
     sandbox: signalbox_tools_exec::SandboxConfiguration,
+    max_git_object_bytes: Option<usize>,
     configured: WorkspaceBoundExecutors<FileSystem, ExecRunner>,
     failure_details: SessionWorkspaceFailureDetails,
     state: Arc<Mutex<SessionWorkspaceState<WorkspaceBoundExecutors<FileSystem, ExecRunner>>>>,
@@ -122,6 +123,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             exec_runner: self.exec_runner.clone(),
             cargo_registry_cache: self.cargo_registry_cache.clone(),
             sandbox: self.sandbox.clone(),
+            max_git_object_bytes: self.max_git_object_bytes,
             configured: self.configured.clone(),
             failure_details: self.failure_details.clone(),
             state: Arc::clone(&self.state),
@@ -154,6 +156,7 @@ where
             exec_runner,
             cargo_registry_cache,
             sandbox,
+            max_git_object_bytes,
         } = composition;
         let failure_details = SessionWorkspaceFailureDetails::try_new()?;
         Ok(Self {
@@ -165,6 +168,7 @@ where
             exec_runner,
             cargo_registry_cache,
             sandbox,
+            max_git_object_bytes,
             configured: families.executors,
             failure_details,
             state: Arc::new(Mutex::new(SessionWorkspaceState::new())),
@@ -394,6 +398,7 @@ where
             self.exec_runner.clone(),
             self.cargo_registry_cache.as_deref(),
             &self.sandbox,
+            self.max_git_object_bytes,
         )
         .map_err(SessionWorkspaceFailure::Composition)?;
         // Every family above resolved the derived pathname independently, and
@@ -519,6 +524,7 @@ where
                 commit,
                 self.exec_runner.clone(),
                 &filesystem,
+                self.max_git_object_bytes,
             )
             .map_err(|_| DaemonToolExecutorError::pre_dispatch())?;
             self.resolve_workspace_instruction_root(session)

@@ -6,11 +6,10 @@ use git2::{Odb, Repository};
 
 use crate::arguments::{GitDiffArguments, GitLogArguments, LocalOperation};
 use crate::failure::LocalGitFailure;
-use crate::limits::{MAX_OBJECT_DATABASE_BYTES, MAX_PACK_FILE_BYTES};
+const LARGE_HISTORY_BYTES: usize = 200 * 1024 * 1024;
 use crate::objects::{PackRoot, persist_objects};
 use crate::pack_install::{OBJECT_PUBLICATION_LOCK, ObjectPublicationLock};
 use crate::pinning::PinnedObjectDatabase;
-use crate::tests::planting::plant_sparse_pack;
 use crate::tests::push::plant_uncompressed_push_pack;
 use crate::tests::support::{Fixture, UNTRACKED_CONTENT, create_fifo, execute, plant_packed_blob};
 
@@ -35,74 +34,38 @@ fn pinned_object_database_never_reopens_a_replacement_fifo() {
 }
 
 #[test]
-fn pinned_object_database_snapshots_mutable_pack_contents() {
+fn selected_packed_content_survives_a_live_pack_rewrite_and_validation_rejects_it() {
     let fixture = Fixture::new();
-    let executor = fixture.executor();
     let trusted = b"trusted-pack";
     let replacement = b"changed-pack";
     let source = plant_packed_blob(fixture.root(), trusted);
-    let trusted_snapshot = fs::read(&source).expect("fixture pack reads before mutation");
-    let name = source
-        .file_name()
-        .expect("fixture pack has a filename")
-        .to_owned();
-    let pinned = PinnedObjectDatabase::capture(&executor.repository_authority)
-        .expect("fixture object database snapshots");
-
+    let executor = fixture.executor();
+    let shell = executor
+        .repository_authority
+        .open_repository_shell()
+        .expect("fixture shell opens");
+    shell
+        .capture_objects_on_read(&executor.repository_authority)
+        .expect("source binds");
+    let oid = git2::Oid::hash_object(git2::ObjectType::Blob, trusted).expect("fixture ID hashes");
+    let mut captured = shell.object_content(oid).expect("selected object captures");
     fs::write(&source, replacement).expect("fixture pack mutates in place");
-    let snapshot = fs::read(pinned.directory.path().join("pack").join(&name))
-        .expect("private pack snapshot reads");
 
-    assert_eq!(snapshot, trusted_snapshot);
     assert_eq!(
-        fs::read(source).expect("mutated source pack reads"),
-        replacement
+        captured
+            .prefix(trusted.len())
+            .expect("private content reads"),
+        trusted
     );
+    assert_eq!(
+        shell.validate_selected_objects(&executor.repository_authority),
+        Err(LocalGitFailure::Repository)
+    );
+    assert_eq!(fs::read(source).expect("mutated source reads"), replacement);
 }
 
 #[test]
-fn oversized_pack_file_is_rejected_before_object_database_attachment() {
-    let fixture = Fixture::new();
-    plant_sparse_pack(
-        fixture.root(),
-        "oversized.pack",
-        (MAX_PACK_FILE_BYTES + 1) as u64,
-    );
-
-    let executor = fixture.executor();
-
-    let failure = PinnedObjectDatabase::capture(&executor.repository_authority)
-        .err()
-        .expect("oversized captured pack rejects");
-
-    assert_eq!(failure, LocalGitFailure::Repository);
-}
-
-#[test]
-fn aggregate_object_database_bytes_are_rejected_before_attachment() {
-    let fixture = Fixture::new();
-    plant_sparse_pack(
-        fixture.root(),
-        "aggregate-a.pack",
-        (MAX_OBJECT_DATABASE_BYTES / 2) as u64,
-    );
-    plant_sparse_pack(
-        fixture.root(),
-        "aggregate-b.pack",
-        (MAX_OBJECT_DATABASE_BYTES / 2) as u64,
-    );
-
-    let executor = fixture.executor();
-
-    let failure = PinnedObjectDatabase::capture(&executor.repository_authority)
-        .err()
-        .expect("aggregate captured object bytes reject");
-
-    assert_eq!(failure, LocalGitFailure::Repository);
-}
-
-#[test]
-fn object_publication_lock_serializes_budget_check_and_installation() {
+fn object_publication_lock_serializes_installation() {
     let fixture = Fixture::new();
     let executor = fixture.executor();
     let pinned_objects =
@@ -165,7 +128,7 @@ fn git_reads_capture_selected_objects_from_a_pack_larger_than_the_snapshot_budge
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let archive = repository
-        .blob(&vec![b'x'; MAX_OBJECT_DATABASE_BYTES + 1])
+        .blob(&vec![b'x'; LARGE_HISTORY_BYTES + 1])
         .expect("unrelated over-budget blob writes");
     let commit = repository
         .find_commit(fixture.initial)
@@ -174,7 +137,7 @@ fn git_reads_capture_selected_objects_from_a_pack_larger_than_the_snapshot_budge
     let mut packed = vec![archive, commit.id(), tree.id()];
     packed.extend(tree.iter().map(|entry| entry.id()));
     let pack = plant_uncompressed_push_pack(&repository, &packed);
-    assert!(fs::metadata(pack).expect("fixture pack").len() > MAX_OBJECT_DATABASE_BYTES as u64);
+    assert!(fs::metadata(pack).expect("fixture pack").len() > LARGE_HISTORY_BYTES as u64);
     let executor = fixture.executor();
 
     let status = execute(&executor, LocalOperation::Status);
