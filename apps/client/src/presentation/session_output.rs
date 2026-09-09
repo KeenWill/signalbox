@@ -309,7 +309,10 @@ impl<'a> Output<'a> {
                 tool_request_id,
             } => writeln!(
                 self.stdout,
-                "goal session={session_id} generation={generation} state=achieved turn={turn_id} request={tool_request_id}"
+                "goal session={session_id} generation={generation} state=achieved turn={turn_id} request={}",
+                tool_request_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "daemon".to_owned())
             )?,
             GoalLifecycleState::UserStopped {} => writeln!(
                 self.stdout,
@@ -400,7 +403,10 @@ impl<'a> Output<'a> {
             } => {
                 writeln!(
                     self.stdout,
-                    "event={ordinal} generation={generation} type=achieved turn={turn_id} request={tool_request_id}"
+                    "event={ordinal} generation={generation} type=achieved turn={turn_id} request={}",
+                    tool_request_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "daemon".to_owned())
                 )?;
                 self.goal_text_field("report", report)
             }

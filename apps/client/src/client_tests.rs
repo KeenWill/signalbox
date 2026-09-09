@@ -5995,6 +5995,7 @@ async fn program_cancellation_presents_the_retained_successful_result() -> Resul
     let outcome =
         ProgramRunCancellationOutcome::AlreadyTerminal(ProgramRunTerminalState::Succeeded {
             result: retained.clone(),
+            result_extent: signalbox_process_protocol::ProgramByteExtent::Complete {},
         });
     let server = tokio::spawn(async move {
         accept_request_and_reply(
@@ -6025,7 +6026,195 @@ async fn program_cancellation_presents_the_retained_successful_result() -> Resul
     let value: serde_json::Value = serde_json::from_str(json)?;
     assert_eq!(
         value,
-        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":retained})
+        serde_json::json!({"kind":"already_terminal","terminal_state":"succeeded","result":retained,"result_extent":{"kind":"complete"}})
+    );
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn program_read_presents_retained_input_and_exact_result() -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{ProgramRun, ProgramRunState};
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let run = ProgramRun {
+        registration_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+        input: vec![0, 255],
+        input_extent: signalbox_process_protocol::ProgramByteExtent::Complete {},
+        outcome: ProgramRunState::Succeeded {
+            result: vec![128, 0],
+            result_extent: signalbox_process_protocol::ProgramByteExtent::Complete {},
+        },
+    };
+    let expected = serde_json::to_value(&run)?;
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &ClientRequest::ReadProgramRun { run_id },
+            ServerMessage::ProgramRunRead { run_id, run },
+        )
+        .await
+    });
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    crate::program::execute(
+        &mut ProcessClient::new(socket),
+        &mut Output::new(&mut stdout, &mut stderr, false),
+        crate::arguments::ProgramCommand::Read { run_id },
+    )
+    .await?;
+    let text = String::from_utf8(stdout)?;
+    let (identity, json) = text.split_once(' ').expect("run and retained state");
+    assert_eq!(identity, format!("run={run_id}"));
+    assert_eq!(serde_json::from_str::<serde_json::Value>(json)?, expected);
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn program_read_presents_typed_truncation_markers() -> Result<(), Box<dyn Error>> {
+    use signalbox_process_protocol::{ProgramRun, ProgramRunState};
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let run = ProgramRun {
+        registration_id: CanonicalUuid::from_uuid(Uuid::now_v7()),
+        input: vec![0, 255],
+        input_extent: signalbox_process_protocol::ProgramByteExtent::Truncated {
+            total_bytes: 5000000,
+        },
+        outcome: ProgramRunState::Succeeded {
+            result: vec![128, 0],
+            result_extent: signalbox_process_protocol::ProgramByteExtent::Truncated {
+                total_bytes: 5000000,
+            },
+        },
+    };
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &ClientRequest::ReadProgramRun { run_id },
+            ServerMessage::ProgramRunRead { run_id, run },
+        )
+        .await
+    });
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    crate::program::execute(
+        &mut ProcessClient::new(socket),
+        &mut Output::new(&mut stdout, &mut stderr, false),
+        crate::arguments::ProgramCommand::Read { run_id },
+    )
+    .await?;
+    let text = String::from_utf8(stdout)?;
+    let (identity, json) = text.split_once(' ').expect("run and retained state");
+    assert_eq!(identity, format!("run={run_id}"));
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    assert_eq!(
+        value["input_extent"],
+        serde_json::json!({"kind": "truncated", "total_bytes": 5000000})
+    );
+    assert_eq!(
+        value["outcome"]["result_extent"],
+        serde_json::json!({"kind": "truncated", "total_bytes": 5000000})
+    );
+    assert_eq!(value["outcome"]["result"], serde_json::json!([128, 0]));
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn program_register_reads_the_executable_and_grants_from_json() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_process_protocol::{
+        ProgramExecutableInput, ProgramGrant, ProgramRegistrationInput,
+    };
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let registration_file = directory.path().join("registration.json");
+    std::fs::write(&registration_file, br#"{"name":"clock","revision":"1","executable":{"kind":"native","entry":"clock","revision":"1"},"grants":["time"]}"#)?;
+    let registration_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &ClientRequest::RegisterProgram {
+                registration_id,
+                registration: ProgramRegistrationInput {
+                    name: "clock".into(),
+                    revision: "1".into(),
+                    executable: ProgramExecutableInput::Native {
+                        entry: "clock".into(),
+                        revision: "1".into(),
+                    },
+                    grants: vec![ProgramGrant::Time],
+                },
+            },
+            ServerMessage::ProgramRegistered { registration_id },
+        )
+        .await
+    });
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    crate::program::execute(
+        &mut ProcessClient::new(socket),
+        &mut Output::new(&mut stdout, &mut stderr, false),
+        crate::arguments::ProgramCommand::Register {
+            registration_id,
+            registration: registration_file,
+        },
+    )
+    .await?;
+    assert!(String::from_utf8(stderr)?.contains(&registration_id.to_string()));
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn program_start_sends_exact_file_bytes_and_rejects_another_registration_receipt()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let socket = directory.path().join("client.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let input = directory.path().join("input.bin");
+    let bytes = vec![0, 255, 128];
+    std::fs::write(&input, &bytes)?;
+    let run_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let registration_id = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let other_registration = CanonicalUuid::from_uuid(Uuid::now_v7());
+    let server = tokio::spawn(async move {
+        accept_request_and_reply(
+            &listener,
+            &ClientRequest::StartProgramRun {
+                run_id,
+                registration_id,
+                input: bytes,
+            },
+            ServerMessage::ProgramRunStarted {
+                run_id,
+                registration_id: other_registration,
+            },
+        )
+        .await
+    });
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let result = crate::program::execute(
+        &mut ProcessClient::new(socket),
+        &mut Output::new(&mut stdout, &mut stderr, false),
+        crate::arguments::ProgramCommand::Start {
+            run_id,
+            registration_id,
+            input,
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(ClientError::AmbiguousMutation)),
+        "an uncorrelated mutation receipt must require recovery"
     );
     server.await??;
     Ok(())

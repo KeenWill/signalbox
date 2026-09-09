@@ -564,6 +564,163 @@ async fn push_range_ignores_large_history_in_the_pack_containing_its_tip() {
     assert!(!objects.exists(archive));
 }
 
+#[test]
+fn merge_push_omits_history_shared_with_the_dispatch_fence() {
+    use crate::tests::support::{AUTHOR_EMAIL, AUTHOR_NAME, commit_with_parents};
+
+    // These labels distinguish graph nodes; their spelling is arbitrary.
+    const ARCHIVE_BYTE: u8 = b'x';
+    const ARCHIVE_PATH: &str = "archive";
+    const HISTORY_LABEL: &str = "old archive";
+    const SHARED_LABEL: &str = "shared history without archive";
+    const FENCE_LABEL: &str = "dispatch fence";
+    const SIDE_LABEL: &str = "base branch advances";
+    const MERGE_LABEL: &str = "merge base into dispatched branch";
+
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture author");
+    let archive = repository
+        .blob(&vec![ARCHIVE_BYTE; crate::limits::MAX_OBJECT_BYTES + 1])
+        .expect("historical blob exceeds the selected-object ceiling");
+    let mut builder = repository.treebuilder(None).expect("archive tree builder");
+    builder
+        .insert(ARCHIVE_PATH, archive, 0o100644)
+        .expect("archive entry");
+    let archive_tree = repository
+        .find_tree(builder.write().expect("archive tree writes"))
+        .expect("archive tree");
+    let history = repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            HISTORY_LABEL,
+            &archive_tree,
+            &[],
+        )
+        .expect("history commit");
+    let retained_tree = repository
+        .find_commit(fixture.initial)
+        .expect("fixture commit")
+        .tree()
+        .expect("small retained tree");
+    let shared = repository
+        .commit(
+            None,
+            &signature,
+            &signature,
+            SHARED_LABEL,
+            &retained_tree,
+            &[&repository.find_commit(history).expect("history parent")],
+        )
+        .expect("shared ancestor removes the archive");
+    let fence = commit_with_parents(&repository, &[shared], FENCE_LABEL);
+    let side = commit_with_parents(&repository, &[shared], SIDE_LABEL);
+    let merged = commit_with_parents(&repository, &[fence, side], MERGE_LABEL);
+
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture(
+        &fixture.executor().repository_authority,
+        merged,
+        Some(fence),
+    )
+    .expect("a merge must not capture history already reachable from the dispatch fence");
+    let objects = snapshot.repository.odb().expect("captured object database");
+    assert!(
+        objects.exists(merged),
+        "the merge is part of the push range"
+    );
+    assert!(
+        objects.exists(side),
+        "the new side of the merge is retained"
+    );
+    assert!(
+        objects.exists(fence),
+        "the dispatch fence is retained for negotiation"
+    );
+    assert!(
+        !objects.exists(history),
+        "shared earlier history is omitted"
+    );
+    assert!(
+        !objects.exists(archive),
+        "historical blobs do not consume push allowance"
+    );
+    let shallow = fs::read_to_string(snapshot.repository.path().join("shallow"))
+        .expect("captured merge has negotiation boundaries");
+    assert_eq!(
+        shallow
+            .lines()
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([fence.to_string(), shared.to_string()]),
+        "each retained boundary closes its omitted parent history"
+    );
+}
+
+#[test]
+fn merge_push_enforces_the_shallow_boundary_ceiling() {
+    use crate::failure::LocalGitFailure;
+    use crate::limits::{MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES};
+    use crate::tests::support::commit_with_parents;
+
+    // The child alone receives a descriptor ceiling equal to the admitted boundary count.
+    const CHILD_ENVIRONMENT: &str = "SIGNALBOX_SHALLOW_BOUNDARY_DESCRIPTOR_CHILD";
+    const CHILD_EVIDENCE: &str = "shallow boundary probe completed";
+    if std::env::var_os(CHILD_ENVIRONMENT).is_none() {
+        let output = std::process::Command::new("sh")
+            .args(["-c", "ulimit -n \"$1\" && shift && exec \"$@\"", "sh"])
+            .arg(MAX_SHALLOW_ENTRIES.to_string())
+            .arg(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "tests::push::merge_push_enforces_the_shallow_boundary_ceiling",
+                "--nocapture",
+            ])
+            .env(CHILD_ENVIRONMENT, "1")
+            .output()
+            .expect("run the bounded-descriptor child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(CHILD_EVIDENCE),
+            "bounded-descriptor probe must execute and pass: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    for boundary_count in [MAX_SHALLOW_ENTRIES, MAX_SHALLOW_ENTRIES + 1] {
+        let fixture = Fixture::new();
+        let repository = Repository::open(fixture.root()).expect("fixture repository");
+        let mut boundaries = vec![fixture.initial];
+        while boundaries.len() < boundary_count {
+            let parent = *boundaries.last().expect("initial boundary exists");
+            // The label is arbitrary; parent identity distinguishes each commit.
+            boundaries.push(commit_with_parents(&repository, &[parent], "ancestor"));
+        }
+        let fence = *boundaries.last().expect("dispatch fence exists");
+        let merged = commit_with_parents(&repository, &boundaries, "merge");
+        let result = crate::push_objects::PushObjectSnapshot::capture(
+            &fixture.executor().repository_authority,
+            merged,
+            Some(fence),
+        );
+        if boundary_count == MAX_SHALLOW_ENTRIES {
+            let snapshot = result.expect("the admitted number of boundaries captures");
+            let shallow = fs::read_to_string(snapshot.repository.path().join("shallow"))
+                .expect("captured negotiation boundaries");
+            assert_eq!(shallow.lines().count(), boundary_count);
+            assert!(shallow.len() <= MAX_SHALLOW_BYTES);
+        } else {
+            assert!(
+                matches!(result, Err(LocalGitFailure::Repository)),
+                "one boundary beyond the existing ceiling must reject"
+            );
+        }
+    }
+    println!("{CHILD_EVIDENCE}");
+}
+
 #[tokio::test]
 async fn push_range_ignores_unrelated_objects_in_one_or_multiple_pack_indexes() {
     use crate::limits::MAX_REPOSITORY_INSPECTIONS;

@@ -171,6 +171,9 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::GitRemoteWithdrawn { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
         | ServerMessage::CredentialPoolPolicy { .. }
+        | ServerMessage::ProgramRegistered { .. }
+        | ServerMessage::ProgramRunStarted { .. }
+        | ServerMessage::ProgramRunRead { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }

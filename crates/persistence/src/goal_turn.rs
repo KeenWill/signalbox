@@ -3,8 +3,8 @@
 use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, DirectModelSelection, FrozenAliasDefinition, FrozenModelSelection,
-    GoalGeneration, GoalTurnSource, ModelAlias, ModelSelectionRequest, OriginConfiguration,
-    SessionId, SessionInputPosition, TurnId, TurnTerminalCause,
+    GoalGeneration, GoalGuidance, GoalTurnSource, ModelAlias, ModelSelectionRequest,
+    OriginConfiguration, SessionId, SessionInputPosition, TurnId, TurnTerminalCause,
 };
 use sqlx::{FromRow, PgConnection, types::Uuid};
 
@@ -20,10 +20,11 @@ use crate::{
 };
 
 /// Fresh identities for one goal-owned accepted-input origin and turn.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GoalTurnInsertion {
     position: SessionInputPosition,
     candidates: GoalTurnCandidates,
+    verification_need: Option<GoalGuidance>,
 }
 
 impl GoalTurnInsertion {
@@ -34,7 +35,12 @@ impl GoalTurnInsertion {
         Self {
             position,
             candidates,
+            verification_need: None,
         }
+    }
+    pub(crate) fn with_verification_need(mut self, need: Option<GoalGuidance>) -> Self {
+        self.verification_need = need;
+        self
     }
 }
 
@@ -271,6 +277,7 @@ pub(crate) async fn insert_goal_turn(
         source,
         candidates.accepted_input(),
         candidates.turn(),
+        insertion.verification_need.as_ref(),
     )
     .await?;
 
@@ -311,6 +318,7 @@ pub(crate) async fn bind_goal_turn(
     source: GoalTurnSource,
     accepted_input: AcceptedInputId,
     turn: TurnId,
+    verification_need: Option<&GoalGuidance>,
 ) -> Result<(), GoalRepositoryError> {
     let (source_event, predecessor) = match source {
         GoalTurnSource::UserEvent(event) => (Some(Decimal::from(event.get())), None),
@@ -319,8 +327,8 @@ pub(crate) async fn bind_goal_turn(
     sqlx::query(
         "INSERT INTO goal_turn
             (session_id, goal_generation, turn_id, accepted_input_id,
-             source_event_ordinal, predecessor_turn_id)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+             source_event_ordinal, predecessor_turn_id, verification_need)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(session_id_to_uuid(session))
     .bind(Decimal::from(generation.get()))
@@ -328,6 +336,7 @@ pub(crate) async fn bind_goal_turn(
     .bind(accepted_input_id_to_uuid(accepted_input))
     .bind(source_event)
     .bind(predecessor)
+    .bind(verification_need.map(GoalGuidance::as_str))
     .execute(&mut *connection)
     .await?;
     Ok(())
