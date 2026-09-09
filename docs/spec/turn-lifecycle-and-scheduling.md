@@ -304,10 +304,10 @@ reconstitution receives a durable operator item and is skipped; non-terminal
 sessions are parked, while terminal sessions retain their outcome. Operator
 status exposes both kinds of pending supervision item. Other sessions continue.
 Infrastructure failures stop initial startup visibly. During guard recovery,
-database failures in migration and startup reconstitution continue reacquisition
-with the same capped backoff and elapsed bound, after closing the failed
-incarnation’s fenced pool. Recovery is idempotent, and a stale observation rolls
-back.
+database failures throughout incarnation reconstruction, including
+repository-watch startup, continue reacquisition with the same capped backoff
+and elapsed bound, after closing the failed incarnation’s fenced pool. Recovery
+is idempotent, and a stale observation rolls back.
 
 Every terminal transition of a source turn, whether by interrupt, model-call
 outcome, startup recovery, or the watchdog, reclassifies its pending steering

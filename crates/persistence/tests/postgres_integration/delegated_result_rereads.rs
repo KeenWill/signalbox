@@ -921,7 +921,8 @@ async fn delegated_tool_crash_locks_parent_before_child_scheduler() -> Result<()
 async fn supervised_module_park_restoration_locks_parent_before_child() -> Result<(), Box<dyn Error>>
 {
     use signalbox_domain::{
-        DispatchingModule, LifecycleActor, SessionParkCause, SessionParkResponder,
+        DispatchingModule, LifecycleActor, SessionLifecycleState, SessionParkCause,
+        SessionParkResponder,
     };
     use signalbox_persistence::session_lifecycle::SessionLifecycleRepository;
     let (container, pool, _database_url) = migrated_postgres().await?;
@@ -985,7 +986,27 @@ async fn supervised_module_park_restoration_locks_parent_before_child() -> Resul
     assert_eq!(child, fixture.child.into_uuid());
     assert_eq!(scheduler, child);
     parent_lock.rollback().await?;
-    assert!(restored.await??);
+    assert!(!restored.await??);
+    let parked = lifecycle.load(fixture.child).await?.unwrap();
+    assert_eq!(
+        parked.state(),
+        SessionLifecycleState::Parked {
+            cause: SessionParkCause::UnknownFailure,
+            responder: SessionParkResponder::Operator,
+            standing: None,
+        }
+    );
+    assert!(parked.supervision_failure().unwrap().pending);
+    let terminal: bool =
+        sqlx::query_scalar("SELECT state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        !terminal,
+        "module restoration leaves supervised evidence for the operator"
+    );
+    lifecycle.resume(fixture.child).await?;
     let resumed = lifecycle.load(fixture.child).await?.unwrap();
     assert!(!resumed.state().is_parked());
     assert!(!resumed.supervision_failure().unwrap().pending);

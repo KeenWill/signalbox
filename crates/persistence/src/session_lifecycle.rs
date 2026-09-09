@@ -734,6 +734,36 @@ async fn lift_park_from_held(
             });
         }
     }
+    if matches!(actor, LifecycleActor::Module { .. })
+        && held
+            .supervision_failure
+            .as_ref()
+            .is_some_and(|failure| failure.pending)
+    {
+        let cause = SessionParkCause::UnknownFailure;
+        let responder = SessionParkResponder::Operator;
+        let (kind, module, turn, request) = encode_actor(actor);
+        sqlx::query(
+            "UPDATE session_lifecycle
+                SET parked_cause = $2, parked_responder = $3, actor_kind = $4,
+                    actor_module = $5, actor_turn_id = $6, actor_tool_request_id = $7
+              WHERE session_id = $1",
+        )
+        .bind(session_id_to_uuid(held.session))
+        .bind(crate::mapping::session_park_cause_to_str(cause))
+        .bind(park_responder_to_str(responder))
+        .bind(kind)
+        .bind(module)
+        .bind(turn)
+        .bind(request)
+        .execute(&mut *connection)
+        .await?;
+        return Ok(SessionLifecycleState::Parked {
+            cause,
+            responder,
+            standing: None,
+        });
+    }
     reconcile_supervision_in_transaction(connection, held.session).await?;
     let admission_state: Option<String> = sqlx::query_scalar(
         "SELECT CASE

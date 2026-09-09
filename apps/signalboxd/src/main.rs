@@ -1274,12 +1274,6 @@ fn recovery_incarnation_outcome(
             if recovering
                 && error.database_failure
                 && matches!(
-                    error.phase,
-                    RuntimePhase::DatabaseConnection
-                        | RuntimePhase::Migration
-                        | RuntimePhase::StartupScan
-                )
-                && matches!(
                     error.failure_class,
                     OperatorFailureClass::Infrastructure { .. }
                 ) =>
@@ -2144,7 +2138,7 @@ async fn run_hub_incarnation(
         match await_while_guarded(&mut database, start).await {
             GuardedAwait::Completed(Ok(runtime)) => Some(runtime),
             GuardedAwait::Completed(Err(_)) => {
-                let failure = erase_startup_cause(
+                let failure = erase_startup_database_cause(
                     RuntimePhase::Configuration,
                     SanitizedStartupCause::Static("repository_watch_startup_failed"),
                 );
@@ -3380,7 +3374,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn guard_recovery_retries_migration_and_scan_failures_with_capped_backoff() {
+    async fn guard_recovery_retries_database_reconstruction_failures_with_capped_backoff() {
         use signalboxd::guard_recovery::{GuardRecoveryPolicy, run_guarded_incarnations};
         let failures = RefCell::new(VecDeque::from([
             Ok(ShutdownOutcome::GuardLost),
@@ -3391,6 +3385,10 @@ mod tests {
                 },
                 None,
                 None,
+            )),
+            Err(super::erase_startup_database_cause(
+                RuntimePhase::Configuration,
+                super::SanitizedStartupCause::Static("repository_watch_startup_failed"),
             )),
             Ok(ShutdownOutcome::Clean),
         ]));
@@ -3408,7 +3406,7 @@ mod tests {
                 let result = failures
                     .borrow_mut()
                     .pop_front()
-                    .expect("four reconstruction attempts");
+                    .expect("five reconstruction attempts");
                 ready(super::recovery_incarnation_outcome(
                     result,
                     observer.is_recovering(),
@@ -3424,7 +3422,8 @@ mod tests {
                 Duration::ZERO,
                 Duration::from_secs(1),
                 Duration::from_secs(3),
-                Duration::from_secs(5)
+                Duration::from_secs(5),
+                Duration::from_secs(7)
             ]
         );
     }
