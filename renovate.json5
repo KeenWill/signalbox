@@ -63,12 +63,12 @@
       // Each digest dependency owns its release value inside one replacement;
       // Renovate validates both before it accepts the updated file.
       "matchStrings": [
-        "\"release\": \"(?<currentValue>rust-v[^\"]+)\",\\s*\"asset\": \"(?<asset>[^\"]+)\",\\s*\"sha256\": \"(?<currentDigest>[a-f0-9]{64})\""
+        "\"release\": \"(?<currentValue>rust-v[^\"]+)\",\\s*\"asset\": \"codex-x86_64-unknown-linux-musl\\.tar\\.gz\",\\s*\"sha256\": \"(?<currentDigest>[a-f0-9]{64})\""
       ],
       "depNameTemplate": "KeenWill/codex",
       "datasourceTemplate": "github-release-attachments",
       "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-fork\\.(?<build>\\d+)$",
-      "autoReplaceStringTemplate": "\"release\": \"{{{newValue}}}\",\n  \"asset\": \"{{{asset}}}\",\n  \"sha256\": \"{{{newDigest}}}\""
+      "autoReplaceStringTemplate": "\"release\": \"{{{newValue}}}\",\n  \"asset\": \"codex-x86_64-unknown-linux-musl.tar.gz\",\n  \"sha256\": \"{{{newDigest}}}\""
     },
     {
       "customType": "regex",
