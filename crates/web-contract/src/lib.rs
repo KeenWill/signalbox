@@ -1195,6 +1195,8 @@ pub enum WebTimelineToolFailureCause {
     InvalidArguments,
     ExecutionFailed,
     ResultTooLarge,
+    /// Successful content contained U+0000.
+    ResultContainsNull,
     CrashLost,
 }
 

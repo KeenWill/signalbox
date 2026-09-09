@@ -374,13 +374,15 @@ catalog name, the closed error kind, the session, and the turn; completed,
 ambiguous, and preflight-only failures emit none.
 
 A result larger than the bound is replaced by the typed `ResultTooLarge` error,
-and oversized bytes are never persisted. The result-text and error-detail bounds
-constrain every executor's capture policy; no executor widens the durable bound
-or converts an otherwise bounded success into a failure because it omitted
-additional result members. A crash-lost attempt has durable `KnownFailed`
-evidence and projects an execution result in the terminal failure suffix;
-reconciliation projects `ToolClosed`. Attempt evidence commits as soon as
-execution ends, independently of semantic projection.
+and oversized bytes are never persisted. A result within the bound containing
+U+0000 is replaced by the typed `ResultContainsNull` error without retaining its
+bytes. The result-text and error-detail bounds constrain every executor's
+capture policy; no executor widens the durable bound or converts an otherwise
+bounded success into a failure because it omitted additional result members. A
+crash-lost attempt has durable `KnownFailed` evidence and projects an execution
+result in the terminal failure suffix; reconciliation projects `ToolClosed`.
+Attempt evidence commits as soon as execution ends, independently of semantic
+projection.
 
 Once every request in a running batch is resolved, one continuation transaction
 appends exactly one result entry per request in proposal order, installs any
