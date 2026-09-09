@@ -209,6 +209,8 @@ mod tests {
         };
         assert!(loader.load().await.is_err());
         std::fs::write(&path, "fixture-token\r\n").expect("write terminated token");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .expect("private credential fixture");
         assert!(loader.load().await.is_ok());
         std::fs::write(&path, "invalid\nheader").expect("rotate to invalid token");
         let error = loader.load().await.err().expect("invalid token rejected");

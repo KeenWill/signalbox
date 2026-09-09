@@ -714,7 +714,11 @@ impl CredentialAccessCode {
         match failure {
             CredentialAccessFailure::Unmapped => Self::Unmapped,
             CredentialAccessFailure::Unavailable => Self::Unavailable,
-            CredentialAccessFailure::Unreadable => Self::Unreadable,
+            CredentialAccessFailure::Unreadable
+            | CredentialAccessFailure::NotRegularFile
+            | CredentialAccessFailure::WrongOwner
+            | CredentialAccessFailure::InsecurePermissions
+            | CredentialAccessFailure::TooLarge => Self::Unreadable,
             CredentialAccessFailure::OauthTupleMismatch => Self::OauthTupleMismatch,
             CredentialAccessFailure::OauthRefreshAmbiguous => Self::OauthRefreshAmbiguous,
             CredentialAccessFailure::OauthRefreshRejected => Self::OauthRefreshRejected,

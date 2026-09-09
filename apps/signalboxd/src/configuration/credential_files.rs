@@ -6,9 +6,89 @@ use signalbox_model_runtime::{
 use std::{
     collections::HashMap,
     fmt, fs, io,
+    io::Read,
+    os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
+
+/// Credential-file admission ceiling in configuration-and-credentials.
+const MAX_CREDENTIAL_FILE_BYTES: u64 = 64 * 1024;
+
+fn credential_io_failure(error: io::Error) -> CredentialAccessFailure {
+    if error.kind() == io::ErrorKind::NotFound {
+        CredentialAccessFailure::Unavailable
+    } else {
+        CredentialAccessFailure::Unreadable
+    }
+}
+
+fn validate_credential_metadata(
+    metadata: &fs::Metadata,
+    effective_uid: u32,
+) -> Result<(), CredentialAccessFailure> {
+    if !metadata.is_file() {
+        return Err(CredentialAccessFailure::NotRegularFile);
+    }
+    if metadata.uid() != effective_uid {
+        return Err(CredentialAccessFailure::WrongOwner);
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err(CredentialAccessFailure::InsecurePermissions);
+    }
+    if metadata.len() > MAX_CREDENTIAL_FILE_BYTES {
+        return Err(CredentialAccessFailure::TooLarge);
+    }
+    Ok(())
+}
+
+fn open_credential_file(path: &Path) -> Result<fs::File, CredentialAccessFailure> {
+    // Reject special files before opening; recheck the actual opened target so
+    // a path replacement cannot substitute unchecked bytes.
+    let effective_uid = rustix::process::geteuid().as_raw();
+    validate_credential_metadata(
+        &fs::metadata(path).map_err(credential_io_failure)?,
+        effective_uid,
+    )?;
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| credential_io_failure(error.into()))?;
+    let file = fs::File::from(descriptor);
+    validate_credential_metadata(
+        &file.metadata().map_err(credential_io_failure)?,
+        effective_uid,
+    )?;
+    Ok(file)
+}
+
+fn read_credential_file(path: &Path) -> Result<Vec<u8>, CredentialAccessFailure> {
+    let mut file = open_credential_file(path)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_CREDENTIAL_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(credential_io_failure)?;
+    if bytes.len() as u64 > MAX_CREDENTIAL_FILE_BYTES {
+        return Err(CredentialAccessFailure::TooLarge);
+    }
+    validate_credential_metadata(
+        &file.metadata().map_err(credential_io_failure)?,
+        rustix::process::geteuid().as_raw(),
+    )?;
+    Ok(bytes)
+}
+
+fn validate_credential_file(
+    path: &Path,
+    reference: CredentialReference,
+) -> Result<(), CredentialAccessError> {
+    open_credential_file(path)
+        .map(|_| ())
+        .map_err(|failure| CredentialAccessError::new(reference, failure))
+}
 
 pub(super) fn credential_file_references_conflict(left: &Path, right: &Path) -> bool {
     left == right || same_file_identity(left, right)
@@ -187,6 +267,14 @@ pub struct FileCredentialAccess {
 }
 
 impl FileCredentialAccess {
+    /// Checks each configured file's admission without reading its secret bytes.
+    pub fn validate(&self) -> Result<(), CredentialAccessError> {
+        for (reference, path) in self.paths.iter() {
+            validate_credential_file(path, reference.clone())?;
+        }
+        Ok(())
+    }
+
     /// Binds one non-secret credential reference to one deployment file.
     pub fn new(path: PathBuf, reference: CredentialReference) -> Self {
         Self::from_files([(reference, path)])
@@ -226,17 +314,45 @@ impl CredentialAccess for FileCredentialAccess {
         let path = self.paths.get(reference).ok_or_else(|| {
             CredentialAccessError::new(reference.clone(), CredentialAccessFailure::Unmapped)
         })?;
-        let file_bytes = tokio::fs::read(path).await;
-        match file_bytes {
-            Ok(file_bytes) => Ok(CredentialValue::new(credential_bytes(&file_bytes))),
-            Err(error) => Err(CredentialAccessError::new(
-                reference.clone(),
-                if error.kind() == io::ErrorKind::NotFound {
-                    CredentialAccessFailure::Unavailable
-                } else {
-                    CredentialAccessFailure::Unreadable
-                },
-            )),
-        }
+        let path = path.clone();
+        let file_bytes = tokio::task::spawn_blocking(move || read_credential_file(&path))
+            .await
+            .unwrap_or(Err(CredentialAccessFailure::Unreadable))
+            .map_err(|failure| CredentialAccessError::new(reference.clone(), failure))?;
+        Ok(CredentialValue::new(credential_bytes(&file_bytes)))
     }
 }
+
+impl super::HubModelConfiguration {
+    /// Admits all model-provider and repository-watch credential files.
+    pub fn validate_credential_files(&self) -> Result<(), CredentialAccessError> {
+        for profile in self.credential_profiles.values() {
+            use crate::credential_pools::CredentialDelivery;
+            match profile.delivery() {
+                CredentialDelivery::File { path, .. } => {
+                    validate_credential_file(path, CredentialReference::new(profile.name()))?
+                }
+                CredentialDelivery::Ambient
+                | CredentialDelivery::Oauth(_)
+                | CredentialDelivery::CodexHome { .. } => {}
+            }
+        }
+        if let Some(watch) = self.repository_watch() {
+            for repository in watch.repositories() {
+                validate_credential_file(
+                    repository.credential_file(),
+                    repository.credential_reference(),
+                )?;
+                if let Some(webhook) = repository.webhook()
+                    && let Some(reference) = repository.webhook_secret_reference()
+                {
+                    validate_credential_file(webhook.secret_file(), reference)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;

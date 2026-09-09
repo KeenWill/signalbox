@@ -550,6 +550,8 @@ mod tests {
         );
         for file_bytes in [b"".as_slice(), b"\r\n".as_slice(), b"\n\r\n".as_slice()] {
             std::fs::write(&path, file_bytes).expect("write empty resolved secret");
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+                .expect("private credential fixture");
             assert_eq!(
                 delivery(
                     State(routing.clone()),

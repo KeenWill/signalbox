@@ -99,6 +99,7 @@ pub struct ConfigurationReload {
     watch: Option<RepositoryWatchRuntime>,
     runtime_factory: Option<crate::model_catalog_runtime::ModelRuntimeFactory>,
     github_tool_credential: Option<PathBuf>,
+    integration_credentials: crate::FileCredentialAccess,
     convergence: PostgresConvergenceSweepStore,
 }
 
@@ -145,6 +146,7 @@ impl ConfigurationReload {
             watch: None,
             runtime_factory: None,
             github_tool_credential: None,
+            integration_credentials: crate::FileCredentialAccess::from_files([]),
             model_path,
             template_path,
             home,
@@ -180,7 +182,21 @@ impl ConfigurationReload {
         self
     }
 
+    /// Rechecks the startup integration credential files on each reload.
+    pub fn with_integration_credentials(
+        mut self,
+        credentials: crate::FileCredentialAccess,
+    ) -> Self {
+        self.integration_credentials = credentials;
+        self
+    }
+
     fn validate_runtime(&self, catalogs: &ConfigurationCatalogs) -> Result<(), ReloadResult> {
+        catalogs
+            .models
+            .validate_credential_files()
+            .and_then(|()| self.integration_credentials.validate())
+            .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
         if let Some(tool_credential) = &self.github_tool_credential
             && catalogs.models.repository_watch().is_some_and(|watch| {
                 watch.repositories().iter().any(|repository| {
@@ -640,6 +656,20 @@ mod tests {
         let directory = tempfile::tempdir().expect("fixture directory");
         let models =
             crate::configuration::checked_in_example_configuration().expect("example models");
+        let mut source = models.source().to_owned();
+        for (reference, path) in
+            models.file_credential_profiles(crate::configuration::ModelAdapter::Anthropic)
+        {
+            let file = tempfile::NamedTempFile::new_in(directory.path())
+                .expect("private model credential");
+            let credential_path = directory.path().join(reference);
+            file.persist(&credential_path).expect("retain credential");
+            source = source.replace(
+                path.to_str().expect("configured path"),
+                credential_path.to_str().expect("fixture path"),
+            );
+        }
+        let models = HubModelConfiguration::parse(&source).expect("fixture model credentials");
         let model_path = directory.path().join("models.toml");
         let template_path = directory.path().join("templates.toml");
         std::fs::write(&model_path, models.source()).expect("model file");
@@ -657,6 +687,58 @@ mod tests {
         )
         .expect("reload composition");
         (directory, reload)
+    }
+
+    #[tokio::test]
+    async fn reload_rechecks_model_credential_permissions() {
+        let (directory, reload) = fixture();
+        reload
+            .read_replacement()
+            .expect("initial credentials admitted");
+        std::fs::set_permissions(
+            directory.path().join("anthropic-overflow"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .expect("make unused profile public");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("reload rejects public profile"),
+            failure(
+                ReloadPhase::Validate,
+                "credential reference `anthropic-overflow` could not be resolved: InsecurePermissions"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_rechecks_integration_credential_files() {
+        let (directory, reload) = fixture();
+        let credential = tempfile::NamedTempFile::new_in(directory.path())
+            .expect("private integration credential");
+        let reference = signalbox_model_runtime::CredentialReference::new(
+            signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE,
+        );
+        let reload = reload.with_integration_credentials(crate::FileCredentialAccess::new(
+            credential.path().to_path_buf(),
+            reference.clone(),
+        ));
+        reload
+            .read_replacement()
+            .expect("initial credentials admitted");
+        credential
+            .as_file()
+            .set_len(65_537)
+            .expect("oversized integration credential");
+        assert_eq!(
+            reload
+                .read_replacement()
+                .expect_err("reload rejects oversized credential"),
+            failure(
+                ReloadPhase::Validate,
+                &format!("credential reference `{reference}` could not be resolved: TooLarge")
+            )
+        );
     }
 
     #[tokio::test]
@@ -743,7 +825,12 @@ credential_file = "/unused/reload-token"
 
     fn fixture_with_repository_watch() -> (tempfile::TempDir, ConfigurationReload) {
         let (directory, reload) = fixture();
-        // The unread credential path and repository are fixture-only watch inputs.
+        let credential =
+            tempfile::NamedTempFile::new_in(directory.path()).expect("private polling credential");
+        let credential_path = directory.path().join("poll-token");
+        credential
+            .persist(&credential_path)
+            .expect("retain polling credential");
         let source = format!(
             r#"{}
 [repository_watch]
@@ -753,9 +840,10 @@ signal_reviewers = []
 [[repository_watch.repositories]]
 repository = "example/reload"
 poll_interval_seconds = 60
-credential_file = "/unused/reload-token"
+credential_file = "{}"
 "#,
-            reload.catalogs().models.source()
+            reload.catalogs().models.source(),
+            credential_path.display()
         );
         reload.current.write().expect("catalog lock").models =
             Arc::new(HubModelConfiguration::parse(&source).expect("watch configuration"));

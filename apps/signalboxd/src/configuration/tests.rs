@@ -665,6 +665,50 @@ path = "{WATCH_WEBHOOK_PATH}"
     )
 }
 
+#[test]
+fn credential_admission_checks_every_configured_file_kind() {
+    let directory = tempfile::tempdir().expect("credential fixture directory");
+    let mut source = configuration_with_repository_watch_webhook();
+    let mut files = Vec::new();
+    for configured_path in [
+        "/run/secrets/anthropic-primary",
+        "/run/secrets/anthropic-overflow",
+        WATCH_CREDENTIAL_FILE,
+        SECOND_WATCH_CREDENTIAL_FILE,
+        WATCH_WEBHOOK_SECRET_FILE,
+    ] {
+        let file = tempfile::NamedTempFile::new_in(directory.path()).expect("private credential");
+        source = source.replace(configured_path, file.path().to_str().expect("fixture path"));
+        files.push(file);
+    }
+    let configuration = HubModelConfiguration::parse(&source).expect("catalog with private files");
+    configuration
+        .validate_credential_files()
+        .expect("all configured files admitted");
+    for file in &files {
+        std::fs::set_permissions(
+            file.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .expect("expose one file");
+        assert_eq!(
+            configuration
+                .validate_credential_files()
+                .expect_err("each configured credential must be private")
+                .failure,
+            CredentialAccessFailure::InsecurePermissions
+        );
+        std::fs::set_permissions(
+            file.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .expect("restore private file");
+        configuration
+            .validate_credential_files()
+            .expect("remaining files still admitted");
+    }
+}
+
 fn configuration_with_repository_watch_rule() -> String {
     format!(
         r#"{}
@@ -5395,6 +5439,8 @@ async fn file_credentials_are_reference_scoped_and_paths_are_redacted() {
 async fn file_credentials_are_reread_for_rotation() {
     let path = std::env::temp_dir().join(format!("signalbox-credential-{}", Uuid::now_v7()));
     std::fs::write(&path, b"first-test-value").expect("fixture file is writable");
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .expect("private credential fixture");
     let source = FileCredentialAccess::new(
         path.clone(),
         CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
@@ -5432,7 +5478,17 @@ async fn file_credential_catalog_resolves_each_declared_profile() {
     let primary_value = b"primary-test-value";
     let historical_value = b"historical-test-value";
     std::fs::write(&primary_path, primary_value).expect("primary fixture is writable");
+    std::fs::set_permissions(
+        &primary_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .expect("private credential fixture");
     std::fs::write(&historical_path, historical_value).expect("historical fixture is writable");
+    std::fs::set_permissions(
+        &historical_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .expect("private credential fixture");
     let primary = CredentialReference::new("primary-profile");
     let historical = CredentialReference::new("historical-profile");
     let source = FileCredentialAccess::from_files([
@@ -5504,6 +5560,8 @@ fn credential_file_of_only_line_termination_narrows_to_an_empty_value() {
 async fn file_credentials_resolve_a_terminated_file_to_the_bare_value() {
     let path = std::env::temp_dir().join(format!("signalbox-credential-{}", Uuid::now_v7()));
     std::fs::write(&path, b"synthetic-token-value\n").expect("fixture file is writable");
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .expect("private credential fixture");
     let source = FileCredentialAccess::new(
         path.clone(),
         CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),

@@ -211,6 +211,10 @@ impl CheckoutFixture {
         git2::Repository::init(&root)?;
         let credential = files.path().join("poll-token");
         std::fs::write(&credential, TOKEN)?;
+        std::fs::set_permissions(
+            &credential,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
         let catalog = include_str!("../../../../config/signalboxd.example.toml")
             .replace(
                 "/usr/local/bin/signalbox-exec-supervisor",
