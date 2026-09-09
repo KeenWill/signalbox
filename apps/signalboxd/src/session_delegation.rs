@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(decided, 11);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn reconciliation_backoff_remains_cancellation_safe() {
         let retries = Arc::new(AtomicUsize::new(0));
         let observed_retries = Arc::clone(&retries);
