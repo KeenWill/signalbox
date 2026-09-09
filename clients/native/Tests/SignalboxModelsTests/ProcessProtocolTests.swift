@@ -2233,6 +2233,7 @@ final class ProcessProtocolTests: XCTestCase {
         "request_id":"9",
         "message":{
           "type":"transcript_snapshot_start",
+          "repository_watch":null,
           "session_id":"\(sessionID)",
           "cursor":"12",
           "\\u0063ursor":"12"
@@ -2260,6 +2261,7 @@ final class ProcessProtocolTests: XCTestCase {
           "request_id":"9",
           "message":{
             "type":"transcript_snapshot_start",
+            "repository_watch":null,
             "session_id":"\(sessionID)",
             "cursor":"12",
             "runner":null
@@ -2271,10 +2273,93 @@ final class ProcessProtocolTests: XCTestCase {
     let expected = SignalboxTranscriptSnapshotBoundary(
       sessionID: try SignalboxCanonicalUUID(validating: sessionID),
       cursor: SignalboxCanonicalUInt64(rawValue: 12),
-      runner: nil
+      runner: nil,
+      repositoryWatch: nil
     )
 
     XCTAssertEqual(frame.message, .transcriptSnapshotStart(expected))
+  }
+
+  func testTranscriptSnapshotStartRetainsRepositoryWatchProvenance() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.repositoryWatchSnapshotStartFrame(sessionID: sessionID)
+    )
+    guard case .transcriptSnapshotStart(let boundary) = frame.message else {
+      return XCTFail("Expected a snapshot boundary, got \(frame.message).")
+    }
+    let provenance = try XCTUnwrap(boundary.repositoryWatch)
+
+    XCTAssertEqual(provenance.dispatchID.rawValue, sessionID)
+    XCTAssertEqual(provenance.actionOrdinal.rawValue, 1)
+    XCTAssertEqual(provenance.repository, "example/repository")
+    XCTAssertEqual(provenance.ruleID, "review")
+    XCTAssertEqual(provenance.ruleRevision.rawValue, 2)
+    XCTAssertEqual(provenance.eventID.rawValue, turnID)
+    XCTAssertEqual(provenance.eventKind, .pullRequestOpened)
+    XCTAssertEqual(provenance.pullRequest?.rawValue, 17)
+  }
+
+  func testTranscriptSnapshotStartDecodesBranchProvenanceWithoutPullRequest() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.repositoryWatchSnapshotStartFrame(
+        sessionID: sessionID,
+        eventKind: "branch_workflow_run_completed",
+        pullRequestJSON: "null"
+      )
+    )
+    guard case .transcriptSnapshotStart(let boundary) = frame.message else {
+      return XCTFail("Expected a snapshot boundary, got \(frame.message).")
+    }
+    let provenance = try XCTUnwrap(boundary.repositoryWatch)
+
+    XCTAssertEqual(provenance.eventKind, .branchWorkflowRunCompleted)
+    XCTAssertNil(provenance.pullRequest)
+  }
+
+  func testTranscriptSnapshotStartRejectsMalformedRepositoryWatchProvenance() throws {
+    let frames = [
+      ProcessProtocolFixture.repositoryWatchSnapshotStartFrame(
+        sessionID: sessionID, actionOrdinal: "0"
+      ),
+      ProcessProtocolFixture.repositoryWatchSnapshotStartFrame(
+        sessionID: sessionID, ruleRevision: "0"
+      ),
+      ProcessProtocolFixture.repositoryWatchSnapshotStartFrame(
+        sessionID: sessionID, eventKind: "unsupported_event"
+      ),
+      ProcessProtocolFixture.repositoryWatchSnapshotStartFrame(
+        sessionID: sessionID, pullRequestJSON: #""0""#
+      ),
+    ]
+    for encoded in frames {
+      let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+      XCTAssertNotNil(
+        ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
+        "Expected malformed provenance to degrade, got \(frame.message)."
+      )
+    }
+  }
+
+  func testTranscriptSnapshotStartRequiresRepositoryWatchField() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: Data(
+        """
+        {
+          "version":1,
+          "request_id":"9",
+          "message":{
+            "type":"transcript_snapshot_start",
+            "session_id":"\(sessionID)",
+            "cursor":"12",
+            "runner":null
+          }
+        }
+        """.utf8
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
   }
 
   /// the native boundary retains every axis of one complete
@@ -2289,6 +2374,7 @@ final class ProcessProtocolTests: XCTestCase {
           "request_id":"9",
           "message":{
             "type":"transcript_snapshot_start",
+            "repository_watch":null,
             "session_id":"\(sessionID)",
             "cursor":"12",
             "runner":{
@@ -2323,7 +2409,8 @@ final class ProcessProtocolTests: XCTestCase {
     let expected = SignalboxTranscriptSnapshotBoundary(
       sessionID: try SignalboxCanonicalUUID(validating: sessionID),
       cursor: SignalboxCanonicalUInt64(rawValue: 12),
-      runner: expectedProjection
+      runner: expectedProjection,
+      repositoryWatch: nil
     )
 
     XCTAssertEqual(frame.message, .transcriptSnapshotStart(expected))
@@ -2339,6 +2426,7 @@ final class ProcessProtocolTests: XCTestCase {
         "request_id":"9",
         "message":{
           "type":"transcript_snapshot_start",
+          "repository_watch":null,
           "session_id":"\(sessionID)",
           "cursor":"12"
         }
@@ -2989,12 +3077,46 @@ private enum ProcessProtocolFixture {
       kind: "transcript_snapshot_start",
       payload: [
         "type": .string("transcript_snapshot_start"),
+        "repository_watch": .null,
         "session_id": .string(sessionID),
         "cursor": .string("12"),
       ],
       decodingDiagnostic: SignalboxDecodingDiagnostic(
         message: "Invalid field value at message."
       )
+    )
+  }
+
+  static func repositoryWatchSnapshotStartFrame(
+    sessionID: String,
+    actionOrdinal: String = "1",
+    ruleRevision: String = "2",
+    eventKind: String = "pull_request_opened",
+    pullRequestJSON: String = #""17""#
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_snapshot_start",
+          "session_id":"\(sessionID)",
+          "cursor":"12",
+          "runner":null,
+          "repository_watch":{
+            "dispatch_id":"\(sessionID)",
+            "action_ordinal":"\(actionOrdinal)",
+            "repository":"example/repository",
+            "rule_id":"review",
+            "rule_revision":"\(ruleRevision)",
+            "event_id":"22222222-2222-4222-8222-222222222222",
+            "event_kind":"\(eventKind)",
+            "pull_request":\(pullRequestJSON)
+          }
+        }
+      }
+      """.utf8
     )
   }
 
@@ -3012,6 +3134,7 @@ private enum ProcessProtocolFixture {
         "request_id":"9",
         "message":{
           "type":"transcript_snapshot_start",
+          "repository_watch":null,
           "session_id":"\(sessionID)",
           "cursor":"12",
           "runner":{
