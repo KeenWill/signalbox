@@ -1053,6 +1053,43 @@ async fn run_creation_retries_preserve_the_binding_and_journal() -> Result<(), B
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn registration_lookup_distinguishes_absence_adoption_and_immutable_conflicts()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::ProgramRegistrationId;
+    use signalbox_persistence::program_registration::{
+        ProgramRegistrationError, ProgramRegistrationRepository,
+    };
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramRegistrationRepository::new(pool.clone());
+    let id = ProgramRegistrationId::from_uuid(Uuid::now_v7());
+    let request = registration_request(&Uuid::now_v7().to_string());
+    let content = request.clone().into_content();
+    assert_eq!(repository.find(id, &content).await?, None);
+    let stored = repository.register_user(id, request).await?;
+    assert_eq!(repository.find(id, &content).await?, Some(stored.clone()));
+    let other_id = ProgramRegistrationId::from_uuid(Uuid::now_v7());
+    assert!(matches!(repository.find(other_id, &content).await,
+        Err(ProgramRegistrationError::RegistrationConflict { registration }) if registration == other_id));
+    let other_content = registration_request(&Uuid::now_v7().to_string()).into_content();
+    assert!(matches!(repository.find(id, &other_content).await,
+        Err(ProgramRegistrationError::RegistrationConflict { registration }) if registration == id));
+    let mut changed = content.clone();
+    changed.grants = signalbox_domain::program_registration::ProgramGrants::new([]);
+    assert_ne!(changed, content);
+    assert!(matches!(repository.find(id, &changed).await,
+        Err(ProgramRegistrationError::RegistrationConflict { registration }) if registration == id));
+    assert_eq!(repository.find(other_id, &other_content).await?, None);
+    assert_eq!(repository.find(id, &content).await?, Some(stored));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM program_registration")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 1, "lookup never creates a missing registration");
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn registration_creation_reconciles_equal_retries_and_refuses_changed_content()
 -> Result<(), Box<dyn Error>> {
     use signalbox_domain::ProgramRegistrationId;
@@ -1551,6 +1588,55 @@ async fn cancellation_prevents_accepting_a_pending_terminal_request() -> Result<
         DeliveryKind::RunCancel(_)
     ));
     assert!(journal.result().is_none());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unfinished_registered_runs_exclude_terminal_outcomes_and_bare_streams()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::ProgramRegistrationId;
+    use signalbox_persistence::program_registration::ProgramRegistrationRepository;
+
+    let (_database, pool) = migrated_postgres().await?;
+    let registrations = ProgramRegistrationRepository::new(pool.clone());
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let registration = registrations
+        .register_user(
+            ProgramRegistrationId::from_uuid(Uuid::now_v7()),
+            registration_request("recovery"),
+        )
+        .await?;
+    let empty = ProgramRunId::from_uuid(Uuid::now_v7());
+    let waiting = ProgramRunId::from_uuid(Uuid::now_v7());
+    let succeeded = ProgramRunId::from_uuid(Uuid::now_v7());
+    let cancelled = ProgramRunId::from_uuid(Uuid::now_v7());
+    let faulted = ProgramRunId::from_uuid(Uuid::now_v7());
+    for run in [empty, waiting, succeeded, cancelled, faulted] {
+        registrations
+            .start_run(run, registration.id, b"input")
+            .await?;
+    }
+    journal
+        .create_stream(ProgramRunId::from_uuid(Uuid::now_v7()))
+        .await?;
+    journal
+        .append_request(waiting, None, RequestKind::Now(payload(b"clock")))
+        .await?;
+    journal
+        .complete_if_tail(succeeded, 0, payload(b"result"))
+        .await?;
+    journal
+        .append_delivery(cancelled, DeliveryKind::RunCancel(payload(b"cancel")))
+        .await?;
+    journal
+        .append_delivery(
+            faulted,
+            DeliveryKind::Fault(ProgramFault::ProgramError(payload(b"fault"))),
+        )
+        .await?;
+    assert_eq!(registrations.unfinished_runs().await?, vec![empty, waiting]);
     pool.close().await;
     Ok(())
 }

@@ -607,6 +607,12 @@ system_prompt = "Inspect repository activity."
             module,
             store,
             sink: RepositoryWatchCommandSink {
+                goal_resumption: signalboxd::PostgresGoalPassDisposition::new(
+                    core.clone(),
+                    models.clone(),
+                    eligibility_nudge.clone(),
+                    signalboxd::GoalModeNumericBounds::new(None, None, None, None, None),
+                ),
                 checkout_runner: None,
                 pool: core,
                 models: Arc::new(models),
@@ -1965,6 +1971,7 @@ async fn approval_judge_loads_repo_watch_authority_before_ledger_settlement()
     let runtime = RepositoryWatchRuntime::unstarted(
         fixture.module.clone(),
         RepositoryWatchServices {
+            goal_resumption: fixture.sink.goal_resumption.clone(),
             checkout_runner: None,
             core_pool: fixture.core.clone(),
             models: fixture.sink.models.clone(),
@@ -2017,6 +2024,7 @@ async fn disabled_runtime_scavenges_checkouts_without_submitting_pending_command
         fixture.module.clone(),
         models.repository_watch().cloned(),
         RepositoryWatchServices {
+            goal_resumption: fixture.sink.goal_resumption.clone(),
             checkout_runner: None,
             core_pool: fixture.core.clone(),
             models: Arc::new(models),
@@ -2682,6 +2690,7 @@ impl CheckoutFixture {
             self.module.clone(),
             self.sink.models.repository_watch().cloned(),
             RepositoryWatchServices {
+                goal_resumption: self.sink.goal_resumption.clone(),
                 core_pool: self.core.clone(),
                 checkout_runner: None,
                 models: self.sink.models.clone(),
@@ -2973,6 +2982,7 @@ async fn assert_projected_origin(
     let watch = RepositoryWatchRuntime::unstarted(
         fixture.module.clone(),
         RepositoryWatchServices {
+            goal_resumption: fixture.sink.goal_resumption.clone(),
             core_pool: fixture.core.clone(),
             checkout_runner: None,
             models: Arc::new(models.clone()),

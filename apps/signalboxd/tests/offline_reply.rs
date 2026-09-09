@@ -1091,6 +1091,339 @@ async fn adopt_session(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[cfg(feature = "test-support")]
+struct UnmonitoredGoalCompletion {
+    database: TestDatabase,
+    pool: PgPool,
+    session: SessionId,
+    first_turn: GoalTurnCandidates,
+    disposition: PostgresGoalPassDisposition,
+    nudge: signalbox_application::InProcessEligibilityNudge,
+    work_source: InProcessEligibilityWorkSource<PostgresEligibilitySweep>,
+}
+
+/// Releases an active scripted goal turn, completes it unmonitored, and consumes
+/// the initial scheduler sweep before returning the idle, pursuing goal.
+#[cfg(feature = "test-support")]
+async fn complete_released_goal_turn() -> Result<UnmonitoredGoalCompletion, Box<dyn Error>> {
+    use signalbox_application::EligibilityWorkSource;
+
+    let runtime = ScriptedModel::following([goal_completion_script()]);
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
+    // Selection identity declared by GOAL_MODEL_CONFIGURATION.
+    const CONFIGURED_SELECTION: u128 = 0x2001;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(CONFIGURED_SELECTION));
+    let mut create = CreateSessionService::new(
+        UuidV7SessionIdGenerator,
+        CreateSessionRepository::new(pool.clone(), configuration.session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(created) = create
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
+        .await?
+    else {
+        panic!("the unique fixture command must create its session")
+    };
+    let session = created.session();
+    let first_turn = GoalTurnCandidates::new(
+        AcceptedInputId::from_uuid(Uuid::now_v7()),
+        TurnId::from_uuid(Uuid::now_v7()),
+    );
+    let goal_repository = GoalRepository::new(pool.clone());
+    let attached = goal_repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                GoalUserAction::Attach(goal_statement("finish the commissioned task")),
+            ),
+            Some(first_turn),
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(attached);
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (nudge, mut work_source) = InProcessEligibilityWorkSource::new(sweep);
+    assert_eq!(work_source.next().await?, session);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let provider =
+        RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog(), None);
+    let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
+    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
+        PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                pool.clone(),
+                configuration.target_catalog(),
+                credential_reference,
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+            None,
+        )
+        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor)
+        .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+            pool.clone(),
+            None,
+            Vec::new(),
+        )),
+    );
+    let disposition = PostgresGoalPassDisposition::new(
+        pool.clone(),
+        configuration,
+        nudge.clone(),
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    );
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = activation.execute(session).await? else {
+        panic!("the owned goal turn must activate before release")
+    };
+    let released =
+        signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandRepository::new(
+            pool.clone(),
+        )
+        .handle(
+            signalbox_domain::SessionLifecycleCommand::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                signalbox_domain::SessionLifecycleOperation::Release,
+            ),
+            signalbox_domain::CommandPrincipal::Operator,
+        )
+        .await?;
+    assert!(matches!(
+        released,
+        signalbox_persistence::session_lifecycle_command::SessionLifecycleCommandHandlingOutcome::Recorded(
+            signalbox_domain::SessionLifecycleCommandResult::Applied(_)
+        )
+    ));
+    execution.execute(activated).await?;
+    disposition.reconcile_success(session).await?;
+    assert_eq!(
+        goal_repository
+            .load_goal(session)
+            .await?
+            .expect("attached goal")
+            .current()
+            .state(),
+        &GoalState::Pursuing,
+    );
+    assert_eq!(goal_repository.recovery_progress(session).await?.turns(), 1);
+
+    assert!(!fatal_execution.is_triggered());
+    Ok(UnmonitoredGoalCompletion {
+        database: container,
+        pool,
+        session,
+        first_turn,
+        disposition,
+        nudge,
+        work_source,
+    })
+}
+
+/// Adoption queues the successor of a turn completed after ownership release.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), Box<dyn Error>> {
+    use signalbox_application::{EligibilityPass, EligibilityWorkSource};
+
+    let UnmonitoredGoalCompletion {
+        database: container,
+        pool,
+        session,
+        first_turn,
+        disposition,
+        mut work_source,
+        ..
+    } = complete_released_goal_turn().await?;
+    let goal_repository = GoalRepository::new(pool.clone());
+    adopt_session(&pool, session).await?;
+    disposition.arm_adopted_goal_resumption(session);
+    let hint = timeout(Duration::from_secs(10), work_source.next()).await??;
+    assert_eq!(hint, session, "adoption wakes the ordinary scheduler");
+    let mut pass = GoalAwareEligibilityPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        disposition.clone(),
+    );
+    pass.run(hint).await?;
+    // Replaying adoption must leave the same queued successor.
+    adopt_session(&pool, session).await?;
+    disposition.reconcile_success(session).await?;
+    let queued: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'queued'",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(queued.len(), 1, "adoption queues exactly one successor");
+    assert_ne!(queued[0], first_turn.turn().into_uuid());
+    assert_eq!(goal_repository.recovery_progress(session).await?.turns(), 2);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Startup recovers an adoption committed before its in-process hook ran.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_recovers_adoption_committed_before_its_scheduler_nudge()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_application::{EligibilityPass, EligibilityWorkSource};
+
+    let UnmonitoredGoalCompletion {
+        database: container,
+        pool,
+        session,
+        first_turn,
+        disposition,
+        work_source,
+        ..
+    } = complete_released_goal_turn().await?;
+    adopt_session(&pool, session).await?;
+    // No adoption hook runs before the old in-process scheduler is dropped.
+    drop(disposition);
+    drop(work_source);
+    let (nudge, mut restarted_source) =
+        InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+    let restarted_disposition = PostgresGoalPassDisposition::new(
+        pool.clone(),
+        support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?,
+        nudge,
+        GoalModeNumericBounds::new(None, None, None, None, None),
+    );
+    let hint = timeout(Duration::from_secs(10), restarted_source.next()).await??;
+    assert_eq!(
+        hint, session,
+        "the initial sweep rediscovers the committed adoption without periodic sweeps"
+    );
+    let mut pass = GoalAwareEligibilityPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        restarted_disposition,
+    );
+    pass.run(hint).await?;
+    let queued: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'queued'",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        queued.len(),
+        1,
+        "startup queues exactly one successor after committed adoption"
+    );
+    assert_ne!(queued[0], first_turn.turn().into_uuid());
+    assert_eq!(
+        GoalRepository::new(pool.clone())
+            .recovery_progress(session)
+            .await?
+            .turns(),
+        2
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Module adoption wakes a pursuing goal through the ordinary goal hook.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn module_adoption_continues_a_goal_completed_while_unmonitored() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_application::{EligibilityPass, EligibilityWorkSource};
+    use signalbox_module_repo_watch_v2::dispatch::{CommandSubmission, SessionCommandSink};
+    use std::sync::Arc;
+
+    let UnmonitoredGoalCompletion {
+        database: container,
+        pool,
+        session,
+        first_turn,
+        disposition,
+        nudge,
+        mut work_source,
+    } = complete_released_goal_turn().await?;
+    let mut sink = signalboxd::repo_watch_dispatch::RepositoryWatchCommandSink {
+        goal_resumption: disposition.clone(),
+        checkout_runner: None,
+        pool: pool.clone(),
+        models: Arc::new(support::parse_model_configuration(
+            GOAL_MODEL_CONFIGURATION,
+        )?),
+        eligibility_nudge: nudge,
+        tool_dispatch_gate: InProcessToolDispatchGate::default(),
+    };
+    let command = signalbox_session_ownership::SessionCommand::lifecycle(
+        signalbox_domain::SessionLifecycleCommand::new(
+            DurableCommandId::from_uuid(Uuid::now_v7()),
+            session,
+            signalbox_domain::SessionLifecycleOperation::Adopt {
+                finish_condition: None,
+            },
+        ),
+    )
+    .expect("the ownership seam admits adoption");
+    assert!(matches!(
+        sink.submit(command.clone()).await.expect("module adoption"),
+        CommandSubmission::Accepted
+    ));
+    let hint = timeout(Duration::from_secs(10), work_source.next()).await??;
+    assert_eq!(
+        hint, session,
+        "module adoption wakes the ordinary scheduler without periodic sweeps"
+    );
+    let mut pass = GoalAwareEligibilityPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        disposition.clone(),
+    );
+    pass.run(hint).await?;
+    assert!(matches!(
+        sink.submit(command).await.expect("module adoption replay"),
+        CommandSubmission::Accepted
+    ));
+    disposition.reconcile_success(session).await?;
+    let queued: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'queued'",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        queued.len(),
+        1,
+        "module adoption queues exactly one successor"
+    );
+    assert_ne!(queued[0], first_turn.turn().into_uuid());
+    assert_eq!(
+        GoalRepository::new(pool.clone())
+            .recovery_progress(session)
+            .await?
+            .turns(),
+        2
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Adopting a session whose goal is blocked arms the resumption the
 /// unmonitored block was not owed.
 #[tokio::test(flavor = "multi_thread")]
@@ -1117,7 +1450,7 @@ async fn adopting_a_blocked_goal_arms_its_resumption() -> Result<(), Box<dyn Err
         nudge,
         GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
     )
-    .arm_blocked_goal_resumption(session);
+    .arm_adopted_goal_resumption(session);
 
     let resumed = resumed_goal(&pool, session).await?;
 
@@ -1167,7 +1500,7 @@ async fn automatic_resume_persists_strategy_guidance_for_a_chargeable_failure()
         nudge,
         GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
     )
-    .arm_blocked_goal_resumption(session);
+    .arm_adopted_goal_resumption(session);
 
     let resumed = resumed_goal(&pool, session).await?;
     let input = resumed_goal_input(&pool, &resumed).await?;
@@ -1222,7 +1555,7 @@ async fn automatic_resume_preserves_the_statement_for_an_exempt_provider_failure
         nudge,
         GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
     )
-    .arm_blocked_goal_resumption(session);
+    .arm_adopted_goal_resumption(session);
 
     let resumed = resumed_goal(&pool, session).await?;
     let input = resumed_goal_input(&pool, &resumed).await?;
@@ -1262,7 +1595,7 @@ async fn adopting_a_blocked_goal_persists_its_scheduled_need() -> Result<(), Box
         nudge,
         GoalModeNumericBounds::new(Some(Duration::from_secs(60)), None, None, None, None),
     )
-    .arm_blocked_goal_resumption(session);
+    .arm_adopted_goal_resumption(session);
 
     let armed = armed_goal(&pool, session).await?;
 

@@ -47,6 +47,7 @@ CRATE_DEPS = [
     "//crates/tools-web:signalbox_tools_web",
     "//crates/tools-workspace:signalbox_tools_workspace",
     "//crates/web-contract:signalbox_web_contract",
+    "//crates/workflow-runtime:signalbox_workflow_runtime",
 ]
 
 TEST_DEPS = [
@@ -97,6 +98,7 @@ rust_library(
         "//crates/tools-web:signalbox_tools_web",
         "//crates/tools-workspace:signalbox_tools_workspace",
         "//crates/web-contract:signalbox_web_contract",
+        "//crates/workflow-runtime:signalbox_workflow_runtime",
     ],
 )
 
