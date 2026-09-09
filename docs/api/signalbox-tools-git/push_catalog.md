@@ -14,6 +14,7 @@ impl<Transport> GitPushTools<Transport> {
         remote: ConfiguredGitRemote,
         transport: Transport,
     ) -> result::Result<Self, GitPushToolsConstructionError>;
+    pub fn with_max_object_bytes(self, max_bytes: option::Option<usize>) -> Self;
     pub fn into_parts(
         self,
     ) -> (

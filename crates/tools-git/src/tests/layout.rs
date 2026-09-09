@@ -365,8 +365,7 @@ fn object_capture_rejects_a_loose_directory_replaced_after_scan() {
         fs::rename(&loose, &retired_loose).expect("loose object directory retires");
         fs::create_dir(&loose).expect("replacement loose object directory constructs");
     })
-    .err()
-    .expect("replacement loose object directory rejects capture");
+    .expect_err("replacement loose object directory rejects capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
     assert!(loose.is_dir());
@@ -395,8 +394,7 @@ fn object_capture_rejects_a_loose_object_replaced_after_scan() {
         fs::remove_file(&object_path).expect("loose object removes after scan");
         fs::write(&object_path, &replacement).expect("loose object replaces after scan")
     })
-    .err()
-    .expect("replaced loose object rejects capture");
+    .expect_err("replaced loose object rejects capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }
@@ -1287,8 +1285,7 @@ fn object_capture_rejects_trailing_bytes_after_a_loose_object_stream() {
         git2::Oid::hash_object(ObjectType::Blob, b"fixture object").expect("fixture ID"),
         || {},
     )
-    .err()
-    .expect("trailing loose-object bytes reject capture");
+    .expect_err("trailing loose-object bytes reject capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }
@@ -1306,8 +1303,7 @@ fn object_capture_rejects_a_loose_object_stored_under_an_unrelated_id() {
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
     let failure = capture_selected_with_hook(&authority, claimed_id, || {})
-        .err()
-        .expect("mismatched loose object rejects capture");
+        .expect_err("mismatched loose object rejects capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }

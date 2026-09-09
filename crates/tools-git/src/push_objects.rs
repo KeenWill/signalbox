@@ -65,10 +65,11 @@ impl PushObjectSnapshot {
             if !visited.insert(commit) {
                 continue;
             }
-            if visited
-                .len()
-                .saturating_add(fence_ancestors.as_ref().map_or(0, |(ancestors, _)| ancestors.len()))
-                > MAX_REPOSITORY_INSPECTIONS
+            if visited.len().saturating_add(
+                fence_ancestors
+                    .as_ref()
+                    .map_or(0, |(ancestors, _)| ancestors.len()),
+            ) > MAX_REPOSITORY_INSPECTIONS
             {
                 return Err(LocalGitFailure::Repository);
             }
@@ -243,7 +244,6 @@ pub(super) struct ObjectSource {
     format: ObjectFormat,
     max_object_bytes: Option<usize>,
     pub(super) directory: tempfile::TempDir,
-    attached: bool,
     deadline: Instant,
 }
 
@@ -312,7 +312,6 @@ impl ObjectSource {
             format: authority.object_format,
             max_object_bytes: authority.max_object_bytes,
             directory: tempfile::tempdir().map_err(rejected)?,
-            attached: false,
             deadline,
         };
         let mut scanned = 0usize;
@@ -500,19 +499,16 @@ impl ObjectSource {
         Ok(false)
     }
 
-    fn attach(&mut self, database: &Odb<'_>) -> Result<(), LocalGitFailure> {
-        if !self.attached {
-            database
-                .add_disk_alternate(
-                    self.directory
-                        .path()
-                        .to_str()
-                        .ok_or(LocalGitFailure::Repository)?,
-                )
-                .map_err(rejected)?;
-            self.attached = true;
-        }
-        Ok(())
+    pub(super) fn attach(&self, database: &Odb<'_>) -> Result<(), LocalGitFailure> {
+        // libgit2 deduplicates disk backends by directory identity.
+        database
+            .add_disk_alternate(
+                self.directory
+                    .path()
+                    .to_str()
+                    .ok_or(LocalGitFailure::Repository)?,
+            )
+            .map_err(rejected)
     }
 
     pub(super) fn store(
@@ -582,7 +578,12 @@ impl ObjectSource {
         let path = PathBuf::from(&hex[..2]).join(&hex[2..]);
         if open_child(&self.objects, &path).is_ok() {
             let source = self.open_file(&path)?;
-            let file = self.files[source].file.as_ref().ok_or(LocalGitFailure::Repository)?.try_clone().map_err(rejected)?;
+            let file = self.files[source]
+                .file
+                .as_ref()
+                .ok_or(LocalGitFailure::Repository)?
+                .try_clone()
+                .map_err(rejected)?;
             let mut content = self.decode_loose(file)?;
             if self.store(database, &mut content)? != oid {
                 return Err(LocalGitFailure::Repository);

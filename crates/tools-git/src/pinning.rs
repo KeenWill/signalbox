@@ -66,7 +66,6 @@ pub(super) struct RepositoryShell {
 }
 
 pub(super) struct PinnedObjectDatabase {
-    pub(super) directory: tempfile::TempDir,
     source: Arc<Mutex<ObjectSource>>,
     pack: OwnedFd,
 }
@@ -530,21 +529,16 @@ impl PinnedObjectDatabase {
         )
         .map_err(|_| LocalGitFailure::Repository)?;
         Ok(Self {
-            directory: tempfile::tempdir().map_err(|_| LocalGitFailure::Operation)?,
             source: Arc::new(Mutex::new(source)),
             pack,
         })
     }
 
     pub(super) fn add_to(&self, database: &Odb<'_>) -> Result<(), LocalGitFailure> {
-        database
-            .add_disk_alternate(
-                self.directory
-                    .path()
-                    .to_str()
-                    .ok_or(LocalGitFailure::Operation)?,
-            )
-            .map_err(|_| LocalGitFailure::Operation)
+        self.source
+            .lock()
+            .map_err(|_| LocalGitFailure::Operation)?
+            .attach(database)
     }
 
     pub(super) fn pack_directory(&self) -> &OwnedFd {

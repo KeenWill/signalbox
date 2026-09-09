@@ -581,7 +581,10 @@ fn merge_push_omits_history_shared_with_the_dispatch_fence() {
     let repository = Repository::open(fixture.root()).expect("fixture repository");
     let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("fixture author");
     let archive = repository
-        .blob(&vec![ARCHIVE_BYTE; crate::tests::support::TEST_OBJECT_BYTES + 1])
+        .blob(&vec![
+            ARCHIVE_BYTE;
+            crate::tests::support::TEST_OBJECT_BYTES + 1
+        ])
         .expect("historical blob exceeds the selected-object ceiling");
     let mut builder = repository.treebuilder(None).expect("archive tree builder");
     builder

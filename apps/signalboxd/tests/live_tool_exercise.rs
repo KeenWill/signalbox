@@ -290,6 +290,7 @@ async fn run_live_smoke() -> SmokeResult {
         &exec_supervisor_executable,
         None,
         &Default::default(),
+        None,
         web_fetch_egress_policy,
     )?;
     let (tool_catalog, tool_executor) = tools.into_parts();

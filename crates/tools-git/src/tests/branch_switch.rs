@@ -439,6 +439,7 @@ fn branch_switch_preserves_a_prepared_target_replaced_before_publication() {
     commit_all(&repository, "nested source");
     let executor = fixture.executor();
 
+    let foreign_path = std::cell::RefCell::new(None);
     let failure = executor
         .branch_switch_with_target_publish_hook(
             GitBranchSwitchArguments {
@@ -448,11 +449,12 @@ fn branch_switch_preserves_a_prepared_target_replaced_before_publication() {
                 let prepared_target = cleanup_file(fixture.root(), Path::new("src"));
                 fs::rename(&prepared_target, prepared_target.with_file_name("retired"))
                     .expect("prepared target retires");
+                foreign_path.replace(Some(prepared_target.clone()));
                 fs::write(prepared_target, foreign_content).expect("foreign target writes");
             },
         )
         .expect_err("prepared target replacement rejects publication");
-    let retained_foreign = cleanup_file(fixture.root(), Path::new("src"));
+    let retained_foreign = foreign_path.into_inner().expect("replaced path records");
 
     assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
