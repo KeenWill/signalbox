@@ -825,9 +825,9 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     Ok(())
 }
 
-/// Superseding the judged generation during the provider round-trip withdraws
-/// its authority while leaving the request pending. Completion must escalate
-/// the offered approval and leave the request parked for a human decision.
+/// Superseding the judged generation withdraws its authority even when the
+/// replacement statement has identical text. Completion leaves the request
+/// pending for a human decision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_completion_escalates_after_the_judged_goal_is_superseded()
@@ -913,9 +913,7 @@ async fn assert_judge_escalation_after_goal_supersession(
             GoalUserCommand::new(
                 DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf4)),
                 fixture.session,
-                GoalUserAction::Supersede(GoalStatement::try_new(String::from(
-                    "pursue the replacement approval fixture goal",
-                ))?),
+                GoalUserAction::Supersede(statement.clone()),
             ),
             Some(GoalTurnCandidates::new(
                 AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0xf5)),
