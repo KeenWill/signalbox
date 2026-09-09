@@ -192,7 +192,7 @@ impl GoalModelProvenance {
     pub const fn report_ref(self) -> GoalReportRef {
         GoalReportRef {
             turn: self.turn,
-            tool_request: self.tool_request,
+            tool_request: Some(self.tool_request),
         }
     }
 }
@@ -213,22 +213,51 @@ impl GoalSchedulerProvenance {
     }
 }
 
-/// A final-report reference into the transcript's tool invocation.
+/// The completed turn and optional model declaration containing its report.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GoalReportRef {
     turn: TurnId,
-    tool_request: ToolRequestId,
+    tool_request: Option<ToolRequestId>,
 }
 
 impl GoalReportRef {
-    /// Returns the turn containing the report declaration.
+    /// Returns the turn whose work the report concludes.
     pub const fn turn(self) -> TurnId {
         self.turn
     }
 
-    /// Returns the request immediately preceded by the report transcript part.
-    pub const fn tool_request(self) -> ToolRequestId {
+    /// Returns the model declaration request, absent for daemon verification.
+    pub const fn tool_request(self) -> Option<ToolRequestId> {
         self.tool_request
+    }
+}
+
+/// Provenance of a completed goal, either declared by the model or checked by the daemon.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GoalAchievementProvenance {
+    /// An exact model declaration and its transcript report.
+    Model(GoalModelProvenance),
+    /// GitHub confirmed the pushed commit and resolved replies after this turn.
+    Verified {
+        /// Completed goal turn whose work was checked.
+        turn: TurnId,
+        /// Observed pull-request head containing the pushed commit.
+        head_sha: crate::CommitSha,
+        /// Threads the session replied on and GitHub confirmed resolved.
+        resolved_thread_ids: Box<[crate::ReviewThreadId]>,
+    },
+}
+
+impl GoalAchievementProvenance {
+    /// Returns the source turn and optional model declaration reference.
+    pub fn report_ref(&self) -> GoalReportRef {
+        match self {
+            Self::Model(model) => model.report_ref(),
+            Self::Verified { turn, .. } => GoalReportRef {
+                turn: *turn,
+                tool_request: None,
+            },
+        }
     }
 }
 
@@ -321,9 +350,9 @@ pub enum GoalState {
         /// Exact statement of what is needed.
         need: GoalNeed,
     },
-    /// The model declared completion.
+    /// The commissioned work is complete.
     Achieved {
-        /// Transcript location of the final report declaration.
+        /// Source turn and optional model declaration of the final report.
         report: GoalReportRef,
     },
     /// The user explicitly stopped the goal.
@@ -480,12 +509,12 @@ pub enum GoalEventKind {
         /// Durable user-command provenance.
         provenance: GoalUserProvenance,
     },
-    /// The model declared achievement with its final report.
+    /// Achievement with its final report.
     Achieved {
-        /// Exact report carried by the correlated tool request.
+        /// Exact model report or daemon verification summary.
         report: GoalReport,
-        /// Trusted tool-dispatch provenance.
-        provenance: GoalModelProvenance,
+        /// Model declaration or daemon verification evidence.
+        provenance: GoalAchievementProvenance,
     },
     /// The user ended the current goal without achievement.
     UserStopped {
@@ -680,9 +709,18 @@ impl Goal {
 
     /// Declares achievement with a report in the invoking tool request.
     pub fn declare_achieved(
-        mut self,
+        self,
         report: GoalReport,
         provenance: GoalModelProvenance,
+    ) -> Result<Self, GoalTransitionError> {
+        self.achieve(report, GoalAchievementProvenance::Model(provenance))
+    }
+
+    /// Records achievement from a model declaration or daemon verification.
+    pub fn achieve(
+        mut self,
+        report: GoalReport,
+        provenance: GoalAchievementProvenance,
     ) -> Result<Self, GoalTransitionError> {
         if !self.current().state.is_pursuing() {
             return Err(GoalTransitionError::new(
@@ -937,7 +975,7 @@ fn apply_stored_event(goal: Goal, event: &GoalEvent) -> Result<Goal, GoalTransit
             provenance,
         } => goal.resume(guidance.clone(), *provenance),
         GoalEventKind::Achieved { report, provenance } => {
-            goal.declare_achieved(report.clone(), *provenance)
+            goal.achieve(report.clone(), provenance.clone())
         }
         GoalEventKind::UserStopped { provenance } => goal.stop(*provenance),
         GoalEventKind::Superseded {
@@ -1116,7 +1154,7 @@ mod tests {
             achieved.events().last().map(GoalEvent::kind),
             Some(&GoalEventKind::Achieved {
                 report: final_report,
-                provenance,
+                provenance: GoalAchievementProvenance::Model(provenance),
             })
         );
     }

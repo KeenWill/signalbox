@@ -13,9 +13,9 @@ use std::num::NonZeroU64;
 use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, CommandPrincipal, CoreAgency, DescendantTerminationScope, DurableCommandId,
-    FinishCheckVerdict, FinishCondition, FrozenAliasDefinition, Goal, GoalBlockProvenance,
-    GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent, GoalEventKind,
-    GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
+    FinishCheckVerdict, FinishCondition, FrozenAliasDefinition, Goal, GoalAchievementProvenance,
+    GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent,
+    GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
     GoalModelProvenance, GoalNeed, GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport,
     GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
     GoalTransitionFailure, GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance,
@@ -224,6 +224,38 @@ impl From<GoalCorruption> for GoalRepositoryError {
 pub struct GoalRepository {
     pool: PgPool,
     tool_dispatch_gate: Option<signalbox_application::InProcessToolDispatchGate>,
+}
+
+/// Durable successful tool output used by the daemon's goal finish verifier.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct GoalCompletedTool {
+    /// Registry name of the completed operation.
+    pub tool_name: String,
+    /// Retained canonical request arguments.
+    pub arguments_text: String,
+    /// Complete durable output, before context rendering.
+    pub result_text: String,
+}
+
+/// A finish observation fenced to the generation and completed turn it checked.
+#[derive(Clone, Debug)]
+pub struct GoalCompletionCheck {
+    /// Generation whose successful work was observed.
+    pub generation: signalbox_domain::GoalGeneration,
+    /// Completed turn checked before continuation.
+    pub turn: TurnId,
+    /// Observed finish condition or the remaining work.
+    pub result: GoalCompletionResult,
+}
+
+/// GitHub evidence, or the exact unfinished work to present to the next turn.
+#[derive(Clone, Debug)]
+pub enum GoalCompletionResult {
+    Verified {
+        head_sha: signalbox_domain::CommitSha,
+        resolved_thread_ids: Box<[signalbox_domain::ReviewThreadId]>,
+    },
+    Missing(GoalGuidance),
 }
 
 impl GoalRepository {
@@ -916,6 +948,29 @@ impl GoalRepository {
             .map_err(Into::into)
     }
 
+    /// Reads successful push/reply results from the current goal generation.
+    pub async fn completed_goal_tools(
+        &self,
+        session: SessionId,
+        generation: signalbox_domain::GoalGeneration,
+    ) -> Result<Vec<GoalCompletedTool>, GoalRepositoryError> {
+        Ok(sqlx::query_as(
+            "SELECT request.tool_name, request.arguments_text, attempt.result_text
+             FROM tool_request AS request
+             JOIN tool_attempt AS attempt USING (session_id, turn_id, request_id)
+             JOIN goal_turn ON goal_turn.session_id = request.session_id AND goal_turn.turn_id = request.turn_id
+             JOIN turn_lifecycle AS lifecycle ON lifecycle.session_id = request.session_id AND lifecycle.turn_id = request.turn_id
+             WHERE request.session_id = $1 AND goal_turn.goal_generation = $2
+               AND lifecycle.state_kind = 'terminal' AND lifecycle.terminal_disposition_kind = 'completed'
+               AND attempt.terminal_disposition_kind = 'completed' AND attempt.result_content_kind = 'text'
+               AND request.tool_name IN ('git_push_configured', 'change_request_thread_reply')
+             ORDER BY lifecycle.acceptance_position,
+                (SELECT min(event_sequence) FROM tool_batch_transition_outbox_event AS event WHERE event.producing_model_call_id = request.producing_model_call_id),
+                request.request_ordinal")
+            .bind(session_id_to_uuid(session)).bind(Decimal::from(generation.get()))
+            .fetch_all(&self.pool).await?)
+    }
+
     /// Reconciles one current goal turn's durable terminal disposition.
     ///
     /// Nonterminal work is left alone, completion queues one idempotent
@@ -926,6 +981,28 @@ impl GoalRepository {
         session: SessionId,
         candidates: GoalTurnCandidates,
         failure_need: GoalNeed,
+        select_definition: SelectDefinition,
+    ) -> Result<GoalTurnContinuationOutcome, GoalRepositoryError>
+    where
+        SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    {
+        self.reconcile_current_with_completion(
+            session,
+            candidates,
+            failure_need,
+            None,
+            select_definition,
+        )
+        .await
+    }
+
+    /// Revalidates an external finish observation before achievement or continuation.
+    pub async fn reconcile_current_with_completion<SelectDefinition>(
+        &self,
+        session: SessionId,
+        candidates: GoalTurnCandidates,
+        failure_need: GoalNeed,
+        completion: Option<GoalCompletionCheck>,
         select_definition: SelectDefinition,
     ) -> Result<GoalTurnContinuationOutcome, GoalRepositoryError>
     where
@@ -984,6 +1061,70 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(GoalTurnContinuationOutcome::AlreadyScheduled);
         }
+        let mut verification_need = None;
+        let mut continuation_input = goal.current().statement().as_str().to_owned();
+        if let Some(check) = completion {
+            if check.generation != generation
+                || check.turn != predecessor
+                || session_is_closing(&mut transaction, session).await?
+            {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::NotCurrentGoalTurn);
+            }
+            match check.result {
+                GoalCompletionResult::Missing(guidance) => {
+                    continuation_input = guidance.as_str().to_owned();
+                    verification_need = Some(guidance);
+                }
+                GoalCompletionResult::Verified {
+                    head_sha,
+                    resolved_thread_ids,
+                } => {
+                    let report = GoalReport::try_new(format!(
+                        "Verified GitHub head {} contains the pushed commit; resolved threads: {}",
+                        head_sha.as_str(),
+                        resolved_thread_ids
+                            .iter()
+                            .map(signalbox_domain::ReviewThreadId::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .map_err(|_| GoalCorruption::Inconsistent("verified achievement report"))?;
+                    let goal = goal
+                        .achieve(
+                            report,
+                            GoalAchievementProvenance::Verified {
+                                turn: predecessor,
+                                head_sha,
+                                resolved_thread_ids,
+                            },
+                        )
+                        .map_err(|_| {
+                            GoalCorruption::Inconsistent("verified achievement transition")
+                        })?;
+                    insert_event(&mut transaction, session, &latest_event(&goal)?).await?;
+                    crate::session_lifecycle::close_in_transaction(
+                        &mut transaction,
+                        session,
+                        SessionTerminalOutcome::AchievedVerified,
+                        LifecycleActor::Core {
+                            agency: CoreAgency::Daemon,
+                        },
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        SessionLifecycleRepositoryError::Database(error)
+                        | SessionLifecycleRepositoryError::CommitAmbiguous(error) => {
+                            GoalRepositoryError::Database(error)
+                        }
+                        _ => GoalCorruption::Inconsistent("verified achievement handoff").into(),
+                    })?;
+                    retire_ineligible_queued_goal_turn(&mut transaction, session).await?;
+                    commit(transaction).await?;
+                    return Ok(GoalTurnContinuationOutcome::NotPursuing);
+                }
+            }
+        }
         let frozen_alias =
             goal_turn_frozen_alias_definition(&mut transaction, session, predecessor).await?;
         let configuration = match current_origin_configuration(&mut transaction, session, |alias| {
@@ -1009,9 +1150,9 @@ impl GoalRepository {
             session,
             generation,
             GoalTurnSource::PredecessorTurn(predecessor),
-            goal.current().statement().as_str(),
+            &continuation_input,
             &configuration,
-            GoalTurnInsertion::new(position, candidates),
+            GoalTurnInsertion::new(position, candidates).with_verification_need(verification_need),
         )
         .await?;
         commit(transaction).await?;
@@ -1472,6 +1613,7 @@ pub(crate) async fn insert_fresh_commissioned_goal(
         GoalTurnSource::UserEvent(event.ordinal()),
         accepted_input,
         turn,
+        None,
     )
     .await
 }
@@ -1956,9 +2098,10 @@ async fn insert_event(
              blocked_reason, need, guidance, report, user_command_id,
              model_turn_id, model_tool_request_id, scheduler_turn_id,
              session_outcome_kind, closure_actor_kind, closure_actor_module,
-             closure_actor_turn_id, closure_actor_tool_request_id)
+             closure_actor_turn_id, closure_actor_tool_request_id,
+             verified_turn_id, verified_head_sha, resolved_thread_ids)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                 $14, $15, $16, $17, $18)",
+                 $14, $15, $16, $17, $18, $19, $20, $21)",
     )
     .bind(session_id_to_uuid(session))
     .bind(Decimal::from(event.ordinal().get()))
@@ -1978,6 +2121,9 @@ async fn insert_event(
     .bind(encoded.closure_actor_module)
     .bind(encoded.closure_actor_turn)
     .bind(encoded.closure_actor_request)
+    .bind(encoded.verified_turn)
+    .bind(encoded.verified_head)
+    .bind(encoded.resolved_threads)
     .execute(&mut *connection)
     .await?;
     outbox::append(
@@ -1992,6 +2138,9 @@ async fn insert_event(
 }
 
 struct EncodedEvent<'a> {
+    verified_turn: Option<Uuid>,
+    verified_head: Option<&'a str>,
+    resolved_threads: Option<Vec<String>>,
     kind: &'static str,
     statement: Option<&'a str>,
     blocked_reason: Option<&'static str>,
@@ -2013,6 +2162,9 @@ impl<'a> EncodedEvent<'a> {
     fn from_event(event: &'a GoalEvent) -> Self {
         let mut encoded = Self {
             kind: goal_event_kind_to_str(event.kind()),
+            verified_turn: None,
+            verified_head: None,
+            resolved_threads: None,
             statement: None,
             blocked_reason: None,
             need: None,
@@ -2060,9 +2212,27 @@ impl<'a> EncodedEvent<'a> {
             }
             GoalEventKind::Achieved { report, provenance } => {
                 encoded.report = Some(report.as_str());
-                encoded.model_turn = Some(turn_id_to_uuid(provenance.turn()));
-                encoded.model_tool_request =
-                    Some(tool_request_id_to_uuid(provenance.tool_request()));
+                match provenance {
+                    GoalAchievementProvenance::Model(model) => {
+                        encoded.model_turn = Some(turn_id_to_uuid(model.turn()));
+                        encoded.model_tool_request =
+                            Some(tool_request_id_to_uuid(model.tool_request()));
+                    }
+                    GoalAchievementProvenance::Verified {
+                        turn,
+                        head_sha,
+                        resolved_thread_ids,
+                    } => {
+                        encoded.verified_turn = Some(turn_id_to_uuid(*turn));
+                        encoded.verified_head = Some(head_sha.as_str());
+                        encoded.resolved_threads = Some(
+                            resolved_thread_ids
+                                .iter()
+                                .map(|id| id.as_str().to_owned())
+                                .collect(),
+                        );
+                    }
+                }
             }
             GoalEventKind::UserStopped { provenance } => {
                 encoded.user_command = Some(durable_command_id_to_uuid(provenance.command()));
@@ -2115,7 +2285,8 @@ pub(crate) async fn load_goal_from_connection(
                 event.guidance, event.report, event.user_command_id,
                 model_turn_id, model_tool_request_id, scheduler_turn_id,
                 session_outcome_kind, closure_actor_kind, closure_actor_module,
-                closure_actor_turn_id, closure_actor_tool_request_id
+                closure_actor_turn_id, closure_actor_tool_request_id,
+                verified_turn_id, verified_head_sha, resolved_thread_ids
            FROM goal_event AS event
            LEFT JOIN goal_execution_failure_resumption_arm AS arm
              ON arm.session_id = event.session_id
@@ -2277,13 +2448,32 @@ fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption
         },
         GoalEventDiscriminator::Achieved => GoalEventKind::Achieved {
             report: goal_report(required(report, "achievement report")?)?,
-            provenance: GoalModelProvenance::new(
-                turn_id_from_uuid(required(model_turn, "achievement model turn")?),
-                tool_request_id_from_uuid(required(
-                    model_tool_request,
-                    "achievement model tool request",
-                )?),
-            ),
+            provenance: match column::<Option<Uuid>>(row, "verified_turn_id")? {
+                Some(turn) => GoalAchievementProvenance::Verified {
+                    turn: turn_id_from_uuid(turn),
+                    head_sha: signalbox_domain::CommitSha::try_new(required(
+                        column(row, "verified_head_sha")?,
+                        "verified head",
+                    )?)
+                    .map_err(|_| GoalCorruption::Inconsistent("verified head"))?,
+                    resolved_thread_ids: required::<Vec<String>>(
+                        column(row, "resolved_thread_ids")?,
+                        "resolved threads",
+                    )?
+                    .into_iter()
+                    .map(signalbox_domain::ReviewThreadId::try_new)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| GoalCorruption::Inconsistent("resolved thread identity"))?
+                    .into_boxed_slice(),
+                },
+                None => GoalAchievementProvenance::Model(GoalModelProvenance::new(
+                    turn_id_from_uuid(required(model_turn, "achievement model turn")?),
+                    tool_request_id_from_uuid(required(
+                        model_tool_request,
+                        "achievement model tool request",
+                    )?),
+                )),
+            },
         },
         GoalEventDiscriminator::UserStopped => GoalEventKind::UserStopped {
             provenance: GoalUserProvenance::new(

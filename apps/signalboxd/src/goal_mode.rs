@@ -31,6 +31,8 @@ use uuid::Uuid;
 
 use crate::HubModelConfiguration;
 
+mod verification;
+
 pub(crate) const GOAL_DECLARE_NAME: &str = "goal_declare";
 const GOAL_DECLARE_DESCRIPTION: &str = "Declares the current commissioned goal achieved or blocked for the invoking session. Write the exact report or need as assistant text immediately before this final response call.";
 /// Object-rooted advertisement of the internally tagged declaration.
@@ -535,6 +537,7 @@ impl From<GoalRepositoryError> for PostgresGoalPassDispositionError {
 /// Production goal continuation and execution-failure adapter.
 #[derive(Clone, Debug)]
 pub struct PostgresGoalPassDisposition {
+    pool: PgPool,
     repository: GoalRepository,
     model_configuration: HubModelConfiguration,
     configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
@@ -553,7 +556,8 @@ impl PostgresGoalPassDisposition {
         numeric_bounds: GoalModeNumericBounds,
     ) -> Self {
         Self {
-            repository: GoalRepository::new(pool),
+            repository: GoalRepository::new(pool.clone()),
+            pool,
             model_configuration,
             configuration_reload: None,
             eligibility_nudge,
@@ -1190,6 +1194,7 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let adapter = self.clone();
         async move {
+            let completion = adapter.completion_check(session).await?;
             let resumption = adapter
                 .owed_to_session(
                     session,
@@ -1207,10 +1212,11 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 .unwrap_or_else(|| std::sync::Arc::new(adapter.model_configuration.clone()));
             let outcome = match adapter
                 .repository
-                .reconcile_current_after_execution(
+                .reconcile_current_with_completion(
                     session,
                     candidates,
                     resumption.need()?,
+                    completion,
                     |alias| models.resolve_alias(alias),
                 )
                 .await

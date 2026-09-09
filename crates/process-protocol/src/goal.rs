@@ -78,12 +78,13 @@ pub enum GoalLifecycleState {
         /// Exact statement of what is needed.
         need: String,
     },
-    /// The model declared completion.
+    /// The commissioned work is complete.
     Achieved {
-        /// Turn containing the final-report declaration.
+        /// Turn whose work was declared or verified complete.
         turn_id: CanonicalUuid,
-        /// Tool request immediately preceded by the final-report transcript part.
-        tool_request_id: CanonicalUuid,
+        /// Model declaration request; absent for daemon verification.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        tool_request_id: Option<CanonicalUuid>,
     },
     /// The user explicitly ended this generation.
     UserStopped {},
@@ -162,14 +163,15 @@ pub enum GoalHistoryEvent {
         /// Durable user command provenance.
         command_id: CommandId,
     },
-    /// The model declared achievement with its final report.
+    /// Achievement with its final report.
     Achieved {
         /// Exact final report.
         report: String,
         /// Invoking turn.
         turn_id: CanonicalUuid,
-        /// Invoking tool request.
-        tool_request_id: CanonicalUuid,
+        /// Model declaration request; absent for daemon verification.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        tool_request_id: Option<CanonicalUuid>,
     },
     /// The user explicitly ended the generation.
     UserStopped {
