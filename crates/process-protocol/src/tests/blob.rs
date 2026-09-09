@@ -487,7 +487,8 @@ fn blob_upload_length_mismatch_rejects_zero_expected_length()
 #[test]
 fn blob_range_response_accepts_empty_bytes_beyond_eof() -> Result<(), Box<dyn std::error::Error>> {
     let frame = ServerFrame::try_new_for_version(
-        ProtocolVersion::One, request(1)?,
+        ProtocolVersion::One,
+        request(1)?,
         ServerMessage::BlobChunkRead {
             digest: CanonicalBlobDigest::from_bytes([0xab; 32]),
             blob_length_bytes: CanonicalU64::new(9),

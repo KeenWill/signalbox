@@ -393,16 +393,12 @@ async fn blob_four_gib_attachment_preparation_reads_no_body() -> Result<(), Box<
     let file = fs::File::create(&path)?;
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.set_len(FOUR_GIB)?;
-    let measured = Arc::new(FilesystemBlobStore::try_new_for_conformance(
-        root.store.clone(),
-    )?);
+    let measured = Arc::new(FilesystemBlobStore::try_new(root.store.clone())?);
     let configuration = support::parse_model_configuration(&root.model_configuration())?;
-    let mut registry = BlobStoreRegistry::initialize_for_conformance(
-        configuration.blob_storage(),
-        runtime.pool.clone(),
-    )
-    .await?
-    .expect("configured registry");
+    let mut registry =
+        BlobStoreRegistry::initialize(configuration.blob_storage(), runtime.pool.clone())
+            .await?
+            .expect("configured registry");
     let (name, _) = registry.routed_store(BlobStorageClass::UserAttachment);
     let name = name.clone();
     let expected = ExpectedBlob::try_new(digest, FOUR_GIB)?;

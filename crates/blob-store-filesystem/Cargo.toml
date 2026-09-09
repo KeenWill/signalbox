@@ -39,7 +39,6 @@ tokio = { version = "1.53.0", default-features = false, features = [
 [[test]]
 name = "conformance"
 path = "tests/conformance.rs"
-required-features = ["test-support"]
 
 [lints]
 workspace = true
