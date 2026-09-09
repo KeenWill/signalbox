@@ -17,7 +17,7 @@
 | credential_availability | 2 | 0 | 0 | [credential_availability](credential_availability.md) |
 | delivery_request | 2 | 0 | 0 | [delivery_request](delivery_request.md) |
 | git_remote | 4 | 0 | 2 | [git_remote](git_remote.md) |
-| goal | 26 | 0 | 0 | [goal](goal.md) |
+| goal | 27 | 0 | 0 | [goal](goal.md) |
 | goal_command | 5 | 0 | 0 | [goal_command](goal_command.md) |
 | imported_conversation | 32 | 0 | 5 | [imported_conversation](imported_conversation.md) |
 | imported_session | 20 | 0 | 0 | [imported_session](imported_session.md) |

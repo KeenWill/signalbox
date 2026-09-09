@@ -349,6 +349,9 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::GitRemoteWithdrawn { .. }
         | ServerMessage::OauthCredentialReceipt { .. }
         | ServerMessage::CredentialPoolPolicy { .. }
+        | ServerMessage::ProgramRegistered { .. }
+        | ServerMessage::ProgramRunStarted { .. }
+        | ServerMessage::ProgramRunRead { .. }
         | ServerMessage::ProgramRunCancellationReceipt { .. }
         | ServerMessage::CredentialExclusionStart {}
         | ServerMessage::CredentialExclusion { .. }
