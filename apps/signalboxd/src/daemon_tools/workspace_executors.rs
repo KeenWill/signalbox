@@ -31,6 +31,10 @@ use signalbox_tools_workspace::{
 use std::{fmt, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
+#[allow(
+    clippy::unnecessary_cast,
+    reason = "device numbers have platform-specific widths"
+)]
 pub(super) fn read_dispatch_marker(
     path: &std::path::Path,
     identity: ComposedWorkspaceIdentity,
@@ -40,7 +44,7 @@ pub(super) fn read_dispatch_marker(
     let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let root = open(path, directory_flags, Mode::empty()).ok()?;
     let root_stat = fstat(&root).ok()?;
-    if (root_stat.st_dev, root_stat.st_ino) != (identity.root.device, identity.root.inode) {
+    if (root_stat.st_dev as u64, root_stat.st_ino) != (identity.root.device, identity.root.inode) {
         return None;
     }
     let administration = openat(
@@ -51,12 +55,13 @@ pub(super) fn read_dispatch_marker(
     )
     .ok()?;
     let administration_stat = fstat(&administration).ok()?;
-    if (administration_stat.st_dev, administration_stat.st_ino)
-        != (
-            identity.administration.device,
-            identity.administration.inode,
-        )
-    {
+    if (
+        administration_stat.st_dev as u64,
+        administration_stat.st_ino,
+    ) != (
+        identity.administration.device,
+        identity.administration.inode,
+    ) {
         return None;
     }
     let marker = openat(
