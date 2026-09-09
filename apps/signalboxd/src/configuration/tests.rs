@@ -128,6 +128,8 @@ pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
+client_frame_deadline = "30s"
+client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
 fenced_pool_min_connections = 48
 fenced_pool_floor_reconciliation_interval = "5s"
@@ -303,6 +305,25 @@ fn configuration_with_anthropic_pool(pool: &str) -> String {
         "the bound pool name is the one the fixture block declares"
     );
     CONFIGURATION.replace(ANTHROPIC_POOL, pool)
+}
+
+#[test]
+fn client_socket_deadlines_are_required_configuration_keys() {
+    let mut document = CONFIGURATION.parse::<toml_edit::DocumentMut>().unwrap();
+    document["numeric_bounds"]
+        .as_table_mut()
+        .unwrap()
+        .remove("client_frame_deadline");
+    document["numeric_bounds"]
+        .as_table_mut()
+        .unwrap()
+        .remove("client_write_progress_deadline");
+    assert_eq!(
+        HubModelConfiguration::parse(&document.to_string()).unwrap_err(),
+        HubModelConfigurationError::MissingNumericBounds {
+            fields: vec!["client_frame_deadline", "client_write_progress_deadline"],
+        }
+    );
 }
 
 #[test]

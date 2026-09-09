@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         cell::RefCell,
         collections::{BTreeSet, VecDeque},
@@ -68,7 +68,7 @@ mod tests {
         RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
         SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
         acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        read_admitted_frame, acquire_review_command_permit,
         acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
         admit_snapshot_reader, admitted_user_content, blob_upload_begin_preflight,
         bounded_rendered_compaction_boundary, canonical_review_request_digest,
@@ -281,7 +281,7 @@ mod tests {
     ///
     /// Writes are routed per thread so concurrent tests never read each other's
     /// events, which keeps assertions on both presence and absence honest.
-    fn capture_telemetry(record: impl FnOnce()) -> String {
+    pub(crate) fn capture_telemetry(record: impl FnOnce()) -> String {
         static INSTALLED: OnceLock<()> = OnceLock::new();
 
         INSTALLED.get_or_init(|| {
@@ -1155,10 +1155,11 @@ mod tests {
         let (mut client, server) = duplex(8);
         let mut reader = BufReader::new(server);
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
-        let acquire = acquire_inbound_frame_permit_after_input(
+        let acquire = read_admitted_frame(
             &mut reader,
             Arc::clone(&budget),
             &mut shutdown_receiver,
+            Some(Duration::from_secs(1)),
         );
         tokio::pin!(acquire);
 
@@ -1169,7 +1170,7 @@ mod tests {
         );
         assert_eq!(budget.available_permits(), 1);
 
-        client.write_all(b"{").await?;
+        client.write_all(b"{}\n").await?;
         let permit = timeout(Duration::from_secs(1), &mut acquire)
             .await??
             .ok_or_else(|| io::Error::other("ready input must acquire a frame slot"))?;

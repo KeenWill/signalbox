@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) struct ConnectionDependencies {
+    pub(super) metrics: Option<crate::telemetry::TelemetryMetrics>,
     pub(super) configuration_reload: Option<crate::configuration_reload::ConfigurationReload>,
     pub(super) recovery_reporter: Option<FatalRecoveryReporter>,
     pub(super) oauth_service: Option<Arc<crate::OauthCredentialService>>,
@@ -21,6 +22,10 @@ pub(super) async fn serve_connections(
     dependencies: ConnectionDependencies,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
+    let mut occupancy = ConnectionOccupancy {
+        metrics: dependencies.metrics,
+        saturated: false,
+    };
     let snapshot_reader_budget = dependencies
         .snapshot_reader_budget
         .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
@@ -75,6 +80,7 @@ pub(super) async fn serve_connections(
     let mut connections = JoinSet::new();
     let mut accept_retry_at = Instant::now();
     loop {
+        occupancy.observe(connections.len());
         if shutdown_requested(&shutdown) {
             break;
         }
@@ -82,6 +88,9 @@ pub(super) async fn serve_connections(
             () = wait_for_shutdown(&mut shutdown) => break,
             accepted = accept_with_retry(&mut accept_retry_at, || listener.accept()), if connections.len() < MAX_ACTIVE_CONNECTIONS => {
                 let (stream, _) = accepted.map_err(ProcessRuntimeError::Accept)?;
+                let Some(stream) = admit_client_peer(stream, rustix::process::geteuid().as_raw()) else {
+                    continue;
+                };
                 connections.spawn(serve_connection(
                     stream,
                     services.clone(),
@@ -95,9 +104,54 @@ pub(super) async fn serve_connections(
     }
 
     while let Some(completed) = connections.join_next().await {
+        occupancy.observe(connections.len());
         inspect_connection_completion(Some(completed))?;
     }
     Ok(())
+}
+
+fn admit_client_peer(stream: UnixStream, expected_uid: u32) -> Option<UnixStream> {
+    match stream.peer_cred() {
+        Ok(peer) if peer.uid() == expected_uid => Some(stream),
+        Ok(peer) => {
+            tracing::warn!(
+                peer_uid = peer.uid(),
+                expected_uid,
+                "client peer failed same-user admission"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::warn!("client peer identity inspection failed");
+            None
+        }
+    }
+}
+
+struct ConnectionOccupancy {
+    metrics: Option<crate::telemetry::TelemetryMetrics>,
+    saturated: bool,
+}
+
+impl ConnectionOccupancy {
+    fn observe(&mut self, active: usize) {
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_client_connections(active);
+        }
+        let saturated = active >= MAX_ACTIVE_CONNECTIONS;
+        if saturated && !self.saturated {
+            tracing::warn!(active_connections = active, "client connection cap reached");
+        }
+        self.saturated = saturated;
+    }
+}
+
+impl Drop for ConnectionOccupancy {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_client_connections(0);
+        }
+    }
 }
 
 // Bounds accept retry frequency during transient resource exhaustion.
@@ -181,7 +235,13 @@ pub(super) async fn serve_connection(
     services: ConnectionServices,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError> {
-    let (reader, mut writer) = stream.into_split();
+    let (reader, writer) = stream.into_split();
+    let bounds = services.model_configuration.numeric_bounds();
+    let frame_deadline = bounds.duration("client_frame_deadline").flatten();
+    let mut writer = super::client_io::ProgressWriter::new(
+        writer,
+        bounds.duration("client_write_progress_deadline").flatten(),
+    );
     let mut reader = BufReader::with_capacity(INBOUND_READ_AHEAD_BYTES, reader);
     let mut pending_import = None;
     let mut pending_blob_upload = None;
@@ -198,25 +258,17 @@ pub(super) async fn serve_connection(
             ConversationImportState::Inactive
         };
         let inbound_frame_budget = services.inbound_frame_budgets.for_connection(import_state);
-        let frame_buffer_permit = tokio::select! {
+        let admitted_frame = tokio::select! {
             biased;
             () = wait_for_deadline(awaiting_bulk_ingest_deadline) => return Ok(()),
-            permit = acquire_inbound_frame_permit_after_input(
+            frame = read_admitted_frame(
                 &mut reader,
                 inbound_frame_budget,
                 &mut shutdown,
-            ) => permit?,
+                frame_deadline,
+            ) => frame?,
         };
-        let Some(frame_buffer_permit) = frame_buffer_permit else {
-            return Ok(());
-        };
-        let line = tokio::select! {
-            biased;
-            () = wait_for_shutdown(&mut shutdown) => return Ok(()),
-            () = wait_for_deadline(awaiting_bulk_ingest_deadline) => return Ok(()),
-            line = read_frame_line(&mut reader) => line?,
-        };
-        let Some(line) = line else {
+        let Some((frame_buffer_permit, line)) = admitted_frame else {
             return Ok(());
         };
         let frame = match line {
@@ -470,11 +522,12 @@ pub(super) async fn wait_for_deadline(deadline: Option<Instant>) {
     }
 }
 
-pub(super) async fn acquire_inbound_frame_permit_after_input<Reader>(
+pub(super) async fn read_admitted_frame<Reader>(
     reader: &mut Reader,
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
-) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError>
+    frame_deadline: Option<Duration>,
+) -> Result<Option<(OwnedSemaphorePermit, IncomingLine)>, ProcessConnectionError>
 where
     Reader: AsyncBufRead + Unpin,
 {
@@ -485,7 +538,23 @@ where
     if !input_ready {
         return Ok(None);
     }
-    acquire_inbound_frame_permit(budget, shutdown).await
+    let deadline = frame_deadline.map(|duration| Instant::now() + duration);
+    tokio::select! {
+        biased;
+        () = wait_for_deadline(deadline) => {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "client frame deadline elapsed").into())
+        }
+        frame = async {
+            let Some(permit) = acquire_inbound_frame_permit(budget, shutdown).await? else {
+                return Ok(None);
+            };
+            tokio::select! {
+                biased;
+                () = wait_for_shutdown(shutdown) => Ok(None),
+                line = read_frame_line(reader) => Ok(line?.map(|line| (permit, line))),
+            }
+        } => frame,
+    }
 }
 
 pub(super) async fn acquire_inbound_frame_permit(
@@ -1016,9 +1085,135 @@ pub(super) struct PendingConversationImport {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::capture_telemetry;
     use super::*;
     use rustix::io::Errno;
     use std::future::ready;
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn mismatching_peer_uid_is_refused_and_closed() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let observed = server.peer_cred().unwrap().uid();
+        let log = capture_telemetry(|| {
+            assert!(admit_client_peer(server, observed.wrapping_add(1)).is_none());
+        });
+        assert!(log.contains(&format!("peer_uid={observed}")));
+        assert_eq!(
+            log.matches("client peer failed same-user admission")
+                .count(),
+            1
+        );
+        assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn matching_peer_uid_can_exchange_bytes() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let mut server = admit_client_peer(server, rustix::process::geteuid().as_raw()).unwrap();
+        client.write_all(b"x").await.unwrap();
+        assert_eq!(server.read_u8().await.unwrap(), b'x');
+    }
+
+    #[test]
+    fn saturation_warns_once_per_episode_and_exports_occupancy() {
+        let metrics = crate::telemetry::TelemetryMetrics::new().unwrap();
+        let mut occupancy = ConnectionOccupancy {
+            metrics: Some(metrics.clone()),
+            saturated: false,
+        };
+        let first = capture_telemetry(|| {
+            occupancy.observe(MAX_ACTIVE_CONNECTIONS - 1);
+            occupancy.observe(MAX_ACTIVE_CONNECTIONS);
+            occupancy.observe(MAX_ACTIVE_CONNECTIONS);
+        });
+        assert_eq!(first.matches("client connection cap reached").count(), 1);
+        assert!(
+            metrics
+                .render()
+                .unwrap()
+                .contains("signalbox_client_connections_active 128\n")
+        );
+        let second = capture_telemetry(|| {
+            occupancy.observe(MAX_ACTIVE_CONNECTIONS - 1);
+            occupancy.observe(MAX_ACTIVE_CONNECTIONS);
+        });
+        assert_eq!(second.matches("client connection cap reached").count(), 1);
+        drop(occupancy);
+        assert!(
+            metrics
+                .render()
+                .unwrap()
+                .contains("signalbox_client_connections_active 0\n")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_frame_expires_even_when_more_bytes_arrive() {
+        let (mut client, server) = tokio::io::duplex(32);
+        let mut reader = BufReader::new(server);
+        let budget = Arc::new(Semaphore::new(1));
+        let (_shutdown, mut shutdown) = watch::channel(false);
+        client.write_all(b"{").await.unwrap();
+        let frame = read_admitted_frame(
+            &mut reader,
+            budget.clone(),
+            &mut shutdown,
+            Some(Duration::from_secs(1)),
+        );
+        tokio::pin!(frame);
+        assert!(
+            timeout(Duration::from_millis(750), &mut frame)
+                .await
+                .is_err()
+        );
+        client.write_all(b" ").await.unwrap();
+        let error = frame.await.err().expect("incomplete frame times out");
+        assert!(
+            matches!(error, ProcessConnectionError::PeerIo(error) if error.kind() == io::ErrorKind::TimedOut)
+        );
+        assert_eq!(budget.available_permits(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn frame_deadline_includes_waiting_for_admission() {
+        let (mut client, server) = tokio::io::duplex(32);
+        let mut reader = BufReader::new(server);
+        let budget = Arc::new(Semaphore::new(0));
+        let (_shutdown, mut shutdown) = watch::channel(false);
+        client.write_all(b"{}\n").await.unwrap();
+        let error = read_admitted_frame(
+            &mut reader,
+            budget,
+            &mut shutdown,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .err()
+        .expect("admission wait times out");
+        assert!(
+            matches!(error, ProcessConnectionError::PeerIo(error) if error.kind() == io::ErrorKind::TimedOut)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_connection_can_send_a_frame_after_the_deadline_duration() {
+        let (mut client, server) = tokio::io::duplex(32);
+        let mut reader = BufReader::new(server);
+        let budget = Arc::new(Semaphore::new(1));
+        let (_shutdown, mut shutdown) = watch::channel(false);
+        let frame = read_admitted_frame(
+            &mut reader,
+            budget,
+            &mut shutdown,
+            Some(Duration::from_secs(1)),
+        );
+        tokio::pin!(frame);
+        assert!(timeout(Duration::from_secs(60), &mut frame).await.is_err());
+        client.write_all(b"{}\n").await.unwrap();
+        let (_, line) = frame.await.unwrap().unwrap();
+        assert!(matches!(line, IncomingLine::Complete(bytes) if bytes == b"{}\n"));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn transient_accept_failures_retry_until_a_connection_arrives() {

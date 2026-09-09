@@ -111,8 +111,7 @@ where
             LocalGitTools::try_new(filesystem, root, git_identity).map_err(|error| {
                 tracing::error!(
                     cause = %error,
-                    cause_detail = ?error,
-                    workspace_root = %root.display(),
+                    root_count = 1,
                     "local Git tool suite rejected the configured workspace"
                 );
                 DaemonToolsConstructionError::LocalGit

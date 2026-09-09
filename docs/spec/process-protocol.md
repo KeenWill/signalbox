@@ -101,10 +101,9 @@ effective user. A group- or other-writable ancestor is admitted only when it is
 sticky and its child is owned by the effective user. A daemon holds an exclusive
 lock beside the socket for its lifetime and pins the bound inode, and it unlinks
 a socket path only after revalidating that pin, so a restart never removes a
-live successor's socket. Socket filesystem access is the deployment boundary;
-the daemon adds no application-level file-owner proof. The absence of
-authentication is provisional: remote access needs an authenticated identity and
-revocation design that does not exist, recorded in
+live successor's socket. The daemon admits only socket peers whose uid equals
+its effective uid. Remote access needs an authenticated identity and revocation
+design that does not exist, recorded in
 [open-questions.md](../open-questions.md).
 
 A denial on the wire requires a reason although the domain command admits its
@@ -143,11 +142,11 @@ unsanitized provider payloads, SQL, or user content other than a bounded,
 credential-redacted provider error body; a tool failure may name a bounded
 workspace-relative path. Retained source content, such as an imported transcript
 entry, is not diagnostic evidence. The guarantee covers protocol output and
-diagnostic evidence; a local log recording a rejected workspace configuration
-names the configured root.
+diagnostic evidence, including local workspace-configuration logs.
 
-The transport is local-machine and single-user; the protocol has no
-authentication, no authorization exchange, and no remote transport.
+The transport is local-machine and single-user; beyond the socket peer uid
+check, the protocol has no authentication or authorization exchange and no
+remote transport.
 
 Domain values, PostgreSQL records, and wire messages are distinct
 representations. The daemon constructs domain and application values from a
@@ -171,6 +170,17 @@ process-wide bulk-ingest permit admits at most one chunked or single-shot
 conversation import or blob upload at a time. The daemon admits one review
 mutation at a time and releases the inbound frame slot after acquiring that
 permit and before application handling.
+
+The daemon exports an active-client-connection gauge and warns once on entering
+each saturation episode; it pauses acceptance at the ceiling. The required
+`client_frame_deadline` bounds frame completion from the first received byte,
+including admission wait, and `client_write_progress_deadline` bounds a write
+that makes no progress. Expiry closes the connection. Neither bound limits idle
+connections or idle follow streams; `"none"` disables the corresponding bound.
+
+SIGINT or SIGTERM stops admission and drains runtime work under the configured
+shutdown grace window. A subsequent termination signal interrupts that drain,
+aborts remaining runtime tasks, and proceeds immediately to cleanup.
 
 Every accepted non-review mutation, import transport request, or blob transport
 request produces exactly one receipt message or an error, except an import or
