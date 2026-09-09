@@ -361,7 +361,10 @@ pub(crate) async fn queue_webhook_pulls(
         serde_json::from_slice(&body).map_err(|_| StoreError::InvalidComparisonBaseline)?;
     let mut numbers = std::collections::BTreeSet::new();
     match event.as_str() {
-        "pull_request" | "pull_request_review" | "pull_request_review_comment" => {
+        "pull_request"
+        | "pull_request_review"
+        | "pull_request_review_comment"
+        | "pull_request_review_thread" => {
             if let Some(number) = observation_decode::positive(&payload["pull_request"]["number"]) {
                 numbers.insert(number);
             }
@@ -381,7 +384,7 @@ pub(crate) async fn queue_webhook_pulls(
         sqlx::query(
             "INSERT INTO webhook_pull_wake (repository, pull_request_number, delivery_id)
             VALUES ($1,$2,$3) ON CONFLICT (repository,pull_request_number)
-            DO UPDATE SET delivery_id=EXCLUDED.delivery_id",
+            DO UPDATE SET delivery_id=EXCLUDED.delivery_id, failed_attempts=0, last_failure=NULL",
         )
         .bind(&repository)
         .bind(Decimal::from(number.get()))

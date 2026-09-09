@@ -751,6 +751,7 @@ impl RuntimeState {
                 let Some(wake) = self.wakes.get(repository.repository()).cloned() else {
                     continue;
                 };
+                wake.notify_one();
                 let task = GitHubRepositoryTask {
                     repository: repository.repository().clone(),
                     signal_reviewers: configuration.signal_reviewers().to_vec(),
@@ -759,7 +760,6 @@ impl RuntimeState {
                     clients: RepositoryWatchClientLoader::new(repository),
                     store: self.store.clone(),
                 };
-                wake.notify_one();
                 self.repositories.spawn(run_repository_task(
                     task,
                     repository.poll_interval(),

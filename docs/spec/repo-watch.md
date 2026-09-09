@@ -40,7 +40,7 @@ mergeability, and conclusion predicates. A rule carries a nonempty ordered
 action list, singleton scope, and cooldown. Its content digest covers its full
 versioned semantics.
 
-The module schema contains thirteen tables:
+The module schema contains seventeen tables:
 
 - `repository_state` and `pr_state` are mutable provider-state projections. A
   repository row fences complete frontier commits with a generation and the
@@ -71,6 +71,11 @@ The module schema contains thirteen tables:
   payload, and settlement.
 - `webhook_delivery`, `webhook_body`, and `webhook_disposition` retain one
   authenticated delivery under its caller-selected expiry.
+- `webhook_pull_wake` coalesces pending PR observations and retains failed
+  attempt counts and the last failure.
+- `poll_cache_reviewers` and `poll_cache_page` retain the selected reviewer set
+  and accepted conditional REST snapshots.
+- `poll_cursor` retains unfinished repository reconciliation.
 - `core_event_cursor` records module application progress.
 - `rule_evaluation_cursor` records each rule revision's last evaluated
   repository event, including nonmatches and suppressed dispatches.
@@ -186,7 +191,10 @@ their named pull requests in `webhook_pull_wake` and wake the repository task.
 Each queued pull request is fetched and admitted independently against the
 committed baseline; the command worker evaluates its events without waiting for
 a poll. Successful admission clears only the consumed delivery; a newer delivery
-remains pending. Periodic polls reconcile repository-wide state. Shadow hooks
+remains pending. Failed observations retain their failure and attempt count.
+After three failed attempts, that row is skipped until a new delivery resets it.
+Other queued PRs continue; periodic polls reconcile repository-wide state
+independently. Startup wakes resume eligible pending rows. Shadow hooks
 acknowledge without queuing or waking. The runtime's `reload_configuration`
 reconciles rule revisions and replaces listener settings inside the reload.
 Enabled rule templates must resolve before composition or reload. Stale or
@@ -345,13 +353,13 @@ and nested-fetch identities. This transport state is separate from events and
 rules and contains no raw provider JSON, credential values, or reactions from
 actors outside the configured signal-reviewer set. Before every poller
 composition, including startup and re-enablement, the runtime compares the
-persisted reviewer set with configured signal reviewers and invalidates both
+persisted reviewer set with configured signal reviewers and invalidates
 validators, snapshots, and unfinished poll cursors when they differ. After
-restart with an unchanged set, the first complete poll sends conditional
-requests for every traversed resource with a persisted validator. Completed
-stages and budget-limited attempts retain accepted transport pages. A completed
-reconciliation removes untraversed resources and terminal pull-request pages;
-unchanged responses retain their traversed pages.
+restart with an unchanged set, requests not already captured by an unfinished
+stage use persisted validators. Completed stages and budget-limited attempts
+retain accepted transport pages. A completed reconciliation removes untraversed
+resources and terminal pull-request pages; unchanged responses retain their
+traversed pages.
 
 Dispatched sessions retain the repository-watch creation cause, module actor,
 and dispatch reference. Their provenance resolves the existing dispatch ledger

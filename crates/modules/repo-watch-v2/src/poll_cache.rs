@@ -928,6 +928,8 @@ impl<T: ConditionalObservationRead> GitHubObservationRead for CachedObservationR
     }
 }
 
+const WEBHOOK_PULL_ATTEMPT_LIMIT: i32 = 3;
+
 /// Drains the pending primary-webhook subjects through ordinary event admission.
 pub async fn observe_webhook_pulls(
     io: &impl ConditionalObservationRead,
@@ -939,9 +941,10 @@ pub async fn observe_webhook_pulls(
     use rust_decimal::{Decimal, prelude::ToPrimitive};
     let pending: Vec<(Decimal, uuid::Uuid)> = sqlx::query_as(
         "SELECT pull_request_number, delivery_id FROM webhook_pull_wake
-         WHERE repository=$1 ORDER BY pull_request_number",
+         WHERE repository=$1 AND failed_attempts < $2 ORDER BY pull_request_number",
     )
     .bind(repository.as_str())
+    .bind(WEBHOOK_PULL_ATTEMPT_LIMIT)
     .fetch_all(&store.pool)
     .await
     .map_err(StoreError::from)
@@ -952,6 +955,7 @@ pub async fn observe_webhook_pulls(
             .and_then(NonZeroU64::new)
             .map(signalbox_session_ownership::PullRequestNumber::new)
             .ok_or(ObservationError::InvalidResponse)?;
+        let result: Result<(), ObservationError> = async {
         let baseline = store
             .ingest_baseline(repository)
             .await
@@ -982,6 +986,16 @@ pub async fn observe_webhook_pulls(
             pull_request=pull.get(),requests=counted.requests.load(std::sync::atomic::Ordering::Relaxed),
             "repository-watch observation completed");
         incremental::webhook_observed(store, repository, pull).await?;
+        Ok(())
+        }.await;
+        if let Err(error) = result {
+            sqlx::query("UPDATE webhook_pull_wake SET failed_attempts=failed_attempts+1, last_failure=$4 WHERE repository=$1 AND pull_request_number=$2 AND delivery_id=$3")
+                .bind(repository.as_str()).bind(number).bind(delivery).bind(error.to_string())
+                .execute(&store.pool).await.map_err(StoreError::from).map_err(ObservationError::Cache)?;
+            tracing::warn!(repository=repository.as_str(),pull_request=pull.get(),%error,
+                "repository-watch webhook pull observation failed");
+            continue;
+        }
         sqlx::query("DELETE FROM webhook_pull_wake WHERE repository=$1 AND pull_request_number=$2 AND delivery_id=$3")
             .bind(repository.as_str()).bind(number).bind(delivery).execute(&store.pool).await.map_err(StoreError::from).map_err(ObservationError::Cache)?;
     }
