@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, ffi::OsString, time::Duration};
 
 use signalbox_tools_exec::{
     CaptureCompleteness, ProcessEnvironment, ProcessOutcome, ProcessRequest, ProcessRunResult,
@@ -12,7 +12,7 @@ use crate::repo_watch_credentials::RepositoryWatchClientLoader;
 
 pub(super) struct ProcessGitPushTransport<Runner> {
     pub(super) runner: Runner,
-    pub(super) credential_file: PathBuf,
+    pub(super) credentials: RepositoryWatchClientLoader,
 }
 
 impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner> {
@@ -20,8 +20,9 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
         &mut self,
         request: GitPushRequest,
     ) -> Result<GitPushReceipt, GitPushTransportFailure> {
-        let authorization = RepositoryWatchClientLoader::for_git_push(self.credential_file.clone())
-            .git_authorization()
+        let authenticated_url = self
+            .credentials
+            .authenticated_push_url(request.remote().url())
             .await
             .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
         if !request.repository_root().is_dir() {
@@ -49,9 +50,9 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
         .collect();
         environment.insert(
             "GIT_CONFIG_KEY_0".into(),
-            format!("http.{}.extraheader", request.remote().url()).into(),
+            format!("url.{authenticated_url}.insteadOf").into(),
         );
-        environment.insert("GIT_CONFIG_VALUE_0".into(), authorization.into());
+        environment.insert("GIT_CONFIG_VALUE_0".into(), request.remote().url().into());
         environment.insert(
             "GIT_DIR".into(),
             request.git_directory().as_os_str().to_owned(),

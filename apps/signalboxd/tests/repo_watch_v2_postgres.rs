@@ -4178,6 +4178,24 @@ impl ConditionalPollFixture {
 impl signalbox_module_repo_watch_v2::poll_cache::ConditionalObservationRead
     for ConditionalPollFixture
 {
+    async fn rest_remaining(
+        &self,
+    ) -> Result<u64, signalbox_module_repo_watch_v2::provider::ObservationError> {
+        let page = self.conditional_page("/rate_limit", None).await?;
+        let signalbox_module_repo_watch_v2::github::ConditionalPage::Modified { body, .. } = page
+        else {
+            return Err(
+                signalbox_module_repo_watch_v2::provider::ObservationError::InvalidResponse,
+            );
+        };
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
+            signalbox_module_repo_watch_v2::provider::ObservationError::InvalidResponse
+        })?;
+        value["resources"]["core"]["remaining"]
+            .as_u64()
+            .ok_or(signalbox_module_repo_watch_v2::provider::ObservationError::InvalidResponse)
+    }
+
     async fn conditional_page(
         &self,
         path: &str,

@@ -152,18 +152,27 @@ impl ConfigurationReload {
                 .await
                 .map_err(|_| ());
         }
-        let path = self.github_tool_credential.as_ref().ok_or(())?;
         let reference =
             CredentialReference::new(signalbox_tools_code_host::CODE_HOST_CREDENTIAL_REFERENCE);
-        let credential = crate::FileCredentialAccess::new(path.clone(), reference.clone())
-            .resolve(&reference)
-            .await
-            .map_err(|_| ())?;
+        let credentials = match catalogs
+            .models
+            .github_credential_profile(reference.as_str())
+        {
+            Some(profile) => crate::FileCredentialAccess::from_github(profile, reference.clone()),
+            None => crate::FileCredentialAccess::new(
+                self.github_tool_credential.clone().ok_or(())?,
+                reference.clone(),
+            ),
+        };
+        let credential = credentials.resolve(&reference).await.map_err(|_| ())?;
         let token = std::str::from_utf8(credential.expose_bytes()).map_err(|_| ())?;
         signalbox_module_repo_watch_v2::github::GitHubClient::try_new(
             "signalbox-goal-verification",
             token,
         )
+        .map(|client| {
+            crate::repo_watch_credentials::with_app_authentication(client, credentials.github_app())
+        })
         .map_err(|_| ())
     }
 
@@ -266,14 +275,9 @@ impl ConfigurationReload {
             .and_then(|()| self.integration_credentials.validate())
             .map_err(|error| failure(ReloadPhase::Validate, &error.to_string()))?;
         if let Some(tool_credential) = &self.github_tool_credential
-            && catalogs.models.repository_watch().is_some_and(|watch| {
-                watch.repositories().iter().any(|repository| {
-                    crate::repo_watch_credentials::credential_files_conflict(
-                        tool_credential,
-                        repository.credential_file(),
-                    )
-                })
-            })
+            && catalogs
+                .models
+                .github_tool_credential_conflicts(tool_credential)
         {
             return Err(failure(
                 ReloadPhase::Validate,
@@ -403,9 +407,10 @@ impl ConfigurationReload {
         &self,
         request: ReloadConfiguration,
         intent: &ReloadIntent,
-        replacement: ConfigurationCatalogs,
+        mut replacement: ConfigurationCatalogs,
         recovering: bool,
     ) -> Result<ReloadLookup, ReloadRepositoryError> {
+        Arc::make_mut(&mut replacement.models).reuse_github_credentials(&self.catalogs().models);
         let prepared_watch = if let Some(watch) = &self.watch {
             let prepared = match watch.prepare_reload(replacement.clone()).await {
                 Ok(prepared) => prepared,

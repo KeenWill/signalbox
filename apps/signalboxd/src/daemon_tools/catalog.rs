@@ -73,7 +73,7 @@ impl DaemonToolCatalog {
                 watch
                     .repositories()
                     .iter()
-                    .any(|repository| repository.push_credential_file().is_some())
+                    .any(|repository| repository.admits_push())
             })
         {
             self.with_compiled_catalog(

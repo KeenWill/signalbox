@@ -104,10 +104,10 @@ where
         .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
         let transport = super::git_push::ProcessGitPushTransport {
             runner,
-            credential_file: repository
-                .push_credential_file()
-                .ok_or(DaemonToolsConstructionError::LocalGit)?
-                .to_owned(),
+            credentials:
+                crate::repo_watch_credentials::RepositoryWatchClientLoader::for_repository_push(
+                    repository,
+                ),
         };
         let (_, executor) =
             signalbox_tools_git::GitPushTools::try_new(filesystem, root, remote, transport)

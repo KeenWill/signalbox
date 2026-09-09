@@ -221,6 +221,7 @@ impl Drop for CensusHistory {
 /// Production GitHub transport with fixed endpoints and deployment-supplied policy.
 #[derive(Clone, Debug)]
 pub struct GitHubCodeHostTransport {
+    app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
     convergence_policy: Option<signalbox_convergence::ConvergencePolicy>,
     convergence_history: ConvergenceHistory,
     client: Client,
@@ -266,6 +267,7 @@ impl GitHubCodeHostTransport {
         let rest_base = Url::parse(REST_BASE_URL).map_err(|_| GitHubCodeHostConstructionError)?;
         let graphql_url = Url::parse(GRAPHQL_URL).map_err(|_| GitHubCodeHostConstructionError)?;
         Ok(Self {
+            app: None,
             convergence_policy: None,
             convergence_history: Default::default(),
             client,
@@ -273,6 +275,15 @@ impl GitHubCodeHostTransport {
             graphql_url,
             bounds,
         })
+    }
+
+    /// Uses the profile's shared installation authentication for every request.
+    pub fn with_app(
+        mut self,
+        app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
+    ) -> Self {
+        self.app = app;
+        self
     }
 
     /// Installs the operator's convergence policy for both convergence reads.
@@ -606,12 +617,23 @@ impl GitHubCodeHostTransport {
             .send_authenticated_with_accept(Method::GET, url, None, BLOB_RAW_ACCEPT, credential)
             .await?;
         ensure_expected_status(&response, StatusCode::OK)?;
-        select_repository_file_content(
+        let scrubber = response_scrubber(&response);
+        let mut body = select_repository_file_content(
             response.bytes_stream(),
             line_range,
             self.bounds.repository_file_content_bytes(),
         )
-        .await
+        .await?;
+        if let Some(scrubber) = scrubber
+            && let RepositoryFileBodyKind::Text(selection) = &mut body.kind
+        {
+            let mut value = serde_json::Value::String(std::mem::take(&mut selection.content));
+            scrubber.redact_value(&mut value);
+            if let serde_json::Value::String(text) = value {
+                selection.content = text;
+            }
+        }
+        Ok(body)
     }
 
     fn repository_contents_url(
@@ -1658,6 +1680,16 @@ impl GitHubCodeHostTransport {
         let headers = HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static(accept))]);
         let request =
             authenticated_request(&self.client, method, url, authentication, body).headers(headers);
+        if let Some(app) = &self.app {
+            return app.send(request).await.map_err(|failure| match failure {
+                signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                    CodeHostTransportFailure::InvalidCredential
+                }
+                signalbox_github_transport::AppRequestFailure::Request(_) => {
+                    CodeHostTransportFailure::DispatchUnknown
+                }
+            });
+        }
         request
             .send()
             .await
@@ -1706,6 +1738,7 @@ impl GitHubCodeHostTransport {
         expected: StatusCode,
     ) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
         ensure_expected_status(&response, expected)?;
+        let scrubber = response_scrubber(&response);
         let completeness = if has_next_page(response.headers()) {
             CodeHostResultCompleteness::Truncated
         } else {
@@ -1716,8 +1749,11 @@ impl GitHubCodeHostTransport {
         if body_completeness == CodeHostResultCompleteness::Truncated {
             return Err(CodeHostTransportFailure::ResponseTooLarge);
         }
-        let value =
+        let mut value =
             serde_json::from_slice(&body).map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+        if let Some(scrubber) = scrubber {
+            scrubber.redact_value(&mut value);
+        }
         Ok((value, completeness))
     }
 }
@@ -1895,6 +1931,7 @@ async fn bounded_json_page(
     limit: usize,
 ) -> Result<(serde_json::Value, CodeHostResultCompleteness), CodeHostTransportFailure> {
     ensure_expected_status(&response, expected)?;
+    let scrubber = response_scrubber(&response);
     let completeness = if has_next_page(response.headers()) {
         CodeHostResultCompleteness::Truncated
     } else {
@@ -1904,8 +1941,11 @@ async fn bounded_json_page(
     if body_completeness == CodeHostResultCompleteness::Truncated {
         return Err(CodeHostTransportFailure::ResponseTooLarge);
     }
-    let value =
+    let mut value =
         serde_json::from_slice(&body).map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+    if let Some(scrubber) = scrubber {
+        scrubber.redact_value(&mut value);
+    }
     Ok((value, completeness))
 }
 
@@ -3028,6 +3068,11 @@ fn required_bool(
     required(object, member)?
         .as_bool()
         .ok_or(CodeHostTransportFailure::InvalidResponse)
+}
+
+fn response_scrubber(response: &Response) -> Option<super::CredentialScrubber> {
+    signalbox_github_transport::response_credential(response)
+        .and_then(|bytes| super::CredentialScrubber::try_new(&CredentialValue::new(bytes)))
 }
 
 #[cfg(test)]

@@ -12,10 +12,25 @@ use reqwest::{
 
 const API_ROOT: &str = "https://api.github.com";
 
+/// Deployment-owned authenticated request dispatch; the path supplies safe error context.
+pub type AuthenticatedRequestSender = std::sync::Arc<
+    dyn Fn(
+            reqwest::RequestBuilder,
+            String,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<reqwest::Response, GitHubClientError>>
+                    + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
 /// GitHub HTTP client owned by repository-watch external I/O.
 #[derive(Clone)]
 pub struct GitHubClient {
     client: Client,
+    request_sender: Option<AuthenticatedRequestSender>,
 }
 
 impl GitHubClient {
@@ -42,7 +57,49 @@ impl GitHubClient {
             .default_headers(headers)
             .build()
             .map_err(GitHubClientError::Build)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            request_sender: None,
+        })
+    }
+
+    /// Installs deployment-owned authentication and refresh at request dispatch.
+    pub fn with_request_sender(mut self, sender: Option<AuthenticatedRequestSender>) -> Self {
+        self.request_sender = sender;
+        self
+    }
+
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+    ) -> Result<reqwest::Response, GitHubClientError> {
+        match &self.request_sender {
+            Some(send) => send(request, path.to_owned()).await,
+            None => request
+                .send()
+                .await
+                .map_err(|source| GitHubClientError::Request {
+                    path: path.to_owned(),
+                    status: None,
+                    source,
+                }),
+        }
+    }
+
+    /// Returns the authenticated principal's remaining REST requests.
+    pub async fn rest_quota(&self) -> Result<Option<u64>, GitHubClientError> {
+        let path = "/rate_limit";
+        let response = self
+            .send(self.client.get(format!("{API_ROOT}{path}")), path)
+            .await?;
+        if !response.status().is_success() {
+            return Err(GitHubClientError::Rejected {
+                path: path.to_owned(),
+                status: response.status(),
+            });
+        }
+        Ok(rest_remaining(response.headers()))
     }
 
     /// Fetches one API-relative resource as exact response bytes.
@@ -77,14 +134,7 @@ impl GitHubClient {
                 request = request.header(IF_MODIFIED_SINCE, modified);
             }
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|source| GitHubClientError::Request {
-                path: path.to_owned(),
-                status: None,
-                source,
-            })?;
+        let response = self.send(request, path).await?;
         let status = response.status();
         if status == StatusCode::NOT_MODIFIED {
             return Ok(ConditionalPage::Unchanged);
@@ -132,18 +182,12 @@ impl GitHubClient {
     /// Submits the module's encoded GraphQL observation query to GitHub.
     pub async fn graphql(&self, body: Vec<u8>) -> Result<Vec<u8>, GitHubClientError> {
         let path = "/graphql";
-        let response = self
+        let request = self
             .client
             .post(format!("{API_ROOT}/graphql"))
             .header(CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|source| GitHubClientError::Request {
-                path: path.to_owned(),
-                status: None,
-                source,
-            })?;
+            .body(body);
+        let response = self.send(request, "/graphql").await?;
         let status = response.status();
         if !status.is_success() {
             return Err(GitHubClientError::Rejected {
@@ -234,9 +278,36 @@ impl Error for GitHubClientError {
     }
 }
 
+fn rest_remaining(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("x-ratelimit-remaining")?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{GitHubClientError, validate_path};
+
+    #[test]
+    fn rest_budget_uses_authenticated_response_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-ratelimit-limit",
+            reqwest::header::HeaderValue::from_static("15000"),
+        );
+        headers.insert(
+            "x-ratelimit-remaining",
+            reqwest::header::HeaderValue::from_static("14987"),
+        );
+        headers.insert(
+            "x-ratelimit-resource",
+            reqwest::header::HeaderValue::from_static("core"),
+        );
+        assert_eq!(super::rest_remaining(&headers), Some(14987));
+    }
 
     #[test]
     fn rejected_request_reports_path_page_and_status() {

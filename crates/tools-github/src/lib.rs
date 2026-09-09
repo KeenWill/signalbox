@@ -1890,6 +1890,7 @@ fn truncate_sanitized(mut text: String) -> String {
 /// Production REST/GraphQL transport with no ambient proxy, redirect, or retry.
 #[derive(Clone, Debug)]
 pub struct GitHubApiTransport {
+    app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
     timeout: Duration,
     rest_base: Url,
     graphql_url: Url,
@@ -1899,12 +1900,22 @@ impl GitHubApiTransport {
     /// Constructs the fixed production transport.
     pub fn try_new() -> Result<Self, GitHubApiTransportConstructionError> {
         Ok(Self {
+            app: None,
             timeout: DEFAULT_TIMEOUT,
             rest_base: Url::parse(REST_BASE_URL)
                 .map_err(|_| GitHubApiTransportConstructionError)?,
             graphql_url: Url::parse(GRAPHQL_URL)
                 .map_err(|_| GitHubApiTransportConstructionError)?,
         })
+    }
+
+    /// Uses the profile's shared installation authentication for each request.
+    pub fn with_app(
+        mut self,
+        app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
+    ) -> Self {
+        self.app = app;
+        self
     }
 
     fn repository_url(
@@ -2159,20 +2170,38 @@ impl GitHubApiTransport {
             .await
             .map_err(classify_destination_failure)?;
         let request = authenticated_request(&client, method, url, authentication, body);
-        let response = request
-            .send()
-            .await
-            .map_err(|error| classify_send_failure(error.is_connect()))?;
+        let response = match &self.app {
+            Some(app) => app.send(request).await.map_err(|failure| match failure {
+                signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                    GitHubTransportFailure::InvalidCredential
+                }
+                signalbox_github_transport::AppRequestFailure::Request(error) => {
+                    classify_send_failure(error.is_connect())
+                }
+            })?,
+            None => request
+                .send()
+                .await
+                .map_err(|error| classify_send_failure(error.is_connect()))?,
+        };
         if classify_status(response.status().as_u16()) == StatusClass::Success {
             return Ok(response);
         }
+        let app_credential =
+            signalbox_github_transport::response_credential(&response).map(CredentialValue::new);
+        let app_scrubber = app_credential
+            .as_ref()
+            .and_then(CredentialScrubber::try_new);
         let status = response.status();
         let status_code = status.as_u16();
         let (body, extent) = match read_bounded(response, MAX_ERROR_SOURCE_BYTES).await {
             Ok(body) => body,
             Err(failure) => return Err(classify_error_body_failure(status, failure)),
         };
-        let detail = sanitize_error_body(&body, extent, &scrubber);
+        let mut detail = sanitize_error_body(&body, extent, &scrubber);
+        if let (Some(detail), Some(app_scrubber)) = (&mut detail, app_scrubber) {
+            detail.0 = app_scrubber.redact_text(std::mem::take(&mut detail.0));
+        }
         Err(GitHubTransportFailure::Rejected {
             status: status_code,
             detail,
@@ -2188,6 +2217,11 @@ impl GitHubApiTransport {
         if response.status() != expected {
             return Err(invalid_response(None));
         }
+        let app_credential =
+            signalbox_github_transport::response_credential(&response).map(CredentialValue::new);
+        let app_scrubber = app_credential
+            .as_ref()
+            .and_then(CredentialScrubber::try_new);
         let (body, extent) = read_bounded(response, MAX_RESPONSE_BYTES).await?;
         if matches!(extent, ResponseExtent::Truncated) {
             return Err(GitHubTransportFailure::ResponseTooLarge);
@@ -2195,13 +2229,16 @@ impl GitHubApiTransport {
         let scrubber = CredentialScrubber::try_new(credential)
             .ok_or(GitHubTransportFailure::InvalidCredential)?;
         let mut value = serde_json::from_slice::<serde_json::Value>(&body).map_err(|_| {
-            invalid_response(sanitize_error_body(
-                &body,
-                ResponseExtent::Complete,
-                &scrubber,
-            ))
+            let mut detail = sanitize_error_body(&body, ResponseExtent::Complete, &scrubber);
+            if let (Some(detail), Some(app_scrubber)) = (&mut detail, &app_scrubber) {
+                detail.0 = app_scrubber.redact_text(std::mem::take(&mut detail.0));
+            }
+            invalid_response(detail)
         })?;
         scrubber.redact_value(&mut value);
+        if let Some(app_scrubber) = app_scrubber {
+            app_scrubber.redact_value(&mut value);
+        }
         Ok(value)
     }
 }

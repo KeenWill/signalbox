@@ -17,6 +17,7 @@ test-support = [
 ]
 
 [dependencies]
+signalbox-github-transport = { path = "../../crates/github-transport" }
 signalbox-approval-judge-eval = { path = "../../crates/approval-judge-eval" }
 signalbox-derive = { path = "../../crates/derive" }
 signalbox-convergence = { path = "../../crates/convergence" }

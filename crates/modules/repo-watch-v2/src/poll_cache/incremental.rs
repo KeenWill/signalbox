@@ -187,15 +187,7 @@ pub async fn poll_with_cache(
     retention: std::time::Duration,
     request_budget: std::num::NonZeroUsize,
 ) -> Result<bool, ObservationError> {
-    let response = io.conditional_page("/rate_limit", None).await?;
-    let ConditionalPage::Modified { body, .. } = response else {
-        return Err(ObservationError::InvalidResponse);
-    };
-    let quota: Value =
-        serde_json::from_slice(&body).map_err(|_| ObservationError::InvalidResponse)?;
-    let remaining = quota["resources"]["core"]["remaining"]
-        .as_u64()
-        .ok_or(ObservationError::InvalidResponse)?;
+    let remaining = io.rest_remaining().await?;
     if remaining < request_budget.get() as u64 {
         return Err(ObservationError::RestBudgetUnavailable {
             required: request_budget.get(),

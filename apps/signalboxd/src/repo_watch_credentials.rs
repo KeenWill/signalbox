@@ -42,12 +42,39 @@ impl RepositoryWatchClientLoader {
         ))
     }
 
+    pub(crate) async fn authenticated_push_url(
+        &self,
+        remote: &str,
+    ) -> Result<String, RepositoryWatchClientLoadError> {
+        let credential = self
+            .credentials
+            .resolve(&self.reference)
+            .await
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        let token = std::str::from_utf8(credential.expose_bytes())
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        let mut url = url::Url::parse(remote)
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        if url.scheme() != "https"
+            || url.host_str() != Some("github.com")
+            || token.is_empty()
+            || token.contains(['\r', '\n', '\0'])
+        {
+            return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
+        }
+        url.set_username("x-access-token")
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        url.set_password(Some(token))
+            .map_err(|_| RepositoryWatchClientLoadError::CredentialUnavailable)?;
+        Ok(url.into())
+    }
+
     /// Binds a repository's file reference without reading its credential.
     pub fn new(repository: &WatchedRepositoryConfiguration) -> Self {
         let reference = repository.credential_reference();
         Self {
-            credentials: FileCredentialAccess::new(
-                repository.credential_file().to_path_buf(),
+            credentials: FileCredentialAccess::from_github(
+                repository.credential(),
                 reference.clone(),
             ),
             reference,
@@ -59,6 +86,13 @@ impl RepositoryWatchClientLoader {
         Self {
             credentials: FileCredentialAccess::new(path, reference.clone()),
             reference,
+        }
+    }
+
+    pub(crate) fn for_repository_push(repository: &WatchedRepositoryConfiguration) -> Self {
+        match repository.push_credential_file() {
+            Some(path) => Self::for_git_push(path.to_path_buf()),
+            None => Self::new(repository),
         }
     }
 
@@ -75,8 +109,38 @@ impl RepositoryWatchClientLoader {
             return Err(RepositoryWatchClientLoadError::CredentialUnavailable);
         }
         GitHubClient::try_new("signalbox-repository-watch", token)
+            .map(|client| with_app_authentication(client, self.credentials.github_app()))
             .map_err(RepositoryWatchClientLoadError::from_construction)
     }
+}
+
+pub(crate) fn with_app_authentication(
+    client: GitHubClient,
+    app: Option<std::sync::Arc<signalbox_github_transport::AppAuthentication>>,
+) -> GitHubClient {
+    let sender: Option<signalbox_module_repo_watch_v2::github::AuthenticatedRequestSender> = app
+        .map(|app| {
+            let send: signalbox_module_repo_watch_v2::github::AuthenticatedRequestSender =
+                std::sync::Arc::new(move |request, path| {
+                    let app = app.clone();
+                    Box::pin(async move {
+                        app.send(request).await.map_err(|failure| match failure {
+                            signalbox_github_transport::AppRequestFailure::Credential(_) => {
+                                GitHubClientError::InvalidCredential
+                            }
+                            signalbox_github_transport::AppRequestFailure::Request(source) => {
+                                GitHubClientError::Request {
+                                    path,
+                                    status: None,
+                                    source,
+                                }
+                            }
+                        })
+                    })
+                });
+            send
+        });
+    client.with_request_sender(sender)
 }
 
 impl signalbox_module_repo_watch_v2::provider::RepositoryClientLoader
@@ -208,6 +272,25 @@ mod tests {
         RepositoryWatchClientLoader,
     };
     use signalbox_model_runtime::CredentialReference;
+
+    #[tokio::test]
+    async fn push_url_carries_x_access_token_authentication() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("test token directory");
+        let path = directory.path().join("token");
+        std::fs::write(&path, b"synthetic-installation-token").expect("test token file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("private test token");
+        let loader = RepositoryWatchClientLoader::for_git_push(path);
+        let url = loader
+            .authenticated_push_url("https://github.com/fixture/project.git")
+            .await
+            .expect("authenticated URL");
+        assert_eq!(
+            url,
+            "https://x-access-token:synthetic-installation-token@github.com/fixture/project.git"
+        );
+    }
 
     #[tokio::test]
     async fn client_loading_observes_file_rotation_and_never_falls_back() {

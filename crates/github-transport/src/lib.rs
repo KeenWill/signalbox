@@ -213,3 +213,8 @@ mod tests {
         assert!(status_is_definitive(429));
     }
 }
+
+mod app;
+pub use app::{
+    AppAuthentication, AppCredentialFailure, AppKeyReader, AppRequestFailure, response_credential,
+};

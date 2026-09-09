@@ -172,9 +172,11 @@ pull-request same-repository head branches; prior completions for those branches
 remain comparison input. Each periodic attempt spends at most
 `numeric_bounds.repository_watch_poll_request_budget` REST and GraphQL requests,
 including its REST-quota preflight; the preflight requires that same number of
-remaining REST requests. Completed discovery, pull-request, and workflow stages
-commit independently. Discovery preserves committed branch heads; branch heads
-are refreshed after pending PR lifecycles and bases, before deriving
+remaining REST requests, read from the authenticated response's
+`x-ratelimit-remaining` header. With `github_app` delivery this is the App
+installation's rate limit. Completed discovery, pull-request, and workflow
+stages commit independently. Discovery preserves committed branch heads; branch
+heads are refreshed after pending PR lifecycles and bases, before deriving
 `base_advanced` facts. Budget exhaustion reports `partial` in logs and operator
 status and retains a durable `poll_cursor` with pending subjects and normalized
 unfinished pages; the next poll resumes those reads, and completion clears the
@@ -310,9 +312,10 @@ command-identity conflicts settle as rejected before submission continues to the
 next action.
 
 Dispatched pull-request sessions whose watched repository configures
-`push_credential_file` can use `git_push_configured` for their retained head
-branch on `origin` at `https://github.com/<owner>/<repo>.git`; fork heads are
-unavailable because that destination is the watched repository.
+`push_credential_file` or a `github_app` credential profile can use
+`git_push_configured` for their retained head branch on `origin` at
+`https://github.com/<owner>/<repo>.git`; fork heads are unavailable because that
+destination is the watched repository.
 
 ## Boundary contracts
 
@@ -324,8 +327,9 @@ tables, or name another module schema.
 The module retains an authenticated, HTTPS-only GitHub client for API-relative
 GET requests and GraphQL observation queries. It receives no database handle.
 The daemon's repository-specific client loader rereads the configured credential
-file on each load and returns only an authenticated client handle. Credential
-and client-construction failures have distinct redacted error classes.
+file on each load, or resolves the selected App profile's shared installation
+token cache, and returns only an authenticated client handle. Credential and
+client-construction failures have distinct redacted error classes.
 
 The module's dedicated PostgreSQL login role owns `mod_repo_watch`, has no
 membership path back to the core identity, and has no table privileges in

@@ -169,8 +169,8 @@ impl ConvergenceSweepRuntime {
                     .map(|pull_request| SweepTarget {
                         repository: repository.repository().clone(),
                         pull_request: *pull_request,
-                        credentials: FileCredentialAccess::new(
-                            repository.credential_file().to_path_buf(),
+                        credentials: FileCredentialAccess::from_github(
+                            repository.credential(),
                             repository.credential_reference(),
                         ),
                         credential_reference: repository.credential_reference(),
@@ -782,14 +782,16 @@ impl ConvergenceSweepRuntime {
             .get(&key)
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let app = target.credentials.github_app();
         let mut send = |request| -> RequestFuture<'_> {
             let authorization = &authorization;
+            let app = app.as_deref();
             Box::pin(async move {
                 let result = match request {
                     GitHubRequest::GraphQl { query, variables } => {
-                        self.graphql(&query, variables, authorization).await
+                        self.graphql(&query, variables, authorization, app).await
                     }
-                    GitHubRequest::Rest { path } => self.rest(&path, authorization).await,
+                    GitHubRequest::Rest { path } => self.rest(&path, authorization, app).await,
                 };
                 result.map_err(|_| {
                     signalbox_convergence::Error::Evidence(
@@ -836,16 +838,25 @@ impl ConvergenceSweepRuntime {
         })
     }
 
-    async fn rest(&self, path: &str, authorization: &HeaderValue) -> Result<Value, CensusError> {
-        let mut response = self
+    async fn rest(
+        &self,
+        path: &str,
+        authorization: &HeaderValue,
+        app: Option<&signalbox_github_transport::AppAuthentication>,
+    ) -> Result<Value, CensusError> {
+        let request = self
             .client
             .get(format!("{}{path}", self.rest_base))
             .header(AUTHORIZATION, authorization.clone())
             .header(ACCEPT, "application/vnd.github+json")
-            .header(USER_AGENT, USER_AGENT_VALUE)
-            .send()
-            .await
-            .map_err(|_| CensusError::Request)?;
+            .header(USER_AGENT, USER_AGENT_VALUE);
+        let mut response = match app {
+            Some(app) => app
+                .send(request)
+                .await
+                .map_err(|_| CensusError::Credential)?,
+            None => request.send().await.map_err(|_| CensusError::Request)?,
+        };
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(Value::Null);
         }
@@ -867,6 +878,7 @@ impl ConvergenceSweepRuntime {
         query: &str,
         variables: Value,
         authorization: &HeaderValue,
+        app: Option<&signalbox_github_transport::AppAuthentication>,
     ) -> Result<Value, CensusError> {
         let body = serde_json::to_vec(&json!({"query": query, "variables": variables}))
             .map_err(|_| CensusError::Decode)?;
@@ -876,16 +888,18 @@ impl ConvergenceSweepRuntime {
         }
         let bytes = 'attempts: loop {
             attempt += 1;
-            let sent = self
+            let request = self
                 .client
                 .post(&self.graphql_url)
                 .header(AUTHORIZATION, authorization.clone())
                 .header(ACCEPT, "application/vnd.github+json")
                 .header(CONTENT_TYPE, "application/json")
                 .header(USER_AGENT, USER_AGENT_VALUE)
-                .body(body.clone())
-                .send()
-                .await;
+                .body(body.clone());
+            let sent = match app {
+                Some(app) => app.send(request).await.map_err(|_| CensusError::Credential),
+                None => request.send().await.map_err(|_| CensusError::Request),
+            };
             match sent {
                 Ok(response)
                     if self
