@@ -70,7 +70,8 @@ pub use conversation_import::{
     ImportConversationService, ImportedConversationConversionReport, ImportedConversationConverter,
     ImportedConversationDropFacts, ImportedConversationIdGenerator,
     ImportedConversationSkippedRecord, ImportedConversationStore, ImportedConversationStoreOutcome,
-    ResilientImportedConversationConverter, UuidV7ImportedConversationIdGenerator,
+    ResilientImportedConversationConverter, StreamConversionError,
+    StreamingResilientImportedConversationConverter, UuidV7ImportedConversationIdGenerator,
 };
 pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,

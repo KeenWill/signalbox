@@ -4,7 +4,7 @@
 //! adapters implement [`ImportedConversationStore`]. The application supplies
 //! hub identities and performs one complete resolve-or-insert operation.
 
-use std::future::Future;
+use std::{future::Future, io::BufRead};
 
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -119,6 +119,36 @@ pub trait ResilientImportedConversationConverter: ImportedConversationConverter 
     ) -> Result<ImportedConversationConversionReport<Self::RecordFailure>, Self::Error>
     where
         NextEntryId: FnMut() -> ImportedTranscriptEntryId;
+}
+
+/// Record-resilient conversion without first materializing the complete source.
+pub trait StreamingResilientImportedConversationConverter:
+    ResilientImportedConversationConverter
+{
+    /// Converts every valid physical record while reading the source incrementally.
+    fn convert_resilient_from_reader<Reader, NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: Reader,
+        next_entry_id: NextEntryId,
+    ) -> Result<
+        ImportedConversationConversionReport<Self::RecordFailure>,
+        StreamConversionError<Self::Error>,
+    >
+    where
+        Reader: BufRead,
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId;
+}
+
+/// Failure to read or convert one streamed conversation source.
+#[derive(signalbox_derive::OperatorError, Clone, Debug, Eq, PartialEq)]
+pub enum StreamConversionError<ConverterError> {
+    #[error("conversation import source read failed")]
+    /// The source reader failed before conversion completed.
+    SourceRead,
+    #[error("conversation conversion failed: {field_0}")]
+    /// The format converter rejected the source.
+    Conversion(ConverterError),
 }
 
 /// Checked result of one append-only store resolution.
@@ -276,6 +306,9 @@ pub enum ImportConversationReport<Failure> {
 /// Conversation-ingestion orchestration failure.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ImportConversationError<ConverterError, StoreError> {
+    #[error("conversation import source read failed")]
+    /// The file-backed source could not be read completely.
+    SourceRead,
     #[error("conversation conversion failed: {field_0}")]
     /// The source converter rejected the complete input.
     Conversion(ConverterError),
@@ -458,6 +491,73 @@ where
             ImportedConversationDropFacts::none(),
         )
         .await
+    }
+}
+
+impl<Generator, Converter, Store> ImportConversationService<Generator, Converter, Store>
+where
+    Generator: ImportedConversationIdGenerator,
+    Converter: StreamingResilientImportedConversationConverter,
+    Store: ImportedConversationStore,
+{
+    /// Converts a file-backed source incrementally and stores at most one aggregate.
+    pub async fn execute_resilient_from_reader<Reader>(
+        &mut self,
+        source: Reader,
+    ) -> Result<
+        ImportConversationReport<Converter::RecordFailure>,
+        ImportConversationError<Converter::Error, Store::Error>,
+    >
+    where
+        Reader: BufRead,
+    {
+        let Self {
+            ids,
+            converter,
+            store,
+        } = self;
+        let candidate = ids.next_conversation_id();
+        let declared = converter.format();
+        let mut issued_entries = Vec::new();
+        let report = converter
+            .convert_resilient_from_reader(candidate, source, || {
+                let entry = ids.next_entry_id();
+                issued_entries.push(entry);
+                entry
+            })
+            .map_err(|error| match error {
+                StreamConversionError::SourceRead => ImportConversationError::SourceRead,
+                StreamConversionError::Conversion(error) => {
+                    ImportConversationError::Conversion(error)
+                }
+            })?;
+        let (converted, skipped_records) = match report {
+            ImportedConversationConversionReport::Converted {
+                conversation,
+                skipped_records,
+            } => (conversation, skipped_records),
+            ImportedConversationConversionReport::NoValidRecords { skipped_records } => {
+                if !issued_entries.is_empty() {
+                    return Err(ImportConversationError::ConverterEntryIdentitySequenceMismatch);
+                }
+                return Ok(ImportConversationReport::NoValidRecords { skipped_records });
+            }
+        };
+        validate_converted::<Converter::Error, Store::Error>(
+            candidate,
+            declared,
+            &issued_entries,
+            &converted,
+        )?;
+        let dropped_records = ImportedConversationDropFacts::from_skipped(&skipped_records)
+            .ok_or(ImportConversationError::ConverterEntryIdentitySequenceMismatch)?;
+        let outcome =
+            store_validated::<Converter::Error, _>(store, candidate, converted, dropped_records)
+                .await?;
+        Ok(ImportConversationReport::Imported {
+            outcome,
+            skipped_records,
+        })
     }
 }
 

@@ -91,6 +91,51 @@ pub trait ResilientImportedConversationConverter: ImportedConversationConverter 
 }
 ```
 
+## StreamingResilientImportedConversationConverter
+
+```rust
+pub trait StreamingResilientImportedConversationConverter:
+    ResilientImportedConversationConverter
+{
+    fn convert_resilient_from_reader<Reader, NextEntryId>(
+        &mut self,
+        conversation: signalbox_domain::ImportedConversationId,
+        source: Reader,
+        next_entry_id: NextEntryId,
+    ) -> result::Result<
+        ImportedConversationConversionReport<
+            <Self as ResilientImportedConversationConverter>::RecordFailure,
+        >,
+        StreamConversionError<<Self as ImportedConversationConverter>::Error>,
+    >
+    where
+        Reader: buf_read::BufRead,
+        NextEntryId: function::FnMut() -> signalbox_domain::ImportedTranscriptEntryId;
+}
+```
+
+## StreamConversionError
+
+```rust
+pub enum StreamConversionError<ConverterError> {
+    SourceRead,
+    Conversion(ConverterError),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl<ConverterError> fmt::Display for StreamConversionError<ConverterError>
+where
+    ConverterError: fmt::Display,
+{
+    fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+impl<ConverterError> error::Error for StreamConversionError<ConverterError>
+where
+    ConverterError: error::Error + 'static + fmt::Display,
+{
+    fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+```
+
 ## ImportedConversationStoreOutcome
 
 ```rust
@@ -181,6 +226,7 @@ pub enum ImportConversationReport<Failure> {
 
 ```rust
 pub enum ImportConversationError<ConverterError, StoreError> {
+    SourceRead,
     Conversion(ConverterError),
     ConverterIdentityMismatch {
         supplied: signalbox_domain::ImportedConversationId,
@@ -245,6 +291,27 @@ where
             <Store as ImportedConversationStore>::Error,
         >,
     >;
+}
+impl<Generator, Converter, Store> ImportConversationService<Generator, Converter, Store>
+where
+    Generator: ImportedConversationIdGenerator,
+    Converter: StreamingResilientImportedConversationConverter,
+    Store: ImportedConversationStore,
+{
+    pub async fn execute_resilient_from_reader<Reader>(
+        &mut self,
+        source: Reader,
+    ) -> result::Result<
+        ImportConversationReport<
+            <Converter as ResilientImportedConversationConverter>::RecordFailure,
+        >,
+        ImportConversationError<
+            <Converter as ImportedConversationConverter>::Error,
+            <Store as ImportedConversationStore>::Error,
+        >,
+    >
+    where
+        Reader: buf_read::BufRead;
 }
 impl<Generator, Converter, Store> ImportConversationService<Generator, Converter, Store>
 where

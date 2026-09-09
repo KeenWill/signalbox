@@ -60,6 +60,10 @@ impl ImportedRawBlobStorage for ImportedSourceBlobStorage {
                 .registry
                 .as_deref()
                 .ok_or(ImportedRawBlobStorageError::Unavailable)?;
+            enforce_per_record_bound(
+                blobs.iter().map(|blob| blob.expected()),
+                registry.max_blob_bytes(),
+            )?;
             let mut publications = Vec::with_capacity(blobs.len());
             for blob in &blobs {
                 publications.push(self.publish_one(registry, blob).await?);
@@ -89,6 +93,20 @@ impl ImportedRawBlobStorage for ImportedSourceBlobStorage {
             drop(permit);
             Ok(contents.into_boxed_slice())
         })
+    }
+}
+
+fn enforce_per_record_bound(
+    blobs: impl IntoIterator<Item = ExpectedBlob>,
+    maximum_blob_bytes: u64,
+) -> Result<(), ImportedRawBlobStorageError> {
+    if blobs
+        .into_iter()
+        .any(|blob| blob.byte_length() > maximum_blob_bytes)
+    {
+        Err(ImportedRawBlobStorageError::Integrity)
+    } else {
+        Ok(())
     }
 }
 
@@ -262,7 +280,26 @@ fn map_catalog_error(error: BlobCatalogRepositoryError) -> ImportedRawBlobStorag
 
 #[cfg(test)]
 mod tests {
-    use super::{ImportedRawBlobStorageError, allocate_blob_buffer};
+    use signalbox_blob_store::ExpectedBlob;
+    use signalbox_domain::BlobDigest;
+
+    use super::{ImportedRawBlobStorageError, allocate_blob_buffer, enforce_per_record_bound};
+
+    fn expected(byte: u8, length: u64) -> ExpectedBlob {
+        ExpectedBlob::try_new(BlobDigest::from_bytes([byte; 32]), length)
+            .expect("the fixture length is positive")
+    }
+
+    #[test]
+    fn imported_records_each_honor_the_blob_ceiling_without_a_cumulative_bound() {
+        let blobs = [expected(1, 3), expected(2, 3)];
+
+        assert_eq!(enforce_per_record_bound(blobs, 3), Ok(()));
+        assert_eq!(
+            enforce_per_record_bound([expected(1, 4)], 3),
+            Err(ImportedRawBlobStorageError::Integrity),
+        );
+    }
 
     #[test]
     fn imported_blob_buffer_reports_reservation_failure() {

@@ -4,7 +4,7 @@
 //! JSON number spellings in Signalbox's source-neutral structured-value
 //! algebra.
 
-use std::{error::Error, fmt, str};
+use std::{error::Error, fmt, io::BufRead, str};
 
 use serde::{
     Deserialize as _,
@@ -61,6 +61,102 @@ impl Error for JsonlRecordSplitFailure {}
 pub struct JsonlRecord<'source> {
     line: u64,
     bytes: &'source [u8],
+}
+
+/// Content-silent reason a streamed JSONL source could not be enumerated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JsonlRecordReadFailure {
+    /// The source reader failed.
+    SourceRead,
+    /// A one-based physical line number could not be represented.
+    PositionExhausted,
+}
+
+impl fmt::Display for JsonlRecordReadFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("streamed JSONL record splitting failed")
+    }
+}
+
+impl Error for JsonlRecordReadFailure {}
+
+/// One owned physical JSONL record read from a stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedJsonlRecord {
+    line: u64,
+    bytes: Vec<u8>,
+}
+
+impl OwnedJsonlRecord {
+    /// Returns the one-based physical source line.
+    pub const fn line(&self) -> u64 {
+        self.line
+    }
+
+    /// Returns the exact record bytes without its line delimiter.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+/// Reads physical JSONL records without materializing the complete source.
+pub fn read_jsonl_records(
+    source: impl BufRead,
+) -> impl Iterator<Item = Result<OwnedJsonlRecord, JsonlRecordReadFailure>> {
+    JsonlRecordReader {
+        source,
+        next_line: 1,
+        finished: false,
+    }
+}
+
+struct JsonlRecordReader<Reader> {
+    source: Reader,
+    next_line: u64,
+    finished: bool,
+}
+
+impl<Reader> Iterator for JsonlRecordReader<Reader>
+where
+    Reader: BufRead,
+{
+    type Item = Result<OwnedJsonlRecord, JsonlRecordReadFailure>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        let read = match self.source.read_until(b'\n', &mut bytes) {
+            Ok(read) => read,
+            Err(_) => {
+                self.finished = true;
+                return Some(Err(JsonlRecordReadFailure::SourceRead));
+            }
+        };
+        if read == 0 {
+            self.finished = true;
+            return None;
+        }
+        let terminated = bytes.last() == Some(&b'\n');
+        if terminated {
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+        } else {
+            self.finished = true;
+        }
+        let line = self.next_line;
+        if terminated {
+            let Some(next_line) = line.checked_add(1) else {
+                self.finished = true;
+                return Some(Err(JsonlRecordReadFailure::PositionExhausted));
+            };
+            self.next_line = next_line;
+        }
+        Some(Ok(OwnedJsonlRecord { line, bytes }))
+    }
 }
 
 impl<'source> JsonlRecord<'source> {
@@ -295,11 +391,27 @@ mod tests {
     use signalbox_domain::{ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText};
 
     use super::{
-        JsonFailure, JsonlRecordSplitFailure, one_based_ordinal, parse_record, split_jsonl_records,
+        JsonFailure, JsonlRecordSplitFailure, one_based_ordinal, parse_record, read_jsonl_records,
+        split_jsonl_records,
     };
 
     const FIRST_RECORD: &[u8] = b"first";
     const FINAL_RECORD: &[u8] = b"last";
+
+    #[test]
+    fn streamed_records_preserve_physical_lines_without_trailing_empty_record() {
+        let records = read_jsonl_records(&b"first\r\n\nlast\n"[..])
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the in-memory reader cannot fail");
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].line(), 1);
+        assert_eq!(records[0].clone().into_bytes(), b"first");
+        assert_eq!(records[1].line(), 2);
+        assert_eq!(records[1].clone().into_bytes(), b"");
+        assert_eq!(records[2].line(), 3);
+        assert_eq!(records[2].clone().into_bytes(), b"last");
+    }
 
     #[test]
     fn preserves_object_member_order() {

@@ -1264,6 +1264,17 @@ private struct ProcessImportedConversationScreen: View {
           Section {
             LabeledContent("Source", value: sourceFormatLabel)
             LabeledContent("Entries", value: "\(viewModel.totalEntryCount)")
+            if transcript.dropFacts.droppedRecordCount.rawValue > 0 {
+              LabeledContent(
+                "Dropped records",
+                value: "\(transcript.dropFacts.droppedRecordCount.rawValue)"
+              )
+              .accessibilityIdentifier("imported-dropped-record-count")
+              if let first = transcript.dropFacts.firstDroppedRecordPosition {
+                LabeledContent("First dropped record", value: "#\(first.rawValue)")
+                  .accessibilityIdentifier("imported-first-dropped-record-position")
+              }
+            }
           }
           if let errorMessage = viewModel.errorMessage ?? viewModel.entryPageErrorMessage {
             Section {

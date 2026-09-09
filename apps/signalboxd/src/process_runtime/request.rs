@@ -1425,7 +1425,7 @@ where
                     version,
                     request_id,
                     format,
-                    source,
+                    ConversationImportSource::Inline(source),
                     services.imported_conversations.clone(),
                     import_permit,
                 )

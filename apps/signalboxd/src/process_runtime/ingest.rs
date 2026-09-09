@@ -199,41 +199,22 @@ where
         )
         .await;
     }
+    if source.seek(SeekFrom::Start(0)).await.is_err() {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            unavailable_protocol_error(InternalDiagnostic::ConversationImportSpoolUnavailable),
+        )
+        .await;
+    }
+    let source = source.into_std().await;
     handle_import_conversation(
         writer,
         version,
         request_id,
         format,
-        {
-            if source.seek(SeekFrom::Start(0)).await.is_err() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    unavailable_protocol_error(
-                        InternalDiagnostic::ConversationImportSpoolUnavailable,
-                    ),
-                )
-                .await;
-            }
-            let capacity = usize::try_from(observed_source_size)
-                .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-            let mut bytes = Vec::new();
-            if bytes.try_reserve_exact(capacity).is_err()
-                || source.read_to_end(&mut bytes).await.is_err()
-            {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    unavailable_protocol_error(
-                        InternalDiagnostic::ConversationImportSpoolUnavailable,
-                    ),
-                )
-                .await;
-            }
-            bytes
-        },
+        ConversationImportSource::Spooled(source),
         repository,
         import_permit,
     )
@@ -837,7 +818,7 @@ pub(super) async fn handle_import_conversation<Writer>(
     version: ProtocolVersion,
     request_id: RequestId,
     format: ConversationImportFormat,
-    source: Vec<u8>,
+    source: ConversationImportSource,
     repository: ImportedConversationRepository,
     import_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
@@ -930,6 +911,11 @@ where
             .await
         }
     }
+}
+
+pub(super) enum ConversationImportSource {
+    Inline(Vec<u8>),
+    Spooled(std::fs::File),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1146,6 +1132,7 @@ where
     ConverterError: ClassifyConversationImportError,
 {
     match error {
+        ImportConversationError::SourceRead => OperationalImportError::Unavailable,
         ImportConversationError::Conversion(error) => match error.disposition() {
             ConversionFailureDisposition::Rejected(evidence) => {
                 OperationalImportError::InvalidSource(evidence)
@@ -1181,11 +1168,11 @@ where
 
 pub(super) async fn execute_import<Converter>(
     converter: Converter,
-    source: Vec<u8>,
+    source: ConversationImportSource,
     repository: ImportedConversationRepository,
 ) -> Result<CompletedImport, OperationalImportError>
 where
-    Converter: ResilientImportedConversationConverter + Send + 'static,
+    Converter: StreamingResilientImportedConversationConverter + Send + 'static,
     Converter::Error: ClassifyConversationImportError,
     Converter::RecordFailure: ClassifyConversationImportRecordFailure + Copy,
 {
@@ -1197,10 +1184,17 @@ where
                 converter,
                 repository,
             );
-            let report = service
-                .execute_resilient(&source)
-                .await
-                .map_err(operational_import_error)?;
+            let report = match source {
+                ConversationImportSource::Inline(source) => {
+                    service.execute_resilient(&source).await
+                }
+                ConversationImportSource::Spooled(source) => {
+                    service
+                        .execute_resilient_from_reader(BufReader::new(source))
+                        .await
+                }
+            }
+            .map_err(operational_import_error)?;
             match report {
                 ImportConversationReport::Imported {
                     outcome,

@@ -4,7 +4,7 @@ pub(crate) mod tests {
         cell::RefCell,
         collections::{BTreeSet, VecDeque},
         error::Error,
-        io::{self, Write},
+        io::{self, Seek, Write},
         sync::{Arc, Mutex, OnceLock, mpsc},
         thread,
     };
@@ -13,6 +13,7 @@ pub(crate) mod tests {
         EligibilityNudge, EligibilityNudgeOutcome, ImportConversationError,
         ImportedConversationConversionReport, ImportedConversationConverter,
         ImportedConversationSkippedRecord, ResilientImportedConversationConverter,
+        StreamConversionError, StreamingResilientImportedConversationConverter,
     };
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
@@ -57,7 +58,8 @@ pub(crate) mod tests {
     use uuid::Uuid;
 
     use super::{
-        CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportState,
+        CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportSource,
+        ConversationImportState,
         ConversionFailureDisposition, ClassifyConversationImportRecordFailure,
         DispatchedTurnTerminalDisposition,
         GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES, ImportedConversationRepository,
@@ -1868,6 +1870,7 @@ pub(crate) mod tests {
     ) -> Result<PendingConversationImport, io::Error> {
         let mut source = tokio::fs::File::from_std(tempfile::tempfile()?);
         source.write_all(source_bytes).await?;
+        source.flush().await?;
         let started_at = Instant::now();
         Ok(PendingConversationImport {
             format,
@@ -2176,7 +2179,8 @@ pub(crate) mod tests {
             request += 1;
         }
 
-        let assembled = pending.as_ref().expect("the import remains pending");
+        let assembled = pending.as_mut().expect("the import remains pending");
+        assembled.source.flush().await?;
         assert!(declared_size_bytes > REMOVED_DEFAULT_BYTES);
         assert!(peak_generated_buffer_bytes <= GENERATED_CHUNK_BYTES);
         assert_eq!(assembled.actual_size_bytes, declared_size_bytes);
@@ -2299,16 +2303,20 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn import_conversion_runs_off_the_async_worker() -> Result<(), Box<dyn Error>> {
+    async fn spooled_import_conversion_runs_from_the_file_off_the_async_worker()
+    -> Result<(), Box<dyn Error>> {
         let async_worker = thread::current().id();
         let (thread_sender, thread_receiver) = mpsc::sync_channel(1);
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
         let repository = ImportedConversationRepository::new(pool);
+        let mut source = tempfile::tempfile()?;
+        source.write_all(b"fixture")?;
+        source.rewind()?;
 
         let outcome = execute_import(
             ThreadReportingRejectConverter(thread_sender),
-            Vec::new(),
+            ConversationImportSource::Spooled(source),
             repository,
         )
         .await;
@@ -2334,7 +2342,12 @@ pub(crate) mod tests {
             .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
         let repository = ImportedConversationRepository::new(pool);
 
-        let outcome = execute_import(PanickingConverter, Vec::new(), repository).await;
+        let outcome = execute_import(
+            PanickingConverter,
+            ConversationImportSource::Inline(Vec::new()),
+            repository,
+        )
+        .await;
 
         assert_eq!(
             outcome,
@@ -2434,6 +2447,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn import_spool_read_failure_is_retryable_without_ambiguity() {
+        let error =
+            ImportConversationError::<io::Error, ImportedConversationRepositoryError>::SourceRead;
+
+        assert_eq!(
+            operational_import_error(error),
+            OperationalImportError::Unavailable,
+        );
+    }
+
+    #[test]
     fn import_catalog_database_failure_remains_retryable() {
         let error =
             ImportConversationError::<io::Error, ImportedConversationRepositoryError>::Store(
@@ -2520,6 +2544,24 @@ pub(crate) mod tests {
         }
     }
 
+    impl StreamingResilientImportedConversationConverter for PanickingConverter {
+        fn convert_resilient_from_reader<Reader, NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            _source: Reader,
+            _next_entry_id: NextEntryId,
+        ) -> Result<
+            ImportedConversationConversionReport<Self::RecordFailure>,
+            StreamConversionError<Self::Error>,
+        >
+        where
+            Reader: std::io::BufRead,
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            panic!("synthetic import worker panic")
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct SyntheticRecordFailure;
 
@@ -2572,6 +2614,37 @@ pub(crate) mod tests {
             self.0
                 .send(thread::current().id())
                 .map_err(|_| io::Error::other("the test thread receiver closed"))?;
+            Ok(ImportedConversationConversionReport::NoValidRecords {
+                skipped_records: vec![ImportedConversationSkippedRecord::new(
+                    1,
+                    SyntheticRecordFailure,
+                )]
+                .into_boxed_slice(),
+            })
+        }
+    }
+
+    impl StreamingResilientImportedConversationConverter for ThreadReportingRejectConverter {
+        fn convert_resilient_from_reader<Reader, NextEntryId>(
+            &mut self,
+            _conversation: ImportedConversationId,
+            mut source: Reader,
+            _next_entry_id: NextEntryId,
+        ) -> Result<
+            ImportedConversationConversionReport<Self::RecordFailure>,
+            StreamConversionError<Self::Error>,
+        >
+        where
+            Reader: std::io::BufRead,
+            NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+        {
+            source
+                .fill_buf()
+                .map_err(|_| StreamConversionError::SourceRead)?;
+            self.0
+                .send(thread::current().id())
+                .map_err(|_| io::Error::other("the test thread receiver closed"))
+                .map_err(StreamConversionError::Conversion)?;
             Ok(ImportedConversationConversionReport::NoValidRecords {
                 skipped_records: vec![ImportedConversationSkippedRecord::new(
                     1,

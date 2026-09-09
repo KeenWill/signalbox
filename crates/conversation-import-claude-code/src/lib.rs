@@ -4,14 +4,16 @@
 //! raw JSONL record, and emits source-neutral imported entries. It performs no
 //! filesystem access and creates no native Signalbox session.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, io::BufRead};
 
 use signalbox_application::{
     ImportedConversationConversionReport, ImportedConversationConverter,
     ImportedConversationSkippedRecord, ResilientImportedConversationConverter,
+    StreamConversionError, StreamingResilientImportedConversationConverter,
 };
 use signalbox_conversation_import_json::{
-    JsonFailure, one_based_ordinal, parse_record, split_jsonl_records,
+    JsonFailure, JsonlRecordReadFailure, one_based_ordinal, parse_record, read_jsonl_records,
+    split_jsonl_records,
 };
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -219,6 +221,70 @@ impl ResilientImportedConversationConverter for ClaudeCodeJsonlConverter {
     }
 }
 
+impl StreamingResilientImportedConversationConverter for ClaudeCodeJsonlConverter {
+    fn convert_resilient_from_reader<Reader, NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: Reader,
+        next_entry_id: NextEntryId,
+    ) -> Result<
+        ImportedConversationConversionReport<Self::RecordFailure>,
+        StreamConversionError<Self::Error>,
+    >
+    where
+        Reader: BufRead,
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId,
+    {
+        let mut prepared = Vec::new();
+        let mut skipped_records = Vec::new();
+        let mut saw_record = false;
+        for record in read_jsonl_records(source) {
+            let record = match record {
+                Ok(record) => record,
+                Err(JsonlRecordReadFailure::SourceRead) => {
+                    return Err(StreamConversionError::SourceRead);
+                }
+                Err(JsonlRecordReadFailure::PositionExhausted) => {
+                    return Err(StreamConversionError::Conversion(position_error()));
+                }
+            };
+            saw_record = true;
+            let line = record.line();
+            let bytes = record.into_bytes();
+            if bytes.is_empty() {
+                skipped_records.push(ImportedConversationSkippedRecord::new(
+                    line,
+                    ClaudeCodeJsonlConversionFailure::BlankLine { line },
+                ));
+                continue;
+            }
+            match prepare_owned_record(line, bytes) {
+                Ok(record) => prepared.push(record),
+                Err(error) => skipped_records.push(ImportedConversationSkippedRecord::new(
+                    line,
+                    record_local_failure(error).map_err(StreamConversionError::Conversion)?,
+                )),
+            }
+        }
+        if !saw_record {
+            return Err(StreamConversionError::Conversion(conversion_error(
+                ClaudeCodeJsonlConversionFailure::EmptySource,
+            )));
+        }
+        if prepared.is_empty() {
+            return Ok(ImportedConversationConversionReport::NoValidRecords {
+                skipped_records: skipped_records.into_boxed_slice(),
+            });
+        }
+        let conversation = build_conversation(conversation, prepared, next_entry_id)
+            .map_err(StreamConversionError::Conversion)?;
+        Ok(ImportedConversationConversionReport::Converted {
+            conversation,
+            skipped_records: skipped_records.into_boxed_slice(),
+        })
+    }
+}
+
 fn record_local_failure(
     error: ClaudeCodeJsonlConversionError,
 ) -> Result<ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConversionError> {
@@ -239,10 +305,17 @@ fn prepare_record(
     line: u64,
     bytes: &[u8],
 ) -> Result<PreparedRecord, ClaudeCodeJsonlConversionError> {
-    let normalized = parse_record(bytes).map_err(|failure| json_error(line, failure))?;
+    prepare_owned_record(line, bytes.to_vec())
+}
+
+fn prepare_owned_record(
+    line: u64,
+    bytes: Vec<u8>,
+) -> Result<PreparedRecord, ClaudeCodeJsonlConversionError> {
+    let normalized = parse_record(&bytes).map_err(|failure| json_error(line, failure))?;
     let pending = normalize_record(&normalized, line)?;
     Ok(PreparedRecord {
-        raw: ImportedRawSourceRecord::from_converted(bytes.to_vec(), normalized),
+        raw: ImportedRawSourceRecord::from_converted(bytes, normalized),
         pending,
     })
 }
@@ -653,11 +726,14 @@ fn media_source_attestation(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        io::{BufReader, Cursor},
+    };
 
     use signalbox_application::{
         ImportedConversationConversionReport, ImportedConversationConverter,
-        ResilientImportedConversationConverter,
+        ResilientImportedConversationConverter, StreamingResilientImportedConversationConverter,
     };
     use signalbox_domain::{
         ImportedConversation, ImportedConversationFormat, ImportedConversationId,
@@ -1222,6 +1298,24 @@ mod tests {
                 identity
             })
             .expect("record-local failures must not abort resilient conversion");
+        let mut streamed_next_identity = 100_u128;
+        let streamed_report = ClaudeCodeJsonlConverter
+            .convert_resilient_from_reader(
+                conversation(),
+                BufReader::with_capacity(4, Cursor::new(&source)),
+                || {
+                    let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        streamed_next_identity,
+                    ));
+                    streamed_next_identity = streamed_next_identity
+                        .checked_add(1)
+                        .expect("fixture identity range is bounded");
+                    identity
+                },
+            )
+            .expect("streamed record-local failures must not abort conversion");
+
+        assert_eq!(streamed_report, report);
         let ImportedConversationConversionReport::Converted {
             conversation: imported,
             skipped_records,
