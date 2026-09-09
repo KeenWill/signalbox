@@ -143,7 +143,10 @@ rust_binary(
 
 rust_unit_test(
     name = "unit_tests",
-    compile_data = ["//crates/process-protocol:src/request.rs"],
+    compile_data = [
+        "//crates/process-protocol:src/request.rs",
+        "//crates/workflow-runtime:tests/fixtures/eval.js",
+    ],
     crate = ":signalboxd_lib",
     crate_features = CRATE_FEATURES,
     data = [

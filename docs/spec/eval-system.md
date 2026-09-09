@@ -27,6 +27,31 @@ own JSONL case file in its own case shape, sends each case to a configured
 provider, prints its own scorecard, and can record the run in judge-specific
 tables.
 
+## Workflow trials
+
+The compiled `approval-judge-eval` revision `1` program pins a corpus blob
+SHA-256 digest, input format, ordered case positions, repeats and non-secret
+judge binding in its immutable run input. Trials follow case order, then repeat
+order, with a maximum of 1,000 calls. Offline scoring requires one repeat.
+`corpus.load` reads and preflights every selected case before provider work;
+`judge.evaluate` addresses a trial ordinal in that retained manifest.
+
+The host adapters reuse the catalog's verified blob reads and `judge_eval_case`.
+Judge answers retain call identity, rendered-request digest, binding and
+contract, verdict/rationale or failure, reported model and available token
+usage. Configured usage limits apply. The common host journals requests and
+answers; an unanswered judge call without durable proof becomes ambiguous
+without provider retry. The native program computes the existing offline or live
+scorecard through the pure library and returns it as the workflow result. Live
+scoring counts failed and ambiguous repeats as unsuccessful; an offline trial
+without a verdict faults without a scorecard. Missing blobs and inadmissible
+cases fail before provider work. No evaluation snapshot is sealed.
+
+`WorkflowRuntime::with_eval` supplies the runner's host services. Operator
+launch composition remains with the planned launch boundary. The typed
+TypeScript fixture calls the same Corpus, Judge and Blob methods; token counts
+and pull-request identities use decimal strings across the JavaScript boundary.
+
 ## Design decisions
 
 Replay uses the daemon's current approval-judge prompt, renderer,
@@ -46,10 +71,8 @@ harness, because it spends provider quota.
 - Evaluation-created sessions whose provenance stays walkable through delegation
   lineage for as long as evaluation rows are read:
   [design](../design/eval-system.md).
-- Reference artifacts pinned by digest as immutable blobs under the contract
-  [blob storage](blob-storage.md) owns: [design](../design/eval-system.md).
-- Judge evaluations on the workflows layer, after which the judge-specific
-  tables and their data are dropped without migration:
+- Sealed workflow evaluation recordings and operator launch commands, after
+  which the judge-specific tables are dropped without data conversion:
   [design](../design/eval-system.md).
 - The judge-specific recording surface is temporary; nothing may build on it in
   a way that outlives it: [design](../design/eval-system.md).

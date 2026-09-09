@@ -26,9 +26,12 @@ use signalbox_workflow_runtime::{
 use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot};
 
-use super::WorkflowService;
 #[cfg(target_os = "linux")]
 use super::{CLOCK_ENTRY, CLOCK_REVISION, compiled_catalog};
+use super::{
+    WorkflowService,
+    eval::{EvalServices, EvaluationEffects},
+};
 
 #[derive(Debug, signalbox_derive::OperatorError)]
 pub enum WorkflowRuntimeError {
@@ -93,6 +96,7 @@ pub struct WorkflowRuntime {
     journal: ProgramJournalRepository,
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedReceiver<WorkflowWake>,
+    eval: Option<EvalServices>,
 }
 
 impl WorkflowRuntime {
@@ -108,15 +112,16 @@ impl WorkflowRuntime {
         let journal = ProgramJournalRepository::new(pool.clone());
         let host = WorkflowHost::new(journal.clone());
         #[cfg(target_os = "linux")]
-        let (host, clock_executable) = {
+        let (host, clock_executable, eval_executable) = {
             let catalog = compiled_catalog()?;
             let executable = catalog
                 .executable(CLOCK_ENTRY, CLOCK_REVISION)
                 .ok_or(WorkflowRuntimeError::NativeUnavailable)?;
-            (host.with_native_catalog(catalog), Some(executable))
+            let eval = catalog.executable(super::eval::EVAL_ENTRY, super::eval::EVAL_REVISION);
+            (host.with_native_catalog(catalog), Some(executable), eval)
         };
         #[cfg(not(target_os = "linux"))]
-        let clock_executable = None;
+        let (clock_executable, eval_executable) = (None, None);
         let registrations = ProgramRegistrationRepository::new(pool.clone());
         let (wake, receiver) = mpsc::unbounded_channel();
         Ok((
@@ -124,6 +129,7 @@ impl WorkflowRuntime {
                 registrations: admission,
                 wake,
                 clock_executable,
+                eval_executable,
             },
             Self {
                 pool,
@@ -131,8 +137,15 @@ impl WorkflowRuntime {
                 journal,
                 registrations,
                 wake: receiver,
+                eval: None,
             },
         ))
+    }
+
+    /// Supplies host-owned corpus, blob and judge services for evaluation runs.
+    pub fn with_eval(mut self, services: EvalServices) -> Self {
+        self.eval = Some(services);
+        self
     }
 
     /// Owns non-Send isolate/root futures on one local executor and joins it on shutdown.
@@ -191,6 +204,7 @@ impl WorkflowRuntime {
                     self.journal.clone(),
                     run,
                     primitives(),
+                    self.eval.clone(),
                     cancelled,
                 ));
             }
@@ -202,7 +216,7 @@ impl WorkflowRuntime {
                                 if let std::collections::btree_map::Entry::Vacant(entry) = active.entry(run) {
                                     let (cancel, cancelled) = oneshot::channel();
                                     entry.insert(Some(cancel));
-                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(), cancelled));
+                                    attempts.push(cancellable_attempt(self.host.clone(), self.journal.clone(), run, primitives(), self.eval.clone(), cancelled));
                                 }
                             }
                             WorkflowWake::Cancel(run) => {
@@ -242,10 +256,11 @@ fn cancellable_attempt<P: LiveDeliverySource + 'static>(
     journal: ProgramJournalRepository,
     run: ProgramRunId,
     primitives: P,
+    eval: Option<EvalServices>,
     cancelled: oneshot::Receiver<()>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        interruptible(attempt(host, journal, run, primitives), cancelled)
+        interruptible(attempt(host, journal, run, primitives, eval), cancelled)
             .await
             .unwrap_or(Ok(run))
     })
@@ -256,9 +271,13 @@ fn attempt<P: LiveDeliverySource + 'static>(
     journal: ProgramJournalRepository,
     run: ProgramRunId,
     mut primitives: P,
+    eval: Option<EvalServices>,
 ) -> Pin<Box<dyn Future<Output = Result<ProgramRunId, WorkflowRuntimeError>>>> {
     Box::pin(async move {
-        let mut effects = UnavailableEffects::default();
+        let mut effects = UnavailableEffects {
+            rejected: None,
+            eval: eval.map(EvaluationEffects::new),
+        };
         let execution = drive_run(&host, &journal, run, &mut primitives, &mut effects).await;
         let Err(source) = execution else {
             return Ok(run);
@@ -453,9 +472,13 @@ impl LiveDeliverySource for ClockSource {
 #[derive(Default)]
 struct UnavailableEffects {
     rejected: Option<ProgramCapability>,
+    eval: Option<EvaluationEffects>,
 }
 impl EffectExecutor for UnavailableEffects {
-    fn recovery(&self, _: &EffectRequest) -> EffectRecovery {
+    fn recovery(&self, request: &EffectRequest) -> EffectRecovery {
+        if let Some(eval) = &self.eval {
+            return eval.recovery(request);
+        }
         EffectRecovery::Idempotent
     }
     fn adopt<'a>(
@@ -470,6 +493,9 @@ impl EffectExecutor for UnavailableEffects {
         invocation: EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
         self.rejected = Some(invocation.request.capability());
+        if let Some(eval) = &mut self.eval {
+            return eval.execute(invocation);
+        }
         Box::pin(async {
             Err(LiveDeliveryFailure::new(
                 "daemon workflow effect is unavailable",

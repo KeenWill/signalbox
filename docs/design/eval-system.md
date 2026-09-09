@@ -41,8 +41,8 @@ trial never seals; no path rewrites or deletes the required lineage.
 ## Effects
 
 The native `ApprovalJudgeEval` program enumerates trials and scores their
-outcomes with pure library code. Evaluation-specific effects admit only native
-callers and use checked Rust-only records under the
+outcomes with pure library code. The typed TypeScript fixture uses the same
+effect records under the
 [workflow codec contract](workflows.md#input-and-result), with the host's
 grants, request ordinals and replay driver. Program code receives no provider,
 database or filesystem handle. The daemon-independent library decodes the

@@ -775,3 +775,42 @@ if (now.value !== "9007199254740993" || random.value !== "18446744073709551615" 
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn evaluation_codec_refuses_invalid_trial_identity_before_request() {
+    let (result, requests) = sdk_script("await sdk.evaluation.judge({ trial: -1 });", []).await;
+    assert!(result.is_err());
+    assert!(requests.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn evaluation_codec_refuses_invalid_blob_bytes() {
+    let (result, requests) = sdk_script(
+        "await sdk.evaluation.blob({ digest: 'sha256:' + 'a'.repeat(64) });",
+        [DeliveryKind::Answer {
+            resolves: SCRIPTED_REQUEST,
+            payload: InlineFramePayload::new(br#"{"bytes":[256]}"#.as_slice()),
+        }],
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn evaluation_judge_codec_preserves_full_width_usage() {
+    let answer = serde_json::json!({
+        "outcome": "verdict", "call": "12345678-1234-1234-1234-123456789abc",
+        "request_digest": format!("sha256:{}", "a".repeat(64)),
+        "binding": { "selection": "12345678-1234-1234-1234-123456789abc", "target": "12345678-1234-1234-1234-123456789abc", "credential_reference": "fixture", "provider_model": "fixture", "contract_digest": "fixture", "cache_accounting": "input_excludes_cache" },
+        "actual": "approve", "rationale": "Recorded decision.", "provider_reported_model": null,
+        "usage": { "input_tokens": "18446744073709551615", "output_tokens": "0", "cache_creation_input_tokens": null, "cache_read_input_tokens": "9007199254740993" }
+    });
+    let (result, requests) = sdk_script(
+        r#"const result = await sdk.evaluation.judge({ trial: 0 });
+        if (result.kind !== 'answer' || result.value.usage.input_tokens !== '18446744073709551615' || result.value.usage.cache_read_input_tokens !== '9007199254740993') throw new Error('usage rounded');"#,
+        [DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(serde_json::to_vec(&answer).unwrap()) }],
+    ).await;
+    result.unwrap();
+    assert_eq!(requests.len(), 1);
+}

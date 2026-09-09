@@ -144,8 +144,10 @@ big-endian u64, and its result concatenates that input and a journaled
 big-endian u64 Unix time in seconds. The runner resolves admitted JavaScript
 artifacts from their registrations without requiring a native catalog. Empty
 `Now` requests receive the SDK's typed Unix-millisecond answer. Registration
-effects and durable primitives are composed; other effects are not composed. The
-process protocol and CLI expose registration, start, read and cancellation.
+effects and durable primitives are composed. The compiled catalog also contains
+`approval-judge-eval` revision `1`; `WorkflowRuntime::with_eval` supplies its
+Corpus, Judge and Blob adapters under [evaluation](eval-system.md). The process
+protocol and CLI expose registration, start, read and cancellation.
 `program register REGISTRATION_ID REGISTRATION_JSON` reads a registration
 description; `program start RUN_ID REGISTRATION_ID --input FILE` admits the
 program codec's exact input bytes. `program read RUN_ID` prints retained input,

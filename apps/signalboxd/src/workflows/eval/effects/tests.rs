@@ -1,0 +1,609 @@
+//! Recorded-response evaluation and journal recovery scenarios.
+
+use super::*;
+use signalbox_domain::ModelCallId;
+use signalbox_model_provider_runtime::RuntimeApprovalJudgeModel;
+use signalbox_model_runtime::{
+    AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, Script, ScriptedModel,
+    TerminalEvidence, ToolCallId, ToolCallProposal, ToolName,
+};
+
+const CORPUS: &[u8] = br#"{"cases":[{"id":"approved","request":{"tool":"current_time","arguments":"{}","commissioned_goal":null,"session_template":null,"frozen_system_prompt":null},"expected":"approve","label_provenance":"synthetic"},{"id":"denied","request":{"tool":"current_time","arguments":"{}","commissioned_goal":null,"session_template":null,"frozen_system_prompt":null},"expected":"deny","label_provenance":"synthetic"}]}"#;
+const SELECTION: &str = "3aa432ca-488e-4237-ac2b-7496a2ccc2b4";
+const TARGET: &str = "ba705029-f367-4da8-a0bf-dbc6bf798e17";
+const RATIONALE: &str = "Recorded synthetic decision.";
+
+struct MemoryBlobs(Vec<u8>);
+impl CorpusBlobs for MemoryBlobs {
+    fn read(
+        &self,
+        digest: BlobDigest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, LiveDeliveryFailure>> + Send + '_>> {
+        Box::pin(async move {
+            if BlobDigest::digest(&self.0) != digest {
+                return Err(failure("blob missing"));
+            }
+            Ok(self.0.clone())
+        })
+    }
+}
+
+struct Fixture {
+    services: EvalServices,
+    manifest: EvalManifest,
+    provider: ScriptedModel<ModelCallId>,
+}
+impl Fixture {
+    fn new(pool: sqlx::PgPool) -> Self {
+        let configuration = Arc::new(
+            HubModelConfiguration::parse(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../config/signalboxd.example.toml"
+            )))
+            .unwrap(),
+        );
+        let provider = ScriptedModel::following([script("approve"), script("deny")]);
+        let model = Arc::new(RuntimeApprovalJudgeModel::new(
+            provider.clone(),
+            configuration.runtime_model_catalog(),
+        ));
+        let binding = JudgeBinding {
+            selection: SELECTION.into(),
+            target: TARGET.into(),
+            credential_reference: "recorded-fixture".into(),
+            provider_model: "claude-fable-5-1".into(),
+            contract_digest: "synthetic-contract".into(),
+            cache_accounting: "input_excludes_cache".into(),
+        };
+        let manifest = EvalManifest {
+            corpus: BlobDigest::digest(CORPUS).to_string(),
+            format: CorpusFormat::Offline,
+            cases: vec![0, 1],
+            repeats: 1,
+            binding: binding.clone(),
+            postures: Default::default(),
+            speculative_tools: Vec::new(),
+        };
+        Self {
+            services: EvalServices {
+                registrations: ProgramRegistrationRepository::new(pool.clone()),
+                journal: ProgramJournalRepository::new(pool),
+                blobs: Arc::new(MemoryBlobs(CORPUS.to_vec())),
+                model,
+                binding,
+                configuration,
+            },
+            manifest,
+            provider,
+        }
+    }
+    fn lazy() -> Self {
+        Self::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused_eval_fixture")
+                .unwrap(),
+        )
+    }
+}
+
+fn script(disposition: &str) -> Script {
+    Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+        exchange: ExchangeFacts::default(),
+        message_id: None,
+        reported_model: None,
+        finish: CompletionFinish::ToolUse,
+        content: vec![AssistantPart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("recorded-decision"),
+            name: ToolName::new("tool_approval_decision"),
+            arguments_json:
+                serde_json::json!({ "recommendation": disposition, "rationale": RATIONALE })
+                    .to_string(),
+        })],
+        usage: TokenUsage {
+            input_tokens: Some(80),
+            output_tokens: Some(20),
+            cache_read_input_tokens: Some(10),
+            cache_creation_input_tokens: None,
+        },
+    }))
+}
+
+#[tokio::test]
+async fn missing_corpus_never_calls_the_provider() {
+    let mut fixture = Fixture::lazy();
+    fixture.manifest.corpus = BlobDigest::digest(b"absent").to_string();
+    assert!(fixture.services.corpus(&fixture.manifest).await.is_err());
+    assert!(fixture.provider.received_operations().is_empty());
+}
+
+#[tokio::test]
+async fn every_selected_case_is_preflighted_before_a_provider_call() {
+    let mut fixture = Fixture::lazy();
+    let mut corpus: serde_json::Value = serde_json::from_slice(CORPUS).unwrap();
+    corpus["cases"][1]["request"]["tool"] = "".into();
+    let bytes = serde_json::to_vec(&corpus).unwrap();
+    fixture.manifest.corpus = BlobDigest::digest(&bytes).to_string();
+    fixture.services.blobs = Arc::new(MemoryBlobs(bytes));
+    assert!(
+        fixture
+            .services
+            .judge(&fixture.manifest, TrialRequest { trial: 0 })
+            .await
+            .is_err()
+    );
+    assert!(fixture.provider.received_operations().is_empty());
+}
+
+#[tokio::test]
+async fn selected_case_order_controls_trial_mapping_and_scoring() {
+    let mut fixture = Fixture::lazy();
+    fixture.manifest.cases = vec![1, 0];
+    let corpus = fixture.services.corpus(&fixture.manifest).await.unwrap();
+    let first = fixture
+        .services
+        .judge(&fixture.manifest, TrialRequest { trial: 0 })
+        .await
+        .unwrap();
+    let second = fixture
+        .services
+        .judge(&fixture.manifest, TrialRequest { trial: 1 })
+        .await
+        .unwrap();
+    let score = score(&fixture.manifest, &corpus, &[first, second]).unwrap();
+    assert_eq!(score["accuracy"]["numerator"], 0);
+    assert_eq!(score["verdicts"][0]["case_id"], "denied");
+    assert_eq!(score["verdicts"][1]["case_id"], "approved");
+    assert_eq!(fixture.provider.received_operations().len(), 2);
+}
+
+#[tokio::test]
+async fn manifest_refuses_repeats_that_exceed_the_paid_call_ceiling() {
+    let mut fixture = Fixture::lazy();
+    fixture.manifest.format = CorpusFormat::Live;
+    fixture.manifest.repeats = 501;
+    assert!(fixture.manifest.encode().is_err());
+    fixture.manifest.repeats = 500;
+    assert!(fixture.manifest.encode().is_ok());
+}
+
+#[tokio::test]
+async fn judge_answer_preserves_call_identity_rationale_and_usage() {
+    let fixture = Fixture::lazy();
+    let answer = fixture
+        .services
+        .judge(&fixture.manifest, TrialRequest { trial: 0 })
+        .await
+        .unwrap();
+    let JudgeAnswer::Verdict {
+        call,
+        binding,
+        actual,
+        rationale,
+        usage,
+        ..
+    } = answer
+    else {
+        panic!("recorded verdict required");
+    };
+    assert_eq!(
+        call,
+        fixture.provider.received_operations()[0]
+            .correlation
+            .into_uuid()
+            .to_string()
+    );
+    assert_eq!(binding, fixture.manifest.binding);
+    assert_eq!(
+        actual,
+        signalbox_approval_judge_eval::ApprovalDisposition::Approve
+    );
+    assert_eq!(rationale, RATIONALE);
+    assert_eq!(usage.input_tokens.as_deref(), Some("80"));
+    assert_eq!(usage.output_tokens.as_deref(), Some("20"));
+    assert_eq!(usage.cache_read_input_tokens.as_deref(), Some("10"));
+    assert_eq!(usage.cache_creation_input_tokens, None);
+}
+
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+mod postgres {
+    use super::*;
+    use crate::workflows::compiled_catalog;
+    use signalbox_domain::{
+        DeliveryKind, EffectRequest, ProgramRegistrationId, RequestKind,
+        program_registration::{
+            NativeProgramRegistrationRequest, ProgramExecutable, ProgramGrants,
+            ProgramRegistrationRequest,
+        },
+    };
+    use signalbox_persistence::{
+        program_journal::ProgramJournalRepository, test_support::postgres::TestDatabase,
+    };
+    use signalbox_workflow_runtime::{ProgramExecutionOutcome, WorkflowHost};
+
+    struct ClockSource;
+    impl signalbox_workflow_runtime::LiveDeliverySource for ClockSource {
+        fn next_delivery<'a>(
+            &'a mut self,
+            _: &'a [signalbox_domain::RequestFrame],
+        ) -> Pin<Box<dyn Future<Output = Result<DeliveryKind, LiveDeliveryFailure>> + 'a>> {
+            panic!("evaluation has no primitive requests");
+        }
+    }
+
+    struct RunFixture {
+        _database: TestDatabase,
+        fixture: Fixture,
+        pool: sqlx::PgPool,
+        journal: ProgramJournalRepository,
+        host: WorkflowHost,
+        run: ProgramRunId,
+    }
+    impl RunFixture {
+        async fn new() -> Self {
+            let (database, pool, _) =
+                signalbox_persistence::test_support::postgres::migrated_postgres(4)
+                    .await
+                    .unwrap();
+            let fixture = Fixture::new(pool.clone());
+            let catalog = compiled_catalog().unwrap();
+            let journal = ProgramJournalRepository::new(pool.clone());
+            let ProgramExecutable::Native {
+                entry,
+                revision,
+                binary_digest,
+            } = catalog.executable(EVAL_ENTRY, EVAL_REVISION).unwrap()
+            else {
+                panic!("native catalog entry");
+            };
+            let registration = fixture
+                .services
+                .registrations
+                .register_native_user(
+                    ProgramRegistrationId::from_uuid(uuid::Uuid::now_v7()),
+                    NativeProgramRegistrationRequest {
+                        name: EVAL_ENTRY.into(),
+                        revision: EVAL_REVISION.into(),
+                        entry,
+                        native_revision: revision,
+                        binary_digest,
+                        grants: ProgramGrants::new([
+                            ProgramCapability::Corpus,
+                            ProgramCapability::Judge,
+                            ProgramCapability::Blob,
+                        ]),
+                    },
+                )
+                .await
+                .unwrap();
+            let run = ProgramRunId::from_uuid(uuid::Uuid::now_v7());
+            fixture
+                .services
+                .registrations
+                .start_run(run, registration.id, &fixture.manifest.encode().unwrap())
+                .await
+                .unwrap();
+            Self {
+                _database: database,
+                fixture,
+                pool,
+                journal: journal.clone(),
+                host: WorkflowHost::new(journal).with_native_catalog(catalog),
+                run,
+            }
+        }
+        async fn execute(&self) -> ProgramExecutionOutcome {
+            self.host
+                .execute_registered(
+                    self.run,
+                    &mut ClockSource,
+                    &mut EvaluationEffects::new(self.fixture.services.clone()),
+                )
+                .await
+                .unwrap()
+        }
+        async fn record(&self, capability: ProgramCapability, method: &str, bytes: Vec<u8>) {
+            let request =
+                EffectRequest::new(capability, method.into(), InlineFramePayload::new(bytes));
+            let frame = self
+                .journal
+                .append_request(self.run, None, RequestKind::Effect(request.clone()))
+                .await
+                .unwrap();
+            let answer = EvaluationEffects::new(self.fixture.services.clone())
+                .execute(EffectInvocation {
+                    run: self.run,
+                    ordinal: frame.ordinal(),
+                    request: &request,
+                })
+                .await
+                .unwrap();
+            self.journal
+                .append_delivery(
+                    self.run,
+                    DeliveryKind::Answer {
+                        resolves: frame.ordinal(),
+                        payload: answer,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn eval_workflow_recorded_execution_replays_without_provider_access() {
+        let mut run = RunFixture::new().await;
+        let result = run.execute().await;
+        let ProgramExecutionOutcome::Completed(bytes) = &result else {
+            panic!("complete scorecard");
+        };
+        let score: serde_json::Value = decode(bytes.as_bytes()).unwrap();
+        assert_eq!(score["accuracy"]["numerator"], 2);
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+        run.fixture.services.model = Arc::new(NoProvider);
+        run.fixture.services.blobs = Arc::new(MemoryBlobs(Vec::new()));
+        assert_eq!(run.execute().await, result);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn eval_workflow_restart_consumes_recorded_trials_before_new_provider_work() {
+        let run = RunFixture::new().await;
+        run.record(
+            ProgramCapability::Corpus,
+            "load",
+            encode(&Empty {}).unwrap(),
+        )
+        .await;
+        run.record(
+            ProgramCapability::Judge,
+            "evaluate",
+            encode(&TrialRequest { trial: 0 }).unwrap(),
+        )
+        .await;
+        assert_eq!(run.fixture.provider.received_operations().len(), 1);
+        let ProgramExecutionOutcome::Completed(bytes) = run.execute().await else {
+            panic!("complete scorecard");
+        };
+        let score: serde_json::Value = decode(bytes.as_bytes()).unwrap();
+        assert_eq!(score["accuracy"]["numerator"], 2);
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn eval_workflow_unanswered_provider_call_is_ambiguous_without_retry() {
+        let mut run = RunFixture::new().await;
+        run.record(
+            ProgramCapability::Corpus,
+            "load",
+            encode(&Empty {}).unwrap(),
+        )
+        .await;
+        let frame = run
+            .journal
+            .append_request(
+                run.run,
+                None,
+                RequestKind::Effect(EffectRequest::new(
+                    ProgramCapability::Judge,
+                    "evaluate".into(),
+                    InlineFramePayload::new(encode(&TrialRequest { trial: 0 }).unwrap()),
+                )),
+            )
+            .await
+            .unwrap();
+        run.fixture.services.model = Arc::new(NoProvider);
+        assert!(matches!(
+            run.execute().await,
+            ProgramExecutionOutcome::Faulted(_)
+        ));
+        let journal = run.journal.load(run.run).await.unwrap().unwrap();
+        let answers = journal
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.frame() {
+                signalbox_domain::JournalFrame::Delivery(delivery) => match delivery.kind() {
+                    DeliveryKind::Answer { resolves, payload } if *resolves == frame.ordinal() => {
+                        Some(payload.as_bytes())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(answers, [b"{\"outcome\":\"ambiguous\"}".as_slice()]);
+        assert!(run.fixture.provider.received_operations().is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn eval_typescript_fixture_uses_the_same_effect_records() {
+        let mut run = RunFixture::new().await;
+        let artifact = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/workflow-runtime/tests/fixtures/eval.js"
+        ));
+        let registration = run
+            .fixture
+            .services
+            .registrations
+            .register_user(
+                ProgramRegistrationId::from_uuid(uuid::Uuid::now_v7()),
+                ProgramRegistrationRequest {
+                    name: "typed-eval".into(),
+                    revision: EVAL_REVISION.into(),
+                    source: artifact.as_bytes().to_vec(),
+                    artifact: artifact.into(),
+                    grants: ProgramGrants::new([
+                        ProgramCapability::Corpus,
+                        ProgramCapability::Judge,
+                        ProgramCapability::Blob,
+                    ]),
+                },
+            )
+            .await
+            .unwrap();
+        run.run = ProgramRunId::from_uuid(uuid::Uuid::now_v7());
+        run.fixture
+            .services
+            .registrations
+            .start_run(
+                run.run,
+                registration.id,
+                &run.fixture.manifest.encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        let ProgramExecutionOutcome::Completed(bytes) = run.execute().await else {
+            panic!("typed trial results");
+        };
+        assert_eq!(
+            decode::<serde_json::Value>(bytes.as_bytes()).unwrap(),
+            serde_json::json!({"verdicts":["approve", "deny"]})
+        );
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn eval_workflow_rejects_reusing_a_measured_trial() {
+        let run = RunFixture::new().await;
+        run.record(
+            ProgramCapability::Corpus,
+            "load",
+            encode(&Empty {}).unwrap(),
+        )
+        .await;
+        run.record(
+            ProgramCapability::Judge,
+            "evaluate",
+            encode(&TrialRequest { trial: 0 }).unwrap(),
+        )
+        .await;
+        let request = EffectRequest::new(
+            ProgramCapability::Judge,
+            "evaluate".into(),
+            InlineFramePayload::new(encode(&TrialRequest { trial: 0 }).unwrap()),
+        );
+        let frame = run
+            .journal
+            .append_request(run.run, None, RequestKind::Effect(request.clone()))
+            .await
+            .unwrap();
+        let result = EvaluationEffects::new(run.fixture.services.clone())
+            .execute(EffectInvocation {
+                run: run.run,
+                ordinal: frame.ordinal(),
+                request: &request,
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(run.fixture.provider.received_operations().len(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn daemon_runner_executes_the_registered_eval_with_supplied_host_services() {
+        let run = RunFixture::new().await;
+        let (_, runner) = crate::workflows::WorkflowRuntime::new(run.pool.clone()).unwrap();
+        const TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+        tokio::time::timeout(
+            TEST_DEADLINE,
+            runner.with_eval(run.fixture.services.clone()).run(async {
+                loop {
+                    if run
+                        .journal
+                        .load(run.run)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .terminal_delivery()
+                        .is_some()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let journal = run.journal.load(run.run).await.unwrap().unwrap();
+        let score: serde_json::Value = decode(journal.result().unwrap().as_bytes()).unwrap();
+        assert_eq!(score["accuracy"]["numerator"], 2);
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+    }
+
+    #[derive(Debug)]
+    struct NoProvider;
+    impl ApprovalJudgeModel for NoProvider {
+        fn prepare<'a>(
+            &'a self,
+            _: ApprovalJudgeModelRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<PreparedApprovalJudgeModelCall, ApprovalJudgeModelError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            panic!("replay must not access provider");
+        }
+    }
+}
+
+#[tokio::test]
+async fn live_scoring_counts_failed_and_ambiguous_requested_repeats() {
+    let mut fixture = Fixture::lazy();
+    let bytes = br#"{"name":"live-case","category":"workspace_benign","tool":"current_time","arguments":"{}","expected":"approve"}"#.to_vec();
+    fixture.manifest.corpus = BlobDigest::digest(&bytes).to_string();
+    fixture.manifest.format = CorpusFormat::Live;
+    fixture.manifest.cases = vec![0];
+    fixture.manifest.repeats = 3;
+    fixture.services.blobs = Arc::new(MemoryBlobs(bytes));
+    let corpus = fixture.services.corpus(&fixture.manifest).await.unwrap();
+    let verdict = fixture
+        .services
+        .judge(&fixture.manifest, TrialRequest { trial: 0 })
+        .await
+        .unwrap();
+    let failed = JudgeAnswer::Failed {
+        call: None,
+        request_digest: BlobDigest::digest(b"fixture").to_string(),
+        binding: fixture.manifest.binding.clone(),
+        cause: "provider_error".into(),
+        usage: usage_record(TokenUsage::unreported()),
+    };
+    let score = score(
+        &fixture.manifest,
+        &corpus,
+        &[verdict, failed, JudgeAnswer::Ambiguous],
+    )
+    .unwrap();
+    assert_eq!(score["correct_majorities"], 0);
+    assert_eq!(score["partial_cases"], 1);
+    assert_eq!(score["failed_calls"], 2);
+    assert_eq!(
+        score["cases"][0]["failure_causes"],
+        serde_json::json!(["provider_error", "ambiguous"])
+    );
+}
+
+#[test]
+fn live_case_codec_preserves_full_width_pull_request_identity() {
+    let case: live::CorpusCase = serde_json::from_value(serde_json::json!({
+        "name": "fenced-case", "category": "git_push", "tool": "git_push", "arguments": "{}", "expected": "approve",
+        "dispatch": { "repository": "owner/repo", "pull_request": u64::MAX, "head_sha": "a".repeat(40), "head_repository": "owner/repo", "head_branch": "work", "base_branch": "main" }
+    })).unwrap();
+    let case = Case::Live(case);
+    let bytes = encode(&case).unwrap();
+    let wire: serde_json::Value = decode(&bytes).unwrap();
+    assert_eq!(
+        wire["case"]["dispatch"]["pull_request"],
+        "18446744073709551615"
+    );
+    assert_eq!(decode::<Case>(&bytes).unwrap(), case);
+}
