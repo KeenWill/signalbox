@@ -354,7 +354,13 @@ pub(super) async fn handle_cancel_program_run<Writer: AsyncWrite + Unpin>(
         command_id: DurableCommandId::from_uuid(command_id.into_uuid()),
         run_id: ProgramRunId::from_uuid(run_id.into_uuid()),
     };
-    let outcome = match store::cancel(&services.pool, command).await {
+    let mut result = store::cancel(&services.pool, command.clone()).await;
+    if let Some(workflows) = &services.workflows {
+        result = workflows
+            .complete_cancellation(&services.pool, command, result)
+            .await;
+    }
+    let outcome = match result {
         Ok(Result::Recorded(Outcome::Applied)) => WireOutcome::Applied {
             terminal_state: ProgramRunCancelledState::Cancelled,
             result: (),

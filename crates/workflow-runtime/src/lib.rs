@@ -75,6 +75,11 @@ impl ProgramArtifact {
 
 /// A live request needs one durable delivery before execution can continue.
 pub trait LiveDeliverySource {
+    /// Whether these admitted requests can wait after dropping program memory.
+    fn suspend_on_wait(&self, _outstanding: &[RequestFrame]) -> bool {
+        false
+    }
+
     fn next_delivery<'a>(
         &'a mut self,
         outstanding: &'a [RequestFrame],
@@ -103,9 +108,11 @@ impl fmt::Display for LiveDeliveryFailure {
 
 impl Error for LiveDeliveryFailure {}
 
-/// Terminal observation made by this execution attempt.
+/// Terminal observation or durable suspension made by this execution attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProgramExecutionOutcome {
+    /// Unanswered durable waits; the caller delivers one before reconstructing the run.
+    Suspended(Vec<RequestFrame>),
     /// Exact result bytes from the accepted terminal request.
     Completed(InlineFramePayload),
     RunCancelled(InlineFramePayload),
@@ -610,6 +617,9 @@ impl WorkflowHost {
         let outstanding = execution.outstanding_frames();
         if outstanding.is_empty() {
             return Ok(None);
+        }
+        if live_deliveries.suspend_on_wait(&outstanding) {
+            return Ok(Some(ProgramExecutionOutcome::Suspended(outstanding)));
         }
         let kind = live_deliveries.next_delivery(&outstanding).await?;
         execution.validate_delivery(&kind)?;
