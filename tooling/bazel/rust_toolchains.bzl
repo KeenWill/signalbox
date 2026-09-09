@@ -1,4 +1,4 @@
-"""Resolve Rust archive checksums from release manifests and retain them in the lockfile."""
+"""Resolve Rust archive checksums from release manifests with locked manifest digests."""
 
 load("@rules_rust//rust/platform:triple.bzl", "get_host_triple")
 load("@rules_rust//rust/private:repositories.bzl", "DEFAULT_TOOLCHAIN_TRIPLES", "rust_register_toolchains", "rust_toolchain_tools_repository")
@@ -46,6 +46,7 @@ def _rust_impl(ctx):
     return ctx.extension_metadata(
         root_module_direct_deps = ["rust_toolchains"],
         root_module_direct_dev_deps = [],
+        reproducible = True,
         facts = facts,
     )
 
@@ -80,6 +81,7 @@ def _host_tools_impl(ctx):
     return ctx.extension_metadata(
         root_module_direct_deps = repositories,
         root_module_direct_dev_deps = [],
+        reproducible = True,
         facts = facts,
     )
 

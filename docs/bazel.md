@@ -7,9 +7,9 @@ groups updates to it with `rust-toolchain.toml`; manual toolchain changes update
 both files.
 
 The toolchain extension reads Rust's published release manifests for archive
-checksums and retains them in `MODULE.bazel.lock`. Stable and dated-nightly
-version updates resolve their checksums automatically; commit the refreshed
-lockfile with the version change.
+checksums and retains the manifest digests in `MODULE.bazel.lock`. Stable and
+dated-nightly version updates resolve their checksums automatically; commit the
+refreshed lockfile with the version change.
 
 ```bash
 bazel build //:rust_build
