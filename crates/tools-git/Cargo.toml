@@ -25,6 +25,7 @@ signalbox-domain = { path = "../domain" }
 signalbox-tool-contract = { path = "../tool-contract" }
 signalbox-tools-workspace = { path = "../tools-workspace" }
 tempfile = "3.27.0"
+tokio = { version = "1.53.0", default-features = false, features = ["rt", "time"] }
 
 # rustix omits mkfifoat on Apple targets, so the FIFO fixtures need a safe
 # wrapper there and nix supplies one. Apple-only and test-only: the Linux
@@ -33,7 +34,7 @@ tempfile = "3.27.0"
 nix = { version = "0.31.3", default-features = false, features = ["fs"] }
 
 [dev-dependencies]
-tokio = { version = "1.53.0", default-features = false, features = ["macros", "rt"] }
+tokio = { version = "1.53.0", default-features = false, features = ["macros", "rt", "sync"] }
 
 [lints]
 workspace = true

@@ -255,7 +255,7 @@ async function openDetails(
   return reads
 }
 
-const toolRow = (page: Page) => page.getByRole('row').filter({ hasText: 'tool batch transition' })
+const toolRow = (page: Page) => page.getByRole('row').filter({ hasText: 'Tool batch updated' })
 
 test('opens tool arguments and follows the typed result continuation', async ({ page }) => {
   const reads = await openDetails(page)
@@ -264,8 +264,8 @@ test('opens tool arguments and follows the typed result continuation', async ({ 
     'release status --json',
   )
   const timeline = page.getByRole('grid', { name: 'Session timeline' })
-  expect(await timeline.ariaSnapshot()).toContain('button "Load next detail chunk"')
-  await page.getByRole('button', { name: 'Load next detail chunk', exact: true }).press('Enter')
+  expect(await timeline.ariaSnapshot()).toContain('button "Load more"')
+  await page.getByRole('button', { name: 'Load more', exact: true }).press('Enter')
   await expect(page.getByRole('region', { name: 'Tool result' })).toContainText('"checks":"passed"')
   expect(reads.at(-1)?.searchParams.get('cursor_field')).toBe('tool_result')
   expect(reads.at(-1)?.searchParams.get('cursor_member')).toBe('0')
@@ -280,28 +280,30 @@ test('opens tool arguments and follows the typed result continuation', async ({ 
 test('fails closed when detail belongs to a different event kind', async ({ page }) => {
   await openDetails(page, true)
   await toolRow(page).click()
-  await expect(page.getByRole('alert').filter({ hasText: 'Detail rejected' })).toBeVisible()
+  await expect(
+    page.getByRole('alert').filter({ hasText: "Details didn't match this event." }),
+  ).toBeVisible()
   await expect(page.getByRole('region', { name: 'Tool arguments' })).toHaveCount(0)
 })
 
 test('opens approval and provider detail independently with the keyboard', async ({ page }) => {
   await openDetails(page)
-  await page.getByRole('row').filter({ hasText: 'tool approval decided' }).press('Enter')
+  await page.getByRole('row').filter({ hasText: 'Tool approval decided' }).press('Enter')
   await expect(page.getByRole('region', { name: 'Approval rationale' })).toContainText(
     'operator decision',
   )
-  await page.getByRole('row').filter({ hasText: 'model call transition' }).press('Enter')
+  await page.getByRole('row').filter({ hasText: 'Model call updated' }).press('Enter')
   await expect(page.getByRole('region', { name: 'Model response' })).toContainText('checks passed')
   await expect(page.getByRole('region', { name: 'Approval rationale' })).toBeVisible()
 })
 
 test('correlates an override approval with the denied request', async ({ page }) => {
   await openDetails(page, false, true)
-  await page.getByRole('row').filter({ hasText: 'tool approval decided' }).press('Enter')
+  await page.getByRole('row').filter({ hasText: 'Tool approval decided' }).press('Enter')
   const detail = page.getByRole('article', {
-    name: 'tool approval decided detail',
+    name: 'Tool approval decided detail',
   })
-  await expect(detail).toContainText('user override')
+  await expect(detail).toContainText('User override')
   await expect(detail).toContainText('Command00000000-0000-0000-0000-000000000123')
   await expect(detail).toContainText('Denied request00000000-0000-0000-0000-000000000124')
 })
@@ -311,10 +313,10 @@ test('captures sessions detail evidence', async ({ page, browserName }) => {
   await page.setViewportSize({ width: 1440, height: 1200 })
   await openDetails(page)
   await toolRow(page).click()
-  await page.getByRole('button', { name: 'Load next detail chunk', exact: true }).click()
+  await page.getByRole('button', { name: 'Load more', exact: true }).click()
   await expect(page.getByRole('region', { name: 'Tool result' })).toBeVisible()
   await expect.soft(page).toHaveScreenshot('sessions-detail-desktop-dark.png')
-  await page.getByRole('row').filter({ hasText: 'tool approval decided' }).click()
+  await page.getByRole('row').filter({ hasText: 'Tool approval decided' }).click()
   await page.getByRole('region', { name: 'Approval rationale' }).scrollIntoViewIfNeeded()
   await expect(page.getByRole('region', { name: 'Approval rationale' })).toBeVisible()
   await page.getByRole('button', { name: 'Use light theme' }).click()
@@ -332,11 +334,18 @@ for (const cause of [
 ] as const) {
   test(`shows the ${cause.type} creation cause and identity`, async ({ page }) => {
     await openDetails(page, false, false, cause)
-    const row = page.getByRole('row').filter({ hasText: 'session created' })
+    const row = page.getByRole('row').filter({ hasText: 'Session created' })
     await row.press('Enter')
-    await expect(row).toContainText(cause.type.replaceAll('_', ' '))
+    await expect(row).toContainText(
+      {
+        interactive: 'Interactive',
+        repository_watch: 'Repository watch',
+        commissioned: 'Assigned',
+        delegated: 'Delegated',
+      }[cause.type],
+    )
     if (cause.type === 'delegated') {
-      await expect(row).toContainText('Spawning request')
+      await expect(row).toContainText('Created by request')
       await expect(row).toContainText(cause.spawning_request_id)
     } else if (cause.type !== 'interactive') {
       await expect(row).toContainText('Dispatch')
@@ -353,7 +362,7 @@ test('reads tool arguments and output in conversation order with events hidden',
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
   await expect(page.locator('.session-telemetry')).toBeHidden()
-  const references = conversation.getByRole('list', { name: 'Attachment references' })
+  const references = conversation.getByRole('list', { name: 'Attachments' })
   await expect(references.getByRole('listitem')).toHaveCount(2)
   await expect(references).toContainText('image/jpeg · 4 B')
   await expect(references).toContainText('image/png · 4 B')
@@ -393,7 +402,7 @@ test('shows reconciliation-required turn outcomes with events hidden', async ({ 
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   await expect(
-    conversation.getByText('Turn reconciliation required · model call', {
+    conversation.getByText('Turn needs recovery · Model call', {
       exact: true,
     }),
   ).toBeVisible()
@@ -405,7 +414,9 @@ test('shows retired goal turns in conversation order with events hidden', async 
   await openDetails(page, false, false, undefined, 'retired')
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
-  await expect(conversation.getByText('Goal turn retired', { exact: true })).toBeVisible()
+  await expect(
+    conversation.getByText('Turn retired before it started', { exact: true }),
+  ).toBeVisible()
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toBeHidden()
   await expect
     .poll(() =>
@@ -429,7 +440,7 @@ test('shows one failed outcome for credential-pool exhaustion while retaining bo
   await expect(conversation.getByText('Turn failed', { exact: true })).toHaveCount(1)
   await events.check()
   const timeline = page.getByRole('grid', { name: 'Session timeline' })
-  await expect(timeline.getByRole('row').filter({ hasText: 'turn failed' })).toHaveCount(2)
+  await expect(timeline.getByRole('row').filter({ hasText: 'Turn failed' })).toHaveCount(2)
   await expect(conversation.getByText('Turn failed', { exact: true })).toHaveCount(1)
 })
 
@@ -438,24 +449,24 @@ test('labels partial tool payloads and the final continued chunk', async ({ page
   await page.getByRole('checkbox', { name: 'Events', exact: true }).uncheck()
   const conversation = page.getByRole('region', { name: 'Conversation', exact: true })
   const output = conversation.getByRole('region', { name: 'Output', exact: true })
-  await expect(output).toContainText('Text excerpt · byte 0 of 55')
+  await expect(output).toContainText('Showing from byte 0 of 55')
   await expect(output).toContainText('"status": "ok"')
   await expect(
     conversation.getByRole('region', { name: 'Arguments', exact: true }),
-  ).not.toContainText('Text excerpt')
+  ).not.toContainText('Showing from byte')
   await page.getByRole('button', { name: 'Next text page', exact: true }).click()
-  await expect(output).toContainText('Text excerpt · byte 15 of 55')
+  await expect(output).toContainText('Showing from byte 15 of 55')
 })
 
 for (const outcome of ['goal_stopped', 'goal_settling'] as const) {
   test(`shows ${outcome} action accounting in goal-stop detail`, async ({ page }) => {
     await openDetails(page, false, false, undefined, outcome)
-    await page.getByRole('row').filter({ hasText: 'goal changed' }).press('Enter')
-    const detail = page.getByRole('article', { name: 'goal changed detail' })
+    await page.getByRole('row').filter({ hasText: 'Goal changed' }).press('Enter')
+    const detail = page.getByRole('article', { name: 'Goal changed detail' })
     await expect(detail).toContainText(detailTurnId)
     await expect(detail).toContainText('Abandoned approved actions')
     await expect(detail).toContainText(
-      outcome === 'goal_stopped' ? 'Abandoned approved actions2' : 'settlement pending',
+      outcome === 'goal_stopped' ? 'Abandoned approved actions2' : 'Pending',
     )
     await detail.getByText('Abandoned approved actions', { exact: true }).scrollIntoViewIfNeeded()
     await expect(detail.getByText('Abandoned approved actions', { exact: true })).toBeVisible()

@@ -310,7 +310,7 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
   )
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Sessions unavailable')).toBeVisible()
+  await expect(page.getByText('Session timeline unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -327,7 +327,7 @@ test('gates Sessions on valid timeline limits', async ({ page }) => {
   )
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Sessions unavailable')).toBeVisible()
+  await expect(page.getByText('Session timeline unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -350,7 +350,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
   const scenario = await useRecoveringBootstrap(page)
   await page.goto('/sessions?workspace=true')
 
-  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   scenario.recover()
   await page.getByRole('button', { name: 'Retry connection' }).click()
 
@@ -516,7 +516,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
   await expect(page.getByRole('form', { name: 'Message composer' })).toBeVisible()
   const timeline = page.getByRole('grid', { name: 'Session timeline' })
-  await expect(page.getByRole('row', { name: /41 input accepted/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /41 Message accepted/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
@@ -534,12 +534,12 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await latest.focus()
   await page.keyboard.press('j')
   await expect(timeline).toBeFocused()
-  await expect(page.getByRole('row', { name: /42 turn activated/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /42 Turn started/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
 
-  const completed = page.getByRole('row', { name: /43 turn completed/ })
+  const completed = page.getByRole('row', { name: /43 Turn completed/ })
   await completed.click()
   await expect(timeline).toBeFocused()
   await expect(completed).toHaveAttribute('aria-controls', 'session-timeline-detail-43')
@@ -547,21 +547,21 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.locator('#session-timeline-disclosure-43')).toHaveText('Expanded')
   await expect(page.locator('#session-timeline-detail-43')).toBeVisible()
   await expect(
-    page.getByRole('article', { name: 'turn completed detail' }).getByText('terminalized'),
+    page.getByRole('article', { name: 'Turn completed detail' }).getByText('Finished'),
   ).toBeVisible()
   await expect(page.getByRole('complementary', { name: 'Inspector', exact: true })).toHaveCount(0)
 
-  const accepted = page.getByRole('row', { name: /41 input accepted/ })
-  await accepted.getByText('input accepted', { exact: true }).click()
+  const accepted = page.getByRole('row', { name: /41 Message accepted/ })
+  await accepted.getByText('Message accepted', { exact: true }).click()
   await expect(page.locator('#session-timeline-detail-41')).toBeVisible()
-  await expect(page.getByRole('region', { name: 'User input', exact: true })).toBeVisible()
-  await accepted.getByText('input accepted', { exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Accepted input', exact: true })).toBeVisible()
+  await accepted.getByText('Message accepted', { exact: true }).click()
   await expect(page.locator('#session-timeline-detail-41')).toBeHidden()
 
   const first = page.getByRole('button', { name: /First/ })
   await first.click()
   await expect(first).toBeFocused()
-  await expect(page.getByRole('row', { name: /41 input accepted/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /41 Message accepted/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
@@ -614,7 +614,7 @@ test('keeps palette selection commands focused on the Session timeline', async (
   await page.getByRole('button', { name: /Select next timeline item/ }).click()
 
   await expect(timeline).toBeFocused()
-  await expect(page.getByRole('row', { name: /42 turn activated/ })).toHaveAttribute(
+  await expect(page.getByRole('row', { name: /42 Turn started/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
@@ -632,7 +632,7 @@ test('preserves the saved row when reopening the current Session fails', async (
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
-  await page.getByRole('row', { name: /43 turn completed/ }).click()
+  await page.getByRole('row', { name: /43 Turn completed/ }).click()
 
   failTimeline = true
   await sessionId.press('Enter')
@@ -650,8 +650,10 @@ test('preserves the saved row when reopening the current Session fails', async (
   expect(savedPosition).toBe('43')
   expect(problems.pageErrors).toEqual([])
   expect(
-    problems.consoleErrors.every((message) =>
-      message.includes('Failed to load resource: the server responded with a status of 503'),
+    problems.consoleErrors.every(
+      (message) =>
+        message.includes('Failed to load resource: the server responded with a status of 503') ||
+        message.startsWith('Session load failed'),
     ),
   ).toBe(true)
 })
@@ -671,7 +673,7 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
-  await page.getByRole('row', { name: /43 turn completed/ }).click()
+  await page.getByRole('row', { name: /43 Turn completed/ }).click()
 
   await sessionId.fill(otherSessionId)
   await sessionId.press('Enter')
@@ -694,8 +696,10 @@ test('preserves the saved row when revisiting a cached Session fails', async ({ 
   expect(savedPosition).toBe('43')
   expect(problems.pageErrors).toEqual([])
   expect(
-    problems.consoleErrors.every((message) =>
-      message.includes('Failed to load resource: the server responded with a status of 503'),
+    problems.consoleErrors.every(
+      (message) =>
+        message.includes('Failed to load resource: the server responded with a status of 503') ||
+        message.startsWith('Session load failed'),
     ),
   ).toBe(true)
 })
@@ -716,7 +720,7 @@ test('clears cached Session projections after a refetch error', async ({ page })
   failTimeline = true
   await page.getByRole('button', { name: /Latest/ }).click()
 
-  await expect(page.getByRole('alert')).toContainText('Session unavailable')
+  await expect(page.getByRole('alert')).toContainText("Session couldn't be loaded.")
   await expect(page.getByRole('grid', { name: 'Session timeline' })).toHaveCount(0)
   await expect(
     page
@@ -725,8 +729,10 @@ test('clears cached Session projections after a refetch error', async ({ page })
   ).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
   expect(
-    problems.consoleErrors.every((message) =>
-      message.includes('Failed to load resource: the server responded with a status of 503'),
+    problems.consoleErrors.every(
+      (message) =>
+        message.includes('Failed to load resource: the server responded with a status of 503') ||
+        message.startsWith('Session load failed'),
     ),
   ).toBe(true)
 })
@@ -747,14 +753,12 @@ test('rejects conflicting retained Session evidence after a boundary refetch', a
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await page.getByRole('checkbox', { name: 'Events', exact: true }).check()
-  await expect(page.getByRole('row', { name: /43 turn completed/ })).toBeVisible()
+  await expect(page.getByRole('row', { name: /43 Turn completed/ })).toBeVisible()
 
   contradictRetainedEvent = true
   await page.getByRole('button', { name: /Latest/ }).click()
 
-  await expect(page.getByRole('alert')).toContainText(
-    'timeline source returned conflicting data for a retained address',
-  )
+  await expect(page.getByRole('alert')).toContainText("Session couldn't be loaded.")
   expect(problems.pageErrors).toEqual([])
 })
 
@@ -962,7 +966,7 @@ test('retries an initial bootstrap failure', async ({ page }) => {
 
   // A refused admission answers with a status, so `readBootstrap` raises a plain error and the
   // shell classifies it as an unavailable bootstrap rather than an unreachable transport.
-  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry connection' }).click()
   await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.getByRole('main')).toBeFocused()
@@ -976,7 +980,7 @@ test('distinguishes an incompatible bootstrap contract from an outage', async ({
 
   // A schema-invalid payload decodes into a contract error, which the shell reports as a rejected
   // contract. Addressed by text because a deferred surface also publishes a `status` region.
-  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByText('Unexpected server response')).toBeVisible()
 })
 
 test('shows transcript-detail commands only on Settings among product routes', async ({ page }) => {
@@ -1087,7 +1091,7 @@ test('keeps Settings available without consulting daemon bootstrap', async ({ pa
 
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
   await expect(page.getByRole('group', { name: 'Theme', exact: true })).toBeVisible()
-  await expect(page.getByText('Transport unavailable')).toHaveCount(0)
+  await expect(page.getByText("Can't reach the server")).toHaveCount(0)
   expect(bootstrapRequests).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -1099,7 +1103,7 @@ test('offers Scenario Studio through the product command palette', async ({ page
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
-  await page.getByRole('button', { name: /Go to Scenario Studio/ }).click()
+  await page.getByRole('button', { name: /Go to Scenario studio/ }).click()
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -1116,7 +1120,7 @@ test('does not start Attention reads when bootstrap validation fails', async ({ 
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
-  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByText('Unexpected server response')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
 
@@ -1138,7 +1142,7 @@ test('does not start Attention reads for incompatible bootstrap values', async (
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
-  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByText('Unexpected server response')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
 
@@ -1148,7 +1152,7 @@ test('retries a transient Attention bootstrap failure in place', async ({ page }
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention unavailable' })).toBeVisible()
-  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   await expect(page.getByRole('button', { name: /^Retry/ })).toHaveCount(1)
   await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
 
@@ -1234,7 +1238,7 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
   ).toBeVisible()
   // A refused admission answers with a status, so the shell classifies it as an unavailable
   // bootstrap rather than as an unreachable transport or a rejected contract.
-  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   await expect(page.locator('.imports-shell-product')).toHaveCount(0)
   expect(importRequests).toBe(0)
   expect(problems.pageErrors).toEqual([])
@@ -1250,7 +1254,7 @@ test('shares expired Imports admission failure with the shell retry state', asyn
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.clock.fastForward(30_001)
   await page.getByRole('textbox', { name: 'Source session' }).fill('expired-admission')
-  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByText('Unexpected server response')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry connection' })).toBeVisible()
   await useDeterministicBootstrap(page)
   await page.getByRole('button', { name: 'Retry connection' }).click()
@@ -1269,12 +1273,12 @@ test('withholds Search focus after cached bootstrap refetch failure and restores
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.clock.fastForward(30_001)
   await page.getByRole('textbox', { name: 'Source session', exact: true }).fill('expired-admission')
-  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByText('Unexpected server response')).toBeVisible()
   await page.getByRole('link', { name: 'Search', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Search unavailable', exact: true })).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Open command palette' }).click()
-  await expect(page.getByRole('button', { name: /Focus lexical search/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Focus search/ })).toHaveCount(0)
   await page.keyboard.press('Escape')
   await page.evaluate(() => {
     let shortcutEvent: KeyboardEvent | undefined
@@ -1301,7 +1305,7 @@ test('withholds Search focus after cached bootstrap refetch failure and restores
   await page.getByRole('button', { name: 'Retry connection', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeVisible()
   await page.getByRole('button', { name: 'Open command palette' }).click()
-  await page.getByRole('button', { name: /Focus lexical search/ }).click()
+  await page.getByRole('button', { name: /Focus search/ }).click()
   await expect(page.getByRole('textbox', { name: 'Search text' })).toBeFocused()
   await page.keyboard.press('Escape')
   await page.keyboard.press(`${modifier}+Shift+f`)
@@ -1315,7 +1319,7 @@ test('mounts Imports after the daemon contract recovers', async ({ page }) => {
   await useDeterministicImportApi(page)
   await page.goto(importsProductFixture.path)
 
-  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry connection' }).click()
 
   await expect(page.locator('.product-connection')).toHaveCount(0)
@@ -1349,14 +1353,12 @@ test('lights up the imports command family only on the Imports surface', async (
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   const palette = page.getByRole('dialog', { name: 'Command palette' })
-  await expect(palette.getByRole('button', { name: /Select next imported frontier/ })).toBeVisible()
+  await expect(palette.getByRole('button', { name: /Next entry/ })).toBeVisible()
   await palette.getByRole('button', { name: /Go to Sessions/ }).click()
   await expect(page).toHaveURL(/\/sessions$/)
 
   await page.keyboard.press(`${modifier}+K`)
-  await expect(palette.getByRole('button', { name: /Select next imported frontier/ })).toHaveCount(
-    0,
-  )
+  await expect(palette.getByRole('button', { name: /Next entry/ })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -1499,9 +1501,7 @@ test('locks product navigation while an ambiguous continuation command is retain
   )
   await page.goto(importsProductFixture.path)
 
-  await page
-    .getByRole('textbox', { name: 'Initial model selection UUID' })
-    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('textbox', { name: 'Model ID' }).fill('00000000-0000-7000-8000-000000000777')
   await page.getByRole('button', { name: 'Resume' }).click()
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()
 
@@ -1538,9 +1538,7 @@ test('retains exact retry after a lost acknowledgement and corrupt continuation 
     })
   })
   await page.goto(importsProductFixture.path)
-  await page
-    .getByRole('textbox', { name: 'Initial model selection UUID' })
-    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('textbox', { name: 'Model ID' }).fill('00000000-0000-7000-8000-000000000777')
   await page.getByRole('button', { name: 'Resume' }).click()
   await expect(page.getByRole('alert')).toContainText('Outcome unknown.')
   const corruptReceipt = page.waitForResponse((response) => response.status() === 500)
@@ -1685,15 +1683,17 @@ test('retries a transient bootstrap failure without reloading', async ({ page })
   await useDeterministicAttention(page)
   await page.goto('/attention')
 
-  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await expect(page.getByText('Server unavailable')).toBeVisible()
   scenario.recover()
   await page.getByRole('button', { name: 'Retry connection' }).click()
   await expect(page.locator('.product-connection')).toHaveCount(0)
   await expect(page.getByRole('main')).toBeFocused()
   expect(problems.pageErrors).toEqual([])
   expect(
-    problems.consoleErrors.every((message) =>
-      message.includes('Failed to load resource: the server responded with a status of 503'),
+    problems.consoleErrors.every(
+      (message) =>
+        message.includes('Failed to load resource: the server responded with a status of 503') ||
+        message.startsWith('Session load failed'),
     ),
   ).toBe(true)
 })
@@ -1703,7 +1703,7 @@ test('distinguishes a rejected bootstrap contract from transport failure', async
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
   await page.goto('/attention')
 
-  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByText('Unexpected server response')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry connection' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -1800,9 +1800,9 @@ test('starts the settled exact import filter without the previous page cursor', 
       },
     })
   })
+  await page.clock.install()
   await page.goto('/imports')
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
-  await page.clock.install()
   await page.clock.pauseAt(new Date(Date.now() + 1_000))
   const input = page.getByRole('textbox', {
     name: 'Source session',
@@ -1923,7 +1923,7 @@ for (const outcome of ['success', 'rejection'] as const) {
     })
     await page.goto(importsProductFixture.path)
     await page
-      .getByRole('textbox', { name: 'Initial model selection UUID' })
+      .getByRole('textbox', { name: 'Model ID' })
       .fill('00000000-0000-7000-8000-000000000777')
     await page.getByRole('button', { name: 'Resume', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible()

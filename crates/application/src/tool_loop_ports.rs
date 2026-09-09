@@ -38,6 +38,8 @@ pub enum ResolvedToolConversationEntry {
         request: ToolRequest,
         /// Terminal physical result authority.
         attempt: EndedToolAttempt,
+        /// Text admitted to model context; terminal executor evidence remains exact.
+        context_text: Option<signalbox_domain::ToolResultText>,
     },
     /// The user decision and request referenced by one denial entry.
     Denied {
