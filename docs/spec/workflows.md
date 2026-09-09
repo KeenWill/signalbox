@@ -97,10 +97,12 @@ replay their recorded outcome without appending frames.
 
 `NativeCatalog` selects compiled `NativeProgram` implementations with checked
 `NativeValue` input decoding before program code and checked output encoding.
-The host hashes its executing binary once. An unfinished run whose catalog
-entry, revision or binary digest is unavailable journals `ContractRetired`;
-retained terminal outcomes require no catalog resolution. JavaScript child
-registration admits only JavaScript artifacts.
+The Linux host hashes its running image through `/proc/self/exe` once,
+preserving its digest across executable path replacement. Catalog construction
+returns `Unsupported` on other platforms. An unfinished run whose catalog entry,
+revision or binary digest is unavailable journals `ContractRetired`; retained
+terminal outcomes require no catalog resolution. JavaScript child registration
+admits only JavaScript artifacts.
 
 One locally polled Rust root future sequentially awaits `WorkflowContext`
 requests. Both adapters share request admission, grant checks, exact-byte

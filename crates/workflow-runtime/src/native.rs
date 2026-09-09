@@ -62,16 +62,19 @@ pub struct NativeCatalog {
 }
 
 impl NativeCatalog {
-    /// Hashes the exact executing file once per process, on the host side.
+    /// Hashes the running image once per process, on the host side.
+    /// Returns `Unsupported` on platforms without a running-image handle.
     pub fn new() -> Result<Self, std::io::Error> {
         static DIGEST: OnceLock<Result<ProgramContentDigest, std::io::Error>> = OnceLock::new();
         let digest = DIGEST
             .get_or_init(|| {
-                std::fs::read(std::env::current_exe()?)
-                    .map(|bytes| ProgramContentDigest::of(&bytes))
+                let mut image = running_image()?;
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut image, &mut bytes)?;
+                Ok(ProgramContentDigest::of(&bytes))
             })
             .as_ref()
-            .map_err(std::io::Error::other)?;
+            .map_err(|error| std::io::Error::new(error.kind(), error))?;
         Ok(Self {
             binary_digest: *digest,
             entries: BTreeMap::new(),
@@ -119,6 +122,21 @@ impl NativeCatalog {
             _ => None,
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn running_image() -> std::io::Result<std::fs::File> {
+    // Opening this kernel handle retains the executing inode after replacement
+    // or unlink; resolving its pathname first would lose that identity.
+    std::fs::File::open("/proc/self/exe")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_image() -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "native executable pinning requires a running-image handle",
+    ))
 }
 
 fn start<P: NativeProgram>(
@@ -299,5 +317,72 @@ impl WorkflowHost {
             .await?
             .and_then(|journal| crate::journal_outcome(&journal))
             .ok_or_else(|| WorkflowHostProtocolError::JournalTailChanged.into())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::{fs, path::Path, process::Command};
+
+    use super::*;
+
+    #[test]
+    fn catalog_digest_survives_executable_path_replacement() -> Result<(), Box<dyn Error>> {
+        in_disposable_executable(|executable| {
+            let executing_bytes = fs::read(executable)?;
+            let replacement = executable.with_extension("replacement");
+            const REPLACEMENT_BYTES: &[u8] = b"different executable contents";
+            fs::write(&replacement, REPLACEMENT_BYTES)?;
+            fs::rename(&replacement, executable)?;
+
+            let catalog = NativeCatalog::new()?;
+            assert_eq!(
+                catalog.binary_digest,
+                ProgramContentDigest::of(&executing_bytes),
+                "the first catalog must pin the executing image after path replacement"
+            );
+
+            fs::remove_file(executable)?;
+            assert_eq!(
+                NativeCatalog::new()?.binary_digest,
+                catalog.binary_digest,
+                "subsequent catalogs must retain the same executing-image digest"
+            );
+            Ok(())
+        })
+    }
+
+    /// Reexecutes only this test in a disposable copy before touching its path.
+    fn in_disposable_executable(
+        check: impl FnOnce(&Path) -> Result<(), Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
+        const CHILD_EXECUTABLE: &str = "SIGNALBOX_NATIVE_REPLACEMENT_EXECUTABLE";
+        if let Some(executable) = std::env::var_os(CHILD_EXECUTABLE) {
+            return check(Path::new(&executable));
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "signalbox-native-executable-replacement-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory)?;
+        let executable = directory.join("test-executable");
+        fs::copy(std::env::current_exe()?, &executable)?;
+        let output = Command::new(&executable)
+            .args([
+                "--exact",
+                "native::tests::catalog_digest_survives_executable_path_replacement",
+                "--nocapture",
+            ])
+            .env(CHILD_EXECUTABLE, &executable)
+            .output();
+        fs::remove_dir_all(directory)?;
+        let output = output?;
+        assert!(
+            output.status.success(),
+            "replacement subprocess failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
     }
 }
