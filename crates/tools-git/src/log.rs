@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::arguments::GitLogArguments;
 use crate::bounded::{
@@ -19,7 +19,7 @@ pub(super) fn log(
         resolve_bounded_commit(repository, authority, &arguments.revision)?;
     let start = start.id();
     validate_live_shallow(&authority.git_directory, authority.object_format)?;
-    let shallow = HashSet::new();
+    let shallow = BTreeSet::new();
     let (ordered, truncated) =
         bounded_topological_page(repository, start, arguments.max_entries, &shallow)?;
     let mut commits = Vec::new();
@@ -52,11 +52,11 @@ pub(super) fn bounded_topological_page(
     repository: &RepositoryShell,
     start: git2::Oid,
     limit: usize,
-    shallow: &HashSet<git2::Oid>,
+    shallow: &BTreeSet<git2::Oid>,
 ) -> Result<(Vec<git2::Oid>, bool), LocalGitFailure> {
     let mut frontier = vec![start];
-    let mut queued = HashSet::from([start]);
-    let mut emitted = HashSet::new();
+    let mut queued = BTreeSet::from([start]);
+    let mut emitted = BTreeSet::new();
     let mut ordered = Vec::with_capacity(limit);
     let mut topology_inspections = 0_usize;
     while !frontier.is_empty() && ordered.len() < limit {
@@ -94,7 +94,7 @@ pub(super) fn bounded_topological_page(
 pub(super) fn select_topological_candidate(
     repository: &RepositoryShell,
     frontier: &[git2::Oid],
-    shallow: &HashSet<git2::Oid>,
+    shallow: &BTreeSet<git2::Oid>,
     inspections: &mut usize,
 ) -> Result<usize, LocalGitFailure> {
     for candidate_index in 0..frontier.len() {
@@ -119,11 +119,11 @@ pub(super) fn bounded_commit_reaches(
     repository: &RepositoryShell,
     descendant: git2::Oid,
     ancestor: git2::Oid,
-    shallow: &HashSet<git2::Oid>,
+    shallow: &BTreeSet<git2::Oid>,
     inspections: &mut usize,
 ) -> Result<bool, LocalGitFailure> {
     let mut pending = vec![descendant];
-    let mut visited = HashSet::new();
+    let mut visited = BTreeSet::new();
     while let Some(oid) = pending.pop() {
         if oid == ancestor {
             return Ok(true);
