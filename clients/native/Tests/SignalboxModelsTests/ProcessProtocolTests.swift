@@ -42,7 +42,7 @@ final class ProcessProtocolTests: XCTestCase {
     guard case .programRunCancellationReceipt(let commandID, let runID, let outcome) = message else {
       return XCTFail("Expected a cancellation receipt")
     }
-    XCTAssertEqual(commandID.rawValue, "33333333-3333-4333-8333-333333333333")
+    XCTAssertEqual(commandID.rawValue.rawValue, "33333333-3333-4333-8333-333333333333")
     XCTAssertEqual(runID.rawValue, "11111111-1111-4111-8111-111111111111")
     XCTAssertEqual(outcome, .alreadySucceeded(result: [0, 255], resultExtent: .truncated(totalBytes: 5242880)))
   }
