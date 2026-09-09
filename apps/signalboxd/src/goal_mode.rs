@@ -547,6 +547,8 @@ pub struct PostgresGoalPassDisposition {
     numeric_bounds: GoalModeNumericBounds,
     #[cfg(feature = "test-support")]
     startup_resume_barrier: Option<Arc<Barrier>>,
+    #[cfg(test)]
+    automatic_resume_deferred: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl PostgresGoalPassDisposition {
@@ -566,6 +568,8 @@ impl PostgresGoalPassDisposition {
             numeric_bounds,
             #[cfg(feature = "test-support")]
             startup_resume_barrier: None,
+            #[cfg(test)]
+            automatic_resume_deferred: None,
         }
     }
 
@@ -869,7 +873,12 @@ impl PostgresGoalPassDisposition {
         loop {
             match self.attempt_automatic_resume(session, blocked).await {
                 ResumeAttempt::Settled => return,
-                ResumeAttempt::OwnershipDeferred => {}
+                ResumeAttempt::OwnershipDeferred => {
+                    #[cfg(test)]
+                    if let Some(deferred) = &self.automatic_resume_deferred {
+                        deferred.notify_one();
+                    }
+                }
                 ResumeAttempt::InfrastructureUnsettled => {
                     if remaining == 0 {
                         tracing::error!(
@@ -2695,7 +2704,9 @@ context_window_tokens = 200000
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn a_module_park_preserves_the_automatic_resume_attempt() -> Result<(), Box<dyn Error>> {
+    async fn startup_rearms_a_parked_automatic_resume_attempt() -> Result<(), Box<dyn Error>> {
+        use signalbox_application::EligibilityWorkSource;
+
         let (_container, pool) = migrated_postgres().await?;
         let models = crate::configuration::checked_in_example_configuration()?;
         let session = SessionId::from_uuid(Uuid::now_v7());
@@ -2769,15 +2780,17 @@ context_window_tokens = 200000
                 },
             )
             .await?;
-        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+        let (nudge, mut source) = signalbox_application::InProcessEligibilityWorkSource::new(
             signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
         );
-        let runtime = PostgresGoalPassDisposition::new(
+        let deferred = Arc::new(tokio::sync::Notify::new());
+        let mut runtime = PostgresGoalPassDisposition::new(
             pool.clone(),
             models,
             nudge,
             GoalModeNumericBounds::new(Some(Duration::ZERO), None, None, None, None),
         );
+        runtime.automatic_resume_deferred = Some(deferred.clone());
         let blocked = repository
             .load_goal(session)
             .await?
@@ -2798,27 +2811,17 @@ context_window_tokens = 200000
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].session(), session);
         assert_eq!(pending[0].blocked(), blocked);
-        let resuming = runtime.clone();
-        let mut resume = tokio::spawn(async move {
-            resuming
-                .resume_owned_execution_failure(session, &need)
-                .await;
-        });
-        const PARKED_RESUME_OBSERVATION: Duration = Duration::from_millis(50);
+        assert_eq!(
+            runtime
+                .reconcile_automatic_resumptions_after_restart()
+                .await?,
+            1,
+            "startup must retain the parked block in its resumption inventory"
+        );
         const RESUME_TEST_TIMEOUT: Duration = Duration::from_secs(10);
-        assert!(
-            tokio::time::timeout(PARKED_RESUME_OBSERVATION, &mut resume)
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            runtime.attempt_automatic_resume(session, blocked).await,
-            ResumeAttempt::OwnershipDeferred
-        );
-        assert_eq!(
-            runtime.attempt_automatic_resume(session, blocked).await,
-            ResumeAttempt::OwnershipDeferred
-        );
+        tokio::time::timeout(RESUME_TEST_TIMEOUT, deferred.notified())
+            .await
+            .expect("the startup worker must defer its attempt before the park is lifted");
         assert!(
             lifecycle
                 .load(session)
@@ -2841,7 +2844,23 @@ context_window_tokens = 200000
             )
             .await?
         );
-        tokio::time::timeout(RESUME_TEST_TIMEOUT, &mut resume).await??;
+        assert_eq!(
+            tokio::time::timeout(RESUME_TEST_TIMEOUT, source.next()).await??,
+            session,
+            "restoring the park must make the automatically resumed turn schedulable"
+        );
+        assert_eq!(
+            repository.recovery_progress(session).await?.resumptions(),
+            1,
+            "restoring the park must resume the block exactly once"
+        );
+        assert_eq!(
+            runtime
+                .reconcile_automatic_resumptions_after_restart()
+                .await?,
+            0,
+            "the completed automatic resumption is absent from startup inventory"
+        );
         assert!(matches!(
             repository
                 .load_goal(session)
