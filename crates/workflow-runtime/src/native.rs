@@ -1,7 +1,14 @@
 //! Compiled, trusted programs with sequential journaled context requests.
 
 use std::{
-    collections::BTreeMap, error::Error, fmt, future::Future, pin::Pin, sync::OnceLock, task::Poll,
+    any::TypeId,
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{Mutex, OnceLock},
+    task::Poll,
 };
 
 use signalbox_domain::{
@@ -82,13 +89,27 @@ impl NativeCatalog {
     }
 
     /// Admits one compiled entry/revision, rejecting duplicate catalog keys.
+    /// Each key remains bound to one program type for the process lifetime.
     pub fn insert<P: NativeProgram>(
         &mut self,
         entry: String,
         revision: String,
     ) -> Result<(), NativeProgramError> {
+        static IMPLEMENTATIONS: Mutex<BTreeMap<(String, String), TypeId>> =
+            Mutex::new(BTreeMap::new());
         match self.entries.entry((entry, revision)) {
             std::collections::btree_map::Entry::Vacant(slot) => {
+                let mut implementations = IMPLEMENTATIONS.lock().map_err(|_| {
+                    NativeProgramError::new("native implementation bindings poisoned")
+                })?;
+                let implementation = implementations
+                    .entry(slot.key().clone())
+                    .or_insert(TypeId::of::<P>());
+                if *implementation != TypeId::of::<P>() {
+                    return Err(NativeProgramError::new(
+                        "native entry/revision is bound to a different program type",
+                    ));
+                }
                 slot.insert(start::<P>);
                 Ok(())
             }

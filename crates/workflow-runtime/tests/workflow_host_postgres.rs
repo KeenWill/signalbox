@@ -1938,10 +1938,9 @@ async fn native_fixture<P: NativeProgram>(
     input: &[u8],
 ) -> Result<(WorkflowHost, ProgramRunId), Box<dyn Error>> {
     let mut catalog = NativeCatalog::new()?;
-    catalog.insert::<P>("fixture".into(), "one".into())?;
-    let executable = catalog
-        .executable("fixture", "one")
-        .expect("compiled entry");
+    let entry = std::any::type_name::<P>();
+    catalog.insert::<P>(entry.into(), "one".into())?;
+    let executable = catalog.executable(entry, "one").expect("compiled entry");
     let repository =
         signalbox_persistence::program_registration::ProgramRegistrationRepository::new(
             pool.clone(),
@@ -2231,7 +2230,10 @@ async fn unavailable_native_revision_faults_without_executing_another_revision()
     )
     .await?;
     let mut catalog = NativeCatalog::new()?;
-    catalog.insert::<ClockProgram>("fixture".into(), "different-revision".into())?;
+    catalog.insert::<ClockProgram>(
+        std::any::type_name::<ClockProgram>().into(),
+        "different-revision".into(),
+    )?;
     let host =
         WorkflowHost::new(ProgramJournalRepository::new(pool.clone())).with_native_catalog(catalog);
     let mut clock = ScriptedDeliveries::new([]);
@@ -2417,6 +2419,38 @@ async fn native_lost_answer_adoption_returns_the_committed_receipt_without_reexe
         outcome
     );
     assert_eq!(effects.adoptions, 1);
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn native_catalog_rebinding_cannot_execute_a_retained_run_as_another_program()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (original_host, run) = native_fixture::<ClockProgram>(
+        &pool,
+        ProgramGrants::new([signalbox_domain::ProgramCapability::Time]),
+        &NATIVE_INPUT.encode()?,
+    )
+    .await?;
+    drop(original_host);
+    let mut replacement = NativeCatalog::new()?;
+    assert!(
+        replacement
+            .insert::<ReceiptProgram>(std::any::type_name::<ClockProgram>().into(), "one".into())
+            .is_err(),
+        "dropping a catalog must not allow its key to bind a different implementation"
+    );
+    let host = WorkflowHost::new(ProgramJournalRepository::new(pool.clone()))
+        .with_native_catalog(replacement);
+    let mut no_live = ScriptedDeliveries::new([]);
+    assert!(matches!(
+        host.execute_registered(run, &mut no_live, &mut no_native_effects())
+            .await?,
+        ProgramExecutionOutcome::Faulted(ProgramFault::ContractRetired(_))
+    ));
+    assert!(no_live.observed_outstanding.is_empty());
     pool.close().await;
     Ok(())
 }

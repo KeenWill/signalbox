@@ -96,7 +96,9 @@ replay their recorded outcome without appending frames.
 ## Native programs
 
 `NativeCatalog` selects compiled `NativeProgram` implementations with checked
-`NativeValue` input decoding before program code and checked output encoding.
+`NativeValue` input decoding before program code and checked output encoding. An
+entry/revision binds to one program type for the process lifetime; another
+catalog may select that type but cannot bind the same key to a different type.
 The Linux host hashes its running image through `/proc/self/exe` once,
 preserving its digest across executable path replacement. Catalog construction
 returns `Unsupported` on other platforms. An unfinished run whose catalog entry,
