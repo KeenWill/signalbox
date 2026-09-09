@@ -8,7 +8,7 @@ use crate::{
     ReconstitutedToolAttempt, SemanticTranscriptEntry, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload, ToolApprovalDecision, ToolAttemptEnd, ToolExecutionErrorKind,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl ToolBatch {
     /// Builds one proposal-ordered reference-only result entry per request.
@@ -17,28 +17,28 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: crate::ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
-        self.prepare_result_projection_with_delegation(entry_ids, continuation_frontier, None)
+        self.prepare_result_projection_with_delegation(
+            entry_ids,
+            continuation_frontier,
+            BTreeMap::new(),
+        )
     }
 
-    /// Builds proposal-ordered results including one delivered foreground child result.
+    /// Builds proposal-ordered results including delivered foreground child results by await request.
     pub fn prepare_delegation_result_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: crate::ContextFrontierId,
-        outcome: crate::DelegationOutcome,
+        outcomes: BTreeMap<crate::ToolRequestId, crate::DelegationOutcome>,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
-        self.prepare_result_projection_with_delegation(
-            entry_ids,
-            continuation_frontier,
-            Some(outcome),
-        )
+        self.prepare_result_projection_with_delegation(entry_ids, continuation_frontier, outcomes)
     }
 
     fn prepare_result_projection_with_delegation(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: crate::ContextFrontierId,
-        delegation_outcome: Option<crate::DelegationOutcome>,
+        mut delegation_outcomes: BTreeMap<crate::ToolRequestId, crate::DelegationOutcome>,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
         if !matches!(self.phase, ToolBatchPhase::Executing { .. })
             || entry_ids.len() != self.requests.len()
@@ -68,12 +68,11 @@ impl ToolBatch {
                 )
             })
             .count();
-        if delegation_outcome.is_some() != (child_wait_count == 1) {
+        if delegation_outcomes.len() != child_wait_count {
             return Err(ToolResultProjectionError {
                 failure: ToolResultProjectionFailure::BatchNotResolved,
             });
         }
-        let mut delegation_outcome = delegation_outcome.map(Box::new);
         let mut entries = Vec::with_capacity(self.requests.len());
         for (request, identity) in self.requests.iter().zip(entry_ids) {
             let payload = match self.approvals.get(&request.id()) {
@@ -105,7 +104,9 @@ impl ToolBatch {
                             spawning_request,
                             child,
                         } => {
-                            let Some(outcome) = delegation_outcome.take() else {
+                            let Some(outcome) =
+                                delegation_outcomes.remove(&request.id()).map(Box::new)
+                            else {
                                 return Err(ToolResultProjectionError {
                                     failure: ToolResultProjectionFailure::BatchNotResolved,
                                 });
@@ -146,7 +147,7 @@ impl ToolBatch {
                 payload,
             ));
         }
-        if delegation_outcome.is_some() {
+        if !delegation_outcomes.is_empty() {
             return Err(ToolResultProjectionError {
                 failure: ToolResultProjectionFailure::BatchNotResolved,
             });
@@ -223,24 +224,23 @@ impl ToolBatch {
             entry_ids,
             result_frontier,
             false,
-            None,
+            BTreeMap::new(),
         )
     }
 
-    /// Builds interrupt closure for one foreground child wait, retaining a
-    /// delivered result when descendant termination materialized one and
-    /// otherwise closing the request with the parent turn.
+    /// Builds interrupt closure for foreground child waits, retaining delivered
+    /// results by await request and closing unresolved requests with the parent turn.
     pub fn prepare_delegation_cancellation_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: crate::ContextFrontierId,
-        outcome: Option<crate::DelegationOutcome>,
+        outcomes: BTreeMap<crate::ToolRequestId, crate::DelegationOutcome>,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
         self.prepare_cancellation_projection_with_delegation(
             entry_ids,
             result_frontier,
             true,
-            outcome,
+            outcomes,
         )
     }
 
@@ -249,7 +249,7 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: crate::ContextFrontierId,
         closes_delegation_wait: bool,
-        delegation_outcome: Option<crate::DelegationOutcome>,
+        mut delegation_outcomes: BTreeMap<crate::ToolRequestId, crate::DelegationOutcome>,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
         let phase_can_close = matches!(self.phase, ToolBatchPhase::Executing { .. })
             || (closes_delegation_wait
@@ -286,12 +286,11 @@ impl ToolBatch {
                 )
             })
             .count();
-        if closes_delegation_wait != (child_wait_count == 1) {
+        if closes_delegation_wait != (child_wait_count > 0) {
             return Err(ToolResultProjectionError {
                 failure: ToolResultProjectionFailure::BatchNotResolved,
             });
         }
-        let mut delegation_outcome = delegation_outcome.map(Box::new);
         let mut entries = Vec::with_capacity(self.requests.len());
         for (request, identity) in self.requests.iter().zip(entry_ids) {
             let payload = match self.approvals.get(&request.id()) {
@@ -330,7 +329,7 @@ impl ToolBatch {
                                     failure: ToolResultProjectionFailure::TurnLevelFailure,
                                 });
                             };
-                            match delegation_outcome.take() {
+                            match delegation_outcomes.remove(&request.id()).map(Box::new) {
                                 Some(outcome) => SemanticTranscriptEntryPayload::DelegationResult {
                                     awaiting_request: request.id(),
                                     spawning_request: *spawning_request,
@@ -364,7 +363,7 @@ impl ToolBatch {
                 payload,
             ));
         }
-        if delegation_outcome.is_some() {
+        if !delegation_outcomes.is_empty() {
             return Err(ToolResultProjectionError {
                 failure: ToolResultProjectionFailure::BatchNotResolved,
             });
