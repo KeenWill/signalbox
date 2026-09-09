@@ -2742,3 +2742,94 @@ async fn native_registration_adopts_equal_retries_and_refuses_changed_executable
 
 #[path = "workflow_host_postgres/durable_primitives.rs"]
 mod durable_primitives;
+
+struct SuspendedWait;
+impl LiveDeliverySource for SuspendedWait {
+    fn suspend_on_wait(&self, outstanding: &[RequestFrame]) -> bool {
+        outstanding
+            .iter()
+            .all(|frame| matches!(frame.kind(), RequestKind::Sleep(_)))
+    }
+    fn next_delivery<'a>(
+        &'a mut self,
+        _: &'a [RequestFrame],
+    ) -> Pin<Box<dyn Future<Output = Result<DeliveryKind, LiveDeliveryFailure>> + 'a>> {
+        panic!("a suspended host must release program state before waiting")
+    }
+}
+
+// Only NativeWaitProgram owns these guards; this fixture runs in one test.
+static NATIVE_WAIT_DROPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+struct NativeWaitGuard;
+impl Drop for NativeWaitGuard {
+    fn drop(&mut self) {
+        NATIVE_WAIT_DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+struct NativeWaitProgram;
+impl NativeProgram for NativeWaitProgram {
+    type Input = NativeNumber;
+    type Output = NativeNumber;
+    async fn run(
+        mut context: WorkflowContext,
+        input: NativeNumber,
+    ) -> Result<NativeNumber, NativeProgramError> {
+        let _guard = NativeWaitGuard;
+        context
+            .sleep(
+                signalbox_domain::program_primitives::SleepUntil(
+                    signalbox_domain::program_primitives::UnixMillis(input.0),
+                )
+                .encode(),
+            )
+            .await?;
+        Ok(input)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_native_wait_drops_program_memory_before_reconstructing_from_the_journal()
+-> Result<(), Box<dyn Error>> {
+    use signalbox_domain::{ProgramCapability, program_primitives::UnixMillis};
+    let (_database, pool) = migrated_postgres().await?;
+    let (host, run) = native_fixture::<NativeWaitProgram>(
+        &pool,
+        ProgramGrants::new([ProgramCapability::Sleep]),
+        &NATIVE_INPUT.encode()?,
+    )
+    .await?;
+    let outcome = host
+        .execute_registered(run, &mut SuspendedWait, &mut no_native_effects())
+        .await?;
+    let ProgramExecutionOutcome::Suspended(outstanding) = outcome else {
+        panic!("durable wait suspends");
+    };
+    assert_eq!(
+        NATIVE_WAIT_DROPS.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(outstanding.len(), 1);
+    let journal = ProgramJournalRepository::new(pool.clone());
+    journal
+        .append_delivery(
+            run,
+            DeliveryKind::Wake {
+                resolves: outstanding[0].ordinal(),
+                payload: UnixMillis(NATIVE_INPUT.0).encode(),
+            },
+        )
+        .await?;
+    assert_eq!(
+        host.execute_registered(run, &mut SuspendedWait, &mut no_native_effects())
+            .await?,
+        ProgramExecutionOutcome::Completed(InlineFramePayload::new(NATIVE_INPUT.encode()?))
+    );
+    assert_eq!(
+        NATIVE_WAIT_DROPS.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert_eq!(journal.load(run).await?.unwrap().entries().len(), 4);
+    pool.close().await;
+    Ok(())
+}

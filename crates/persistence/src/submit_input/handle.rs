@@ -360,38 +360,39 @@ where
                 .map(signalbox_domain::ToolRequest::id)
                 .collect::<Vec<_>>();
             let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
-            let child_wait =
-                batch
-                    .requests()
-                    .iter()
-                    .find_map(|request| match batch.attempt(request.id()) {
-                        Some(signalbox_domain::ReconstitutedToolAttempt::Ended(attempt)) => {
-                            match attempt.end() {
-                                signalbox_domain::ToolAttemptEnd::AwaitingChild {
-                                    spawning_request,
-                                    child,
-                                } => Some((request.id(), *spawning_request, *child)),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    });
-            let projection = match child_wait {
-                Some((awaiting_request, spawning_request, child)) => batch
-                    .prepare_delegation_cancellation_projection(
-                        result_entries,
-                        result_frontier,
-                        load_optional_foreground_delegation_outcome(
-                            connection,
-                            interrupt.session(),
-                            awaiting_request,
-                            spawning_request,
-                            child,
-                        )
-                        .await
-                        .map_err(map_tool_loop_error)?,
-                    ),
-                None => batch.prepare_cancellation_projection(result_entries, result_frontier),
+            let mut has_child_wait = false;
+            let mut child_outcomes = std::collections::BTreeMap::new();
+            for request in batch.requests() {
+                if let Some(signalbox_domain::ReconstitutedToolAttempt::Ended(attempt)) =
+                    batch.attempt(request.id())
+                    && let signalbox_domain::ToolAttemptEnd::AwaitingChild {
+                        spawning_request,
+                        child,
+                    } = attempt.end()
+                {
+                    has_child_wait = true;
+                    if let Some(outcome) = load_optional_foreground_delegation_outcome(
+                        connection,
+                        interrupt.session(),
+                        request.id(),
+                        *spawning_request,
+                        *child,
+                    )
+                    .await
+                    .map_err(map_tool_loop_error)?
+                    {
+                        child_outcomes.insert(request.id(), outcome);
+                    }
+                }
+            }
+            let projection = if has_child_wait {
+                batch.prepare_delegation_cancellation_projection(
+                    result_entries,
+                    result_frontier,
+                    child_outcomes,
+                )
+            } else {
+                batch.prepare_cancellation_projection(result_entries, result_frontier)
             }
             .map_err(|_| {
                 SubmitInputCorruption::Inconsistent(

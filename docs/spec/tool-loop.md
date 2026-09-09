@@ -196,7 +196,9 @@ or in-flight attempt takes the effect-class crash-loss path.
 Foreground waiting on a child through `await_session` is a logical tool
 transition that ends any physical attempt before committing the wait, so restart
 resumes from durable wait and result rows and cannot duplicate an external
-effect.
+effect. A batch can retain multiple foreground waits; continuation and
+interruption associate delivered child results with their await requests in
+proposal order.
 
 The error kind set stays closed; a family whose failures do not fit maps into it
 and may fix the detail to its own closed token vocabulary.
@@ -311,14 +313,15 @@ human, `AlwaysConfirm`, or automatic selection is never overridden, and the
 consuming request still freezes the delegated posture.
 
 Each family supplies its compiled declarations and matching executor and owns
-its exact argument schemas, permission defaults, effect classes, bounds, and
-execution results. The catalog owns only their composition and the name-directed
-executor, which covers exactly the composed families; disagreement between the
-advertised catalog and the executor is a daemon defect. A tool name shared with
-a runner declaration is admitted only when the model-facing definition and
-permission are equal and the local effect class maps exactly, `EffectFree` to
-`Pure` and `ExternalEffect` to `SideEffecting`. Effect class controls crash
-classification, not permission identity.
+its exact argument schemas, permission defaults, effect classes, and execution
+results; deployment configuration supplies its policy bounds. The catalog owns
+only their composition and the name-directed executor, which covers exactly the
+composed families; disagreement between the advertised catalog and the executor
+is a daemon defect. A tool name shared with a runner declaration is admitted
+only when the model-facing definition and permission are equal and the local
+effect class maps exactly, `EffectFree` to `Pure` and `ExternalEffect` to
+`SideEffecting`. Effect class controls crash classification, not permission
+identity.
 
 The workspace read, workspace mutation, local Git, and execution families bind
 one workspace root, and that root is per session;
@@ -553,6 +556,8 @@ the hint until a full nudge buffer has capacity.
 
 ## Planned
 
+- Session-scoped fatal execution parking; see
+  [daemon survival design](../design/daemon-survival.md).
 - Lost-lease retry takeover: [tool-loop design](../design/tool-loop.md).
 - Pre-approval admissibility: a family may declare a request inadmissible before
   any approval decision, resolved at request level with a `ToolInadmissible`
