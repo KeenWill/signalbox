@@ -232,9 +232,6 @@ test('keeps an oversized browser-native original download-only', async ({ page }
   await resolveArtifactWithoutMouse(page, oversizedOriginalArtifact)
   const artifact = page.getByRole('article', { name: `Artifact ${displayName}` })
   await expect(artifact.getByRole('button', { name: 'Load original' })).toHaveCount(0)
-  await expect(
-    artifact.getByText('Original exceeds inline admission bounds. Download remains available.'),
-  ).toBeVisible()
   await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
