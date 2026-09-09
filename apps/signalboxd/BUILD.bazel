@@ -11,7 +11,10 @@ CRATE_COMPILE_DATA = [
 
 CRATE_FEATURES = SUITES["signalboxd"]["crate_features"]
 
-CRATE_PROC_MACRO_DEPS = ["//crates/tool-schema-derive:signalbox_tool_schema_derive"]
+CRATE_PROC_MACRO_DEPS = [
+    "//crates/derive:signalbox_derive",
+    "//crates/tool-schema-derive:signalbox_tool_schema_derive",
+]
 
 CRATE_DEPS = [
     ":signalboxd_lib",
@@ -116,7 +119,7 @@ rust_binary(
     compile_data = CRATE_COMPILE_DATA + ["//crates/approval-judge-eval:corpora/seed-v1.json"],
     crate_features = CRATE_FEATURES,
     crate_root = "src/bin/signalbox-approval-judge-eval.rs",
-    proc_macro_deps = CRATE_PROC_MACRO_DEPS + ["//crates/derive:signalbox_derive"],
+    proc_macro_deps = CRATE_PROC_MACRO_DEPS,
     deps = CRATE_DEPS,
 )
 
