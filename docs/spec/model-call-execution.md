@@ -52,9 +52,10 @@ less the output ceiling and the required prompt. Before completed tool results
 enter context, each result receives an equal share of the smaller of that
 safe-prefix budget and the producing call's remaining headroom, reserving the
 next response's output, the following call's output ceiling, and two rounds of
-result envelope framing. Oversized text is truncated at a UTF-8 boundary with an
-explicit marker naming the retained and dropped byte counts; JSON escaping and
-the marker count against the share. The admitted text is durable and used by
+result envelope framing plus maximum bounded failure content for the second
+round. Oversized text is truncated at a UTF-8 boundary with an explicit marker
+naming the retained and dropped byte counts; JSON escaping and the marker count
+against the share. The admitted text is durable and used by
 ordinary rendering, compaction, and headroom accounting; exact executor text
 remains observation evidence. When even framing and empty-prefix markers or
 other indivisible content cannot fit the first safe prefix, no call is prepared

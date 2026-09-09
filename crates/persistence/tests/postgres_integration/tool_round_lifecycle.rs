@@ -5731,7 +5731,15 @@ async fn a_bounded_result_leaves_headroom_for_a_subsequent_tool_response()
             authorized
                 .executor_fence()
                 .bind(ToolAttemptObservation::KnownFailed {
-                    error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+                    error: ToolExecutionError::new(
+                        ToolExecutionErrorKind::ExecutionFailed,
+                        Some(
+                            ToolExecutionErrorDetail::try_new(
+                                "\\\"".repeat(ToolExecutionErrorDetail::MAX_UTF8_BYTES),
+                            )
+                            .expect("maximally escaped bounded fixture detail"),
+                        ),
+                    ),
                 }),
         )
         .await?;

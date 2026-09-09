@@ -3,7 +3,9 @@
 use super::{ToolLoopCorruption, ToolLoopRepositoryError};
 use crate::model_execution::ToolContinuationUsageLimitCatalog;
 use rust_decimal::Decimal;
-use signalbox_domain::{ModelCallId, ProviderModelIdentity, ResolvedProviderTarget};
+use signalbox_domain::{
+    ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, ToolExecutionErrorDetail,
+};
 use sqlx::{PgConnection, Row};
 
 pub(super) async fn result_byte_limit(
@@ -36,7 +38,11 @@ pub(super) async fn result_byte_limit(
                     'tool_attempt_id', request.request_id,
                     'content', ''
                 )::text)), 0)::bigint FROM tool_request request
-                  WHERE request.producing_model_call_id = call.model_call_id) AS framing_bytes
+                  WHERE request.producing_model_call_id = call.model_call_id) AS framing_bytes,
+                octet_length(jsonb_build_object('error', jsonb_build_object(
+                    'kind', 'execution_failed',
+                    'detail', repeat('\"', $3)
+                ))::text)::bigint AS maximum_failure_content_bytes
            FROM model_call call WHERE call.model_call_id = $1",
     )
     .bind(producing_call.into_uuid())
@@ -44,6 +50,7 @@ pub(super) async fn result_byte_limit(
     // have the request ID's width. Reserve the widest physical position and
     // the empty result envelope, without charging source response payloads.
     .bind(Decimal::from(u64::MAX))
+    .bind(i32::try_from(ToolExecutionErrorDetail::MAX_UTF8_BYTES).unwrap_or(i32::MAX))
     .fetch_one(&mut *connection)
     .await?;
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -92,13 +99,18 @@ pub(super) async fn result_byte_limit(
         .map_err(|_| ToolLoopCorruption::Inconsistent("tool result count"))?;
     let framing = u64::try_from(row.try_get::<i64, _>("framing_bytes")?)
         .map_err(|_| ToolLoopCorruption::Inconsistent("tool result framing"))?;
+    let maximum_failure_content =
+        u64::try_from(row.try_get::<i64, _>("maximum_failure_content_bytes")?)
+            .map_err(|_| ToolLoopCorruption::Inconsistent("tool failure content"))?;
     let safe_prefix = window.saturating_sub(output).saturating_sub(prompt_bytes);
     // The next response can request tools: retain its output while reserving
-    // the following model call's output ceiling and another round of envelopes.
+    // the following model call's output ceiling and another round of envelopes,
+    // including maximally escaped bounded failure details.
     let continuation_output = output.saturating_add(output);
     let headroom = window
         .saturating_sub(continuation_output)
         .saturating_sub(framing)
+        .saturating_sub(count.saturating_mul(maximum_failure_content))
         .saturating_sub(input)
         .saturating_sub(previous_output);
     let per_result = safe_prefix
