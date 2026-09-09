@@ -296,6 +296,7 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
                 let Some(ResolvedToolConversationEntry::ExecutionResult {
                     request,
                     attempt: ended,
+                    context_text,
                     ..
                 }) = resolved_tools.remove(&source)
                 else {
@@ -318,8 +319,13 @@ pub(super) fn render_frontier_messages_with_placements<'a>(
                     );
                 }
                 let content = match ended.end() {
-                    ToolAttemptEnd::Completed { result } => {
-                        ModelToolResultContent::Success(result.clone())
+                    ToolAttemptEnd::Completed { .. } => {
+                        let text = context_text.as_ref().ok_or(
+                            ModelFrontierRenderingError::MissingOrMismatchedToolEvidence {
+                                entry: source,
+                            },
+                        )?;
+                        ModelToolResultContent::Success(ToolResultContent::Text(text.clone()))
                     }
                     ToolAttemptEnd::KnownFailed { error } => {
                         ModelToolResultContent::ExecutionError(error.clone())
@@ -622,11 +628,15 @@ pub fn projected_frontier_content_bytes<'a>(
                 ResolvedToolConversationEntry::AssistantToolUse { request, .. } => {
                     request.arguments().as_str().len()
                 }
-                ResolvedToolConversationEntry::ExecutionResult { attempt, .. } => {
+                ResolvedToolConversationEntry::ExecutionResult {
+                    attempt,
+                    context_text,
+                    ..
+                } => {
                     match attempt.end() {
-                        ToolAttemptEnd::Completed { result } => match result {
-                            ToolResultContent::Text(text) => text.as_str().len(),
-                        },
+                        ToolAttemptEnd::Completed { .. } => {
+                            context_text.as_ref().map_or(0, |text| text.as_str().len())
+                        }
                         ToolAttemptEnd::KnownFailed { error } => {
                             error.detail().map_or(0, |detail| detail.as_str().len())
                         }

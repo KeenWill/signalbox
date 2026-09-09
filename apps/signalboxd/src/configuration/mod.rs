@@ -560,7 +560,8 @@ impl HubModelConfiguration {
                     fast_mode,
                     u64::from(effective.max_output_tokens()),
                     u64::from(effective.context_window_tokens()),
-                );
+                )
+                .with_compaction_prompt_bytes(compaction_prompt.len() as u64);
                 tool_continuation_usage_limits.push(if effective.provider_compaction_supported() {
                     limit.with_provider_compaction_replay()
                 } else {
