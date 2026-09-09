@@ -4833,6 +4833,7 @@ dependencies = [
  "signalbox-tool-contract",
  "signalbox-tools-workspace",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

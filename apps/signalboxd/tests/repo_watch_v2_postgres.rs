@@ -3733,8 +3733,15 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     .expect("reload composition")
     .with_repository_watch(runtime.clone());
     hook.enabled = true;
-    let replacement_source = runtime_configuration_source(&hook)?;
-    let replacement = runtime_configuration(&hook)?;
+    let push_credential = files.path().join("push-token");
+    let replacement_source = runtime_configuration_source(&hook)?.replace(
+        "credential_file =",
+        &format!(
+            "push_credential_file = \"{}\"\ncredential_file =",
+            push_credential.display()
+        ),
+    );
+    let replacement = signalboxd::HubModelConfiguration::parse(&replacement_source)?;
     let watch = replacement.repository_watch().expect("watch configuration");
     let sets = watch
         .repositories()
@@ -3783,6 +3790,16 @@ async fn durable_reload_replays_activated_intent_and_disables_live_workers()
     // No model file exists: recovery must use the checked intent after the activation commit.
     std::fs::remove_file(&template_path)?;
     reload.recover().await?;
+    let recovered_catalogs = reload.catalogs();
+    assert_eq!(
+        recovered_catalogs
+            .models
+            .repository_watch()
+            .expect("recovered watch")
+            .repositories()[0]
+            .push_credential_file(),
+        Some(push_credential.as_path()),
+    );
     std::fs::write(&template_path, templates_source)?;
     assert_eq!(
         repository.lookup(request).await?,

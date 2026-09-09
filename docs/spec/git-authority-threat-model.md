@@ -47,7 +47,18 @@ through a path-based repository API, because such an API cannot express the
 descriptor-pinned, no-follow, bounded-read contract.
 
 No operation accepts a command line, shell fragment, executable, repository
-path, or remote destination, and the implementation never spawns a Git binary.
+path, or remote destination. Local operations never spawn a Git binary. The
+daemon push transport runs Git from the pinned checkout root with a private
+administration directory and captured object database, excluding checkout
+configuration, credential helpers, hooks, and redirects. Push credentials and
+the destination come from the watched repository's deployment configuration; the
+retained dispatch head fences the branch.
+
+For dispatched pushes, object capture follows the branch's commits after the
+retained dispatch head. The fence commit and its tree metadata are retained for
+negotiation; earlier commits and unchanged fence blobs are omitted. Selected
+packed objects and their delta dependencies retain the content bounds. The
+transport disables delta compression against omitted historical blobs.
 
 Minting a destination is a human act, and a session cannot mint a workspace or a
 destination; pushing to a minted destination is an approval-gated agent act.
