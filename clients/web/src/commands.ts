@@ -82,7 +82,7 @@ export const commandRegistry = [
   {
     id: 'artifact.attachment.remove',
     title: 'Remove composer attachment',
-    description: 'Remove the attachment targeted by the invoking control.',
+    description: 'Remove this attachment.',
     category: 'Artifact',
     bindings: [],
     available: (context) => context.removeAttachment !== undefined,
@@ -91,7 +91,7 @@ export const commandRegistry = [
   {
     id: 'artifact.select',
     title: 'Select artifact',
-    description: 'Select the artifact targeted by the invoking control.',
+    description: 'Select this artifact.',
     category: 'Artifact',
     bindings: [],
     available: (context) => context.artifactSelectionTarget !== undefined,
@@ -103,8 +103,8 @@ export const commandRegistry = [
   },
   {
     id: 'artifact.preview.expand',
-    title: 'Expand bounded artifact preview',
-    description: 'Show the larger bounded projection of the selected artifact.',
+    title: 'Expand preview',
+    description: 'Show more of the selected artifact.',
     category: 'Artifact',
     bindings: [],
     available: (context) => {
@@ -123,7 +123,7 @@ export const commandRegistry = [
   {
     id: 'artifact.preview.collapse',
     title: 'Collapse artifact preview',
-    description: 'Return the selected artifact to its initial bounded projection.',
+    description: 'Shrink the preview.',
     category: 'Artifact',
     bindings: [],
     available: (context) => {
@@ -142,7 +142,7 @@ export const commandRegistry = [
   {
     id: 'artifact.original.load',
     title: 'Load artifact original',
-    description: 'Request the admitted browser-native original for the selected artifact.',
+    description: 'Load the full-size original.',
     category: 'Artifact',
     bindings: [],
     available: (context) => {
@@ -163,7 +163,7 @@ export const commandRegistry = [
   {
     id: 'navigate.attention',
     title: 'Go to Attention',
-    description: 'Open the operator intervention queue.',
+    description: 'Open Attention.',
     category: 'Navigate',
     bindings: [{ label: 'g a', registration: { kind: 'sequence', sequence: ['G', 'A'] } }],
     available: productNavigation,
@@ -172,7 +172,7 @@ export const commandRegistry = [
   {
     id: 'navigate.sessions',
     title: 'Go to Sessions',
-    description: 'Open the bounded session workspace.',
+    description: 'Open Sessions.',
     category: 'Navigate',
     bindings: [{ label: 'g s', registration: { kind: 'sequence', sequence: ['G', 'S'] } }],
     available: productNavigation,
@@ -181,7 +181,7 @@ export const commandRegistry = [
   {
     id: 'navigate.imports',
     title: 'Go to Imports',
-    description: 'Open conversation import operations.',
+    description: 'Open Imports.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -190,7 +190,7 @@ export const commandRegistry = [
   {
     id: 'navigate.reviews',
     title: 'Go to Reviews',
-    description: 'Open approval work and history.',
+    description: 'Open Reviews.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -199,7 +199,7 @@ export const commandRegistry = [
   {
     id: 'navigate.runners',
     title: 'Go to Runners',
-    description: 'Open runner capacity and health.',
+    description: 'Open Runners.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -217,7 +217,7 @@ export const commandRegistry = [
   {
     id: 'navigate.usage',
     title: 'Go to Usage',
-    description: 'Open token and cost analysis.',
+    description: 'Open Usage.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -226,7 +226,7 @@ export const commandRegistry = [
   {
     id: 'navigate.settings',
     title: 'Go to Settings',
-    description: 'Open browser-local workstation preferences.',
+    description: 'Open Settings.',
     category: 'Navigate',
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
@@ -234,8 +234,8 @@ export const commandRegistry = [
   },
   {
     id: 'navigate.scenario',
-    title: 'Go to Scenario Studio',
-    description: 'Open the streaming interaction scenario.',
+    title: 'Go to Scenario studio',
+    description: 'Open Scenario studio.',
     category: 'Navigate',
     bindings: [],
     available: productNavigation,
@@ -244,7 +244,7 @@ export const commandRegistry = [
   {
     id: 'artifact.open',
     title: 'Open artifact inspector',
-    description: 'Resolve and inspect an immutable blob by its server-provided identity.',
+    description: 'Look up stored content by digest.',
     category: 'Surface',
     bindings: [],
     available: artifactInspector,
@@ -262,7 +262,7 @@ export const commandRegistry = [
   {
     id: 'help.open',
     title: 'Open keyboard help',
-    description: 'Review modal navigation and command bindings.',
+    description: 'See keyboard shortcuts.',
     category: 'Surface',
     bindings: [{ label: '?', registration: { kind: 'hotkey', hotkey: { key: '/', shift: true } } }],
     available: always,
@@ -271,7 +271,7 @@ export const commandRegistry = [
   {
     id: 'navigation.open',
     title: 'Open scenario navigation',
-    description: 'Choose a deterministic development scenario.',
+    description: 'Choose a scenario.',
     category: 'Surface',
     bindings: [],
     available: always,
@@ -279,8 +279,8 @@ export const commandRegistry = [
   },
   {
     id: 'search.focus',
-    title: 'Focus lexical search',
-    description: 'Move directly to the bounded canonical-evidence search field.',
+    title: 'Focus search',
+    description: 'Jump to the search box.',
     category: 'Navigate',
     bindings: [{ label: 'Mod+Shift+F', registration: { kind: 'hotkey', hotkey: 'Mod+Shift+F' } }],
     available: (context) => context.searchAvailable === true,
@@ -288,8 +288,8 @@ export const commandRegistry = [
   },
   {
     id: 'surface.escape',
-    title: 'Unwind current surface',
-    description: 'Close the nearest overlay or leave editing and return to the timeline.',
+    title: 'Close or go back',
+    description: 'Close the dialog or return to the timeline.',
     category: 'Surface',
     bindings: [{ label: 'Escape', registration: { kind: 'hotkey', hotkey: 'Escape' } }],
     available: always,
@@ -346,7 +346,7 @@ export const commandRegistry = [
   {
     id: 'selection.first',
     title: 'Go to first timeline item',
-    description: 'Load the first timeline window or select its first loaded item.',
+    description: 'Jump to the start.',
     category: 'Navigate',
     bindings: [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
@@ -362,7 +362,7 @@ export const commandRegistry = [
   {
     id: 'selection.last',
     title: 'Go to latest timeline item',
-    description: 'Load the latest timeline window or select its latest loaded item.',
+    description: 'Jump to the end.',
     category: 'Navigate',
     bindings: [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
@@ -377,8 +377,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.entry.select',
-    title: 'Select imported frontier',
-    description: 'Select the requested immutable imported entry.',
+    title: 'Select entry',
+    description: 'Select this entry.',
     category: 'Imports',
     bindings: [],
     available: (context) =>
@@ -389,8 +389,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.entry.next',
-    title: 'Select next imported frontier',
-    description: 'Move toward the latest entry in the loaded import window.',
+    title: 'Next entry',
+    description: 'Move down one entry.',
     category: 'Imports',
     bindings: [
       { label: 'j', scope: 'imports', registration: { kind: 'hotkey', hotkey: 'J' } },
@@ -409,8 +409,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.entry.previous',
-    title: 'Select previous imported frontier',
-    description: 'Move toward the first entry in the loaded import window.',
+    title: 'Previous entry',
+    description: 'Move up one entry.',
     category: 'Imports',
     bindings: [
       { label: 'k', scope: 'imports', registration: { kind: 'hotkey', hotkey: 'K' } },
@@ -428,8 +428,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.entry.first',
-    title: 'Select first loaded imported frontier',
-    description: 'Move to the earliest entry in the loaded import window.',
+    title: 'First loaded entry',
+    description: 'Jump to the first loaded entry.',
     category: 'Imports',
     bindings: [
       {
@@ -447,8 +447,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.entry.last',
-    title: 'Select latest loaded imported frontier',
-    description: 'Move to the latest entry in the loaded import window.',
+    title: 'Last loaded entry',
+    description: 'Jump to the last loaded entry.',
     category: 'Imports',
     bindings: [
       {
@@ -466,8 +466,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.continue.resume',
-    title: 'Resume from imported frontier',
-    description: 'Create a native session by resuming the selected imported frontier.',
+    title: 'Resume from this entry',
+    description: 'Start a session that continues from this entry.',
     category: 'Imports',
     bindings: [],
     available: (context) =>
@@ -476,8 +476,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.continue.fork',
-    title: 'Fork from imported frontier',
-    description: 'Create a native session by forking the selected imported frontier.',
+    title: 'Fork from this entry',
+    description: 'Start a new branch from this entry.',
     category: 'Imports',
     bindings: [],
     available: (context) =>
@@ -487,7 +487,7 @@ export const commandRegistry = [
   {
     id: 'imports.discovery.retry',
     title: 'Retry imports',
-    description: 'Import discovery',
+    description: 'Reload the imports list.',
     category: 'Imports',
     bindings: [],
     available: (context) => context.retryImportDiscovery !== undefined,
@@ -495,8 +495,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.continue.retry',
-    title: 'Retry import continuation',
-    description: 'Replay the retained imported-continuation command without changing its payload.',
+    title: 'Retry',
+    description: 'Send the same request again.',
     category: 'Imports',
     bindings: [],
     available: (context) => context.canRetryImport === true && context.retryImport !== undefined,
@@ -504,8 +504,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.continue.abandon',
-    title: 'Abandon import continuation',
-    description: 'Discard the retained imported-continuation command after explicit confirmation.',
+    title: 'Abandon',
+    description: 'Forget the saved retry.',
     category: 'Imports',
     bindings: [],
     available: (context) =>
@@ -515,7 +515,7 @@ export const commandRegistry = [
   {
     id: 'layout.toggle',
     title: 'Toggle focus/workbench layout',
-    description: 'Switch between a quiet transcript and the full operator workspace.',
+    description: 'Switch between the conversation and all panes.',
     category: 'View',
     bindings: [{ label: 'Shift+W', registration: { kind: 'hotkey', hotkey: 'Shift+W' } }],
     available: always,
@@ -528,7 +528,7 @@ export const commandRegistry = [
   {
     id: 'layout.workbench',
     title: 'Use workbench layout',
-    description: 'Show navigation, the primary surface, and the contextual inspector.',
+    description: 'Show all panes.',
     category: 'Settings',
     bindings: [],
     available: always,
@@ -537,7 +537,7 @@ export const commandRegistry = [
   {
     id: 'layout.focus',
     title: 'Use focus layout',
-    description: 'Show the primary surface without secondary panes.',
+    description: 'Hide side panes.',
     category: 'Settings',
     bindings: [],
     available: always,
@@ -546,7 +546,7 @@ export const commandRegistry = [
   {
     id: 'density.toggle',
     title: 'Toggle visual density',
-    description: 'Switch compact and comfortable spacing independently of detail.',
+    description: 'Switch between compact and comfortable spacing.',
     category: 'View',
     bindings: [{ label: 'Shift+D', registration: { kind: 'hotkey', hotkey: 'Shift+D' } }],
     available: always,
@@ -558,7 +558,7 @@ export const commandRegistry = [
   {
     id: 'density.compact',
     title: 'Use compact density',
-    description: 'Use dense rows for high-volume operator work.',
+    description: 'Fit more rows on screen.',
     category: 'Settings',
     bindings: [],
     available: always,
@@ -567,7 +567,7 @@ export const commandRegistry = [
   {
     id: 'density.comfortable',
     title: 'Use comfortable density',
-    description: 'Add separation without changing information detail.',
+    description: 'Add more spacing.',
     category: 'Settings',
     bindings: [],
     available: always,
@@ -576,7 +576,7 @@ export const commandRegistry = [
   {
     id: 'theme.toggle',
     title: 'Toggle light/dark theme',
-    description: 'Switch the CSS-variable theme.',
+    description: 'Switch between light and dark.',
     category: 'View',
     bindings: [{ label: 'Shift+T', registration: { kind: 'hotkey', hotkey: 'Shift+T' } }],
     available: always,
@@ -588,7 +588,7 @@ export const commandRegistry = [
   {
     id: 'theme.dark',
     title: 'Use dark theme',
-    description: 'Use the dark workstation color theme.',
+    description: 'Use the dark theme.',
     category: 'Settings',
     bindings: [],
     available: always,
@@ -597,7 +597,7 @@ export const commandRegistry = [
   {
     id: 'theme.light',
     title: 'Use light theme',
-    description: 'Use the light workstation color theme.',
+    description: 'Use the light theme.',
     category: 'Settings',
     bindings: [],
     available: always,
@@ -606,7 +606,7 @@ export const commandRegistry = [
   {
     id: 'detail.full',
     title: 'Show full transcript detail',
-    description: 'Show every supported timeline record.',
+    description: 'Show everything.',
     category: 'View',
     bindings: [],
     available: transcriptDetail,
@@ -624,7 +624,7 @@ export const commandRegistry = [
   {
     id: 'detail.results',
     title: 'Show transcript results',
-    description: 'Emphasize origins and durable results.',
+    description: 'Show inputs, results and warnings.',
     category: 'View',
     bindings: [],
     available: transcriptDetail,
@@ -633,7 +633,7 @@ export const commandRegistry = [
   {
     id: 'session.send',
     title: 'Send message',
-    description: 'Submit text to the idle session.',
+    description: 'Send your message.',
     category: 'Surface',
     bindings: [],
     available: (context) => context.submitSessionInput !== undefined,
@@ -642,7 +642,7 @@ export const commandRegistry = [
   {
     id: 'session.open',
     title: 'Open session workspace',
-    description: 'Open a bounded workspace for an exact session identity.',
+    description: 'Open a session by ID.',
     category: 'Navigate',
     bindings: [],
     available: (context) => context.sessionId !== undefined && context.openSession !== undefined,
@@ -654,7 +654,7 @@ export const commandRegistry = [
   {
     id: 'pane.navigation.preview',
     title: 'Preview navigation pane size',
-    description: 'Preview the browser-local navigation pane width without persisting it.',
+    description: 'Preview the navigation width.',
     category: 'Settings',
     bindings: [],
     available: paneSizeProvided,
@@ -670,7 +670,7 @@ export const commandRegistry = [
   {
     id: 'pane.navigation.resize',
     title: 'Resize navigation pane',
-    description: 'Set the browser-local navigation pane width.',
+    description: 'Set the navigation width.',
     category: 'Settings',
     bindings: [],
     available: paneSizeProvided,
@@ -686,7 +686,7 @@ export const commandRegistry = [
   {
     id: 'pane.inspector.preview',
     title: 'Preview inspector pane size',
-    description: 'Preview the browser-local inspector pane width without persisting it.',
+    description: 'Preview the inspector width.',
     category: 'Settings',
     bindings: [],
     available: paneSizeProvided,
@@ -702,7 +702,7 @@ export const commandRegistry = [
   {
     id: 'pane.inspector.resize',
     title: 'Resize inspector pane',
-    description: 'Set the browser-local inspector pane width.',
+    description: 'Set the inspector width.',
     category: 'Settings',
     bindings: [],
     available: paneSizeProvided,
@@ -718,7 +718,7 @@ export const commandRegistry = [
   {
     id: 'preferences.reset',
     title: 'Restore preference defaults',
-    description: 'Restore every browser-local workstation preference to its default.',
+    description: 'Reset all settings.',
     category: 'Settings',
     bindings: [],
     available: always,
