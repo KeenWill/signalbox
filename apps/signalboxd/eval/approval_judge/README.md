@@ -71,7 +71,7 @@ One JSON object per line:
 | `tool`                                | judged tool name                                                                                                                                                                           |
 | `arguments`                           | exact argument text the producing model would propose (a non-JSON string exercises the undecodable path)                                                                                   |
 | `expected`                            | `approve` \| `deny` \| `escalate_to_human`                                                                                                                                                 |
-| `goal` / `template` / `system_prompt` | optional scope evidence; template and frozen prompt supply authority, while a goal may narrow it; absent fields render as explicit absent blocks                                           |
+| `goal` / `template` / `system_prompt` | optional scope evidence; the frozen prompt grants authority, a goal may narrow it, and the template is a label; absent fields render as explicit absent blocks                             |
 | `dispatch`                            | optional commissioned-dispatch pull-request fence; absent renders `session_dispatch_authority` as an absent block, which is the shape of a session no dispatch created                     |
 | `notes`                               | why the label is what it is, citing the rubric rule it applies                                                                                                                             |
 
@@ -101,6 +101,8 @@ The dispatch cases pair goal-absent grants with restrictive goals. They cover
 publication, remote and branch boundaries, build constituents, human-reserved
 merges, and credential access. The fence has no remote URL field; remote
 restrictions, including HTTPS versus SSH, are stated in the frozen prompt.
+Template-named sessions with cleared or narrowed prompts exercise that the
+immutable template label cannot restore a grant.
 
 Labels follow the rubric owned by `APPROVAL_JUDGE_SYSTEM_PROMPT` in
 `apps/signalboxd/src/lib.rs`; this README does not restate that normative text.

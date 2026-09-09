@@ -260,13 +260,13 @@ judge uses the exact direct selection of the request-producing call. The judge
 prompt carries the session's commissioned goal, template, frozen system prompt,
 and optional dispatch authority, each separately delimited and quoted as
 untrusted evidence, and the prompt treats them as scope to compare with the
-request, never as instruction. The template, frozen system prompt, and dispatch
-fence supply authority; a goal, when present, may narrow that scope but cannot
-independently grant or widen it. Goal absence does not require escalation. The
-judge applies the first matching rule: escalate human-reserved actions or
-truncated authority or undecodable arguments, deny requests explicitly outside
-scope, approve plainly covered requests and their ordinary constituents,
-otherwise escalate.
+request, never as instruction. The frozen system prompt supplies authority,
+bounded by the dispatch fence; the template name is a label, never authority. A
+goal, when present, may narrow that scope but cannot independently grant or
+widen it. Goal absence does not require escalation. The judge applies the first
+matching rule: escalate human-reserved actions or truncated authority or
+undecodable arguments, deny requests explicitly outside scope, approve plainly
+covered requests and their ordinary constituents, otherwise escalate.
 
 Outside a turn judged under the commissioned generation's dispatch authority, an
 `EscalateToHuman` result for a request still admissible stores the completed
