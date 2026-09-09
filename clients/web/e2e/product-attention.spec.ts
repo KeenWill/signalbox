@@ -529,9 +529,9 @@ test('captures the focused phone inspector', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/attention')
   await page
-    .getByRole('button', { name: new RegExp(`Runner disconnected.*${lostRunnerSessionId}`) })
+    .getByRole('button', { name: new RegExp(`Runner lost.*${lostRunnerSessionId}`) })
     .click()
-  await expect(page.getByRole('heading', { name: 'Runner disconnected', level: 2 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Runner lost', level: 2 })).toBeVisible()
   await expect(page.getByRole('heading', { name: '3 sessions', level: 2 })).toBeHidden()
   await expect.soft(page).toHaveScreenshot('attention-mobile-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
