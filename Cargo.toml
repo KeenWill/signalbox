@@ -41,7 +41,7 @@ members = [
     "crates/ownership-seam",
     "crates/persistence",
     "crates/process-protocol",
-    "crates/program-runtime",
+    "crates/workflow-runtime",
     "crates/runner-wire",
     "crates/test-bin",
     "crates/tool-contract",

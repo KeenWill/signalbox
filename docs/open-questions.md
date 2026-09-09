@@ -364,15 +364,6 @@ questions below remain open.
   remains the owner of placement, sandbox, approval, workspace, credential, and
   generic dispatch behavior; this question cannot redefine those constraints.
   Blocks runner-side tool registry and executor implementation.
-- **Daemon Git push transport.** `git_push_configured` is implemented as a
-  declaration and executor over an injected transport, but no production
-  `GitPushTransport` exists. Remote authority and destination policy are decided
-  and stated under
-  [remote destination authority](spec/git-authority-threat-model.md):
-  destinations are durable records an operator mints, scoped by workspace
-  identity, and `https` only. The credential policy for a push and the
-  production transport itself remain undecided; until they are decided the tool
-  stays absent from the daemon registry. Blocks daemon-side Git push.
 - **Workspace portability between runners.** Moving a session that owns a
   workspace to another runner requires that workspace to exist, or to be
   reconstructible, on the destination. Version one never carries a workspace
@@ -447,14 +438,14 @@ automatic resumption of an execution-failure block are specified in
   not vendored. Blocks only external-corpus evaluation, not the synthetic corpus
   or eval harness.
 - **Turn-origin instructions in the approval-judge request.** The delegated
-  request context carries session-scoped authority — the goal generation the
-  judged turn is bound to, the template name, and the system prompt frozen for
-  that turn — but no turn-origin content. A delegation-origin child turn's exact
-  parent-supplied task is therefore not shown, so a child created from a broad
-  template may ask for an effect its delegated task never covered while the
-  judge sees only the wider session authority. Freezing that task alongside the
-  session-level fields is undecided, because each added field is further
-  attacker-influenced text placed inside the judge's own prompt, and the
+  request context carries the system prompt frozen for the judged turn, the
+  bound goal generation as narrowing scope, and the template name as a
+  non-authorizing label, but no turn-origin content. A delegation-origin child
+  turn's exact parent-supplied task is therefore not shown, so a child with a
+  broad frozen prompt may ask for an effect its delegated task never covered
+  while the judge sees only the wider frozen-prompt grant. Freezing that task
+  alongside the session-level fields is undecided, because each added field is
+  further attacker-influenced text placed inside the judge's own prompt, and the
   injection posture is what makes any session-derived context admissible at all.
   Recorded as a design question rather than a blocker; authority the context
   does not settle escalates rather than approves.
@@ -700,11 +691,11 @@ open and bind no implementation:
   a need because it adds invalidation and reader-retirement law without
   improving correctness.
 
-## Program substrate and evaluations
+## Workflows and evaluations
 
 The substrate and evaluation contracts are owned by
-[program-substrate](spec/program-substrate.md) and
-[eval-system](spec/eval-system.md). Two edges remain deferred:
+[workflows](spec/workflows.md) and [eval-system](spec/eval-system.md). Two edges
+remain deferred:
 
 - **Remote and out-of-process program hosts.** The frame protocol is the seam;
   only the in-daemon host is committed. Hosting programs in a separate
@@ -726,17 +717,16 @@ and ordering.
   cancellation for client-facing standing update subscriptions require a future
   foundation decision. Blocks the planned callback surface. Individual program
   event waits use the request identity committed in
-  [workflows design](design/program-substrate.md#waits).
+  [workflows design](design/workflows.md#waits).
 - **Review-workflow orchestration.** The
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
   pass, finding, external-link, and store contracts. The caller-driven
   application commands, durable retry receipts, run/pass projection, and
-  workflow-facing local process protocol are implemented. Automatic pass
-  scheduling, durable hold or atomic accepted-input creation,
-  code-host/model/workspace adapter seams, prompts, automatic publication,
-  repair, conflict escalation, and merge-based stack propagation remain to be
-  designed and implemented above that surface. Blocks automatic end-to-end
-  review workflows.
+  workflow-facing local process protocol are implemented. Conflict escalation
+  and merge-based stack propagation remain undecided. Concrete adapters,
+  blocked-repair resumption, and post-publication import have committed
+  [review workflows design](design/review-workflows.md). Blocks automatic
+  end-to-end review workflows.
 - **Independent session-link relationship.** Links between sessions that
   delegation did not create require their own foundation decision. Blocks
   session linking and visibility authority.

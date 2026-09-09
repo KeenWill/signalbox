@@ -100,6 +100,17 @@ where
     FileSystem: WorkspaceMutationFileSystem,
     ExecRunner: ProcessRunner,
 {
+    /// Supplies current repository configuration and persisted dispatch authority for pushes.
+    pub fn with_repository_watch(
+        mut self,
+        watch: Option<crate::repo_watch_runtime::RepositoryWatchRuntime>,
+    ) -> Self {
+        if let Some(workspaces) = self.workspace_bound.as_mut() {
+            workspaces.repository_watch = watch;
+        }
+        self
+    }
+
     /// Installs the executor matching the composed blob-read declarations.
     ///
     /// An absent executor is the unconfigured deployment, whose catalog never
@@ -120,6 +131,14 @@ impl DaemonToolExecutorError {
     pub(super) fn from_error(error: &impl ClassifyOperatorFailure) -> Self {
         Self {
             class: error.operator_failure_class(),
+        }
+    }
+
+    pub(super) const fn pre_dispatch() -> Self {
+        Self {
+            class: OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
         }
     }
 
@@ -231,6 +250,7 @@ where
             name if WORKSPACE_READ_TOOL_NAMES.contains(&name)
                 || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
                 || LOCAL_GIT_TOOL_NAMES.contains(&name)
+                || name == signalbox_tools_git::GIT_PUSH_CONFIGURED_NAME
                 || matches!(
                     name,
                     SANDBOXED_EXEC_NAME | UNSANDBOXED_EXEC_NAME | CARGO_DIAGNOSTICS_NAME

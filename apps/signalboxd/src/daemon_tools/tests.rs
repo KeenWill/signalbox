@@ -6691,3 +6691,53 @@ fn a_shared_executor_reports_one_handle_as_sole() {
 
     assert!(sole.is_sole_handle());
 }
+
+/// A watched repository with a push credential distinct from its polling credential.
+fn repository_git_push_configuration() -> crate::HubModelConfiguration {
+    let example = crate::configuration::checked_in_example_configuration().expect("example models");
+    crate::HubModelConfiguration::parse(&format!(
+        r#"{}
+[repository_watch]
+version = 1
+signal_reviewers = []
+[[repository_watch.repositories]]
+repository = "fixture/project"
+poll_interval_seconds = 60
+credential_file = "/unused/poll-token"
+push_credential_file = "/unused/push-token"
+"#,
+        example.source(),
+    ))
+    .expect("watched repository with push credential")
+}
+
+#[test]
+fn base_composition_omits_git_push_even_with_a_push_credential() {
+    let configuration = repository_git_push_configuration();
+    let (base, _) = EchoTool::try_new().expect("base tool").into_parts();
+    let catalog = DaemonToolCatalog::try_new([base])
+        .expect("base catalog")
+        .with_repository_push(
+            configuration.repository_watch(),
+            DaemonToolComposition::Base,
+        )
+        .expect("push stays unavailable without mapped workspace tools");
+    let push = ToolName::try_new(signalbox_tools_git::GIT_PUSH_CONFIGURED_NAME.to_owned())
+        .expect("push tool name");
+    assert!(catalog.definition(&push).is_none());
+}
+
+#[test]
+fn mapped_composition_registers_git_push_with_a_push_credential() {
+    let configuration = repository_git_push_configuration();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let catalog = mapped_daemon_catalog(workspace.path())
+        .with_repository_push(
+            configuration.repository_watch(),
+            DaemonToolComposition::WithMappedFamilies,
+        )
+        .expect("mapped workspace tools support push");
+    let push = ToolName::try_new(signalbox_tools_git::GIT_PUSH_CONFIGURED_NAME.to_owned())
+        .expect("push tool name");
+    assert!(catalog.definition(&push).is_some());
+}

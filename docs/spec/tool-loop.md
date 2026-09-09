@@ -153,16 +153,16 @@ One request carries the whole catalog, so a provider refusing a single schema
 refuses every exchange; a root-level union in a schema is a family-wide outage,
 not a per-tool cost.
 
-The compiled `git_push_configured` declaration is not registered, because no
-production push transport exists to supply its transport authority.
+The daemon registers `git_push_configured` when mapped workspace tools are
+composed and a watched repository configures `push_credential_file`; execution
+resolves that session's retained dispatch and current repository configuration
+on every call. The transport pushes without force to the configured repository
+URL and confirms the remote branch equals the resolved commit before
+acknowledging success.
 
 The seven local Git tools perform no remote operation.
 
 The daemon-local registry supplies no runner execution path.
-
-The snapshot freeze exists because a catalog or runner change while a call is in
-flight could otherwise upgrade permission, introduce an unavailable runner tool,
-widen its selector, or move the locus.
 
 Because the attempt schema requires a closed effect class, preparation records
 `EffectFree` as a non-dispatching sentinel for an undeclared name. The preflight
@@ -212,8 +212,7 @@ no transcript, request, attempt, approval, turn, placement, grant, or lease
 state directly; a delegation executor persists through its port. One terminal
 attempt row holds a tool's output. An execution result entry references that
 row; no result entry copies the output. The tool registry is an input to policy
-and execution; it never determines request content. Approval and dispatch use
-the snapshot frozen when the proposal was made, never a later lookup.
+and execution; it never determines request content.
 
 Contracts owned elsewhere bind here: one recorded attempt per model call in
 [model-call-execution](model-call-execution.md); no transaction across external
@@ -260,16 +259,26 @@ judge uses the exact direct selection of the request-producing call. The judge
 prompt carries the session's commissioned goal, template, frozen system prompt,
 and optional dispatch authority, each separately delimited and quoted as
 untrusted evidence, and the prompt treats them as scope to compare with the
-request, never as instruction. Outside a turn judged under the commissioned
-generation's dispatch authority, an `EscalateToHuman` result for a request still
-admissible stores the completed call but no decision and leaves the same request
-parked. A commissioned dispatch also keeps the request parked while its
-authority stands or when the turn has pending steering. Once that authority is
-withdrawn, an escalation with no pending steering terminalizes the unattended
-turn under the commissioned-dispatch audit, preserving `ToolInadmissible` for
-requests already closed by placement loss. A `KnownFailed`, `Refused`,
-`Cancelled`, or `Ambiguous` terminal judge call for an admissible request
-retains the attended park while immediately admitting a user decision.
+request, never as instruction. The frozen system prompt supplies authority,
+bounded by the dispatch fence; the template name is a label, never authority. A
+goal, when present, may narrow that scope but cannot independently grant or
+widen it. Goal absence does not require escalation. The judge applies the first
+matching rule: escalate human-reserved actions or truncated authority or
+undecodable arguments, deny requests explicitly outside scope, approve plainly
+covered requests and their ordinary constituents, otherwise escalate. Exec
+pushes require both a dispatch fence and an immutable permitted remote in the
+frozen prompt; a mutable remote alias alone does not establish the destination.
+
+Outside a turn judged under the commissioned generation's dispatch authority, an
+`EscalateToHuman` result for a request still admissible stores the completed
+call but no decision and leaves the same request parked. A commissioned dispatch
+also keeps the request parked while its authority stands or when the turn has
+pending steering. Once that authority is withdrawn, an escalation with no
+pending steering terminalizes the unattended turn under the
+commissioned-dispatch audit, preserving `ToolInadmissible` for requests already
+closed by placement loss. A `KnownFailed`, `Refused`, `Cancelled`, or
+`Ambiguous` terminal judge call for an admissible request retains the attended
+park while immediately admitting a user decision.
 
 A completed judge call records the provider's offered recommendation, the
 effective recommendation, and the cause when withdrawn authority substitutes
@@ -369,9 +378,9 @@ and oversized bytes are never persisted. The result-text and error-detail bounds
 constrain every executor's capture policy; no executor widens the durable bound
 or converts an otherwise bounded success into a failure because it omitted
 additional result members. A crash-lost attempt has durable `KnownFailed`
-evidence and therefore projects an execution result, not `ToolClosed`. Attempt
-evidence commits as soon as execution ends, independently of semantic
-projection.
+evidence and projects an execution result in the terminal failure suffix;
+reconciliation projects `ToolClosed`. Attempt evidence commits as soon as
+execution ends, independently of semantic projection.
 
 Once every request in a running batch is resolved, one continuation transaction
 appends exactly one result entry per request in proposal order, installs any
