@@ -112,16 +112,15 @@ milliseconds and a uniformly sampled operating-system u64 respectively. Values
 use decimal strings in checked JSON payloads; recorded answers replay without
 reading the clock or drawing randomness. `Sleep` carries an absolute
 `deadline_unix_ms` at request admission and receives `Wake` with that deadline
-once wall time reaches it, including after restart. Sleep-only waits use timers
-without opening journal listeners.
+once wall time reaches it, including after restart. Sleep-only waits use timers.
 
 `AwaitEvent` carries a typed `program_answers` source run and an exclusive
 journal position (`after`, zero for the beginning). It receives the next
 retained `Answer` delivery's exact payload bytes and position. The outstanding
 request's run and ordinal identify each wait. Source reads occur before
 listening, after subscription and after every wake; PostgreSQL answer
-notifications are hints filtered to the requested source runs. The SDK's typed
-`primitives` wrappers preserve full-width values as decimal strings.
+notifications are hints; retained reads select the requested source runs. The
+SDK's typed `primitives` wrappers preserve full-width values as decimal strings.
 
 ## Daemon runner
 
@@ -131,13 +130,16 @@ waking it. Startup resumes registered runs without a terminal outcome, and an
 active run has one attempt at a time. At a quiescent sleep or event wait, the
 host drops the JavaScript isolate or native root future; the daemon retains only
 the outstanding requests until a delivery is recorded, then reconstructs the run
-by replay. Cancellation wakes and drops blocked host operations. Shutdown
-interrupts non-yielding JavaScript and drains attempts; restart replays the
-retained requests and deliveries. JavaScript loading or execution errors,
-stalled programs, child registration conflicts and unavailable granted effects
-record a per-run `ProgramError` fault; other runs continue and restart retains
-that outcome. Recovery retries an unanswered unavailable effect into the same
-fault. A concurrent terminal outcome is preserved.
+by replay. Event waits share one PostgreSQL listener per runtime and catch up
+from retained state on each broadcast hint. Cancellation wakes and drops blocked
+host operations. An ambiguous cancellation commit replays the same durable
+command identity before signalling the attempt. Shutdown interrupts non-yielding
+JavaScript and drains attempts; restart replays the retained requests and
+deliveries. JavaScript loading or execution errors, stalled programs, child
+registration conflicts and unavailable granted effects record a per-run
+`ProgramError` fault; other runs continue and restart retains that outcome.
+Recovery retries an unanswered unavailable effect into the same fault. A
+concurrent terminal outcome is preserved.
 
 The Linux compiled catalog includes `clock` revision `1`: its input is a
 big-endian u64, and its result concatenates that input and a journaled
