@@ -855,6 +855,14 @@ fn merge_test_commit_files(
         builder.insert(*path, blob, 0o100644).expect("file");
     }
     let tree_id = builder.write().expect("tree");
+    merge_test_commit_tree(repository, tree_id, parents)
+}
+
+fn merge_test_commit_tree(
+    repository: &Repository,
+    tree_id: git2::Oid,
+    parents: &[git2::Oid],
+) -> git2::Oid {
     let tree = repository.find_tree(tree_id).expect("tree exists");
     let parents: Vec<_> = parents
         .iter()
@@ -1626,4 +1634,72 @@ async fn merge_refusal_bounds_collected_previews_across_thousands_of_paths() {
             .all(|entry| entry.first_dropped_hunk.is_empty())
     );
     assert!(!transport.has_request());
+}
+
+/// Keeps each tree object small while directory copies multiply the expanded path count.
+const SHARED_SUBTREE_FILES: usize = 1024;
+
+fn merge_test_repeated_blob_tree(repository: &Repository, directories: usize) -> git2::Oid {
+    let blob = repository.blob(b"shared\n").expect("shared blob");
+    let mut subtree = repository.treebuilder(None).expect("subtree builder");
+    for index in 0..SHARED_SUBTREE_FILES {
+        subtree
+            .insert(format!("file-{index:04}"), blob, 0o100644)
+            .expect("shared blob entry");
+    }
+    let subtree = subtree.write().expect("shared subtree");
+    let mut root = repository.treebuilder(None).expect("root builder");
+    for index in 0..directories {
+        root.insert(format!("dir-{index:04}"), subtree, 0o040000)
+            .expect("shared subtree entry");
+    }
+    root.write().expect("root tree")
+}
+
+#[tokio::test]
+async fn push_refuses_shared_blob_paths_above_the_merge_entry_ceiling() {
+    use crate::limits::MAX_REPOSITORY_INSPECTIONS;
+
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(&repository, &[], &[]);
+    let tree = merge_test_repeated_blob_tree(
+        &repository,
+        MAX_REPOSITORY_INSPECTIONS / SHARED_SUBTREE_FILES + 1,
+    );
+    let branch = merge_test_commit_tree(&repository, tree, &[ancestor]);
+    let base = merge_test_commit_files(&repository, &[], &[ancestor]);
+    let merge = merge_test_commit_tree(&repository, tree, &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+    let authority = fixture.executor().repository_authority;
+    crate::push_objects::PushObjectSnapshot::capture(&authority, merge, Some(branch))
+        .expect("few shared objects fit the snapshot limits");
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert_eq!(result, Err(GitPushFailure::Repository));
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_accepts_shared_blob_paths_within_the_merge_entry_ceiling() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(&repository, &[], &[]);
+    let tree = merge_test_repeated_blob_tree(&repository, 2);
+    let branch = merge_test_commit_tree(&repository, tree, &[ancestor]);
+    let base = merge_test_commit_files(&repository, &[], &[ancestor]);
+    let merge = merge_test_commit_tree(&repository, tree, &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("bounded shared paths push");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
 }

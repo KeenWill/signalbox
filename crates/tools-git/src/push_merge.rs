@@ -106,16 +106,16 @@ pub(super) fn verify_merge(
                 .tree_id(),
         );
     }
-    let mut visited = HashSet::new();
+    let mut inspected_entries = 0;
     while let Some(oid) = trees.pop() {
-        if !visited.insert(oid) {
-            continue;
-        }
-        if visited.len() > MAX_REPOSITORY_INSPECTIONS {
+        source.capture(&database, oid).map_err(repository_failure)?;
+        let tree = repository.find_tree(oid).map_err(repository_failure)?;
+        if tree.len() > MAX_REPOSITORY_INSPECTIONS - inspected_entries {
             return Err(GitPushFailure::Repository);
         }
-        source.capture(&database, oid).map_err(repository_failure)?;
-        for entry in &repository.find_tree(oid).map_err(repository_failure)? {
+        inspected_entries += tree.len();
+        // Shared tree objects still contribute entries at every path where they occur.
+        for entry in &tree {
             if entry.kind() == Some(ObjectType::Tree) {
                 trees.push(entry.id());
             }

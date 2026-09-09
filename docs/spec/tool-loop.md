@@ -180,6 +180,10 @@ Verification supports two-parent merges and refuses larger merges with
 `UnsupportedMergeShape` naming the parent count before traversing ancestry. It
 retains only the first dropped hunk per file. Non-merge pushes are unaffected.
 
+Before constructing merge diffs, verification counts tree-entry occurrences
+across the four compared trees against `MAX_REPOSITORY_INSPECTIONS`, including
+reused subtrees.
+
 The seven local Git tools perform no remote operation.
 
 The daemon-local registry supplies no runner execution path.
