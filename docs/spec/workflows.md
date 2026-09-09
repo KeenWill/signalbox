@@ -200,6 +200,13 @@ and truncation of journal rows.
 
 ## Boundary contracts
 
+`RepoWatchEffects` admits `repo.nextRuleEvent`, `repo.commitEvaluation` and
+`repo.submitPending` under the `repo-watch` grant. Programs receive checked
+rule/event context and propose ordered template actions without database
+handles. [Repository watch](repo-watch.md) owns revalidation and effect
+receipts; the adapter verifies a matching durable journal request and answer
+before releasing a receipt, including delivery in a successor run.
+
 The canonical SDK specifier is `@signalbox/program-sdk/v<version>`, where the
 version is a positive decimal integer with no leading zero. Frame-contract
 release one admits exactly `@signalbox/program-sdk/v1`. The module loader in the

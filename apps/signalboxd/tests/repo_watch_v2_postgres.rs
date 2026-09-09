@@ -60,6 +60,8 @@ mod checkout;
 mod provider_identity;
 #[path = "repo_watch_v2/retirement.rs"]
 mod retirement;
+#[path = "repo_watch_v2/workflows.rs"]
+mod workflows;
 
 // The configured merged-subject retention window is seven days.
 const MERGED_RETENTION: Duration = Duration::from_secs(604_800);

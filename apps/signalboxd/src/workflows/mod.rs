@@ -1,5 +1,6 @@
 //! Daemon admission and compiled workflow catalog; governed by docs/spec/workflows.md.
 
+pub mod repo_watch;
 pub mod runtime;
 
 #[cfg(target_os = "linux")]

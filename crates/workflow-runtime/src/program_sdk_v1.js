@@ -187,7 +187,7 @@
     },
   });
   const capabilities = ["time", "random", "sleep", "subscribe", "session", "judge",
-    "exec-stage", "corpus", "eval-record", "blob", "register"];
+    "exec-stage", "corpus", "eval-record", "blob", "register", "repo-watch"];
 
   const unsigned = (value) => {
     if (typeof value !== "string" || !regexExec(/^(0|[1-9][0-9]*)$/, value)

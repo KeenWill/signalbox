@@ -471,6 +471,7 @@ pub(crate) const fn program_capability_to_str(value: ProgramCapability) -> &'sta
         ProgramCapability::EvalRecord => "eval-record",
         ProgramCapability::Blob => "blob",
         ProgramCapability::Register => "register",
+        ProgramCapability::RepoWatch => "repo-watch",
     }
 }
 
@@ -487,6 +488,7 @@ pub(crate) fn program_capability_from_str(value: &str) -> Option<ProgramCapabili
         "eval-record" => Some(ProgramCapability::EvalRecord),
         "blob" => Some(ProgramCapability::Blob),
         "register" => Some(ProgramCapability::Register),
+        "repo-watch" => Some(ProgramCapability::RepoWatch),
         _ => None,
     }
 }

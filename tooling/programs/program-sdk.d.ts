@@ -19,7 +19,7 @@ declare module "@signalbox/program-sdk/v1" {
   }): (input: Uint8Array) => Promise<Uint8Array>;
 
   export type Capability = "time" | "random" | "sleep" | "subscribe" | "session"
-    | "judge" | "exec-stage" | "corpus" | "eval-record" | "blob" | "register";
+    | "judge" | "exec-stage" | "corpus" | "eval-record" | "blob" | "register" | "repo-watch";
   export type Delivery =
     | { kind: "answer"; payload: number[] }
     | { kind: "wake"; payload: number[] }

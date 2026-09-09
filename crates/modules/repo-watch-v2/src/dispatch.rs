@@ -307,11 +307,28 @@ impl RepoWatchStore {
         sink: &mut Sink,
         source: &LifecycleEventSource,
     ) -> Result<(), SubmissionError<Sink::Error>> {
+        self.submit_selected_pending(codec, sink, source, None)
+            .await
+    }
+
+    pub(crate) async fn submit_selected_pending<
+        Codec: SessionCommandCodec,
+        Sink: SessionCommandSink,
+    >(
+        &self,
+        codec: &mut Codec,
+        sink: &mut Sink,
+        source: &LifecycleEventSource,
+        dispatch: Option<signalbox_session_ownership::RepoWatchDispatchId>,
+    ) -> Result<(), SubmissionError<Sink::Error>> {
         for planned in self
             .recover_pending_commands(codec)
             .await
             .map_err(SubmissionError::Store)?
         {
+            if dispatch.is_some_and(|dispatch| planned.dispatch() != dispatch) {
+                continue;
+            }
             let id = planned.command().command_id();
             let retirement_session: Option<Uuid> = sqlx::query_scalar(
                 "SELECT origin.created_session_id FROM dispatch_ledger reaction
@@ -390,7 +407,7 @@ impl RepoWatchStore {
     }
 }
 
-fn singleton_key(
+pub(crate) fn singleton_key(
     scope: RepoWatchSingletonScope,
     event: &RepoWatchEvent,
     observation: Option<&RepoWatchObservation>,
