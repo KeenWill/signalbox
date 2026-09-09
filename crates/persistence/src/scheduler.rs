@@ -164,7 +164,7 @@ impl PostgresEligibilitySweep {
                         active.active_phase_kind = 'running'
                         OR (
                             active.active_phase_kind = 'awaiting_tool_approval'
-                            AND EXISTS (
+                            AND (tool_approval_human_wait_is_due(active.approval_tool_request_id) OR EXISTS (
                                 SELECT 1
                                   FROM tool_request AS request
                                  WHERE request.request_id =
@@ -178,7 +178,7 @@ impl PostgresEligibilitySweep {
                                          WHERE judge.request_id = request.request_id
                                            AND judge.state_kind = 'terminal'
                                    )
-                            )
+                            ))
                         )
                         OR (
                             active.active_phase_kind = 'awaiting_child'

@@ -11,6 +11,18 @@
     {
       "disposition": "approve",
       "rationale": "The frozen prompt grants this workspace read without a commissioned goal."
+    },
+    {
+      "disposition": "approve",
+      "rationale": "Sandbox exec is ordinary task work; no separate action grant is required."
+    },
+    {
+      "disposition": "approve",
+      "rationale": "Publishing to the session-owned branch is ordinary task work."
+    },
+    {
+      "disposition": "escalate_to_human",
+      "rationale": "The other branch lies outside the established session scope."
     }
   ]
 }

@@ -18,13 +18,14 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
-    ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
-    ToolExecutionInvocation, ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
-    ToolPreauthorization, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
+    EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    OperatorFailureClass, StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, ToolCatalog,
+    ToolCatalogValidationFailure, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorEvidence, ToolInputSchema, ToolPreauthorization, UuidV7SessionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
+    UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     ActivatedTurn, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
@@ -167,6 +168,10 @@ context_window_tokens = 200000
 "#;
 
 fn approval_judge_model_configuration() -> HubModelConfiguration {
+    approval_judge_model_configuration_with_timeout("10m")
+}
+
+fn approval_judge_model_configuration_with_timeout(timeout: &str) -> HubModelConfiguration {
     support::parse_model_configuration(&format!(
         r#"
 version = 1
@@ -200,6 +205,9 @@ model_family = "fixture"
 provider_model = "scripted-tool-loop"
 max_output_tokens = 64
 context_window_tokens = 200000
+
+[tool_settings]
+approval_wait_timeout = "{timeout}"
 "#,
         Uuid::from_u128(FIXTURE_ID_SEED + 1),
         Uuid::from_u128(FIXTURE_ID_SEED + 4),
@@ -521,6 +529,28 @@ impl ToolLoopFixture {
         Executor: ToolExecutor + Clone + Send + 'static,
         Executor::Error: Send + 'static,
     {
+        self.execution_with_judge_configuration(
+            scripts,
+            judge_script,
+            catalog,
+            executor,
+            approval_judge_model_configuration(),
+        )
+    }
+
+    fn execution_with_judge_configuration<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        judge_script: Script,
+        catalog: Catalog,
+        executor: Executor,
+        configuration: HubModelConfiguration,
+    ) -> FixtureJudgeExecution<Catalog, Executor>
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let judge_runtime = Arc::new(ScriptedModel::<ModelCallId>::single(judge_script));
         let provider = RuntimeModelCallProvider::new(
@@ -538,7 +568,6 @@ impl ToolLoopFixture {
             },
             self.runtime_models.clone(),
         ));
-        let configuration = approval_judge_model_configuration();
         (
             PostgresProviderModelExecution::new(
                 PostgresModelCallRepository::new(
@@ -2412,9 +2441,15 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
         2
     );
 
-    fixture
-        .decide(request, ToolApprovalDecision::Approve)
-        .await?;
+    let receipt = approve_through_process(&fixture, request, DECISION_COMMAND_ID).await?;
+    assert_approved_receipt(receipt, request);
+    let source: String = sqlx::query_scalar(
+        "SELECT decision_source FROM tool_approval_decision WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(source, "user_command");
     execution.resume_active(fixture.session).await?;
 
     assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
@@ -3156,8 +3191,18 @@ async fn tier_zero_echo_completes_offline_tool_loop() -> Result<(), Box<dyn Erro
 /// offline.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+async fn web_fetch_completes_without_a_human_with_blanket_disabled() -> Result<(), Box<dyn Error>> {
+    headless_web_fetch(DangerousToolAutoApproval::Disabled).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn web_fetch_completes_without_a_human_with_approve_all() -> Result<(), Box<dyn Error>> {
+    headless_web_fetch(DangerousToolAutoApproval::ApproveAll).await
+}
+
+async fn headless_web_fetch(posture: DangerousToolAutoApproval) -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(posture).await?;
     let expected_status = 200;
     let expected_content_type = "text/plain";
     let expected_body = "offline body";
@@ -3174,15 +3219,16 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
         web.clone(),
         UnusedSessionStatusWriter,
         UnusedCodeHostTransport,
-        WebFetchEgressPolicy::try_from_allowed_origins([String::from("https://example.com")])?,
+        WebFetchEgressPolicy::default(),
     )?
     .into_parts();
     let arguments = serde_json::json!({"url": expected_url}).to_string();
-    let (execution, runtime) = fixture.execution(
+    let (execution, runtime, judge_runtime) = fixture.execution_with_judge(
         [
             tool_use_script(&[(WEB_FETCH_NAME, arguments.as_str())]),
             completion_script("fetch observed"),
         ],
+        approval_judge_script("approve", "Public documentation is ordinary task work."),
         tool_catalog,
         tool_executor,
     );
@@ -3191,10 +3237,14 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
         .execute(Box::new(fixture.activated.clone()))
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
-    fixture
-        .decide(request, ToolApprovalDecision::Approve)
-        .await?;
-    execution.resume_active(fixture.session).await?;
+    let source: String = sqlx::query_scalar(
+        "SELECT decision_source FROM tool_approval_decision WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(source, "delegate");
+    assert_eq!(judge_runtime.received_operations().len(), 1);
     let fetched = web.requests();
     let [physical_request] = fetched.as_slice() else {
         panic!("one physical fetch crosses the injected transport")
@@ -3528,7 +3578,7 @@ async fn composed_introspection_returns_real_own_transcript() -> Result<(), Box<
     })
     .to_string();
     let expected_tool_use_content = format!(
-        "{}\n{arguments}",
+        "{}\n{{\"after_position\":null,\"max_bytes\":131072,\"max_entries\":100}}",
         signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME
     );
     let (execution, runtime) = fixture.execution(
@@ -5410,4 +5460,141 @@ impl signalbox_tools_plan::SessionPlanPort for UnusedConversationPort {
     ) -> Result<signalbox_tools_plan::PlanReadPage, Self::Error> {
         Err(UnusedSessionStatusWriterError)
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_timeout_continues_with_a_typed_denial() -> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "human-confirmed";
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        TOOL_NAME,
+        ToolPermissionDefault::Confirm,
+        ToolEffectClass::EffectFree,
+    )]);
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("timeout observed"),
+        ],
+        tool_catalog,
+        executor.clone(),
+    );
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+    assert!(
+        PostgresToolLoopRepository::new(fixture.pool.clone())
+            .expire_human_approval_wait(fixture.session, fixture.turn, Some(Duration::ZERO))
+            .await?
+    );
+    execution.resume_active(fixture.session).await?;
+    assert!(executor.events().is_empty());
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_denied",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, TOOL_NAME, "{}"),
+            expected_failed_tool_result(
+                request,
+                serde_json::json!({
+                    "error": {"kind":"denied", "detail":"approval_wait_timeout"}
+                })
+                .to_string()
+            ),
+        ]
+    );
+    Ok(())
+}
+
+struct NoReconciliationHints;
+
+impl EligibilitySweep for NoReconciliationHints {
+    type Error = std::convert::Infallible;
+
+    async fn find_sessions(&mut self) -> Result<EligibilitySweepBatch, Self::Error> {
+        Ok(EligibilitySweepBatch::new(Vec::new(), false))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_deadline_wakes_without_periodic_reconciliation() -> Result<(), Box<dyn Error>> {
+    approval_deadline_wakes(false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_deadline_restores_without_periodic_reconciliation() -> Result<(), Box<dyn Error>>
+{
+    approval_deadline_wakes(true).await
+}
+
+async fn approval_deadline_wakes(restore: bool) -> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "human-confirmed";
+    // This work source has lossless nudges, no periodic sweep, and no initial hints.
+    let (nudge, mut work_source) = InProcessEligibilityWorkSource::new(NoReconciliationHints);
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let repository = PostgresToolLoopRepository::new(fixture.pool.clone());
+    let wakeups = signalboxd::ApprovalWaitWakeups::new(repository.clone(), nudge.clone());
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime, _) = fixture.execution_with_judge_configuration(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("deadline observed"),
+        ],
+        approval_judge_script("approve", "Unused for an explicitly human request."),
+        catalog([tool(
+            TOOL_NAME,
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
+        )]),
+        executor.clone(),
+        approval_judge_model_configuration_with_timeout("1s"),
+    );
+    let execution = if restore {
+        execution
+    } else {
+        execution.with_approval_wait_wakeups(wakeups)
+    };
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    if restore {
+        let restored = signalboxd::ApprovalWaitWakeups::new(repository.clone(), nudge);
+        restored.refresh(None).await?;
+    }
+    // Harness allowance only; the configured durable wait is one second.
+    let session = timeout(Duration::from_secs(15), work_source.next()).await??;
+    assert_eq!(session, fixture.session);
+    execution.resume_active(session).await?;
+    assert!(executor.events().is_empty());
+    assert_eq!(
+        continuation_result_json(&runtime)?,
+        serde_json::json!({
+            "error": {"kind": "denied", "detail": "approval_wait_timeout"}
+        })
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?.last().map(String::as_str),
+        Some("turn_completed")
+    );
+    assert!(
+        repository
+            .pending_human_approval_waits(Some(session))
+            .await?
+            .is_empty()
+    );
+    Ok(())
 }
