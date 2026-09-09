@@ -1,6 +1,6 @@
 //! Process-local repository ingestion evidence.
 
-use signalbox_ownership_seam::{OffsetDateTime, RepositorySlug};
+use signalbox_session_ownership::{OffsetDateTime, RepositorySlug};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
