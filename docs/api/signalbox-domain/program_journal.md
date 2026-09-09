@@ -283,6 +283,8 @@ pub struct ProgramJournal {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl ProgramJournal {
     pub fn terminal_delivery(&self) -> option::Option<&DeliveryFrame>;
+    pub fn result(&self) -> option::Option<&InlineFramePayload>;
+    pub fn has_outstanding_requests(&self) -> bool;
     pub fn try_new(
         run: ProgramRunId,
         entries: vec::Vec<JournalEntry>,
@@ -302,6 +304,8 @@ pub enum ProgramJournalError {
     UnknownResolvedRequest,
     RequestResolvedTwice,
     OrdinalExhausted,
+    InvalidTerminalAnswer,
+    FrameAfterSuccess,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for ProgramJournalError {

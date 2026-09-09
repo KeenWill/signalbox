@@ -364,20 +364,67 @@ pub struct ProgramJournal {
 }
 
 impl ProgramJournal {
-    /// The recorded terminal outcome, if this run already ended.
-    ///
-    /// A `run_cancel` or `fault` resolves no request and ends the attempt that
-    /// recorded it, so every later frame is behind an outcome that is already
-    /// durable. The first such delivery is therefore the run's outcome, and it
-    /// is knowable from the journal alone — a resumed run cannot produce a
-    /// different one, whatever its artifact does or whether it loads at all.
+    /// The first cancellation, fault, or accepted terminal answer.
     pub fn terminal_delivery(&self) -> Option<&DeliveryFrame> {
-        self.entries.iter().find_map(|entry| match entry.frame() {
-            JournalFrame::Delivery(delivery) if delivery.kind().resolves().is_none() => {
-                Some(delivery)
+        let mut terminals = BTreeSet::new();
+        for entry in self.entries() {
+            match entry.frame() {
+                JournalFrame::Request(request)
+                    if matches!(request.kind(), RequestKind::Terminal(_)) =>
+                {
+                    terminals.insert(request.ordinal());
+                }
+                JournalFrame::Delivery(delivery)
+                    if delivery.kind().resolves().is_none()
+                        || matches!(delivery.kind(), DeliveryKind::Answer { resolves, .. } if terminals.contains(resolves)) =>
+                {
+                    return Some(delivery);
+                }
+                _ => {}
             }
-            JournalFrame::Delivery(_) | JournalFrame::Request(_) => None,
+        }
+        None
+    }
+
+    fn terminal_request(&self, ordinal: RequestOrdinal) -> Option<&InlineFramePayload> {
+        self.entries.iter().find_map(|entry| match entry.frame() {
+            JournalFrame::Request(request) if request.ordinal() == ordinal => {
+                match request.kind() {
+                    RequestKind::Terminal(payload) => Some(payload),
+                    _ => None,
+                }
+            }
+            _ => None,
         })
+    }
+
+    /// Exact result bytes retained by an accepted Terminal/Answer pair.
+    pub fn result(&self) -> Option<&InlineFramePayload> {
+        match self.terminal_delivery()?.kind() {
+            DeliveryKind::Answer { resolves, .. } => self.terminal_request(*resolves),
+            _ => None,
+        }
+    }
+
+    /// Whether an answerable request still has no resolving delivery.
+    pub fn has_outstanding_requests(&self) -> bool {
+        let mut outstanding = BTreeSet::new();
+        for entry in self.entries() {
+            match entry.frame() {
+                JournalFrame::Request(request)
+                    if !matches!(request.kind(), RequestKind::Scope(_)) =>
+                {
+                    outstanding.insert(request.ordinal());
+                }
+                JournalFrame::Delivery(delivery) => {
+                    if let Some(ordinal) = delivery.kind().resolves() {
+                        outstanding.remove(&ordinal);
+                    }
+                }
+                _ => {}
+            }
+        }
+        !outstanding.is_empty()
     }
 
     /// Validates all three contiguous orders and resolution correlations.
@@ -390,8 +437,15 @@ impl ProgramJournal {
         let mut next_delivery = 1_u64;
         let mut answerable = BTreeSet::new();
         let mut resolved = BTreeSet::new();
+        let mut terminals = BTreeSet::new();
+        let mut refused_terminals = BTreeSet::new();
+        let mut ended = false;
+        let mut succeeded = false;
 
         for entry in &entries {
+            if succeeded {
+                return Err(ProgramJournalError::FrameAfterSuccess);
+            }
             if entry.position().as_u64() != next_position {
                 return Err(ProgramJournalError::NoncontiguousPosition);
             }
@@ -407,6 +461,12 @@ impl ProgramJournal {
                     next_request = next_request
                         .checked_add(1)
                         .ok_or(ProgramJournalError::OrdinalExhausted)?;
+                    if matches!(request.kind(), RequestKind::Terminal(_)) {
+                        terminals.insert(request.ordinal());
+                        if answerable.len() != resolved.len() {
+                            refused_terminals.insert(request.ordinal());
+                        }
+                    }
                     if !matches!(request.kind(), RequestKind::Scope(_)) {
                         answerable.insert(request.ordinal());
                     }
@@ -418,7 +478,21 @@ impl ProgramJournal {
                     next_delivery = next_delivery
                         .checked_add(1)
                         .ok_or(ProgramJournalError::OrdinalExhausted)?;
+                    if delivery.kind().resolves().is_none() {
+                        ended = true;
+                    }
                     if let Some(request) = delivery.kind().resolves() {
+                        if terminals.contains(&request)
+                            && matches!(delivery.kind(), DeliveryKind::Answer { .. })
+                        {
+                            if ended
+                                || refused_terminals.contains(&request)
+                                || answerable.len() != resolved.len() + 1
+                            {
+                                return Err(ProgramJournalError::InvalidTerminalAnswer);
+                            }
+                            succeeded = true;
+                        }
                         if !answerable.contains(&request) {
                             return Err(ProgramJournalError::UnknownResolvedRequest);
                         }
@@ -454,6 +528,8 @@ pub enum ProgramJournalError {
     UnknownResolvedRequest,
     RequestResolvedTwice,
     OrdinalExhausted,
+    InvalidTerminalAnswer,
+    FrameAfterSuccess,
 }
 
 impl fmt::Display for ProgramJournalError {
@@ -464,6 +540,10 @@ impl fmt::Display for ProgramJournalError {
             Self::NoncontiguousDeliveryOrdinal => "delivery ordinals are not contiguous",
             Self::UnknownResolvedRequest => "delivery resolves no earlier answerable request",
             Self::RequestResolvedTwice => "request has more than one resolving delivery",
+            Self::InvalidTerminalAnswer => {
+                "terminal answer requires a running run with no other outstanding requests"
+            }
+            Self::FrameAfterSuccess => "journal frame follows accepted success",
             Self::OrdinalExhausted => "journal ordinal is exhausted",
         };
         formatter.write_str(message)
@@ -668,6 +748,73 @@ mod tests {
     fn journal(entries: Vec<JournalEntry>) -> ProgramJournal {
         ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries)
             .expect("fixture journal is valid")
+    }
+
+    #[test]
+    fn accepted_terminal_answer_retains_request_bytes_as_the_result() {
+        let result = InlineFramePayload::new(b"result".as_slice());
+        let terminal = RequestFrame::new(
+            RequestOrdinal::try_from_u64(1).expect("ordinal"),
+            None,
+            RequestKind::Terminal(result.clone()),
+        );
+        let answer = delivery(1, 1, b"acknowledgement");
+        let completed = journal(vec![
+            entry(1, JournalFrame::Request(terminal)),
+            entry(2, JournalFrame::Delivery(answer.clone())),
+        ]);
+        assert_eq!(completed.result(), Some(&result));
+        assert_eq!(completed.terminal_delivery(), Some(&answer));
+        let mut late = completed.entries().to_vec();
+        late.push(entry(3, JournalFrame::Delivery(run_cancel(2, b"late"))));
+        assert_eq!(
+            ProgramJournal::try_new(completed.run(), late),
+            Err(ProgramJournalError::FrameAfterSuccess)
+        );
+    }
+
+    #[test]
+    fn terminal_emitted_with_outstanding_work_cannot_be_accepted_after_that_work_drains() {
+        let terminal = RequestFrame::new(
+            RequestOrdinal::try_from_u64(2).expect("ordinal"),
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"premature".as_slice())),
+        );
+        let entries = vec![
+            entry(1, JournalFrame::Request(request(1, b"work"))),
+            entry(2, JournalFrame::Request(terminal)),
+            entry(3, JournalFrame::Delivery(delivery(1, 1, b"drained"))),
+            entry(4, JournalFrame::Delivery(delivery(2, 2, b"ack"))),
+        ];
+        assert_eq!(
+            ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+            Err(ProgramJournalError::InvalidTerminalAnswer)
+        );
+    }
+
+    #[test]
+    fn rejected_terminal_request_has_no_successful_result() {
+        let ordinal = RequestOrdinal::try_from_u64(1).expect("ordinal");
+        let terminal = RequestFrame::new(
+            ordinal,
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"refused".as_slice())),
+        );
+        let rejected = journal(vec![
+            entry(1, JournalFrame::Request(terminal)),
+            entry(
+                2,
+                JournalFrame::Delivery(DeliveryFrame::new(
+                    DeliveryOrdinal::try_from_u64(1).expect("ordinal"),
+                    DeliveryKind::Reject {
+                        resolves: ordinal,
+                        reason: RejectReason::OutstandingRequests,
+                    },
+                )),
+            ),
+        ]);
+        assert!(rejected.result().is_none());
+        assert!(rejected.terminal_delivery().is_none());
     }
 
     /// replay delivers concurrent answers in durable delivery order.

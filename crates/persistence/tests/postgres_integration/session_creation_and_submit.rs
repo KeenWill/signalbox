@@ -5680,6 +5680,7 @@ async fn program_submit_records_its_run_and_conflicts_with_user_replay()
         .start_run(
             signalbox_domain::ProgramRunId::from_uuid(Uuid::now_v7()),
             registration.id,
+            &[],
         )
         .await?;
     let capability = signalbox_persistence::program_journal::ProgramSessionHost::new(
@@ -6004,7 +6005,7 @@ async fn submit_replay_requires_the_actor_principal_pair() -> Result<(), Box<dyn
             },
         )
         .await?;
-    registrations.start_run(run, registration.id).await?;
+    registrations.start_run(run, registration.id, &[]).await?;
     let capability = signalbox_persistence::program_journal::ProgramSessionHost::new(journal)
         .session_capability(run)
         .await?

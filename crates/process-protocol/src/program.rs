@@ -15,10 +15,11 @@ pub enum ProgramRunCancelledState {
 pub enum ProgramRunTerminalState {
     Cancelled,
     Faulted,
+    Succeeded,
 }
 
 /// Closed result of a durable program cancellation command.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProgramRunCancellationOutcome {
     Applied {
@@ -28,6 +29,6 @@ pub enum ProgramRunCancellationOutcome {
     NotFound {},
     AlreadyTerminal {
         terminal_state: ProgramRunTerminalState,
-        result: (),
+        result: Option<Vec<u8>>,
     },
 }

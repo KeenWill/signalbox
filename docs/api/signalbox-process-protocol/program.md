@@ -17,6 +17,7 @@ pub enum ProgramRunCancelledState {
 pub enum ProgramRunTerminalState {
     Cancelled,
     Faulted,
+    Succeeded,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
@@ -32,8 +33,8 @@ pub enum ProgramRunCancellationOutcome {
     NotFound {},
     AlreadyTerminal {
         terminal_state: ProgramRunTerminalState,
-        result: (),
+        result: option::Option<vec::Vec<u8>>,
     },
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
