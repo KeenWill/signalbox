@@ -358,11 +358,12 @@ struct MergeDroppedHunk<'a> {
     truncated: bool,
 }
 
+// Shared collection and serialization budget for merge-refusal previews.
+pub(super) const MAX_MERGE_DETAIL_BYTES: usize = 4096;
+
 fn merge_dropped_detail(
     files: &[crate::push_merge::DroppedBaseChanges],
 ) -> Result<ToolExecutionErrorDetail, GitPushExecutorError> {
-    // ToolExecutionErrorDetail's existing admission bound.
-    const MAX_DETAIL_BYTES: usize = 4096;
     let mut detail = MergeDroppedDetail {
         error: "MergeDroppedBaseChanges",
         files: Vec::new(),
@@ -373,7 +374,7 @@ fn merge_dropped_detail(
     for file in files {
         detail.files.push(&file.file);
         detail.omitted_files -= 1;
-        if encode_merge_dropped_detail(&detail)?.len() > MAX_DETAIL_BYTES {
+        if encode_merge_dropped_detail(&detail)?.len() > MAX_MERGE_DETAIL_BYTES {
             detail.files.pop();
             detail.omitted_files += 1;
             break;
@@ -383,10 +384,10 @@ fn merge_dropped_detail(
         detail.hunks.push(MergeDroppedHunk {
             file: &file.file,
             first_dropped_hunk: String::new(),
-            truncated: !file.first_dropped_hunk.is_empty(),
+            truncated: file.truncated || !file.first_dropped_hunk.is_empty(),
         });
         detail.omitted_hunks -= 1;
-        if encode_merge_dropped_detail(&detail)?.len() > MAX_DETAIL_BYTES {
+        if encode_merge_dropped_detail(&detail)?.len() > MAX_MERGE_DETAIL_BYTES {
             detail.hunks.pop();
             detail.omitted_hunks += 1;
             break;
@@ -395,12 +396,13 @@ fn merge_dropped_detail(
     let mut encoded = encode_merge_dropped_detail(&detail)?;
     for (index, file) in files.iter().take(detail.hunks.len()).enumerate() {
         let limit =
-            encoded.len() + (MAX_DETAIL_BYTES - encoded.len()) / (detail.hunks.len() - index);
+            encoded.len() + (MAX_MERGE_DETAIL_BYTES - encoded.len()) / (detail.hunks.len() - index);
         // bounded_text cannot account for JSON escaping or preserve its delimiters.
         for character in file.first_dropped_hunk.chars() {
             let hunk = &mut detail.hunks[index];
             hunk.first_dropped_hunk.push(character);
-            hunk.truncated = hunk.first_dropped_hunk.len() != file.first_dropped_hunk.len();
+            hunk.truncated =
+                file.truncated || hunk.first_dropped_hunk.len() != file.first_dropped_hunk.len();
             let candidate = encode_merge_dropped_detail(&detail)?;
             if candidate.len() > limit {
                 let hunk = &mut detail.hunks[index];
@@ -443,10 +445,12 @@ mod tests {
             DroppedBaseChanges {
                 file: "one.txt".to_owned(),
                 first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
             },
             DroppedBaseChanges {
                 file: "two.txt".to_owned(),
                 first_dropped_hunk: "-keep\n".to_owned(),
+                truncated: false,
             },
         ];
         let detail = merge_dropped_detail(&files).expect("model-visible detail");
@@ -474,10 +478,12 @@ mod tests {
             DroppedBaseChanges {
                 file: "one.txt".to_owned(),
                 first_dropped_hunk: large_hunk.clone(),
+                truncated: false,
             },
             DroppedBaseChanges {
                 file: "two.txt".to_owned(),
                 first_dropped_hunk: "-keep\n".to_owned(),
+                truncated: false,
             },
         ];
         let detail = merge_dropped_detail(&files).expect("bounded model-visible refusal");
@@ -514,10 +520,12 @@ mod tests {
             DroppedBaseChanges {
                 file: "visible.txt".to_owned(),
                 first_dropped_hunk: "-keep\n".to_owned(),
+                truncated: false,
             },
             DroppedBaseChanges {
                 file: "long".repeat(4096),
                 first_dropped_hunk: "-keep\n".to_owned(),
+                truncated: false,
             },
         ];
         let detail = merge_dropped_detail(&files).expect("bounded model-visible refusal");
@@ -573,5 +581,36 @@ mod tests {
         assert!(omitted > 0);
         assert_eq!(listed, bases[..bases.len() - omitted]);
         assert!(detail.as_str().len() <= ToolExecutionErrorDetail::MAX_UTF8_BYTES);
+    }
+
+    #[test]
+    fn merge_refusal_keeps_collection_truncation_when_the_preview_fits() {
+        let files = vec![
+            DroppedBaseChanges {
+                file: "first.txt".to_owned(),
+                first_dropped_hunk: "-base".to_owned(),
+                truncated: true,
+            },
+            DroppedBaseChanges {
+                file: "second.txt".to_owned(),
+                first_dropped_hunk: String::new(),
+                truncated: true,
+            },
+        ];
+
+        let detail = merge_dropped_detail(&files).expect("bounded detail");
+        let value: serde_json::Value = serde_json::from_str(detail.as_str()).expect("valid JSON");
+
+        assert_eq!(
+            value["files"],
+            serde_json::json!(["first.txt", "second.txt"])
+        );
+        assert_eq!(
+            value["hunks"],
+            serde_json::json!([
+                { "file": "first.txt", "first_dropped_hunk": "-base", "truncated": true },
+                { "file": "second.txt", "first_dropped_hunk": "", "truncated": true },
+            ])
+        );
     }
 }

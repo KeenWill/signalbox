@@ -164,18 +164,21 @@ parent order. A missing or ambiguous fence binding refuses the push with
 `UnprovenMergeParents`. Multiple merge bases refuse it with
 `AmbiguousMergeBases`, listing base object IDs and an omitted count when the
 detail cannot fit them all; verification does not construct a virtual merge
-base. Before pushing a merge, the executor compares each zero-context hunk
-relative to its merged base parent against the branch's hunks relative to the
-parents' merge base, ignoring line offsets. Rename detection correlates source
-and destination paths in both diffs and maps the base parent's renames onto the
-branch's paths before comparing hunks. A hunk absent from the branch diff
-refuses the push with `MergeDroppedBaseChanges`. Its bounded JSON detail lists
-filenames before hunk previews, marks each shortened preview with `truncated`,
-and counts omitted filenames and previews explicitly when they cannot fit.
-Filenames use bytewise Git path quoting. Verification supports two-parent merges
-and refuses larger merges with `UnsupportedMergeShape` naming the parent count
-before traversing ancestry. It retains only the first dropped hunk per file.
-Non-merge pushes are unaffected.
+base. Before pushing a merge, the executor compares additions and removals
+relative to its base parent against the branch's effects relative to the merge
+base, ignoring line offsets and consuming each matching effect once. A carried
+addition does not require the branch patch's obsolete preimage to remain;
+carried removals must also occur in the branch diff. Rename detection correlates
+source and destination paths in both diffs and maps the base parent's renames
+onto the branch's paths before comparing hunks. An effect absent from the branch
+diff refuses the push with `MergeDroppedBaseChanges`. Collected dropped-hunk
+previews share a 4 KiB budget, and collection truncation remains explicit in the
+detail. Its bounded JSON detail lists filenames before hunk previews, marks each
+shortened preview with `truncated`, and counts omitted filenames and previews
+explicitly when they cannot fit. Filenames use bytewise Git path quoting.
+Verification supports two-parent merges and refuses larger merges with
+`UnsupportedMergeShape` naming the parent count before traversing ancestry. It
+retains only the first dropped hunk per file. Non-merge pushes are unaffected.
 
 The seven local Git tools perform no remote operation.
 

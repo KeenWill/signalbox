@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    ops::Range,
     path::Path,
     time::Instant,
 };
@@ -10,7 +11,9 @@ use git2::{Delta, Diff, DiffFindOptions, DiffOptions, ObjectType, Odb, Oid, Patc
 use serde::Serialize;
 
 use crate::{
-    limits::MAX_REPOSITORY_INSPECTIONS, pinning::PinnedRepository, push_executor::GitPushFailure,
+    limits::MAX_REPOSITORY_INSPECTIONS,
+    pinning::PinnedRepository,
+    push_executor::{GitPushFailure, MAX_MERGE_DETAIL_BYTES},
     push_objects::ObjectSource,
 };
 
@@ -18,6 +21,7 @@ use crate::{
 pub(super) struct DroppedBaseChanges {
     pub(super) file: String,
     pub(super) first_dropped_hunk: String,
+    pub(super) truncated: bool,
 }
 
 fn repository_failure<T>(_: T) -> GitPushFailure {
@@ -92,6 +96,7 @@ pub(super) fn verify_merge(
     }
     let ancestor = *ancestors.first().ok_or(GitPushFailure::Repository)?;
     let mut dropped = BTreeMap::new();
+    let mut preview_bytes = MAX_MERGE_DETAIL_BYTES;
     let mut trees = Vec::new();
     for commit in [target, branch, base, ancestor] {
         trees.push(
@@ -172,15 +177,32 @@ pub(super) fn verify_merge(
                 }
             }
         }
-        let mut permitted = own_index
+        let branch_hunks = own_index
             .map(|index| hunks(&own, index))
             .transpose()?
             .unwrap_or_default();
+        let mut permitted = BTreeMap::new();
+        for effect in branch_hunks.iter().flat_map(Hunk::effects) {
+            *permitted.entry(effect).or_insert(0usize) += 1;
+        }
         for hunk in hunks(&carried, index)? {
-            if let Some(index) = permitted.iter().position(|own| own == &hunk) {
-                permitted.remove(index);
-            } else {
-                dropped.insert(path.to_owned(), String::from_utf8_lossy(&hunk).into_owned());
+            let carried = hunk.effects().all(|effect| {
+                let Some(remaining) = permitted.get_mut(effect) else {
+                    return false;
+                };
+                if *remaining == 0 {
+                    return false;
+                }
+                *remaining -= 1;
+                true
+            });
+            if !carried {
+                let prefix = hunk.bytes.len().min(preview_bytes);
+                let (preview, shortened) =
+                    crate::bounded::bounded_bytes(&hunk.bytes[..prefix], preview_bytes);
+                let truncated = shortened || prefix < hunk.bytes.len();
+                preview_bytes -= preview.len();
+                dropped.insert(path.to_owned(), (preview, truncated));
                 break;
             }
         }
@@ -192,11 +214,12 @@ pub(super) fn verify_merge(
         Err(GitPushFailure::MergeDroppedBaseChanges(
             dropped
                 .into_iter()
-                .map(|(path, first_dropped_hunk)| {
+                .map(|(path, (first_dropped_hunk, truncated))| {
                     Ok(DroppedBaseChanges {
                         file: String::from_utf8(crate::diff::quoted_diff_path(b"", &path))
                             .map_err(repository_failure)?,
                         first_dropped_hunk,
+                        truncated,
                     })
                 })
                 .collect::<Result<_, GitPushFailure>>()?,
@@ -234,7 +257,27 @@ fn diff_options() -> DiffOptions {
     options
 }
 
-fn hunks(diff: &Diff<'_>, index: usize) -> Result<Vec<Vec<u8>>, GitPushFailure> {
+#[derive(Default)]
+struct Hunk {
+    bytes: Vec<u8>,
+    changes: Vec<Range<usize>>,
+}
+
+impl Hunk {
+    fn single(bytes: Vec<u8>) -> Self {
+        let end = bytes.len();
+        Self {
+            bytes,
+            changes: std::iter::once(0..end).collect(),
+        }
+    }
+
+    fn effects(&self) -> impl Iterator<Item = &[u8]> {
+        self.changes.iter().map(|range| &self.bytes[range.clone()])
+    }
+}
+
+fn hunks(diff: &Diff<'_>, index: usize) -> Result<Vec<Hunk>, GitPushFailure> {
     let delta = diff.get_delta(index).ok_or(GitPushFailure::Repository)?;
     let mut hunks = Vec::new();
     if delta.status() == Delta::Renamed {
@@ -242,7 +285,7 @@ fn hunks(diff: &Diff<'_>, index: usize) -> Result<Vec<Vec<u8>>, GitPushFailure> 
             path.map(|path| crate::diff::quoted_diff_path(b"", path))
                 .ok_or(GitPushFailure::Repository)
         };
-        hunks.push(
+        hunks.push(Hunk::single(
             [
                 b"rename ".as_slice(),
                 &quoted(delta.old_file().path())?,
@@ -250,28 +293,30 @@ fn hunks(diff: &Diff<'_>, index: usize) -> Result<Vec<Vec<u8>>, GitPushFailure> 
                 &quoted(delta.new_file().path())?,
             ]
             .concat(),
-        );
+        ));
     }
     if delta.old_file().mode() != delta.new_file().mode() {
-        hunks.push(
+        hunks.push(Hunk::single(
             format!(
                 "mode {:?} -> {:?}",
                 delta.old_file().mode(),
                 delta.new_file().mode()
             )
             .into_bytes(),
-        );
+        ));
     }
     if let Some(patch) = Patch::from_diff(diff, index).map_err(repository_failure)? {
         for index in 0..patch.num_hunks() {
             let (_, lines) = patch.hunk(index).map_err(repository_failure)?;
-            let mut hunk = Vec::new();
+            let mut hunk = Hunk::default();
             for line in 0..lines {
                 let line = patch
                     .line_in_hunk(index, line)
                     .map_err(repository_failure)?;
-                hunk.push(line.origin() as u8);
-                hunk.extend_from_slice(line.content());
+                let start = hunk.bytes.len();
+                hunk.bytes.push(line.origin() as u8);
+                hunk.bytes.extend_from_slice(line.content());
+                hunk.changes.push(start..hunk.bytes.len());
             }
             hunks.push(hunk);
         }
@@ -281,14 +326,14 @@ fn hunks(diff: &Diff<'_>, index: usize) -> Result<Vec<Vec<u8>>, GitPushFailure> 
     }
     // Binary and empty-file changes have no text hunks; compare object identities.
     if delta.old_file().id() != delta.new_file().id() {
-        hunks.push(
+        hunks.push(Hunk::single(
             format!(
                 "object {} -> {}",
                 delta.old_file().id(),
                 delta.new_file().id()
             )
             .into_bytes(),
-        );
+        ));
     }
     Ok(hunks)
 }

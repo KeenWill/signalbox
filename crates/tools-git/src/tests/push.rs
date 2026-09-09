@@ -917,6 +917,7 @@ async fn push_refuses_branch_side_resolution_that_drops_base_changes() {
             crate::push_merge::DroppedBaseChanges {
                 file: "shared.txt".to_owned(),
                 first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
             }
         ]))
     );
@@ -1039,6 +1040,7 @@ async fn merge_refusal_retains_only_the_first_dropped_hunk_per_file() {
             crate::push_merge::DroppedBaseChanges {
                 file: "shared.txt".to_owned(),
                 first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
             },
         ]))
     );
@@ -1139,6 +1141,7 @@ async fn push_refuses_a_branch_rename_that_drops_the_base_edit() {
             DroppedBaseChanges {
                 file: "new.txt".to_owned(),
                 first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
             }
         ]))
     );
@@ -1197,15 +1200,18 @@ async fn merge_refusal_distinguishes_non_utf8_paths_from_each_other_and_literal_
         Err(GitPushFailure::MergeDroppedBaseChanges(vec![
             DroppedBaseChanges {
                 file: r#""a\\200""#.to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned()
+                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
             },
             DroppedBaseChanges {
                 file: r#""a\200""#.to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned()
+                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
             },
             DroppedBaseChanges {
                 file: r#""a\201""#.to_owned(),
-                first_dropped_hunk: "-base\n+branch\n".to_owned()
+                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
             },
         ]))
     );
@@ -1306,6 +1312,7 @@ async fn push_refuses_a_base_rename_that_drops_the_base_edit() {
             DroppedBaseChanges {
                 file: "new.txt".to_owned(),
                 first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
             }
         ]))
     );
@@ -1371,6 +1378,7 @@ async fn push_refuses_dropped_base_changes_when_the_base_is_the_first_parent() {
             DroppedBaseChanges {
                 file: "shared.txt".to_owned(),
                 first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
             }
         ]))
     );
@@ -1498,4 +1506,124 @@ async fn push_indexes_thousands_of_disjoint_parent_paths_before_matching() {
     .expect("disjoint changes push");
 
     assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_accepts_combined_replacements_without_the_obsolete_branch_preimage() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "old\n", &[]);
+    let branch = merge_test_commit(&repository, "branch\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "base\n", &[ancestor]);
+    let merge = merge_test_commit(&repository, "base\nbranch\n", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("both replacements survive");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_accepts_the_remaining_branch_removal_after_a_base_replacement() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "old-a\nold-b\n", &[]);
+    let branch = merge_test_commit(&repository, "branch\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "base\nold-b\n", &[ancestor]);
+    let merge = merge_test_commit(&repository, "base\nbranch\n", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("remaining branch effect pushes");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_refuses_a_merge_that_repeats_a_branch_effect() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "old\n", &[]);
+    let branch = merge_test_commit(&repository, "branch\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "base\n", &[ancestor]);
+    let merge = merge_test_commit(&repository, "base\nbranch\nbranch\n", &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert_eq!(
+        result,
+        Err(GitPushFailure::MergeDroppedBaseChanges(vec![
+            DroppedBaseChanges {
+                file: "shared.txt".to_owned(),
+                first_dropped_hunk: "+branch\n+branch\n".to_owned(),
+                truncated: false,
+            }
+        ]))
+    );
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn merge_refusal_bounds_collected_previews_across_thousands_of_paths() {
+    use crate::push_executor::MAX_MERGE_DETAIL_BYTES;
+
+    // Each path shares large blobs; repeated previews would exceed the detail budget many times over.
+    const PATH_COUNT: usize = 1024;
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let paths: Vec<_> = (0..PATH_COUNT)
+        .map(|index| format!("file-{index:04}"))
+        .collect();
+    let branch_content = format!("{}\n", "branch".repeat(MAX_MERGE_DETAIL_BYTES));
+    let base_content = format!("{}\n", "base".repeat(MAX_MERGE_DETAIL_BYTES));
+    let files = |content| {
+        paths
+            .iter()
+            .map(|path| (path.as_bytes(), content))
+            .collect::<Vec<_>>()
+    };
+    let ancestor = merge_test_commit_files(&repository, &files("old\n"), &[]);
+    let branch = merge_test_commit_files(&repository, &files(&branch_content), &[ancestor]);
+    let base = merge_test_commit_files(&repository, &files(&base_content), &[ancestor]);
+    let merge = merge_test_commit_files(&repository, &files(&branch_content), &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    let Err(GitPushFailure::MergeDroppedBaseChanges(dropped)) = result else {
+        panic!("expected dropped-base refusal, got {result:?}")
+    };
+    assert_eq!(
+        dropped.iter().map(|entry| &entry.file).collect::<Vec<_>>(),
+        paths.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        dropped
+            .iter()
+            .map(|entry| entry.first_dropped_hunk.len())
+            .sum::<usize>(),
+        MAX_MERGE_DETAIL_BYTES
+    );
+    assert!(dropped.iter().all(|entry| entry.truncated));
+    assert!(
+        dropped
+            .iter()
+            .skip(1)
+            .all(|entry| entry.first_dropped_hunk.is_empty())
+    );
+    assert!(!transport.has_request());
 }
