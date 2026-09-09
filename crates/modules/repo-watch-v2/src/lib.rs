@@ -34,6 +34,7 @@ pub mod dispatch;
 mod event_decode;
 pub mod github;
 pub mod ingest;
+mod kickoff;
 pub mod measurements;
 mod observation_decode;
 pub mod poll_cache;
@@ -2190,13 +2191,35 @@ impl RepoWatchStore {
             .collect::<Result<Vec<_>, _>>()?;
         let mut inserted_count = 0_usize;
         for (command, payload) in planned.iter().zip(encoded_commands) {
+            let kickoff = if command.command().kind() == SessionCommandKind::CreateSession {
+                let (event_payload, baseline): (Vec<u8>, Option<Value>) = sqlx::query_as(
+                    "SELECT event.normalized_payload, repository.comparison_baseline
+                     FROM gh_event AS event LEFT JOIN repository_state AS repository
+                       ON repository.repository = event.repository WHERE event.event_id = $1",
+                )
+                .bind(command.event_id().into_uuid())
+                .fetch_one(&mut *transaction)
+                .await?;
+                let event = crate::event_decode::event(command.event_id(), &event_payload)
+                    .ok_or(StoreError::InvalidRetainedEvent)?;
+                let observation = baseline
+                    .as_ref()
+                    .map(|value| {
+                        crate::observation_decode::observation(value)
+                            .ok_or(StoreError::InvalidRetainedEvent)
+                    })
+                    .transpose()?;
+                crate::kickoff::text(command.rule_id().as_str(), &event, observation.as_ref())
+            } else {
+                None
+            };
             inserted_count += usize::from(
                 sqlx::query(
                     "INSERT INTO dispatch_ledger
                         (dispatch_ref, action_ordinal, command_id, repository, rule_id,
                          rule_revision, event_id, trigger_sequence, command_kind, command_payload,
-                         status, issued_at, singleton_key)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
+                         status, issued_at, singleton_key, kickoff_text)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12, $13)
                      ON CONFLICT DO NOTHING",
                 )
                 .bind(command.dispatch().into_uuid())
@@ -2211,6 +2234,7 @@ impl RepoWatchStore {
                 .bind(payload)
                 .bind(issued_at)
                 .bind(admission.map(|(key, _)| key))
+                .bind(kickoff)
                 .execute(&mut *transaction)
                 .await?
                 .rows_affected()

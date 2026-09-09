@@ -654,7 +654,8 @@ pub(super) fn commission_failure_ambiguity(
             | CreateSessionRepositoryError::Corruption(_) => None,
         },
         CommissionedDispatchRepositoryError::InitialInput(error) => match error {
-            SubmitInputRepositoryError::Database(_) => Some(false),
+            SubmitInputRepositoryError::Database(_)
+            | SubmitInputRepositoryError::CheckoutProvisioningPending => Some(false),
             SubmitInputRepositoryError::CommitAmbiguous(_) => Some(true),
             SubmitInputRepositoryError::DifferentCommandKind { .. }
             | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }

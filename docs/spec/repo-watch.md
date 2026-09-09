@@ -347,8 +347,34 @@ row and its created session, rule revision, event, action ordinal, repository,
 and optional pull request, without a second stored copy of the dispatch or
 session identity. Transcript snapshots and browser session descriptors project
 that retained origin as soon as creation commits, before ledger settlement; the
-browser workspace displays it. Held creation submits no initial input and
-creates no turn.
+browser workspace displays it. After recording the provisioned checkout, the
+daemon submits a first input with the repository-watch module principal and
+`start_when_no_active_turn` delivery before releasing the provisioning hold. The
+ledger freezes the target repository, pull request number, title, head branch,
+head SHA, base branch, and rule instruction at dispatch, and retains the submit
+command identity and publication instruction before submission; pending creation
+replay preserves recorded command delivery through core command idempotency. New
+kickoff submissions read the current session defaults version. A recorded
+defaults-version mismatch retains the provisioning hold and replaces the kickoff
+identity for one retry per dispatch attempt; only an applied result releases the
+hold. Other recorded rejections retire the dispatch with `kickoff_rejected` and
+a durable nonsticky stop, preserving the rejected kickoff command for diagnosis.
+Failed provisioning submits no input. `labeled-review-response` requests thread
+repair, validation, commit, push with `git_push_configured`, replies naming the
+commit, and thread resolution; a stored observation with no unresolved threads
+instead requests a one-turn mergeability and gating-check convergence check, a
+plain pull request reply, and a clean finish. `renovate-merge-forward` requests
+merging the base forward, resolving only conflicts, validating, committing,
+pushing, and reporting the result. Push instructions require the same configured
+authority as `git_push_configured`: a push credential and a head in the watched
+repository. Without that authority, kickoff states that push is unavailable and
+requests a reviewable diff in a plain pull request reply, leaving unresolved
+threads open for the owner to apply the diff. The publication instruction is
+retained with the kickoff command identity and remains unchanged on replay.
+
+During checkout provisioning, non-repository-watch input admission is deferred
+without claiming its command identity, so the kickoff is the first queued input.
+Clients can retry the same command after provisioning completes.
 
 ## Planned
 
