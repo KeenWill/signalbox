@@ -1,9 +1,26 @@
 import { defineProgram, jsonCodec, session } from "@signalbox/program-sdk/v1";
+import type { Codec } from "@signalbox/program-sdk/v1";
 
 const text = jsonCodec((value: unknown): string => {
   if (typeof value !== "string") throw new TypeError("expected string");
   return value;
 });
+
+const onlyOk = jsonCodec((value: unknown): "ok" => {
+  if (value !== "ok") throw new TypeError("expected ok");
+  return value;
+});
+
+// @ts-expect-error A codec that only encodes "ok" cannot encode arbitrary strings.
+const widened: Codec<string> = onlyOk;
+// @ts-expect-error A codec that decodes arbitrary strings cannot promise only "ok".
+const narrowed: Codec<"ok"> = text;
+void widened;
+void narrowed;
+
+defineProgram({ input: text, output: onlyOk, run: (): "ok" => "ok" });
+// @ts-expect-error The return type must match the narrow output codec.
+defineProgram({ input: text, output: onlyOk, run: (): "other" => "other" });
 
 defineProgram({ input: text, output: text, run: (input) => input.toUpperCase() });
 // @ts-expect-error The output codec constrains the return type.

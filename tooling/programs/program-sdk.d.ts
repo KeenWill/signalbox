@@ -1,7 +1,7 @@
 declare module "@signalbox/program-sdk/v1" {
   export interface Codec<T> {
-    decode(bytes: Uint8Array): T;
-    encode(value: T): Uint8Array;
+    decode: (bytes: Uint8Array) => T;
+    encode: (value: T) => Uint8Array;
   }
 
   /** Validates decoded JSON and validates again before encoding a result. */
