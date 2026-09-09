@@ -1,12 +1,17 @@
 //! Merge-forward hunk preservation before push; see tool-loop.md.
 
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Instant,
+};
 
 use git2::{Diff, DiffOptions, ObjectType, Oid, Patch};
 use serde::Serialize;
 
 use crate::{
-    limits::MAX_REPOSITORY_INSPECTIONS, pinning::PinnedRepository, push_executor::GitPushFailure,
+    limits::{MAX_MERGE_PARENTS, MAX_REPOSITORY_INSPECTIONS},
+    pinning::PinnedRepository,
+    push_executor::GitPushFailure,
     push_objects::ObjectSource,
 };
 
@@ -35,6 +40,11 @@ pub(super) fn verify_merge(
         .capture(&database, target)
         .map_err(repository_failure)?;
     let merge = repository.find_commit(target).map_err(repository_failure)?;
+    if merge.parent_count() > MAX_MERGE_PARENTS {
+        return Err(GitPushFailure::MergeParentLimitExceeded {
+            parents: merge.parent_count(),
+        });
+    }
     if merge.parent_count() < 2 {
         return Ok(());
     }
@@ -56,7 +66,7 @@ pub(super) fn verify_merge(
                 .parent_ids(),
         );
     }
-    let mut dropped = Vec::new();
+    let mut dropped = BTreeMap::new();
     for base in merge.parent_ids().skip(1) {
         let ancestor = repository
             .merge_base(branch, base)
@@ -100,6 +110,9 @@ pub(super) fn verify_merge(
                 .path()
                 .or_else(|| delta.old_file().path())
                 .ok_or(GitPushFailure::Repository)?;
+            if dropped.contains_key(path) {
+                continue;
+            }
             let mut options = diff_options();
             options.disable_pathspec_match(true).pathspec(path);
             let own = repository
@@ -123,10 +136,7 @@ pub(super) fn verify_merge(
                 if let Some(index) = permitted.iter().position(|own| own == &hunk) {
                     permitted.remove(index);
                 } else {
-                    dropped.push(DroppedBaseChanges {
-                        file: path.to_string_lossy().into_owned(),
-                        first_dropped_hunk: String::from_utf8_lossy(&hunk).into_owned(),
-                    });
+                    dropped.insert(path.to_owned(), String::from_utf8_lossy(&hunk).into_owned());
                     break;
                 }
             }
@@ -136,9 +146,15 @@ pub(super) fn verify_merge(
     if dropped.is_empty() {
         Ok(())
     } else {
-        dropped.sort_by(|a, b| a.file.cmp(&b.file));
-        dropped.dedup_by(|a, b| a.file == b.file);
-        Err(GitPushFailure::MergeDroppedBaseChanges(dropped))
+        Err(GitPushFailure::MergeDroppedBaseChanges(
+            dropped
+                .into_iter()
+                .map(|(path, first_dropped_hunk)| DroppedBaseChanges {
+                    file: path.to_string_lossy().into_owned(),
+                    first_dropped_hunk,
+                })
+                .collect(),
+        ))
     }
 }
 

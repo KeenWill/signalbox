@@ -919,3 +919,72 @@ async fn push_accepts_a_plain_commit() {
 
     assert_eq!(transport.request().commit(), branch.to_string());
 }
+
+#[tokio::test]
+async fn push_refuses_merges_above_the_parent_ceiling() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let branch = merge_test_commit(&repository, "shared\n", &[]);
+    let parents = vec![branch; crate::limits::MAX_MERGE_PARENTS + 1];
+    let merge = merge_test_commit(&repository, "shared\n", &parents);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert_eq!(
+        result,
+        Err(GitPushFailure::MergeParentLimitExceeded {
+            parents: parents.len()
+        })
+    );
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_accepts_merges_at_the_parent_ceiling() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let branch = merge_test_commit(&repository, "shared\n", &[]);
+    let parents = vec![branch; crate::limits::MAX_MERGE_PARENTS];
+    let merge = merge_test_commit(&repository, "shared\n", &parents);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("merge at ceiling pushes");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn merge_refusal_retains_only_the_first_dropped_hunk_per_file_across_parents() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit(&repository, "shared\n", &[]);
+    let branch = merge_test_commit(&repository, "shared\nbranch\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "shared\nbase\n", &[ancestor]);
+    let other_base = merge_test_commit(&repository, "shared\nother base\n", &[ancestor]);
+    let merge = merge_test_commit(&repository, "shared\nbranch\n", &[branch, base, other_base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert_eq!(
+        result,
+        Err(GitPushFailure::MergeDroppedBaseChanges(vec![
+            crate::push_merge::DroppedBaseChanges {
+                file: "shared.txt".to_owned(),
+                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+            },
+        ]))
+    );
+    assert!(!transport.has_request());
+}
