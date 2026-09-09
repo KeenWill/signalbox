@@ -125,7 +125,8 @@ pub struct StartupScanOutcome {
 }
 
 impl StartupScanOutcome {
-    /// Returns the number of prior-process turns terminalized by this scan.
+    /// Returns the number of prior-process turns terminalized or newly parked
+    /// on model-call recovery by this scan.
     pub const fn recovered_turn_count(&self) -> usize {
         self.recovered_turn_count
     }
@@ -136,7 +137,7 @@ impl StartupScanOutcome {
     /// The scan cannot resolve these turns: their physical tenure has ended
     /// and the exact ambiguity set is durable, whether this scan classified
     /// the issued call or found the wait already parked. They do not block
-    /// startup, so they are reported rather than counted as recovered. Only
+    /// startup; newly created model-call waits also count as recovered. Only
     /// model-call waits with an automatic and eventual operator surface are
     /// reported.
     pub fn awaiting_recovery_decision_sessions(&self) -> &[SessionId] {
@@ -246,13 +247,9 @@ where
                         break;
                     }
                     Ok(StartupScanSessionOutcome::RecoveredModelCall(outcome)) => {
-                        // This scan just created the wait, so the session is
-                        // reported on the restart that wedges it rather than
-                        // only on a later one that observes it already parked.
+                        recovered_turn_count += 1;
                         if matches!(*outcome, ModelCallTerminalOutcome::AwaitingRecovery(_)) {
                             awaiting_recovery_decision_sessions.push(session);
-                        } else {
-                            recovered_turn_count += 1;
                         }
                         break;
                     }

@@ -43,7 +43,7 @@ export const hasConversationContent = (
         )
       )
     case 'event_fact':
-      return body.kind === 'goal_turn_retired'
+      return body.kind === 'goal_turn_retired' || body.kind === 'automatic_reconciliation_exhausted'
     default:
       return false
   }

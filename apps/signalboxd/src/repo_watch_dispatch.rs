@@ -317,6 +317,14 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 return Err(RepositoryWatchCommandError::CoreCommandFailed);
             }
         } else if !checkout.removed {
+            if let Some((kickoff, text)) = self
+                .store
+                .retain_dispatch_kickoff(id, DurableCommandId::from_uuid(Uuid::now_v7()))
+                .await
+                .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
+            {
+                self.core.submit_kickoff(kickoff, session, text).await?;
+            }
             signalbox_persistence::start_eligible_turn::StartEligibleTurnRepository::new(
                 self.core.pool.clone(),
             )
@@ -442,6 +450,58 @@ impl SessionCommandSink for RepositoryWatchCommandSink {
 }
 
 impl RepositoryWatchCommandSink {
+    async fn submit_kickoff(
+        &mut self,
+        command: DurableCommandId,
+        session: SessionId,
+        text: String,
+    ) -> Result<(), RepositoryWatchCommandError> {
+        use signalbox_application::{
+            SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+            UuidV7SubmitInputIdGenerator,
+        };
+        use signalbox_domain::{
+            DeliveryRequest, ModelSelectionOverride, ParentTerminationKind,
+            PerInputConfigurationChoices, SessionConfigurationDefaultsVersion, UserContent,
+        };
+        let request = SubmitInputRequest::try_new(
+            command,
+            session,
+            UserContent::try_text(text)
+                .map_err(|_| RepositoryWatchCommandError::UnsupportedCommand)?,
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        )
+        .map_err(|_| RepositoryWatchCommandError::UnsupportedCommand)?;
+        let mut service = SubmitInputService::new(
+            UuidV7SubmitInputIdGenerator,
+            crate::process_runtime::ConfiguredSubmitInputTransaction {
+                repository: signalbox_persistence::submit_input::SubmitInputRepository::with_model_capabilities(
+                    self.pool.clone(), self.models.model_capability_catalog(),
+                ),
+                model_configuration: &self.models,
+                principal: CommandPrincipal::Module { module: DispatchingModule::RepositoryWatch },
+                cascade_root_kind: ParentTerminationKind::Cancelled,
+            },
+            self.eligibility_nudge.clone(),
+            self.tool_dispatch_gate.clone(),
+        );
+        match service.execute(request).await {
+            Ok(SubmitInputOutcome::Recorded(_)) => Ok(()),
+            Ok(SubmitInputOutcome::ConflictingReuse { .. }) => {
+                Err(RepositoryWatchCommandError::CoreCommandFailed)
+            }
+            Err(error) => {
+                tracing::warn!(?session, %error, "repository-watch kickoff submission failed");
+                Err(RepositoryWatchCommandError::CoreCommandFailed)
+            }
+        }
+    }
+
     async fn submit_with_checkout_provisioning(
         &mut self,
         command: SessionCommand,

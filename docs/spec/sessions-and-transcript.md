@@ -566,8 +566,12 @@ oversized text is a typed bounded excerpt carrying its total length and exact
 continuation, never a summary that appears complete. Detail bodies carry typed
 session and turn lifecycle facts, model settings and provider responses, tool
 arguments and execution evidence, approval decisions, goals, compaction, runner
-placement, and delegation; a retired turn remains a closed event fact. A runner
-directory that exceeds the remaining detail byte budget leaves its item
+placement, and delegation; a retired turn remains a closed event fact. The
+`automatic_reconciliation_exhausted` process event names the turn and exact
+model call or tool attempt whose automatic attempt budget was spent; its browser
+detail is a closed event fact.
+
+A runner directory that exceeds the remaining detail byte budget leaves its item
 unreturned and continues at that item's address. Creation bodies retain the
 cause and its dispatch, program-run, or spawning-request identity. User
 overrides retain the command and denied-request identities. Repeated tool and

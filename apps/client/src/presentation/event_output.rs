@@ -200,6 +200,11 @@ impl<'a> Output<'a> {
                  call={model_call_id} entry={completion_entry_id} \
                  frontier={terminal_frontier_id}"
             ),
+            SessionEvent::AutomaticReconciliationExhausted { .. } => {
+                write!(self.stdout, "event={cursor} session={session_id} ")?;
+                self.json_value(event)?;
+                writeln!(self.stdout)
+            }
             SessionEvent::TurnCredentialPoolExhausted {
                 turn_id,
                 terminal_frontier_id,

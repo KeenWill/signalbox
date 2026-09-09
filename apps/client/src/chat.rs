@@ -1363,7 +1363,8 @@ fn update_turns_from_event(
             }
         }
         SessionEvent::ToolApprovalDecided { .. } => TurnEventEffect::ApprovalDecided,
-        SessionEvent::SessionCreated {}
+        SessionEvent::AutomaticReconciliationExhausted { .. }
+        | SessionEvent::SessionCreated {}
         | SessionEvent::SessionModelSettingsChanged { .. }
         | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::ModelCallTransition { .. }

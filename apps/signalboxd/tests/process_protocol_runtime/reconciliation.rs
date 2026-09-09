@@ -1,6 +1,7 @@
 //! Reconciliation coverage.
 
 use super::*;
+use signalbox_persistence::process_read::{ProcessReadRepository, ProcessTurnState};
 
 #[derive(Debug, Default)]
 pub(crate) struct ReconciliationCycle {
@@ -78,6 +79,25 @@ pub(crate) async fn park_turn_on_ambiguous_model_call(
     pool: &PgPool,
     session_id: CanonicalUuid,
 ) -> Result<(), Box<dyn Error>> {
+    checkpoint_in_flight_model_call(pool, session_id).await?;
+
+    let mut scan = StartupScanService::new(
+        UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    let recovery = scan.execute().await?;
+    assert_eq!(
+        recovery.recovered_turn_count(),
+        1,
+        "a newly parked lost call counts as recovered"
+    );
+    Ok(())
+}
+
+async fn checkpoint_in_flight_model_call(
+    pool: &PgPool,
+    session_id: CanonicalUuid,
+) -> Result<ModelCallId, Box<dyn Error>> {
     let session = SessionId::from_uuid(session_id.into_uuid());
     activate_turn(pool, session).await?;
 
@@ -113,17 +133,67 @@ pub(crate) async fn park_turn_on_ambiguous_model_call(
         return Err(io::Error::other("the fixture call must authorize send").into());
     };
 
-    let mut scan = StartupScanService::new(
-        UuidV7StartupScanIdGenerator,
-        PostgresStartupScanRepository::new(pool.clone()),
-    );
-    let recovery = scan.execute().await?;
+    Ok(call)
+}
+
+/// Losing the process leaves no live provider exchange; startup records the
+/// exact ambiguity once and automatic reconciliation releases the turn.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn restart_recovers_an_in_flight_model_call_and_reconciles() -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("abandoned call")).await?;
+    let call = checkpoint_in_flight_model_call(&runtime.pool, session_id).await?;
+    drop(connection);
+
+    assert_eq!(runtime.kill_and_restart().await?, 1);
     assert_eq!(
-        recovery.recovered_turn_count(),
-        0,
-        "an unobserved issued call parks its turn instead of terminalizing it"
+        sole_terminal_call_disposition(&runtime.pool, session_id, turn_id).await?,
+        Some(String::from("ambiguous"))
     );
-    Ok(())
+    let lost: String =
+        sqlx::query_scalar("SELECT end_disposition FROM turn_attempt WHERE turn_id = $1")
+            .bind(turn_id.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(lost, "lost");
+    let snapshot = ProcessReadRepository::new(runtime.pool.clone())
+        .read_transcript(SessionId::from_uuid(session_id.into_uuid()))
+        .await?
+        .expect("recovered transcript");
+    assert!(matches!(
+        snapshot.turns()[0].state(),
+        ProcessTurnState::ActiveAwaitingModelCallRecovery { .. }
+    ));
+    assert_eq!(
+        runtime.restart().await?,
+        0,
+        "a parked call is recovered only once"
+    );
+
+    let repository = signalbox_persistence::automatic_reconciliation::PostgresAutomaticReconciliationRepository::new(runtime.pool.clone());
+    let batch = repository.claim_due().await?;
+    let [claimed] = batch.claimed() else {
+        panic!("the lost call is due for reconciliation")
+    };
+    assert_eq!(
+        claimed.operation(),
+        signalbox_application::AutomaticReconciliationOperation::ModelCall(call)
+    );
+    assert_eq!(
+        repository.reconcile(*claimed).await?,
+        signalbox_application::AutomaticReconciliationOutcome::Reconciled
+    );
+    let state: String =
+        sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(turn_id.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(state, "terminal");
+    runtime.stop().await
 }
 
 /// a turn parked on an ambiguous model call refuses ordinary input until the user reconciliation
@@ -583,6 +653,63 @@ async fn reconcile_turn_reports_an_absent_session_exactly() -> Result<(), Box<dy
         }
     );
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// A follower learns that automatic recovery requires an operator without
+/// reconnecting for a new transcript snapshot.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn automatic_reconciliation_exhaustion_reaches_the_follow_stream()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("lost call")).await?;
+    park_turn_on_ambiguous_model_call(&runtime.pool, session_id).await?;
+    let call: Uuid = sqlx::query_scalar("SELECT model_call_id FROM model_call WHERE turn_id = $1")
+        .bind(turn_id.into_uuid())
+        .fetch_one(&runtime.pool)
+        .await?;
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::FollowSession { session_id },
+        )
+        .await?;
+    loop {
+        if matches!(
+            response_within(&mut connection).await?.message(),
+            ServerMessage::TranscriptSnapshotEnd { .. }
+        ) {
+            break;
+        }
+    }
+    // Zero automatic attempts isolates the exhaustion publication boundary.
+    let repository = signalbox_persistence::automatic_reconciliation::PostgresAutomaticReconciliationRepository::new(runtime.pool.clone())
+        .with_policy(Some(0), None, None);
+    assert_eq!(repository.claim_due().await?.exhausted().len(), 1);
+    let event = loop {
+        let frame = response_within(&mut connection).await?;
+        if let ServerMessage::SessionEvent {
+            event: event @ SessionEvent::AutomaticReconciliationExhausted { .. },
+            ..
+        } = frame.message()
+        {
+            break event.clone();
+        }
+    };
+    assert_eq!(
+        event,
+        SessionEvent::AutomaticReconciliationExhausted {
+            turn_id,
+            operation_kind: signalbox_process_protocol::ReconciliationOperationKind::ModelCall,
+            operation_id: CanonicalUuid::from_uuid(call),
+        }
+    );
     drop(connection);
     runtime.stop().await
 }
