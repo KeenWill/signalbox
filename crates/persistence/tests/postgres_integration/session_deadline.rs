@@ -543,17 +543,18 @@ async fn waiting_expiry_parks_without_terminalizing_the_turn() -> Result<(), Box
     .execute(&pool)
     .await?;
 
-    let outcome = PostgresSessionDeadlineRepository::new(
+    // Consume setup transitions so the expiry owns the complete observed batch.
+    read_state_changes(&pool).await?;
+    let deadlines = PostgresSessionDeadlineRepository::new(
         pool.clone(),
         SessionDeadlineBounds::new(None, Some(Duration::ZERO)),
-    )
-    .expire_next()
-    .await?;
+    );
+    let outcome = deadlines.expire_next().await?;
     assert_eq!(outcome, SessionDeadlinePassOutcome::Parked { session });
     let events = read_state_changes(&pool).await?;
     assert_eq!(
-        events.last(),
-        Some(&(
+        events,
+        vec![(
             signalbox_persistence::outbox::DispatchedSessionStateKind::Waiting,
             SessionLifecycleState::Parked {
                 cause: SessionParkCause::WaitingDeadlineExpired,
@@ -561,7 +562,15 @@ async fn waiting_expiry_parks_without_terminalizing_the_turn() -> Result<(), Box
                 standing: None,
             },
             LifecycleActor::Watchdog,
-        ))
+        )]
+    );
+    assert_eq!(
+        deadlines.expire_next().await?,
+        SessionDeadlinePassOutcome::Idle
+    );
+    assert!(
+        read_state_changes(&pool).await?.is_empty(),
+        "an idle expiry pass must emit no duplicate transition"
     );
     let lifecycle = SessionLifecycleRepository::new(pool.clone())
         .load(session)
