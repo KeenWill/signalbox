@@ -114,7 +114,7 @@ async fn clone_database(
             .collect::<String>()
     );
     let lock = i64::from_be_bytes(digest.as_bytes()[..8].try_into()?);
-    sqlx::query("SELECT pg_advisory_lock($1)")
+    sqlx::query(crate::lock_inventory::TEST_DATABASE_TEMPLATE)
         .bind(lock)
         .execute(&mut admin)
         .await?;
