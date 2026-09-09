@@ -2680,7 +2680,9 @@ context_window_tokens = 200000
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn a_module_park_preserves_the_automatic_resume_attempt() -> Result<(), Box<dyn Error>> {
+    async fn startup_rearms_a_parked_automatic_resume_attempt() -> Result<(), Box<dyn Error>> {
+        use signalbox_application::EligibilityWorkSource;
+
         let (_container, pool) = migrated_postgres().await?;
         let models = crate::configuration::checked_in_example_configuration()?;
         let session = SessionId::from_uuid(Uuid::now_v7());
@@ -2754,7 +2756,7 @@ context_window_tokens = 200000
                 },
             )
             .await?;
-        let (nudge, _source) = signalbox_application::InProcessEligibilityWorkSource::new(
+        let (nudge, mut source) = signalbox_application::InProcessEligibilityWorkSource::new(
             signalbox_persistence::scheduler::PostgresEligibilitySweep::new(pool.clone()),
         );
         let runtime = PostgresGoalPassDisposition::new(
@@ -2783,19 +2785,14 @@ context_window_tokens = 200000
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].session(), session);
         assert_eq!(pending[0].blocked(), blocked);
-        let resuming = runtime.clone();
-        let mut resume = tokio::spawn(async move {
-            resuming
-                .resume_owned_execution_failure(session, &need)
-                .await;
-        });
-        const PARKED_RESUME_OBSERVATION: Duration = Duration::from_millis(50);
-        const RESUME_TEST_TIMEOUT: Duration = Duration::from_secs(10);
-        assert!(
-            tokio::time::timeout(PARKED_RESUME_OBSERVATION, &mut resume)
-                .await
-                .is_err()
+        assert_eq!(
+            runtime
+                .reconcile_automatic_resumptions_after_restart()
+                .await?,
+            1,
+            "startup must retain the parked block in its resumption inventory"
         );
+        const RESUME_TEST_TIMEOUT: Duration = Duration::from_secs(10);
         assert_eq!(
             runtime.attempt_automatic_resume(session, blocked).await,
             ResumeAttempt::OwnershipDeferred
@@ -2826,7 +2823,23 @@ context_window_tokens = 200000
             )
             .await?
         );
-        tokio::time::timeout(RESUME_TEST_TIMEOUT, &mut resume).await??;
+        assert_eq!(
+            tokio::time::timeout(RESUME_TEST_TIMEOUT, source.next()).await??,
+            session,
+            "restoring the park must make the automatically resumed turn schedulable"
+        );
+        assert_eq!(
+            repository.recovery_progress(session).await?.resumptions(),
+            1,
+            "restoring the park must resume the block exactly once"
+        );
+        assert_eq!(
+            runtime
+                .reconcile_automatic_resumptions_after_restart()
+                .await?,
+            0,
+            "the completed automatic resumption is absent from startup inventory"
+        );
         assert!(matches!(
             repository
                 .load_goal(session)
