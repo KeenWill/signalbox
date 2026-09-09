@@ -2404,12 +2404,23 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
                 repository.clone(),
                 repository.clone(),
                 repository.clone(),
-                repository,
+                repository.clone(),
                 provider,
                 gate,
                 automatic_tool_round_limit,
             );
             loop {
+                if repository
+                    .session_is_parked(session)
+                    .await
+                    .map_err(|error| {
+                        RetainedModelExecutionError::Primary(ModelCallExecutionError::Prepare(
+                            error,
+                        ))
+                    })?
+                {
+                    return Ok(());
+                }
                 let outcome = match service.execute(session).await {
                     Ok(outcome) => outcome,
                     Err(error) if service.retained_state().is_some() => {
@@ -3035,7 +3046,7 @@ where
                 model_repository.clone(),
                 model_repository.clone(),
                 model_repository.clone(),
-                model_repository,
+                model_repository.clone(),
                 provider,
                 model_gate,
                 automatic_tool_round_limit,
@@ -3050,6 +3061,18 @@ where
             );
             let mut run_tools = true;
             let mut return_if_tools_absent = false;
+            let session_is_parked = || async {
+                model_repository
+                    .session_is_parked(session)
+                    .await
+                    .map_err(|error| {
+                        PostgresProviderToolLoopExecutionError::Model(Box::new(
+                            RetainedModelExecutionError::Primary(ModelCallExecutionError::Prepare(
+                                error,
+                            )),
+                        ))
+                    })
+            };
 
             // Every stage this loop completes ends at a committed durable
             // boundary a successor pass resumes from: a checkpointed attempt or
@@ -3060,7 +3083,9 @@ where
             // returning issues neither another tool operation nor another paid
             // provider round.
             loop {
-                if shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                if shutdown_checkpoint_requested(&shutdown_checkpoint)
+                    || session_is_parked().await?
+                {
                     return Ok(());
                 }
                 if run_tools {
@@ -3099,7 +3124,9 @@ where
                             run_tools = false;
                         }
                         ToolExecutionServiceOutcome::AwaitingApproval(waiting) => {
-                            if shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                            if shutdown_checkpoint_requested(&shutdown_checkpoint)
+                                || session_is_parked().await?
+                            {
                                 return Ok(());
                             }
                             let (Some(approval_judge), Some(configuration)) =
@@ -3158,7 +3185,9 @@ where
                     }
                 }
 
-                if shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                if shutdown_checkpoint_requested(&shutdown_checkpoint)
+                    || session_is_parked().await?
+                {
                     return Ok(());
                 }
                 let model_outcome = match model.execute(session).await {
@@ -3366,7 +3395,7 @@ impl PostgresScriptedModelExecution {
                 repository.clone(),
                 repository.clone(),
                 repository.clone(),
-                repository,
+                repository.clone(),
                 ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
                     signalbox_domain::ModelCallTerminalObservation::Completed {
                         assistant_text: vec![assistant_reply],
@@ -3376,6 +3405,17 @@ impl PostgresScriptedModelExecution {
                 None,
             );
             loop {
+                if repository
+                    .session_is_parked(session)
+                    .await
+                    .map_err(|error| {
+                        RetainedModelExecutionError::Primary(ModelCallExecutionError::Prepare(
+                            error,
+                        ))
+                    })?
+                {
+                    return Ok(());
+                }
                 let outcome = match service.execute(session).await {
                     Ok(outcome) => outcome,
                     Err(error) if service.retained_state().is_some() => {

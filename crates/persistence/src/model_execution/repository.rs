@@ -58,6 +58,19 @@ impl PostgresModelCallRepository {
         }
     }
 
+    /// Observes whether the session's park suspends further scheduler operations.
+    pub async fn session_is_parked(
+        &self,
+        session: SessionId,
+    ) -> Result<bool, ModelCallRepositoryError> {
+        Ok(sqlx::query_scalar(
+            "SELECT state_kind = 'parked' FROM session_lifecycle WHERE session_id = $1",
+        )
+        .bind(session_id_to_uuid(session))
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     /// Shares the runner authority used at model and tool continuation boundaries.
     pub fn with_runner_recovery(
         mut self,
