@@ -36,11 +36,13 @@ trial never seals; no path rewrites or deletes the required lineage.
 ## Effects
 
 The native `ApprovalJudgeEval` program enumerates trials and scores their
-outcomes with pure library code. Evaluation effects use checked Rust-only
-records and grants with the workflow host's request ordinals and replay driver;
-program code receives no provider, database or filesystem handle. Corpus cases
-are read through `blob.read` by digest, decoded by the daemon-independent
-library and verified against the manifest at sealing.
+outcomes with pure library code. Evaluation-specific effects admit only native
+callers and use checked Rust-only records under the
+[workflow codec contract](workflows.md#input-and-result), with the host's
+grants, request ordinals and replay driver. Program code receives no provider,
+database or filesystem handle. Corpus cases are read through `blob.read` by
+digest, decoded by the daemon-independent library and verified against the
+manifest at sealing.
 
 | Capability / operation                   | Contract                                                                                                                                                                                                                                                                                             |
 | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -56,12 +58,13 @@ disable provider access and require identical evidence and scorecards.
 ## Recording and sealing
 
 `evaluation_run` and `evaluation_trial` form one immutable sealed snapshot. The
-run row is keyed by the workflow run identity and retains its registration and
-manifest reference, measurement metadata, scorecard kind and full scorecard.
-Trial rows are keyed by that run and trial ordinal and retain the case/repeat
-binding, expected label/provenance, outcome and journal evidence reference,
-including available rationale, provider identity and token usage with its cache
-accounting semantics. Failed and ambiguous outcomes are explicit trial evidence.
+run row is keyed by the workflow run identity and retains measurement metadata,
+scorecard kind and full scorecard; registration and manifest resolve through the
+workflow run. Trial rows are keyed by that run and trial ordinal and retain the
+case/repeat binding, expected label/provenance, outcome and journal evidence
+reference, including available rationale, provider identity and token usage with
+its cache accounting semantics. Failed and ambiguous outcomes are explicit trial
+evidence.
 
 Seal verifies the calling run, exact manifest membership and one resolved
 outcome for every planned trial, then derives the scorecard from that accepted
