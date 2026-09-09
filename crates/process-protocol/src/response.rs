@@ -1332,6 +1332,8 @@ impl ServerMessage {
                 bytes,
                 ..
             } if blob_length_bytes.value() == 0
+                || (bytes.as_bytes().is_empty()
+                    && offset_bytes.value() < blob_length_bytes.value())
                 || bytes.as_bytes().len() > MAX_BLOB_READ_BYTES
                 || u64::try_from(bytes.as_bytes().len()).map_or(true, |length_bytes| {
                     length_bytes

@@ -30,6 +30,23 @@ async fn an_unsatisfied_range_proves_a_truncated_s3_replica() -> Result<(), Box<
 }
 
 #[tokio::test]
+async fn a_shortened_partial_range_proves_a_truncated_s3_replica() -> Result<(), Box<dyn Error>> {
+    let error = read_tail(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 10737418237-10737418238/10737418239\r\nConnection: close\r\n\r\nen").await.expect_err("truncated replica");
+    let error = error
+        .downcast_ref::<BlobStoreError>()
+        .expect("store failure");
+    assert_eq!(error.kind(), BlobStoreFailureKind::VerificationFailed);
+    assert_eq!(
+        error
+            .verification_failure()
+            .expect("length mismatch")
+            .observed_length(),
+        10 * 1024 * 1024 * 1024 - 1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_s3_server_error_does_not_prove_a_length_mismatch() -> Result<(), Box<dyn Error>> {
     let error = read_tail(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nContent-Range: bytes */3\r\nConnection: close\r\n\r\n").await.expect_err("server error");
     let error = error

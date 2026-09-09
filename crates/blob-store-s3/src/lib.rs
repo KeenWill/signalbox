@@ -734,11 +734,6 @@ impl S3BlobStore {
         } else {
             String::from("bytes *")
         };
-        if range != expected_range {
-            return Err(BlobStoreError::unavailable(
-                "validate S3 object range response",
-            ));
-        }
         let observed_length = observed_length
             .parse::<u64>()
             .map_err(|_| BlobStoreError::unavailable("read S3 object length"))?;
@@ -748,7 +743,7 @@ impl S3BlobStore {
                 BlobVerificationFailure::new(expected, None, observed_length),
             ));
         }
-        if !partial_content {
+        if !partial_content || range != expected_range {
             return Err(BlobStoreError::unavailable(
                 "validate S3 object range response",
             ));
