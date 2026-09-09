@@ -221,14 +221,14 @@ mod tests {
         // The intermediate process makes this test the container's guardian owner,
         // isolating the deliberate storage exhaustion from the suite's server.
         let output = tokio::task::spawn_blocking(|| -> std::io::Result<_> {
-            let executable = std::env::current_exe()?;
+            let directory = tempfile::tempdir()?;
             Command::new("python3")
                 .args([
                     "-c",
                     "import subprocess,sys; subprocess.run([sys.executable, '-c', *sys.argv[1:]], check=True)",
                     CONTAINER_HELPER,
                 ])
-                .arg(executable.parent().expect("test executable directory").join("postgres-fixtures"))
+                .arg(directory.path())
                 .arg(POSTGRES_IMAGE_TAG)
                 .arg(include_str!("../../../../config/signalboxd.example.toml"))
                 .env("NEXTEST_RUN_ID", uuid::Uuid::now_v7().to_string())
