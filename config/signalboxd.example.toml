@@ -474,17 +474,10 @@ prompt = "Summarize the prior conversation faithfully for continuation."
 [conversation_import]
 max_source_bytes = 268435456
 
-# web_fetch can issue outbound requests only to these exact origins. Approval
-# posture is configured separately below. An absent or empty list disables its
-# outbound requests. Add an origin only when the deployment accepts it as an
-# egress recipient for untrusted model context.
-[web_fetch]
-allowed_origins = [
-  "https://api.github.com",
-  "https://crates.io",
-  "https://docs.rs",
-  "https://github.com",
-]
+# Optional exact-origin restriction. Without this table, web_fetch admits every
+# origin permitted by its transport. An empty allowed_origins array denies all.
+# [web_fetch]
+# allowed_origins = ["https://example.com"]
 
 # Tool dependencies use the same closed mapping-table pattern as model
 # adapters. The two GitHub-backed families share one non-secret profile; the
@@ -546,11 +539,14 @@ author_email = "signalbox@example.invalid"
 # unsandboxed_exec accepts all three posture values, but only
 # unsandboxed_exec = "delegated" changes where its requests go: to the approval
 # judge, which can still deny them or escalate to a person. Mapping it "auto" or
-# "human" leaves it parked for a person, as does omitting it, and no session
-# blanket ever lowers it.
+# Web tools use the judge under every session blanket. Set an exact web tool
+# to "human" to require a person; "auto" still delegates web requests.
+[tool_settings]
+approval_wait_timeout = "10m" # "none" allows an unbounded human wait.
+
 [tool_approval_postures]
-web_fetch = "human"
-web_search = "human"
+web_fetch = "delegated"
+web_search = "delegated"
 # Uncomment exact names to park those tools for the configured approval judge.
 # github_pull_request_publish_review = "delegated"
 # write_file = "delegated"

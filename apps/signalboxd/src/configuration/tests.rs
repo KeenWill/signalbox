@@ -6205,3 +6205,33 @@ fn repository_watch_poll_budget_rejects_attempts_outside_its_bounds() {
         );
     }
 }
+
+#[test]
+fn human_approval_wait_accepts_a_duration_or_none() {
+    let timed = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"2m\"\n"
+    ))
+    .expect("duration is valid");
+    assert_eq!(
+        timed.approval_wait_timeout(),
+        Some(Duration::from_secs(120))
+    );
+    let unbounded = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"none\"\n"
+    ))
+    .expect("none is valid");
+    assert_eq!(unbounded.approval_wait_timeout(), None);
+}
+
+#[test]
+fn human_approval_wait_rejects_zero_and_invalid_durations() {
+    for value in ["0s", "-1s", "forever"] {
+        assert!(
+            HubModelConfiguration::parse(&format!(
+                "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"{value}\"\n"
+            ))
+            .is_err(),
+            "{value}"
+        );
+    }
+}

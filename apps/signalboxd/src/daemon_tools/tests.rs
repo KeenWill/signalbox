@@ -4226,7 +4226,7 @@ fn composed_catalog_applies_an_enforceable_posture() {
 /// The shipped posture table and daemon catalog compose both egress tools
 /// into user-approved requests while their declarations stay fail-closed.
 #[test]
-fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
+fn shipped_web_postures_resolve_both_daemon_tools_to_delegated_approval() {
     let configuration = crate::configuration::checked_in_example_configuration()
         .expect("checked-in configuration is valid");
     let (web_fetch_catalog, _executor) =
@@ -4257,11 +4257,11 @@ fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
 
     assert_eq!(
         web_fetch_definition.approval_posture(),
-        Some(ToolApprovalPosture::Human)
+        Some(ToolApprovalPosture::Delegated)
     );
     assert_eq!(
         web_search_definition.approval_posture(),
-        Some(ToolApprovalPosture::Human)
+        Some(ToolApprovalPosture::Delegated)
     );
     assert_eq!(
         web_fetch_definition.permission_default(),

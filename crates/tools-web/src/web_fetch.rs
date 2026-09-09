@@ -36,19 +36,19 @@ pub(crate) const MAX_WEB_FETCH_BODY_BYTES: usize = 64 * 1024;
 /// Deployment-owned exact origins to which `web_fetch` may automatically
 /// egress.
 ///
-/// An empty policy disables physical web fetches. Each admitted origin is
-/// canonicalized to its scheme, host, and effective port; paths and query
+/// An absent restriction admits every transport-permitted origin. Each configured
+/// origin is canonicalized to its scheme, host, and effective port; paths and query
 /// strings remain request data and do not broaden the destination set.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WebFetchEgressPolicy {
-    allowed_origins: BTreeSet<WebFetchOrigin>,
+    allowed_origins: Option<BTreeSet<WebFetchOrigin>>,
 }
 
 impl WebFetchEgressPolicy {
     /// Constructs a fail-closed policy with no admitted egress destination.
     pub const fn deny_all() -> Self {
         Self {
-            allowed_origins: BTreeSet::new(),
+            allowed_origins: Some(BTreeSet::new()),
         }
     }
 
@@ -66,17 +66,17 @@ impl WebFetchEgressPolicy {
                 return Err(WebFetchEgressPolicyError::DuplicateOrigin);
             }
         }
-        Ok(Self { allowed_origins })
+        Ok(Self {
+            allowed_origins: Some(allowed_origins),
+        })
     }
 
     fn admits(&self, url: &Url) -> bool {
-        WebFetchOrigin::from_url(url).is_some_and(|origin| self.allowed_origins.contains(&origin))
-    }
-}
-
-impl Default for WebFetchEgressPolicy {
-    fn default() -> Self {
-        Self::deny_all()
+        WebFetchOrigin::from_url(url).is_some_and(|origin| {
+            self.allowed_origins
+                .as_ref()
+                .is_none_or(|origins| origins.contains(&origin))
+        })
     }
 }
 
@@ -262,7 +262,8 @@ impl<Transport> WebFetchTool<Transport> {
         .map_err(|error| match error {
             ToolContractCompileError::Name => WebFetchToolConstructionError::Name,
             ToolContractCompileError::Schema => WebFetchToolConstructionError::Schema,
-        })?;
+        })?
+        .with_approval_posture(signalbox_domain::ToolApprovalPosture::Delegated);
         let compiled = CompiledTool::new(
             definition,
             WebFetchArgumentValidator {
@@ -578,8 +579,22 @@ mod tests {
             .expect("fixture origin is admitted")
     }
 
-    /// The read-only operation defaults to confirmation because a remote
-    /// server observes the GET.
+    /// Web requests retain an explicit judge decision before transport.
+    #[test]
+    fn absent_origin_restriction_admits_a_public_origin() {
+        let (catalog, _) = WebFetchTool::try_new(FailingTransport, WebFetchEgressPolicy::default())
+            .expect("web tool compiles")
+            .into_parts();
+        let name = &catalog.definitions()[0].name().clone();
+        assert_eq!(
+            catalog.validate_arguments(
+                name,
+                &arguments(r#"{"url":"https://unlisted.example/documentation"}"#)
+            ),
+            Ok(())
+        );
+    }
+
     #[test]
     fn web_fetch_definition_carries_exact_policy() {
         let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())

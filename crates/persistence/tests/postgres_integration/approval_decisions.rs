@@ -4161,3 +4161,135 @@ async fn approval_judge_replay_rejects_a_mismatch_after_a_runtime_safety_denial(
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_timeout_denies_a_human_wait_and_resumes_the_turn() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
+        &pool,
+        APPROVAL_FIXTURE_SEED,
+        APPROVAL_TOOL_NAME,
+        APPROVAL_ARGUMENTS,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    assert_eq!(
+        repository.find_resumable_turn(fixture.session).await?,
+        Some(fixture.turn)
+    );
+    assert!(
+        repository
+            .expire_human_approval_wait(
+                fixture.session,
+                fixture.turn,
+                Some(std::time::Duration::ZERO)
+            )
+            .await?
+    );
+    let batch = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("batch remains active");
+    let denial = batch.approval(request).expect("timeout records a denial");
+    assert_eq!(
+        denial.decision(),
+        &ToolApprovalDecision::Deny {
+            reason: Some(ToolDenialReason::try_new(String::from(
+                "approval_wait_timeout"
+            ))?),
+        }
+    );
+    assert_eq!(
+        denial.source(),
+        signalbox_domain::ToolDecisionSource::RuntimeSafety
+    );
+    assert!(batch.awaiting_approval().is_none());
+    assert!(
+        !repository
+            .expire_human_approval_wait(
+                fixture.session,
+                fixture.turn,
+                Some(std::time::Duration::ZERO)
+            )
+            .await?
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_timeout_none_keeps_the_human_wait_unscheduled() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
+        &pool,
+        APPROVAL_FIXTURE_SEED,
+        APPROVAL_TOOL_NAME,
+        APPROVAL_ARGUMENTS,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    assert!(
+        !repository
+            .expire_human_approval_wait(fixture.session, fixture.turn, None)
+            .await?
+    );
+    assert_eq!(repository.find_resumable_turn(fixture.session).await?, None);
+    let batch = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("batch remains active");
+    assert_eq!(
+        batch
+            .awaiting_approval()
+            .expect("human wait remains")
+            .request(),
+        request
+    );
+    assert!(batch.approval(request).is_none());
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_timeout_restart_preserves_the_first_deadline() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _) = migrated_postgres().await?;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
+        &pool,
+        APPROVAL_FIXTURE_SEED,
+        APPROVAL_TOOL_NAME,
+        APPROVAL_ARGUMENTS,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    assert!(
+        !repository
+            .expire_human_approval_wait(
+                fixture.session,
+                fixture.turn,
+                Some(std::time::Duration::from_secs(3600))
+            )
+            .await?
+    );
+    assert_eq!(repository.find_resumable_turn(fixture.session).await?, None);
+    // Advance the stored deadline independently of the replacement process's configuration.
+    sqlx::query("UPDATE tool_approval_human_wait SET deadline = transaction_timestamp() - interval '1 second' WHERE request_id = $1")
+        .bind(request.into_uuid()).execute(&pool).await?;
+    let restarted = PostgresToolLoopRepository::new(pool.clone());
+    assert_eq!(
+        restarted.find_resumable_turn(fixture.session).await?,
+        Some(fixture.turn)
+    );
+    assert!(
+        restarted
+            .expire_human_approval_wait(fixture.session, fixture.turn, None)
+            .await?
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

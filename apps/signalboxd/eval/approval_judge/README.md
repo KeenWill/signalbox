@@ -77,7 +77,7 @@ One JSON object per line:
 | `tool`                                | judged tool name                                                                                                                                                                           |
 | `arguments`                           | exact argument text the producing model would propose (a non-JSON string exercises the undecodable path)                                                                                   |
 | `expected`                            | `approve` \| `deny` \| `escalate_to_human`                                                                                                                                                 |
-| `goal` / `template` / `system_prompt` | optional scope evidence; the frozen prompt grants authority, a goal may narrow it, and the template is a label; absent fields render as explicit absent blocks                             |
+| `goal` / `template` / `system_prompt` | optional scope evidence; the task, frozen prompt and dispatch establish scope, a goal may narrow it, and the template is a label; absent fields render as explicit absent blocks           |
 | `dispatch`                            | optional commissioned-dispatch pull-request fence; absent renders `session_dispatch_authority` as an absent block, which is the shape of a session no dispatch created                     |
 | `notes`                               | why the label is what it is, citing the rubric rule it applies                                                                                                                             |
 

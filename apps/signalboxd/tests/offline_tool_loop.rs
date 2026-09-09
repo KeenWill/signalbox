@@ -2412,9 +2412,15 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
         2
     );
 
-    fixture
-        .decide(request, ToolApprovalDecision::Approve)
-        .await?;
+    let receipt = approve_through_process(&fixture, request, DECISION_COMMAND_ID).await?;
+    assert_approved_receipt(receipt, request);
+    let source: String = sqlx::query_scalar(
+        "SELECT decision_source FROM tool_approval_decision WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(source, "user_command");
     execution.resume_active(fixture.session).await?;
 
     assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
@@ -3156,8 +3162,18 @@ async fn tier_zero_echo_completes_offline_tool_loop() -> Result<(), Box<dyn Erro
 /// offline.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn Error>> {
-    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+async fn web_fetch_completes_without_a_human_with_blanket_disabled() -> Result<(), Box<dyn Error>> {
+    headless_web_fetch(DangerousToolAutoApproval::Disabled).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn web_fetch_completes_without_a_human_with_approve_all() -> Result<(), Box<dyn Error>> {
+    headless_web_fetch(DangerousToolAutoApproval::ApproveAll).await
+}
+
+async fn headless_web_fetch(posture: DangerousToolAutoApproval) -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(posture).await?;
     let expected_status = 200;
     let expected_content_type = "text/plain";
     let expected_body = "offline body";
@@ -3174,15 +3190,16 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
         web.clone(),
         UnusedSessionStatusWriter,
         UnusedCodeHostTransport,
-        WebFetchEgressPolicy::try_from_allowed_origins([String::from("https://example.com")])?,
+        WebFetchEgressPolicy::default(),
     )?
     .into_parts();
     let arguments = serde_json::json!({"url": expected_url}).to_string();
-    let (execution, runtime) = fixture.execution(
+    let (execution, runtime, judge_runtime) = fixture.execution_with_judge(
         [
             tool_use_script(&[(WEB_FETCH_NAME, arguments.as_str())]),
             completion_script("fetch observed"),
         ],
+        approval_judge_script("approve", "Public documentation is ordinary task work."),
         tool_catalog,
         tool_executor,
     );
@@ -3191,10 +3208,14 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
         .execute(Box::new(fixture.activated.clone()))
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
-    fixture
-        .decide(request, ToolApprovalDecision::Approve)
-        .await?;
-    execution.resume_active(fixture.session).await?;
+    let source: String = sqlx::query_scalar(
+        "SELECT decision_source FROM tool_approval_decision WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(source, "delegate");
+    assert_eq!(judge_runtime.received_operations().len(), 1);
     let fetched = web.requests();
     let [physical_request] = fetched.as_slice() else {
         panic!("one physical fetch crosses the injected transport")
@@ -5410,4 +5431,50 @@ impl signalbox_tools_plan::SessionPlanPort for UnusedConversationPort {
     ) -> Result<signalbox_tools_plan::PlanReadPage, Self::Error> {
         Err(UnusedSessionStatusWriterError)
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_timeout_continues_with_a_typed_denial() -> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "human-confirmed";
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        TOOL_NAME,
+        ToolPermissionDefault::Confirm,
+        ToolEffectClass::EffectFree,
+    )]);
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("timeout observed"),
+        ],
+        tool_catalog,
+        executor.clone(),
+    );
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.wait_for_requests(1).await?[0];
+    assert!(
+        PostgresToolLoopRepository::new(fixture.pool.clone())
+            .expire_human_approval_wait(fixture.session, fixture.turn, Some(Duration::ZERO))
+            .await?
+    );
+    execution.resume_active(fixture.session).await?;
+    assert!(executor.events().is_empty());
+    assert_eq!(
+        continuation_tool_exchange(&runtime)?,
+        vec![
+            expected_tool_call(request, TOOL_NAME, "{}"),
+            expected_failed_tool_result(
+                request,
+                serde_json::json!({
+                    "error": {"kind":"denied", "detail":"approval_wait_timeout"}
+                })
+                .to_string()
+            ),
+        ]
+    );
+    Ok(())
 }

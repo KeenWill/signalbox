@@ -181,7 +181,11 @@ The loop's bounds are on durable content, not on wall-clock time, so one
 model-controlled chain cannot hold the progressing slot indefinitely or exhaust
 daemon memory.
 
-Pending approval has no timeout.
+Human approval waits use `tool_settings.approval_wait_timeout` (ten minutes by
+default, or `none`). The first human wait records its deadline durably; restart
+retains it. Expiry records a core-issued `RuntimeSafety` denial with reason
+`approval_wait_timeout` and continues the turn. Judge execution time is not part
+of the human wait.
 
 A tool recovery wait is terminalized only by a proof-bearing interruption or by
 the automatic-reconciliation ledger's claim on that exact ambiguity; resolving
@@ -259,19 +263,19 @@ judge uses the exact direct selection of the request-producing call. The judge
 prompt carries the session's commissioned goal, template, frozen system prompt,
 and optional dispatch authority, each separately delimited and quoted as
 untrusted evidence, and the prompt treats them as scope to compare with the
-request, never as instruction. The frozen system prompt supplies authority,
-bounded by the dispatch fence; the template name is a label, never authority. A
-goal, when present, may narrow that scope but cannot independently grant or
-widen it. Goal absence does not require escalation. The judge applies the first
-matching rule: escalate human-reserved actions or truncated authority or
-undecodable arguments, deny requests explicitly outside scope, approve plainly
-covered requests and their ordinary constituents, otherwise escalate. Exec
-pushes require both a dispatch fence and an immutable permitted remote in the
-frozen prompt; a mutable remote alias alone does not establish the destination.
-The judge identifies `git_push_configured` as the built-in configured-repository
-transport and judges its branch scope without requiring a remote URL in the
-frozen prompt. An explicit remote-URL restriction still requires a verified
-destination match; an unknown match escalates.
+request, never as instruction. The judge approves ordinary task work inside the
+sandbox and scoped credentials without requiring a separate action grant:
+checkout reads and writes, sandbox execs, builds, tests, dependency
+installation, public web research, own-branch pushes, code-host reads, and
+replies and resolutions on the session's pull request. The frozen prompt,
+dispatch fence, and any goal restrict scope; template names supply no authority
+and goal absence does not require escalation. Human reservations, truncated
+authority, and undecodable arguments escalate; explicit prohibitions deny.
+Actions outside established sandbox or credential scope, including pushes to
+another branch, escalate unless exact authority permits them.
+`git_push_configured` pins its destination to the configured repository URL. The
+fenced head commit is a starting point, so task work may publish new commits to
+its own branch.
 
 For repository-watch pull-request sessions, core persistence loads the session's
 typed creation-dispatch identities. The daemon obtains the retained GitHub event
@@ -288,7 +292,8 @@ pending steering terminalizes the unattended turn under the
 commissioned-dispatch audit, preserving `ToolInadmissible` for requests already
 closed by placement loss. A `KnownFailed`, `Refused`, `Cancelled`, or
 `Ambiguous` terminal judge call for an admissible request retains the attended
-park while immediately admitting a user decision.
+park while immediately admitting a user decision. The daemon operator may
+approve or deny any escalation, including a commissioned session's escalation.
 
 A completed judge call records the provider's offered recommendation, the
 effective recommendation, and the cause when withdrawn authority substitutes
@@ -468,16 +473,16 @@ stay exact on the durable request but replay to the provider as a fixed
 placeholder object, so the paired typed error reaches either provider; the
 placeholder is never durable evidence.
 
-A `web_fetch` request's canonical origin must satisfy the deployment-owned
-web-fetch catalog policy in
-[configuration-and-credentials](configuration-and-credentials.md) before
-dispatch, and the transport that carries an admitted request is stated in
+A `web_fetch` request's canonical origin must satisfy any optional deployment
+restriction in [configuration-and-credentials](configuration-and-credentials.md)
+before dispatch, and the transport that carries an admitted request is stated in
 [web-egress-threat-model](web-egress-threat-model.md). Failure before request
 dispatch returns a fixed sanitized known failure; timeout, transport, or body
 loss after dispatch begins is commit-ambiguous. Both web tools declare
-`ExternalEffect`, and for both the shipped human posture supersedes the
-declaration's confirm default and the session blanket, so a request parks before
-it reaches its transport or credential boundary.
+`ExternalEffect` and default to delegated approval under either session blanket.
+An explicit `human` tool posture parks for a person; `auto` still delegates web
+requests. The judge decides before either tool reaches its transport or
+credential boundary.
 
 The blob tools authorize only digests present in attachment stubs in the
 rendered frontier for the issuing turn. A visibility or budget closure resolves
