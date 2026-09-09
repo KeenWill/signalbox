@@ -23,6 +23,25 @@ defineProgram({ input: text, output: onlyOk, run: (): "ok" => "ok" });
 defineProgram({ input: text, output: onlyOk, run: (): "other" => "other" });
 
 defineProgram({ input: text, output: text, run: (input) => input.toUpperCase() });
+defineProgram<string, string>({ input: text, output: text, run: (input: unknown) => String(input) });
+// @ts-expect-error The callback must accept every value the input codec decodes.
+defineProgram({ input: text, output: text, run: (input: "ok") => input });
+
+defineProgram({
+  input: text,
+  output: text,
+  run(input) {
+    // @ts-expect-error The callback has no definition-object receiver.
+    void this.input;
+    return input;
+  },
+});
+const receiverRun = function (this: { prefix: string }, input: string): string {
+  return this.prefix + input;
+};
+// @ts-expect-error A callback requiring an explicit receiver cannot run unbound.
+defineProgram({ input: text, output: text, run: receiverRun });
+
 // @ts-expect-error The output codec constrains the return type.
 defineProgram({ input: text, output: text, run: () => 42 });
 // @ts-expect-error An effect input must include the selected model.

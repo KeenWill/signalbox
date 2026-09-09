@@ -2,6 +2,9 @@ use super::*;
 use deno_core::serde_json;
 use deno_core::v8;
 
+// The isolate bridge strips delivery ordinals; these fixtures need any positive ordinal.
+const SCRIPTED_REQUEST: RequestOrdinal = RequestOrdinal::try_from_u64(1).expect("positive ordinal");
+
 #[tokio::test(flavor = "current_thread")]
 async fn emitted_typescript_entry_returns_checked_session_result() -> Result<(), Box<dyn Error>> {
     const COMMAND: &str = "12345678-1234-1234-1234-123456789abc";
@@ -40,11 +43,12 @@ async fn emitted_typescript_entry_returns_checked_session_result() -> Result<(),
     loop {
         let status = poll_runtime_once(&mut runtime).await;
         while let Ok(request) = receiver.try_recv() {
-            effect_requests.push(request.kind.into_domain());
+            effect_requests.push(request.kind);
             request
                 .reply
-                .send(IsolateDelivery::Answer {
-                    payload: answer.clone(),
+                .send(DeliveryKind::Answer {
+                    resolves: SCRIPTED_REQUEST,
+                    payload: InlineFramePayload::new(answer.clone()),
                 })
                 .unwrap_or_else(|_| panic!("entrypoint must await its effect"));
         }
@@ -83,7 +87,7 @@ async fn emitted_typescript_entry_returns_checked_session_result() -> Result<(),
 /// Executes SDK calls inside the closed isolate and supplies exact scripted answers.
 async fn sdk_script(
     source: &str,
-    answers: impl IntoIterator<Item = IsolateDelivery>,
+    answers: impl IntoIterator<Item = DeliveryKind>,
 ) -> (Result<(), Box<dyn Error>>, Vec<RequestKind>) {
     let mut observed = Vec::new();
     let result = async {
@@ -101,7 +105,7 @@ async fn sdk_script(
         loop {
             let status = poll_runtime_once(&mut runtime).await;
             while let Ok(request) = receiver.try_recv() {
-                observed.push(request.kind.into_domain());
+                observed.push(request.kind);
                 request
                     .reply
                     .send(answers.next().expect("scripted answer for every request"))
@@ -347,19 +351,19 @@ try {
 }
 "#,
         [
-            IsolateDelivery::Answer { payload: serde_json::to_vec(&serde_json::json!({
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(serde_json::to_vec(&serde_json::json!({
                 "session": "12345678-1234-1234-1234-123456789abc",
                 "turn": "12345678-1234-1234-1234-123456789abc",
                 "accepted_input": "12345678-1234-1234-1234-123456789abc",
                 "digest": vec![255_u8; 32], "outcome": "completed"
-            })).expect("valid turn answer") },
-            IsolateDelivery::Answer { payload: br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.to_vec() },
-            IsolateDelivery::Answer { payload: br#"{"registration":"12345678-1234-1234-1234-123456789abc"}"#.to_vec() },
-            IsolateDelivery::Answer { payload: vec![] },
-            IsolateDelivery::Answer { payload: vec![] },
-            IsolateDelivery::Answer { payload: vec![] },
-            IsolateDelivery::Wake { payload: vec![] },
-            IsolateDelivery::Wake { payload: vec![] },
+            })).expect("valid turn answer")) },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.as_slice()) },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(br#"{"registration":"12345678-1234-1234-1234-123456789abc"}"#.as_slice()) },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
+            DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
+            DeliveryKind::Wake { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
+            DeliveryKind::Wake { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::default() },
         ],
     )
     .await;
@@ -609,8 +613,11 @@ async fn answer_wrappers_refuse_extra_success_fields() {
     ] {
         let (result, requests) = sdk_script(
             &format!("const identity = {IDENTITY:?}; await {call};"),
-            [IsolateDelivery::Answer {
-                payload: serde_json::to_vec(&payload).expect("JSON answer fixture"),
+            [DeliveryKind::Answer {
+                resolves: SCRIPTED_REQUEST,
+                payload: InlineFramePayload::new(
+                    serde_json::to_vec(&payload).expect("JSON answer fixture"),
+                ),
             }],
         )
         .await;
@@ -650,8 +657,9 @@ Object.assign(Object.prototype, {fields});
 await {call};
 "#
             ),
-            [IsolateDelivery::Answer {
-                payload: br#"{"unexpected":1}"#.to_vec(),
+            [DeliveryKind::Answer {
+                resolves: SCRIPTED_REQUEST,
+                payload: InlineFramePayload::new(br#"{"unexpected":1}"#.as_slice()),
             }],
         )
         .await;
@@ -680,8 +688,11 @@ if (answer.kind !== "answer" || answer.value.session !== identity) {
   throw new Error("own answer data must remain valid despite inherited accessors");
 }
 "#,
-        [IsolateDelivery::Answer {
-            payload: br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.to_vec(),
+        [DeliveryKind::Answer {
+            resolves: SCRIPTED_REQUEST,
+            payload: InlineFramePayload::new(
+                br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.as_slice(),
+            ),
         }],
     )
     .await;
@@ -696,8 +707,9 @@ async fn session_wrapper_refuses_malformed_host_answer() {
 const identity = "12345678-1234-1234-1234-123456789abc";
 await sdk.session.create({ command: identity, model: identity });
 "#,
-        [IsolateDelivery::Answer {
-            payload: br#"{"session":17}"#.to_vec(),
+        [DeliveryKind::Answer {
+            resolves: SCRIPTED_REQUEST,
+            payload: InlineFramePayload::new(br#"{"session":17}"#.as_slice()),
         }],
     )
     .await;
@@ -719,7 +731,7 @@ const answer = await sdk.session.turn({ command: identity, session: identity,
   text: "雪😀", defaults_version: "18446744073709551615" });
 if (answer.kind !== "answer" || answer.value.outcome !== "refused") throw new Error("expected refusal");
 "#,
-        [IsolateDelivery::Answer { payload: br#"{"outcome":"refused"}"#.to_vec() }],
+        [DeliveryKind::Answer { resolves: SCRIPTED_REQUEST, payload: InlineFramePayload::new(br#"{"outcome":"refused"}"#.as_slice()) }],
     )
     .await;
     result.expect("the maximum u64 must encode exactly");
@@ -742,7 +754,7 @@ const result = await sdk.register({ id: identity, name: "example", revision: "re
   source: [0, 255], artifact: "export {}; // 雪", grants: ["session"] });
 if (result.kind !== "reject" || result.reason !== "capability_denied") throw new Error("expected grant refusal");
 "#,
-        [IsolateDelivery::Reject { reason: IsolateRejectReason::CapabilityDenied }],
+        [DeliveryKind::Reject { resolves: SCRIPTED_REQUEST, reason: RejectReason::CapabilityDenied }],
     )
     .await;
     result.expect("grant refusals remain typed deliveries");
