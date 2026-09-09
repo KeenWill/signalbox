@@ -132,6 +132,53 @@ impl ProgramJournalRepository {
         crate::program_registration::ProgramRegistrationRepository::new(self.pool.clone())
     }
 
+    /// Listens for committed answers from the requested source runs; notifications are hints.
+    pub async fn listen(
+        &self,
+        runs: &[ProgramRunId],
+    ) -> Result<ProgramJournalWake, ProgramJournalRepositoryError> {
+        let listener_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(self.pool.connect_options().as_ref().clone());
+        let mut listener = sqlx::postgres::PgListener::connect_with(&listener_pool).await?;
+        listener.listen("signalbox_program_journal").await?;
+        Ok(ProgramJournalWake {
+            listener,
+            runs: runs.to_vec(),
+        })
+    }
+
+    /// Reads the next retained answer strictly after the source position.
+    pub async fn next_event(
+        &self,
+        wait: signalbox_domain::program_primitives::AwaitProgramEvent,
+    ) -> Result<
+        Option<signalbox_domain::program_primitives::ProgramEvent>,
+        ProgramJournalRepositoryError,
+    > {
+        use signalbox_domain::program_primitives::{ProgramEvent, ProgramEventSource};
+        let ProgramEventSource::ProgramAnswers(run) = wait.source;
+        let row = sqlx::query(
+            "SELECT journal_position, payload_inline FROM program_run_journal_entry
+             WHERE run_id = $1 AND journal_position > $2
+               AND frame_direction = 'delivery' AND frame_kind = 'answer'
+             ORDER BY journal_position LIMIT 1",
+        )
+        .bind(run.into_uuid())
+        .bind(Decimal::from(wait.after))
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let position = positive_u64_from_numeric(row.try_get("journal_position")?)
+                .map_err(|_| ProgramJournalCorruption::InvalidOrdinal("event position"))?;
+            Ok(ProgramEvent {
+                position,
+                payload: InlineFramePayload::new(row.try_get::<Vec<u8>, _>("payload_inline")?),
+            })
+        })
+        .transpose()
+    }
+
     /// Creates the journal anchor for one new run under frame contract v1.
     pub async fn create_stream(
         &self,
@@ -1085,5 +1132,27 @@ impl signalbox_application::program_session::ProgramRunVerifier for ProgramJourn
                 .await
                 .map_err(ProgramSessionCapabilityError::Journal)?
                 .is_some())
+    }
+}
+
+/// A disposable notification listener; callers must catch up after listening and every wake.
+pub struct ProgramJournalWake {
+    listener: sqlx::postgres::PgListener,
+    runs: Vec<ProgramRunId>,
+}
+
+impl ProgramJournalWake {
+    pub async fn changed(&mut self) -> Result<(), ProgramJournalRepositoryError> {
+        while let Some(notification) = self.listener.try_recv().await? {
+            if notification
+                .payload()
+                .parse::<uuid::Uuid>()
+                .is_ok_and(|run| self.runs.contains(&ProgramRunId::from_uuid(run)))
+            {
+                return Ok(());
+            }
+        }
+        // A reconnect also requires catch-up because notifications may have been lost.
+        Ok(())
     }
 }
