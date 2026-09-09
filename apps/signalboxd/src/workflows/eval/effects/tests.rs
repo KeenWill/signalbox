@@ -18,7 +18,7 @@ impl CorpusBlobs for MemoryBlobs {
     fn read(
         &self,
         digest: BlobDigest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, LiveDeliveryFailure>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, EvalFailure>> + Send + '_>> {
         Box::pin(async move {
             if BlobDigest::digest(&self.0) != digest {
                 return Err(failure("blob missing"));
@@ -296,6 +296,39 @@ mod postgres {
                 .await
                 .unwrap()
         }
+        async fn javascript(&mut self, artifact: &str) {
+            let registration = self
+                .fixture
+                .services
+                .registrations
+                .register_user(
+                    ProgramRegistrationId::from_uuid(uuid::Uuid::now_v7()),
+                    ProgramRegistrationRequest {
+                        name: "typed-eval".into(),
+                        revision: EVAL_REVISION.into(),
+                        source: artifact.as_bytes().to_vec(),
+                        artifact: artifact.into(),
+                        grants: ProgramGrants::new([
+                            ProgramCapability::Corpus,
+                            ProgramCapability::Judge,
+                            ProgramCapability::Blob,
+                        ]),
+                    },
+                )
+                .await
+                .unwrap();
+            self.run = ProgramRunId::from_uuid(uuid::Uuid::now_v7());
+            self.fixture
+                .services
+                .registrations
+                .start_run(
+                    self.run,
+                    registration.id,
+                    &self.fixture.manifest.encode().unwrap(),
+                )
+                .await
+                .unwrap();
+        }
         async fn record(&self, capability: ProgramCapability, method: &str, bytes: Vec<u8>) {
             let request =
                 EffectRequest::new(capability, method.into(), InlineFramePayload::new(bytes));
@@ -416,41 +449,9 @@ mod postgres {
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn eval_typescript_fixture_uses_the_same_effect_records() {
         let mut run = RunFixture::new().await;
-        let artifact = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../crates/workflow-runtime/tests/fixtures/eval.js"
-        ));
-        let registration = run
-            .fixture
-            .services
-            .registrations
-            .register_user(
-                ProgramRegistrationId::from_uuid(uuid::Uuid::now_v7()),
-                ProgramRegistrationRequest {
-                    name: "typed-eval".into(),
-                    revision: EVAL_REVISION.into(),
-                    source: artifact.as_bytes().to_vec(),
-                    artifact: artifact.into(),
-                    grants: ProgramGrants::new([
-                        ProgramCapability::Corpus,
-                        ProgramCapability::Judge,
-                        ProgramCapability::Blob,
-                    ]),
-                },
-            )
-            .await
-            .unwrap();
-        run.run = ProgramRunId::from_uuid(uuid::Uuid::now_v7());
-        run.fixture
-            .services
-            .registrations
-            .start_run(
-                run.run,
-                registration.id,
-                &run.fixture.manifest.encode().unwrap(),
-            )
-            .await
-            .unwrap();
+        let artifact =
+            include_str!("../../../../../../crates/workflow-runtime/tests/fixtures/eval.js");
+        run.javascript(artifact).await;
         let ProgramExecutionOutcome::Completed(bytes) = run.execute().await else {
             panic!("typed trial results");
         };
@@ -500,13 +501,58 @@ mod postgres {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn daemon_runner_executes_the_registered_eval_with_supplied_host_services() {
+    async fn daemon_eval_registration_requires_installed_host_services() {
         let run = RunFixture::new().await;
-        let (_, runner) = crate::workflows::WorkflowRuntime::new(run.pool.clone()).unwrap();
+        let (service, runner) = crate::workflows::WorkflowRuntime::new(run.pool.clone()).unwrap();
+        let registration = run
+            .fixture
+            .services
+            .registrations
+            .for_run(run.run)
+            .await
+            .unwrap()
+            .unwrap();
+        let ProgramExecutable::Native {
+            entry,
+            revision,
+            binary_digest,
+        } = registration.content.executable
+        else {
+            panic!("native eval registration");
+        };
+        let request = NativeProgramRegistrationRequest {
+            name: EVAL_ENTRY.into(),
+            revision: EVAL_REVISION.into(),
+            entry,
+            native_revision: revision,
+            binary_digest,
+            grants: registration.content.grants,
+        };
+        assert!(service.eval_executable().is_none());
+        assert!(matches!(
+            service
+                .register_native(registration.id, request.clone())
+                .await,
+            Err(crate::workflows::WorkflowRuntimeError::NativeUnavailable),
+        ));
+        let runner = runner.with_eval(run.fixture.services.clone());
+        assert!(service.eval_executable().is_some());
+        service
+            .register_native(registration.id, request)
+            .await
+            .unwrap();
+        service
+            .start(
+                run.run,
+                registration.id,
+                &run.fixture.manifest.encode().unwrap(),
+            )
+            .await
+            .unwrap();
         const TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
         tokio::time::timeout(
             TEST_DEADLINE,
-            runner.with_eval(run.fixture.services.clone()).run(async {
+            runner.run(async {
                 loop {
                     if run
                         .journal
@@ -530,6 +576,94 @@ mod postgres {
         let score: serde_json::Value = decode(journal.result().unwrap().as_bytes()).unwrap();
         assert_eq!(score["accuracy"]["numerator"], 2);
         assert_eq!(run.fixture.provider.received_operations().len(), 2);
+    }
+
+    async fn infrastructure_failure_keeps_run_recoverable(run: RunFixture, services: EvalServices) {
+        let (_, runner) = crate::workflows::WorkflowRuntime::new(run.pool.clone()).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            runner.with_eval(services).run(std::future::pending()),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        let journal = run.journal.load(run.run).await.unwrap().unwrap();
+        assert!(journal.terminal_delivery().is_none());
+        assert_eq!(journal.entries().len(), 1);
+        assert!(run.fixture.provider.received_operations().is_empty());
+        assert!(matches!(
+            run.execute().await,
+            ProgramExecutionOutcome::Completed(_)
+        ));
+        assert_eq!(run.fixture.provider.received_operations().len(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn daemon_eval_database_failure_retains_an_unanswered_recoverable_request() {
+        let run = RunFixture::new().await;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        pool.close().await;
+        let mut services = run.fixture.services.clone();
+        services.registrations = ProgramRegistrationRepository::new(pool);
+        infrastructure_failure_keeps_run_recoverable(run, services).await;
+    }
+
+    struct UnavailableBlobs;
+    impl CorpusBlobs for UnavailableBlobs {
+        fn read(
+            &self,
+            _: BlobDigest,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, EvalFailure>> + Send + '_>> {
+            Box::pin(async { Err(blob_failure(BlobReadError::Unavailable)) })
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn daemon_eval_blob_failure_retains_an_unanswered_recoverable_request() {
+        let run = RunFixture::new().await;
+        let mut services = run.fixture.services.clone();
+        services.blobs = Arc::new(UnavailableBlobs);
+        infrastructure_failure_keeps_run_recoverable(run, services).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn invalid_judge_requests_keep_their_refusal_after_recovery() {
+        for (method, payload) in [
+            ("unsupported", "{}"),
+            ("evaluate", "{}"),
+            ("evaluate", r#"{"trial":2}"#),
+            ("evaluate", r#"{"trial":1}"#),
+        ] {
+            let mut run = RunFixture::new().await;
+            run.javascript(&format!(
+                "import {{ effect }} from '@signalbox/program-sdk/v1'; await effect('judge', {method:?}, new Uint8Array({:?}));",
+                payload.as_bytes(),
+            )).await;
+            for _ in 0..2 {
+                let mut effects = EvaluationEffects::new(run.fixture.services.clone());
+                let result = run
+                    .host
+                    .execute_registered(run.run, &mut ClockSource, &mut effects)
+                    .await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(signalbox_workflow_runtime::WorkflowHostError::LiveDelivery(
+                            _
+                        ))
+                    ),
+                    "{result:?}"
+                );
+                assert!(effects.rejected());
+            }
+            let journal = run.journal.load(run.run).await.unwrap().unwrap();
+            assert_eq!(journal.entries().len(), 1);
+            assert!(run.fixture.provider.received_operations().is_empty());
+        }
     }
 
     #[derive(Debug)]

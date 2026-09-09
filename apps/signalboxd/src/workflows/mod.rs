@@ -22,6 +22,10 @@ use signalbox_persistence::{
 #[cfg(target_os = "linux")]
 use signalbox_workflow_runtime::native::{NativeCatalog, NativeProgram, WorkflowContext};
 use signalbox_workflow_runtime::native::{NativeProgramError, NativeValue};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::mpsc;
 
 pub use runtime::{WorkflowRuntime, WorkflowRuntimeError};
@@ -38,6 +42,7 @@ pub struct WorkflowService {
     wake: mpsc::UnboundedSender<runtime::WorkflowWake>,
     clock_executable: Option<ProgramExecutable>,
     eval_executable: Option<ProgramExecutable>,
+    eval_ready: Arc<AtomicBool>,
 }
 
 impl WorkflowService {
@@ -71,7 +76,9 @@ impl WorkflowService {
     }
 
     pub fn eval_executable(&self) -> Option<&ProgramExecutable> {
-        self.eval_executable.as_ref()
+        self.eval_executable
+            .as_ref()
+            .filter(|_| self.eval_ready.load(Ordering::Acquire))
     }
 
     pub fn clock_executable(&self) -> Option<&ProgramExecutable> {
@@ -94,7 +101,7 @@ impl WorkflowService {
     ) -> Result<ProgramRegistration, WorkflowRuntimeError> {
         let executable = request.clone().into_content().executable;
         if Some(&executable) != self.clock_executable.as_ref()
-            && Some(&executable) != self.eval_executable.as_ref()
+            && Some(&executable) != self.eval_executable()
         {
             return Err(WorkflowRuntimeError::NativeUnavailable);
         }
@@ -206,6 +213,7 @@ mod tests {
             wake,
             clock_executable: None,
             eval_executable: None,
+            eval_ready: Arc::new(AtomicBool::new(false)),
         };
         let command = CancelProgramRun {
             command_id: signalbox_domain::DurableCommandId::from_uuid(uuid::Uuid::now_v7()),

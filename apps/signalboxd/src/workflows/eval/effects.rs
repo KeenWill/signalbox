@@ -6,7 +6,7 @@ use crate::{
         ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, ApprovalJudgeEvalDispatchFence,
         judge_eval_case, render_eval_case,
     },
-    blob_read_runtime::{BLOB_READ_TIMEOUT, read_blob_chunk, read_blob_entry},
+    blob_read_runtime::{BLOB_READ_TIMEOUT, BlobReadError, read_blob_chunk, read_blob_entry},
     blob_storage_runtime::BlobStoreRegistry,
     configuration::HubModelConfiguration,
 };
@@ -66,17 +66,17 @@ impl EvalServices {
         }
     }
 
-    async fn manifest(&self, run: ProgramRunId) -> Result<EvalManifest, LiveDeliveryFailure> {
+    async fn manifest(&self, run: ProgramRunId) -> Result<EvalManifest, EvalFailure> {
         let bytes = self
             .registrations
             .input_for_run(run)
             .await
-            .map_err(failure)?
+            .map_err(infrastructure_failure)?
             .ok_or_else(|| failure("evaluation run input missing"))?;
         EvalManifest::decode(bytes.as_bytes()).map_err(failure)
     }
 
-    async fn corpus(&self, manifest: &EvalManifest) -> Result<CorpusAnswer, LiveDeliveryFailure> {
+    async fn corpus(&self, manifest: &EvalManifest) -> Result<CorpusAnswer, EvalFailure> {
         let digest = manifest.corpus.parse().map_err(failure)?;
         let bytes = self.blobs.read(digest).await?;
         if BlobDigest::digest(&bytes) != digest {
@@ -128,10 +128,7 @@ impl EvalServices {
         &self,
         manifest: &EvalManifest,
         trial: TrialRequest,
-    ) -> Result<JudgeAnswer, LiveDeliveryFailure> {
-        if trial.trial >= manifest.trial_count().map_err(failure)? {
-            return Err(failure("trial is outside manifest"));
-        }
+    ) -> Result<JudgeAnswer, EvalFailure> {
         if manifest.binding != self.binding {
             return Err(failure("pinned judge binding is unavailable"));
         }
@@ -195,16 +192,93 @@ impl EvalServices {
 /// An attempt's effect adapter; each answer is persisted by the common host.
 pub struct EvaluationEffects {
     services: EvalServices,
+    rejected: bool,
 }
 impl EvaluationEffects {
     pub fn new(services: EvalServices) -> Self {
-        Self { services }
+        Self {
+            services,
+            rejected: false,
+        }
+    }
+
+    pub(crate) fn rejected(&self) -> bool {
+        self.rejected
+    }
+
+    fn finish<T>(&mut self, result: Result<T, EvalFailure>) -> Result<T, LiveDeliveryFailure> {
+        self.rejected = matches!(&result, Err(EvalFailure::Rejected(_)));
+        result.map_err(|error| match error {
+            EvalFailure::Rejected(error) | EvalFailure::Infrastructure(error) => error,
+        })
+    }
+
+    async fn judge_trial(
+        &self,
+        invocation: EffectInvocation<'_>,
+    ) -> Result<(EvalManifest, TrialRequest), EvalFailure> {
+        let trial: TrialRequest =
+            decode(invocation.request.payload().as_bytes()).map_err(failure)?;
+        let manifest = self.services.manifest(invocation.run).await?;
+        if trial.trial >= manifest.trial_count().map_err(failure)? {
+            return Err(failure("trial is outside manifest"));
+        }
+        let journal = self
+            .services
+            .journal
+            .load(invocation.run)
+            .await
+            .map_err(infrastructure_failure)?
+            .ok_or_else(|| failure("evaluation journal missing"))?;
+        let preceding_trials = journal.entries().iter().filter(|entry| {
+            matches!(entry.frame(), signalbox_domain::JournalFrame::Request(frame)
+                if frame.ordinal() < invocation.ordinal && matches!(frame.kind(), signalbox_domain::RequestKind::Effect(effect)
+                    if effect.capability() == ProgramCapability::Judge && effect.method() == "evaluate"))
+        }).count();
+        if preceding_trials != trial.trial as usize {
+            return Err(failure(
+                "judge request does not follow manifest trial order",
+            ));
+        }
+        Ok((manifest, trial))
+    }
+
+    async fn execute_inner(
+        &self,
+        invocation: EffectInvocation<'_>,
+    ) -> Result<InlineFramePayload, EvalFailure> {
+        let bytes = invocation.request.payload().as_bytes();
+        let answer = match (invocation.request.capability(), invocation.request.method()) {
+            (ProgramCapability::Corpus, "load") => {
+                let _: Empty = decode(bytes).map_err(failure)?;
+                let manifest = self.services.manifest(invocation.run).await?;
+                encode(&self.services.corpus(&manifest).await?).map_err(failure)?
+            }
+            (ProgramCapability::Judge, "evaluate") => {
+                let (manifest, trial) = self.judge_trial(invocation).await?;
+                encode(&self.services.judge(&manifest, trial).await?).map_err(failure)?
+            }
+            (ProgramCapability::Blob, "read") => {
+                let input: BlobReadRequest = decode(bytes).map_err(failure)?;
+                let digest = input.digest.parse().map_err(failure)?;
+                let bytes = self.services.blobs.read(digest).await?;
+                if BlobDigest::digest(&bytes) != digest {
+                    return Err(failure("blob digest mismatch"));
+                }
+                encode(&BlobAnswer { bytes }).map_err(failure)?
+            }
+            _ => return Err(failure("unsupported evaluation operation")),
+        };
+        Ok(InlineFramePayload::new(answer))
     }
 }
 
 impl EffectExecutor for EvaluationEffects {
     fn recovery(&self, request: &signalbox_domain::EffectRequest) -> EffectRecovery {
-        if request.capability() == ProgramCapability::Judge {
+        if request.capability() == ProgramCapability::Judge
+            && request.method() == "evaluate"
+            && decode::<TrialRequest>(request.payload().as_bytes()).is_ok()
+        {
             EffectRecovery::Ambiguous
         } else {
             EffectRecovery::Idempotent
@@ -212,57 +286,27 @@ impl EffectExecutor for EvaluationEffects {
     }
     fn adopt<'a>(
         &'a mut self,
-        _: EffectInvocation<'a>,
+        invocation: EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
     {
-        Box::pin(async { Ok(None) })
+        Box::pin(async move {
+            let result = if invocation.request.capability() == ProgramCapability::Judge
+                && invocation.request.method() == "evaluate"
+            {
+                self.judge_trial(invocation).await.map(|_| None)
+            } else {
+                Ok(None)
+            };
+            self.finish(result)
+        })
     }
     fn execute<'a>(
         &'a mut self,
         invocation: EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<InlineFramePayload, LiveDeliveryFailure>> + 'a>> {
         Box::pin(async move {
-            let bytes = invocation.request.payload().as_bytes();
-            let answer = match (invocation.request.capability(), invocation.request.method()) {
-                (ProgramCapability::Corpus, "load") => {
-                    let _: Empty = decode(bytes).map_err(failure)?;
-                    let manifest = self.services.manifest(invocation.run).await?;
-                    encode(&self.services.corpus(&manifest).await?).map_err(failure)?
-                }
-                (ProgramCapability::Judge, "evaluate") => {
-                    let trial: TrialRequest = decode(bytes).map_err(failure)?;
-                    let manifest = self.services.manifest(invocation.run).await?;
-                    let journal = self
-                        .services
-                        .journal
-                        .load(invocation.run)
-                        .await
-                        .map_err(failure)?
-                        .ok_or_else(|| failure("evaluation journal missing"))?;
-                    let preceding_trials = journal.entries().iter().filter(|entry| {
-                        matches!(entry.frame(), signalbox_domain::JournalFrame::Request(frame)
-                            if frame.ordinal() < invocation.ordinal && matches!(frame.kind(), signalbox_domain::RequestKind::Effect(effect)
-                                if effect.capability() == ProgramCapability::Judge && effect.method() == "evaluate"))
-                    }).count();
-                    if preceding_trials != trial.trial as usize {
-                        return Err(failure(
-                            "judge request does not follow manifest trial order",
-                        ));
-                    }
-                    encode(&self.services.judge(&manifest, trial).await?).map_err(failure)?
-                }
-                (ProgramCapability::Blob, "read") => {
-                    let input: BlobReadRequest = decode(bytes).map_err(failure)?;
-                    let digest = input.digest.parse().map_err(failure)?;
-                    let bytes = self.services.blobs.read(digest).await?;
-                    if BlobDigest::digest(&bytes) != digest {
-                        return Err(failure("blob digest mismatch"));
-                    }
-                    encode(&BlobAnswer { bytes }).map_err(failure)?
-                }
-                _ => return Err(failure("unsupported evaluation operation")),
-            };
-            Ok(InlineFramePayload::new(answer))
+            let result = self.execute_inner(invocation).await;
+            self.finish(result)
         })
     }
 }
@@ -271,7 +315,7 @@ trait CorpusBlobs: Send + Sync {
     fn read(
         &self,
         digest: BlobDigest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, LiveDeliveryFailure>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, EvalFailure>> + Send + '_>>;
 }
 struct CatalogBlobs {
     repository: BlobCatalogRepository,
@@ -281,26 +325,26 @@ impl CorpusBlobs for CatalogBlobs {
     fn read(
         &self,
         digest: BlobDigest,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, LiveDeliveryFailure>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, EvalFailure>> + Send + '_>> {
         Box::pin(async move {
             let _permit = self
                 .stores
                 .read_budget()
                 .try_acquire_owned()
-                .map_err(failure)?;
+                .map_err(infrastructure_failure)?;
             tokio::time::timeout(BLOB_READ_TIMEOUT, async {
                 let entry = read_blob_entry(&self.repository, digest)
                     .await
-                    .map_err(|error| failure(format!("blob read: {error:?}")))?;
+                    .map_err(blob_failure)?;
                 let length = std::num::NonZeroU64::new(entry.expected().byte_length())
                     .filter(|length| length.get() <= signalbox_blob_store::MAX_BLOB_RANGE_BYTES)
                     .ok_or_else(|| failure("blob exceeds the existing direct-read range"))?;
                 read_blob_chunk(&self.stores, &entry, 0, length)
                     .await
-                    .map_err(|error| failure(format!("blob read: {error:?}")))
+                    .map_err(blob_failure)
             })
             .await
-            .map_err(failure)?
+            .map_err(infrastructure_failure)?
         })
     }
 }
@@ -407,8 +451,29 @@ fn stable_digest(bytes: &[u8]) -> String {
     format!("fnv1a128:{hash:032x}")
 }
 
-fn failure(error: impl std::fmt::Display) -> LiveDeliveryFailure {
-    LiveDeliveryFailure::new(error.to_string())
+#[derive(Debug)]
+enum EvalFailure {
+    Rejected(LiveDeliveryFailure),
+    Infrastructure(LiveDeliveryFailure),
+}
+
+fn failure(error: impl std::fmt::Display) -> EvalFailure {
+    EvalFailure::Rejected(LiveDeliveryFailure::new(error.to_string()))
+}
+
+fn infrastructure_failure(error: impl std::fmt::Display) -> EvalFailure {
+    EvalFailure::Infrastructure(LiveDeliveryFailure::new(error.to_string()))
+}
+
+fn blob_failure(error: BlobReadError) -> EvalFailure {
+    let message = format!("blob read: {error:?}");
+    match error {
+        BlobReadError::Unavailable
+        | BlobReadError::Integrity
+        | BlobReadError::Missing
+        | BlobReadError::Corrupt => infrastructure_failure(message),
+        BlobReadError::NotFound | BlobReadError::RangeOutOfBounds { .. } => failure(message),
+    }
 }
 
 #[cfg(test)]

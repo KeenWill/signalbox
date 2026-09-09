@@ -4,6 +4,10 @@ use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -102,6 +106,7 @@ pub struct WorkflowRuntime {
     registrations: ProgramRegistrationRepository,
     wake: mpsc::UnboundedReceiver<WorkflowWake>,
     eval: Option<EvalServices>,
+    eval_ready: Arc<AtomicBool>,
 }
 
 impl WorkflowRuntime {
@@ -129,12 +134,14 @@ impl WorkflowRuntime {
         let (clock_executable, eval_executable) = (None, None);
         let registrations = ProgramRegistrationRepository::new(pool.clone());
         let (wake, receiver) = mpsc::unbounded_channel();
+        let eval_ready = Arc::new(AtomicBool::new(false));
         Ok((
             WorkflowService {
                 registrations: admission,
                 wake,
                 clock_executable,
                 eval_executable,
+                eval_ready: eval_ready.clone(),
             },
             Self {
                 pool,
@@ -143,6 +150,7 @@ impl WorkflowRuntime {
                 registrations,
                 wake: receiver,
                 eval: None,
+                eval_ready,
             },
         ))
     }
@@ -150,6 +158,7 @@ impl WorkflowRuntime {
     /// Supplies host-owned corpus, blob and judge services for evaluation runs.
     pub fn with_eval(mut self, services: EvalServices) -> Self {
         self.eval = Some(services);
+        self.eval_ready.store(true, Ordering::Release);
         self
     }
 
@@ -534,9 +543,17 @@ impl EffectExecutor for UnavailableEffects {
     }
     fn adopt<'a>(
         &'a mut self,
-        _: EffectInvocation<'a>,
+        invocation: EffectInvocation<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<Option<InlineFramePayload>, LiveDeliveryFailure>> + 'a>>
     {
+        if let Some(eval) = &mut self.eval {
+            let rejected = &mut self.rejected;
+            return Box::pin(async move {
+                let result = eval.adopt(invocation).await;
+                *rejected = eval.rejected().then_some(invocation.request.capability());
+                result
+            });
+        }
         Box::pin(async { Ok(None) })
     }
     fn execute<'a>(
@@ -547,10 +564,7 @@ impl EffectExecutor for UnavailableEffects {
             let rejected = &mut self.rejected;
             return Box::pin(async move {
                 let result = eval.execute(invocation).await;
-                *rejected = result
-                    .as_ref()
-                    .err()
-                    .map(|_| invocation.request.capability());
+                *rejected = eval.rejected().then_some(invocation.request.capability());
                 result
             });
         }
