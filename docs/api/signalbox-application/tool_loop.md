@@ -419,9 +419,7 @@ pub enum ToolExecutionServiceOutcome {
     ContinuationCheckpointed(signalbox_domain::ModelCallId),
     ContinuationTargetUnavailable(boxed::Box<signalbox_domain::FailedModelCallTurn>),
     ContinuationPoolExhausted(boxed::Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
-    ContinuationContextCompactionRequired(
-        boxed::Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>,
-    ),
+    ContinuationContextCompactionRequired(signalbox_domain::TurnId),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

@@ -51,9 +51,8 @@ use signalbox_persistence::{
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnExecution, ActivatedTurnPass, CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED,
-    FatalExecutionSupervisor, GoalModeNumericBounds, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution,
+    ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSupervisor, GoalModeNumericBounds,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution,
 };
 use sqlx::{PgPool, types::Uuid};
 use tokio::time::timeout;
@@ -855,21 +854,10 @@ async fn an_unmonitored_sessions_failure_block_schedules_no_resumption()
     Ok(())
 }
 
-/// a goal turn whose durable recovery cause requires an operator is
-/// parked by the shared resume planner, not only by the direct disposition
-/// callback that reads the cause.
-///
-/// This drives the sequence that reaches `reconcile_success` with the cause
-/// already recorded: the turn terminalizes as a call-free compaction failure
-/// writing its `goal_execution_failure_recovery` row, the direct
-/// `block_execution_failure` callback never runs — which is what a daemon
-/// restart between the failing commit and the disposition future does — and the
-/// next pass reconciles the still-undisposed terminal turn. The appended block
-/// must carry the operator-required need, because planning it from block
-/// provenance alone armed a resume into the same impossible compaction.
+/// A recorded compaction failure follows ordinary automatic goal recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_reconciled_success_parks_a_durably_non_resumable_failure()
+async fn s_goal_reconciled_compaction_failure_arms_automatic_resumption()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
@@ -969,7 +957,7 @@ async fn s_goal_reconciled_success_parks_a_durably_non_resumable_failure()
     };
 
     assert_eq!(*reason, GoalBlockedReasonKind::ExecutionFailure);
-    assert_eq!(need.as_str(), CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED);
+    assert!(need.as_str().contains("automatic resumption is scheduled"));
     assert_eq!(execution_failure_turn(&goal), attached_turn.turn());
 
     pool.close().await;

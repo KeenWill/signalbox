@@ -2055,10 +2055,11 @@ fn frontier_closes_latest_tool_round(
         }
     }
     let mut continuation = &suffix[results_end..];
-    if continuation.first().is_some_and(|entry| {
+    while continuation.first().is_some_and(|entry| {
         matches!(
             entry.payload(),
             SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                | SemanticTranscriptEntryPayload::ContextSummary { .. }
         )
     }) {
         continuation = &continuation[1..];

@@ -223,7 +223,7 @@ pub struct ReportedModelCallUsage {
     /// compaction, separate from billed usage.
     #[get(copy)]
     retained_output_tokens: Option<u64>,
-    /// Whether reported output became assistant transcript for the next call.
+    /// Whether reported output measures retained response material for the next call.
     #[get(copy)]
     output_is_retained: bool,
     /// Returns a conservative byte allowance for model-visible transcript
@@ -954,7 +954,7 @@ pub(crate) fn map_projected_membership_error(
     }
 }
 
-fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositoryError {
+pub(crate) fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositoryError {
     match error {
         SubmitInputRepositoryError::Database(error) => error.into(),
         SubmitInputRepositoryError::CommitAmbiguous(error) => {

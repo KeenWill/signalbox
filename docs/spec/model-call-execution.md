@@ -58,31 +58,25 @@ typed failure kinds remain intact. Oversized text is truncated at a UTF-8
 boundary with an explicit marker naming the retained and dropped byte counts;
 JSON escaping and the marker count against the share. The admitted text is
 durable and used by ordinary rendering, compaction, and headroom accounting;
-exact executor text and failure details remain observation evidence. When even
-framing and empty-prefix markers or other indivisible content cannot fit the
-first safe prefix, no call is prepared and one transaction fails the turn as a
-last-resort compaction wall. Automatic compaction targets the first safe
-boundary at or beyond half the rendered bytes and falls back to the latest safe
-boundary that fits. At two points a headroom guard adds the newest reported
-input for the pinned target, a byte allowance for model-visible content that
-input does not cover, and the configured output reservation, and compares the
-sum with the configured context window. Queued-turn allowances measure each
-uncovered entry through the effective adapter's message serializer, including
-framing and content-free messages. Before activating a queued turn, the guard
-repeats automatic compaction until the continuation fits. Each attempt after the
-first must replace at least two visible entries, so the starting frontier member
-count bounds attempts across restarts. A failed attempt, an uncompactable
-prefix, or a summary and pending input that still exceed the window fails the
-queued turn with no ordinary call prepared. Inside the tool-result continuation
-transaction an exceeded bound commits the tool results, prepares no continuation
-call, and fails the turn with a headroom record. For a repository-watch-created
-session, the daemon queues at most one successor per such terminalization with
-the fixed input
-`Continue the unfinished repository-watch task from the compacted context.` and
-compacts the terminal frontier through the existing automatic compaction path
-using that successor's frozen direct model selection before activating it; the
-successor remains in the commissioned goal lineage when the terminal turn
-belongs to a goal.
+exact executor text and failure details remain observation evidence. When
+framing or an indivisible exchange exceeds the compaction input budget, source
+text is bounded with UTF-8-safe truncation and retained/dropped byte markers.
+The dedicated call summarizes that bounded material. Its summary text is bounded
+by the configured output reservation in bytes; headroom measures the admitted
+text separately from billed provider output. Automatic compaction targets the
+first safe boundary at or beyond half the rendered bytes, falls back to the
+latest fitting safe boundary, and includes the first indivisible exchange when
+none fits. Before activating a queued turn, the guard repeats compaction until
+its continuation fits. When only a summary remains, its replacement is bounded
+to half its bytes. A failed provider compaction closes the queued turn without
+preparing an ordinary call.
+
+A tool-result continuation exceeding reserved headroom commits its results and a
+compaction checkpoint while retaining the active turn. The daemon summarizes the
+checkpoint through its last safe boundary, then prepares the continuation from
+the results and appended summary. The checkpoint survives restarts, and tool
+results are reused without execution. This applies to every session kind and
+preserves the same turn and goal lineage.
 
 Anthropic prospective input counting is the one provider interaction permitted
 before activation and before a `model_call` exists. The accepted input, frozen

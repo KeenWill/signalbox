@@ -11,20 +11,6 @@ pub(crate) fn exactly_one_credential_reference(references: &[String]) -> &str {
 }
 
 #[track_caller]
-pub(crate) fn reported_usage_still_exceeded_turn(
-    outcome: Result<(), ReportedUsageCompactionError>,
-) -> TurnId {
-    match outcome {
-        Err(ReportedUsageCompactionError::Compaction {
-            turn,
-            cause_code: "reported_usage_context_still_exceeded",
-            ..
-        }) => turn,
-        other => panic!("expected a still-exceeded compaction failure, got {other:?}"),
-    }
-}
-
-#[track_caller]
 pub(crate) fn failed_automatic_compaction_turn(
     outcome: Result<
         (),
@@ -1022,7 +1008,8 @@ async fn compaction_preparation_serializes_turn_activation() -> Result<(), Box<d
 /// summary-plus-suffix input, and sends only that fitting operation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn Error>> {
+async fn automatic_guard_repeats_compaction_until_ordinary_input_fits() -> Result<(), Box<dyn Error>>
+{
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
@@ -1058,28 +1045,27 @@ async fn automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn E
         )
         .await?;
     let second_turn = accepted_successor_turn(&mut successor, session_id, 2).await?;
-    let guarded_configuration = support::parse_model_configuration(
-        &MODEL_CONFIGURATION
-            .replace("max_output_tokens = 256", "max_output_tokens = 1")
-            .replace(
-                "context_window_tokens = 200000",
-                "context_window_tokens = 4096",
-            ),
-    )?;
+    let guarded_configuration = support::parse_model_configuration(&MODEL_CONFIGURATION.replace(
+        "context_window_tokens = 200000",
+        "context_window_tokens = 4096",
+    ))?;
     let ordinary_runtime = RecordingCountedScriptedModel::following(
         [completed_script(
             "fixture-model",
             "automatic guard current reply",
             TokenUsage::unreported(),
         )],
-        [8192, 4],
+        [8192, 8192, 4],
     );
     let summary_text = String::from("automatic guard summary");
-    let summary_runtime = ScriptedModel::single(completed_script(
-        "fixture-model",
-        &summary_text,
-        TokenUsage::unreported(),
-    ));
+    let summary_runtime = ScriptedModel::following([
+        completed_script(
+            "fixture-model",
+            &"initial summary ".repeat(32),
+            TokenUsage::unreported(),
+        ),
+        completed_script("fixture-model", &summary_text, TokenUsage::unreported()),
+    ]);
     let probe = execute_guarded_turn(
         &mut runtime,
         ordinary_runtime,
@@ -1090,7 +1076,7 @@ async fn automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn E
     )
     .await?;
     let counted = probe.counted_operations();
-    assert_eq!(counted.len(), 2);
+    assert_eq!(counted.len(), 3);
     let first_counted_text = rendered_text_messages(&counted[0]);
     assert!(
         first_counted_text
@@ -1103,7 +1089,7 @@ async fn automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn E
             .any(|message| message.1 == first_assistant)
     );
     assert_eq!(
-        rendered_text_messages(&counted[1]),
+        rendered_text_messages(&counted[2]),
         vec![
             (
                 signalbox_model_runtime::ConversationRole::User,
@@ -1119,7 +1105,7 @@ async fn automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn E
     assert_eq!(prepared.len(), 1);
     assert_eq!(
         rendered_text_messages(&prepared[0]),
-        rendered_text_messages(&counted[1])
+        rendered_text_messages(&counted[2])
     );
     let compaction_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
@@ -1129,7 +1115,7 @@ async fn automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn E
     .bind(session_id.into_uuid())
     .fetch_one(&runtime.pool)
     .await?;
-    assert_eq!(compaction_count, 1);
+    assert_eq!(compaction_count, 2);
     let summary_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM semantic_transcript_entry
@@ -1147,10 +1133,7 @@ async fn automatic_guard_compacts_before_ordinary_send() -> Result<(), Box<dyn E
     runtime.stop().await
 }
 
-/// provider-reported preflight rechecks the completed summary and closes the queued candidate
-/// call-free when reserved headroom is still unavailable. The compaction retains its summary
-/// output, not the source input that summary replaced, so a summary larger than the window is what
-/// leaves the queued turn unservable.
+/// Summary headroom uses admitted text independently of the compactor's billed output.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn reported_usage_rechecks_compaction_headroom() -> Result<(), Box<dyn Error>> {
@@ -1235,13 +1218,10 @@ async fn reported_usage_rechecks_compaction_headroom() -> Result<(), Box<dyn Err
         compaction_model,
     );
 
-    let failed_turn = reported_usage_still_exceeded_turn(
-        compaction
-            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
-            .await,
-    );
+    compaction
+        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
+        .await?;
 
-    assert_eq!(*failed_turn.as_uuid(), queued_turn.into_uuid());
     assert_eq!(summary_probe.received_operations().len(), 1);
     let ordinary_call_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
@@ -1258,10 +1238,7 @@ async fn reported_usage_rechecks_compaction_headroom() -> Result<(), Box<dyn Err
     .bind(queued_turn.into_uuid())
     .fetch_one(&runtime.pool)
     .await?;
-    assert_eq!(
-        lifecycle,
-        (String::from("terminal"), Some(String::from("failed")), None)
-    );
+    assert_eq!(lifecycle, (String::from("queued"), None, None));
 
     drop(connection);
     runtime.stop().await

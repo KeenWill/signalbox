@@ -388,7 +388,6 @@ pub(crate) enum AutomaticContextCompactionError {
     Model,
     AttachmentUnavailable,
     Configuration,
-    InputDoesNotFit,
     State,
     Integrity,
     AlreadyAttempted,
@@ -417,7 +416,7 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             Self::Read(ProcessReadError::Corruption(_)) | Self::Integrity => {
                 signalbox_application::OperatorFailureClass::FailClosedCorruption
             }
-            Self::Configuration | Self::InputDoesNotFit | Self::State | Self::AlreadyAttempted => {
+            Self::Configuration | Self::State | Self::AlreadyAttempted => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
             }
         }
@@ -443,7 +442,6 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             Self::Model => "context_compaction_model",
             Self::AttachmentUnavailable => "context_compaction_attachment_unavailable",
             Self::Configuration => "context_compaction_configuration",
-            Self::InputDoesNotFit => "context_compaction_input_does_not_fit",
             Self::State => "context_compaction_state",
             Self::Integrity => "context_compaction_integrity",
             Self::AlreadyAttempted => "context_compaction_already_attempted",
@@ -498,32 +496,15 @@ pub(super) async fn automatic_context_compaction_boundary(
             entries.first(),
             Some(ProcessTranscriptEntry::ContextSummary { .. })
         );
-    if selected_only_current_summary
-        && successor_compaction_cannot_advance(&encoded_lengths, &boundaries, input_byte_budget)
-    {
-        return Ok(None);
+    if selected_only_current_summary || selected.is_none() {
+        return Ok(boundaries
+            .iter()
+            .enumerate()
+            .find(|(index, (_, safe))| *safe && (!selected_only_current_summary || *index > 0))
+            .map(|(_, (position, _))| *position)
+            .or(selected));
     }
     Ok(selected)
-}
-
-pub(super) fn successor_compaction_cannot_advance(
-    encoded_lengths: &[u64],
-    boundaries: &[(u64, bool)],
-    input_byte_budget: u64,
-) -> bool {
-    if encoded_lengths.len() != boundaries.len() || encoded_lengths.len() < 2 {
-        return true;
-    }
-    let mut minimum_bytes = 2_u64;
-    for (encoded_length, (_, safe_boundary)) in encoded_lengths[1..].iter().zip(&boundaries[1..]) {
-        minimum_bytes = minimum_bytes
-            .saturating_add(1)
-            .saturating_add(*encoded_length);
-        if *safe_boundary {
-            return minimum_bytes > input_byte_budget;
-        }
-    }
-    true
 }
 
 pub(super) fn bounded_rendered_compaction_boundary(
@@ -581,7 +562,7 @@ pub(crate) async fn compact_automatically(
 ) -> Result<AppliedContextCompaction, AutomaticContextCompactionError> {
     let repository = ContextCompactionRepository::new(model_calls.pool().clone());
     let compaction_prompt = model_configuration.compaction_prompt();
-    let (prepared, automatic_input_byte_budget) = loop {
+    let (prepared, automatic_input_byte_budget, summary_byte_budget) = loop {
         let defaults = match ProcessReadRepository::new(model_calls.pool().clone())
             .read_session_defaults(session, None)
             .await
@@ -646,14 +627,40 @@ pub(crate) async fn compact_automatically(
             .read_selected_transcript_entries(&preview_positions, &preview_entries)
             .await
             .map_err(AutomaticContextCompactionError::Read)?;
-        let requested_through_position = automatic_context_compaction_boundary(
-            preview.members(),
-            &rendered_entries,
-            automatic_input_byte_budget,
-            &BlobCatalogRepository::new(model_calls.pool().clone()),
+        let summary_byte_budget = if rendered_entries.len() == 1
+            && let ProcessTranscriptEntry::ContextSummary { content, .. } = &rendered_entries[0]
+        {
+            u64::try_from(content.len()).unwrap_or(u64::MAX).div_ceil(2)
+        } else {
+            u64::from(definition.max_output_tokens())
+        }
+        .min(automatic_input_byte_budget);
+        let active_checkpoint: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1
+                AND turn_id = $2 AND state_kind = 'active' AND compaction_frontier_id IS NOT NULL)",
         )
-        .await?
-        .ok_or(AutomaticContextCompactionError::InputDoesNotFit)?;
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .fetch_one(model_calls.pool())
+        .await
+        .map_err(|error| AutomaticContextCompactionError::Repository(error.into()))?;
+        let requested_through_position = if active_checkpoint {
+            preview
+                .members()
+                .iter()
+                .rev()
+                .find(|member| member.is_safe_boundary())
+                .map(|member| member.position())
+        } else {
+            automatic_context_compaction_boundary(
+                preview.members(),
+                &rendered_entries,
+                automatic_input_byte_budget,
+                &BlobCatalogRepository::new(model_calls.pool().clone()),
+            )
+            .await?
+        }
+        .ok_or(AutomaticContextCompactionError::State)?;
         let call = ModelCallId::from_uuid(uuid::Uuid::now_v7());
         let request = PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
@@ -686,7 +693,7 @@ pub(crate) async fn compact_automatically(
         }
         match repository.prepare(request).await {
             Ok(PrepareContextCompactionOutcome::Prepared(prepared)) => {
-                break (prepared, automatic_input_byte_budget);
+                break (prepared, automatic_input_byte_budget, summary_byte_budget);
             }
             Ok(PrepareContextCompactionOutcome::DefaultsChanged) => continue,
             Ok(
@@ -740,19 +747,7 @@ pub(crate) async fn compact_automatically(
             return Err(AutomaticContextCompactionError::Integrity);
         }
     };
-    if u64::try_from(rendered_range.len())
-        .ok()
-        .is_none_or(|rendered_bytes| rendered_bytes > automatic_input_byte_budget)
-    {
-        fail_context_compaction_until_resolved(
-            &repository,
-            &prepared,
-            FailedContextCompactionDisposition::KnownFailed,
-        )
-        .await
-        .map_err(AutomaticContextCompactionError::Repository)?;
-        return Err(AutomaticContextCompactionError::InputDoesNotFit);
-    }
+    let rendered_range = bounded_compaction_source(rendered_range, automatic_input_byte_budget);
     authorize_context_compaction_until_resolved(&repository, &prepared)
         .await
         .map_err(AutomaticContextCompactionError::Repository)?;
@@ -783,9 +778,54 @@ pub(crate) async fn compact_automatically(
         .with_output_tokens(result.usage.output_tokens)
         .with_cache_creation_input_tokens(result.usage.cache_creation_input_tokens)
         .with_cache_read_input_tokens(result.usage.cache_read_input_tokens);
-    complete_context_compaction_until_resolved(&repository, &prepared, &result.summary, usage)
+    let summary = bounded_compaction_material(result.summary, summary_byte_budget);
+    complete_context_compaction_until_resolved(&repository, &prepared, &summary, usage)
         .await
         .map_err(AutomaticContextCompactionError::Repository)
+}
+
+pub(super) fn bounded_compaction_source(material: String, byte_budget: u64) -> String {
+    if u64::try_from(material.len()).is_ok_and(|length| length <= byte_budget) {
+        return material;
+    }
+    let Ok(serde_json::Value::Array(entries)) = serde_json::from_str(&material) else {
+        return bounded_compaction_material(material, byte_budget);
+    };
+    if entries.is_empty() || entries.len() as u64 > byte_budget {
+        return bounded_compaction_material(material, byte_budget);
+    }
+    let separators = entries.len().saturating_sub(1) as u64;
+    let share = byte_budget.saturating_sub(separators) / entries.len() as u64;
+    entries
+        .into_iter()
+        .map(|entry| bounded_compaction_material(entry.to_string(), share))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn bounded_compaction_material(mut material: String, byte_budget: u64) -> String {
+    let budget = usize::try_from(byte_budget).unwrap_or(usize::MAX);
+    if material.len() <= budget {
+        return material;
+    }
+    let original_bytes = material.len();
+    let mut retained = budget;
+    loop {
+        retained = material.floor_char_boundary(retained);
+        let marker = format!(
+            "\n[compaction text truncated: retained {retained} bytes; dropped {} bytes]",
+            original_bytes - retained,
+        );
+        if retained + marker.len() <= budget {
+            material.truncate(retained);
+            material.push_str(&marker);
+            return material;
+        }
+        if marker.len() > budget {
+            return "[truncated]"[..budget.min("[truncated]".len())].to_owned();
+        }
+        retained = retained.min(budget - marker.len());
+    }
 }
 
 pub(super) async fn load_context_compaction_range(

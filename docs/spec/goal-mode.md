@@ -73,11 +73,6 @@ choose a different safe approach; an unchargeable failure resumes without
 guidance and reuses the statement. Why: infrastructure recovery must not invent
 a model instruction.
 
-One execution-failure class requires an operator instead of automatic
-resumption: a failed turn carrying the durable cause that no context-compaction
-boundary fits the model window. Why: an unchanged successor would fail for the
-same cause.
-
 No goal-mode surface delegates work or creates child sessions, and the goal
 events and commands reserve no delegation variant.
 

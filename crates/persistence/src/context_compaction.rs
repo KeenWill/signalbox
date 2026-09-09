@@ -32,7 +32,7 @@ pub struct PrepareContextCompactionRequest {
     pub session: SessionId,
     /// Optional exact one-based complete-frontier position.
     pub requested_through_position: Option<u64>,
-    /// Queued turn whose context guard owns this automatic attempt.
+    /// Turn whose context guard owns this automatic attempt.
     pub automatic_for_turn: Option<TurnId>,
     /// Current defaults epoch observed before entering the transaction.
     pub defaults_version: SessionConfigurationDefaultsVersion,
@@ -212,7 +212,7 @@ pub enum PrepareContextCompactionOutcome {
     InvalidBoundary,
     /// Equal replay names a previously recorded failed command.
     FailedReplay,
-    /// A prior automatic attempt is unapplied, or this attempt cannot reduce the visible frontier.
+    /// A prior automatic attempt is unapplied.
     AutomaticAlreadyAttempted,
 }
 
@@ -845,6 +845,11 @@ async fn load_compaction_source(
              WHERE session_id = $1
                AND (state_kind = 'terminal' OR delegation_runtime_terminal)
             UNION ALL
+            SELECT compaction_frontier_id
+              FROM turn_lifecycle
+             WHERE session_id = $1 AND state_kind = 'active'
+               AND compaction_frontier_id IS NOT NULL
+            UNION ALL
             SELECT seed_context_frontier_id
               FROM imported_session_seed
              WHERE session_id = $1
@@ -1055,12 +1060,14 @@ async fn prepare_in_transaction(
               WHERE session_id = $1
                 AND state_kind = 'active'
                 AND NOT delegation_runtime_terminal
+                AND NOT (turn_id IS NOT DISTINCT FROM $2 AND compaction_frontier_id IS NOT NULL)
          ) OR EXISTS (
              SELECT 1 FROM context_compaction_model_call
               WHERE session_id = $1 AND state_kind <> 'terminal'
          )",
     )
     .bind(session_id_to_uuid(request.session))
+    .bind(request.automatic_for_turn.map(TurnId::into_uuid))
     .fetch_one(&mut **transaction)
     .await?;
     if busy {
@@ -1106,29 +1113,6 @@ async fn prepare_in_transaction(
     let Some(through_index) = through_index else {
         return Ok((false, PrepareContextCompactionOutcome::InvalidBoundary));
     };
-    // Every successor attempt must replace at least two visible entries. The
-    // first may replace one; thereafter successful attempts strictly decrease
-    // the frontier length, including across scheduler passes and restarts.
-    if let Some(turn) = request.automatic_for_turn
-        && through_index == 0
-    {
-        let has_predecessor: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                 SELECT 1 FROM compact_session_command
-                  WHERE session_id = $1 AND automatic_for_turn_id = $2
-             )",
-        )
-        .bind(session_uuid)
-        .bind(turn.into_uuid())
-        .fetch_one(&mut **transaction)
-        .await?;
-        if has_predecessor {
-            return Ok((
-                false,
-                PrepareContextCompactionOutcome::AutomaticAlreadyAttempted,
-            ));
-        }
-    }
     if !range_closes_tool_exchanges(&visible[..=through_index]) {
         return Ok((false, PrepareContextCompactionOutcome::InvalidBoundary));
     }

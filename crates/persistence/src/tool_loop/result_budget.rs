@@ -139,7 +139,7 @@ pub(super) fn context_error_detail(text: &str, limit: usize) -> String {
 }
 
 /// The budget includes JSON string escaping and the truncation marker.
-/// A marker that cannot fit is retained for the compaction-wall fallback.
+/// A marker that cannot fit is retained for dedicated compaction.
 pub(super) fn context_text(text: &str, limit: usize) -> String {
     fn encoded_bytes(text: &str) -> usize {
         // A UTF-8 string always serializes; counting avoids allocating a JSON copy.

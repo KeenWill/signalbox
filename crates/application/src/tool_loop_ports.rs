@@ -241,7 +241,7 @@ pub enum PrepareToolContinuationOutcome {
     /// Every member was unavailable before the continuation could issue a call.
     PoolExhausted(Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
     /// Reported usage requires compaction before another same-turn call.
-    ContextCompactionRequired(Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>),
+    ContextCompactionRequired(TurnId),
 }
 
 /// Authoritative status of one unchanged in-memory executor observation.

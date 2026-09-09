@@ -118,8 +118,8 @@ use signalboxd::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy,
     FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
     PostgresProviderModelExecution, ProcessProviderTextDeltaSink, ProcessRuntime,
-    ProcessRuntimeError, ReportedUsageCompaction, ReportedUsageCompactionError,
-    SessionTemplateConfiguration, TurnLivenessNumericBounds, TurnLivenessRuntime,
+    ProcessRuntimeError, ReportedUsageCompaction, SessionTemplateConfiguration,
+    TurnLivenessNumericBounds, TurnLivenessRuntime,
 };
 use sqlx::PgPool;
 use tempfile::TempDir;

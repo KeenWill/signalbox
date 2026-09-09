@@ -563,17 +563,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn successor_compaction_rejects_an_unreachable_later_safe_boundary() {
-        assert!(super::successor_compaction_cannot_advance(
-            &[10, 100, 100],
-            &[(31, true), (32, false), (33, true)],
-            203,
-        ));
-        assert!(!super::successor_compaction_cannot_advance(
-            &[10, 100, 100],
-            &[(31, true), (32, false), (33, true)],
-            204,
-        ));
+    fn oversized_compaction_source_retains_a_marked_utf8_prefix() {
+        let source = "🦀".repeat(269 * 1024 / 4);
+        let bounded = super::bounded_compaction_material(source, 1024);
+        assert!(bounded.len() <= 1024);
+        assert!(bounded.starts_with("🦀"));
+        assert!(bounded.contains("[compaction text truncated: retained "));
+        assert!(bounded.ends_with(" bytes]"));
+    }
+
+    #[test]
+    fn oversized_compaction_source_includes_the_last_exchange() {
+        let source = serde_json::json!([
+            { "content": "first exchange".repeat(1024) },
+            { "content": "last exchange".repeat(1024) },
+        ]).to_string();
+        let bounded = super::bounded_compaction_source(source, 1024);
+        assert!(bounded.len() <= 1024);
+        assert!(bounded.contains("first exchange"));
+        assert!(bounded.contains("last exchange"));
+        assert_eq!(bounded.matches("compaction text truncated").count(), 2);
     }
 
     #[test]

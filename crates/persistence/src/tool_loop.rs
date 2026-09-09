@@ -1360,6 +1360,42 @@ impl PostgresToolLoopRepository {
                     }
                     _ => return Ok(PrepareToolContinuationOutcome::NoWork),
                 };
+                let checkpoint: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT compaction_frontier_id FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+                ).bind(turn.into_uuid()).bind(session.into_uuid())
+                    .fetch_one(&mut *transaction).await?;
+                let compacted: Option<(Uuid, Uuid)> = match checkpoint {
+                    Some(frontier) => sqlx::query_as(
+                        "SELECT result_frontier_id, summary_entry_id FROM context_compaction
+                          WHERE session_id = $1 AND source_frontier_id = $2",
+                    ).bind(session.into_uuid()).bind(frontier)
+                        .fetch_optional(&mut *transaction).await?,
+                    None => None,
+                };
+                if checkpoint.is_some() && compacted.is_none() {
+                    return Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(turn));
+                }
+                let checkpoint_snapshot = match checkpoint {
+                    Some(frontier) => Some(load_snapshot(&mut transaction, session,
+                        signalbox_domain::ContextFrontierId::from_uuid(frontier)).await?),
+                    None => None,
+                };
+                let result_entries = checkpoint_snapshot.as_ref().map_or_else(
+                    || identities.result_entries().to_vec(),
+                    |snapshot| snapshot.ordered_entries()
+                        .skip(batch.yielded_snapshot().entry_count())
+                        .take(batch.requests().len()).map(|entry| entry.entry()).collect(),
+                );
+                let mut result_frontier = checkpoint.map_or(identities.result_frontier(),
+                    signalbox_domain::ContextFrontierId::from_uuid);
+                let relocated_checkpoint = checkpoint_snapshot.as_ref().is_some_and(|snapshot|
+                    snapshot.entry_count() > batch.yielded_snapshot().entry_count() + batch.requests().len());
+                if relocated_checkpoint {
+                    let prefix: Uuid = sqlx::query_scalar(
+                        "SELECT prefix_context_frontier_id FROM context_frontier WHERE context_frontier_id = $1",
+                    ).bind(result_frontier.into_uuid()).fetch_one(&mut *transaction).await?;
+                    result_frontier = signalbox_domain::ContextFrontierId::from_uuid(prefix);
+                }
                 let child_wait =
                     batch
                         .requests()
@@ -1379,8 +1415,8 @@ impl PostgresToolLoopRepository {
                 let mut projection = match child_wait {
                     Some((awaiting_request, spawning_request, child)) => batch
                         .prepare_delegation_result_projection(
-                            identities.result_entries().to_vec(),
-                            identities.result_frontier(),
+                            result_entries.clone(),
+                            result_frontier,
                             load_foreground_delegation_outcome(
                                 &mut transaction,
                                 session,
@@ -1391,8 +1427,8 @@ impl PostgresToolLoopRepository {
                             .await?,
                         ),
                     None => batch.prepare_result_projection(
-                        identities.result_entries().to_vec(),
-                        identities.result_frontier(),
+                        result_entries.clone(),
+                        result_frontier,
                     ),
                 }
                 .map_err(|_| {
@@ -1400,6 +1436,33 @@ impl PostgresToolLoopRepository {
                         "tool batch is not ready for continuation",
                     )
                 })?;
+                if let Some((frontier, summary)) = compacted {
+                    let loaded = crate::session::load_session_from_connection(&mut transaction, session)
+                        .await.map_err(|error| match error {
+                            crate::session::SessionRepositoryError::Database(error) => ToolLoopRepositoryError::from(error),
+                            crate::session::SessionRepositoryError::Corruption(_) => ToolLoopCorruption::Inconsistent("compaction session").into(),
+                        })?.ok_or(ToolLoopCorruption::Missing("compaction session"))?;
+                    let scheduling = Box::pin(crate::submit_input::load_scheduling_projection(&mut transaction, loaded))
+                        .await.map_err(crate::model_execution::map_scheduling_error).map_err(map_model_call_error)?;
+                    if relocated_checkpoint {
+                        let snapshot = checkpoint_snapshot.as_ref()
+                            .ok_or(ToolLoopCorruption::Missing("relocated checkpoint"))?;
+                        let reference = snapshot.ordered_entries().last()
+                            .ok_or(ToolLoopCorruption::Missing("relocation entry"))?;
+                        let entry = scheduling.semantic_entry(reference).cloned()
+                            .ok_or(ToolLoopCorruption::Missing("relocation entry"))?;
+                        projection = projection.with_context_boundary(entry, snapshot.clone())
+                            .map_err(|_| ToolLoopCorruption::Inconsistent("relocated checkpoint projection"))?;
+                    }
+                    let reference = signalbox_domain::SemanticTranscriptEntryRef::from_source(session,
+                        signalbox_domain::SemanticTranscriptEntryId::from_uuid(summary));
+                    let entry = scheduling.semantic_entry(reference).cloned()
+                        .ok_or(ToolLoopCorruption::Missing("compaction summary"))?;
+                    let snapshot = load_snapshot(&mut transaction, session,
+                        signalbox_domain::ContextFrontierId::from_uuid(frontier)).await?;
+                    projection = projection.with_context_boundary(entry, snapshot)
+                        .map_err(|_| ToolLoopCorruption::Inconsistent("compacted result projection"))?;
+                }
                 let pending_inputs: Vec<Uuid> = sqlx::query_scalar(
                     "SELECT accepted_input_id FROM accepted_input
                       WHERE session_id = $1 AND expected_active_turn_id = $2
@@ -1437,10 +1500,11 @@ impl PostgresToolLoopRepository {
                 )
                 .await
                 .map_err(map_model_call_error)?;
-                persist_result_entries(&mut transaction, &projection).await?;
-                insert_snapshot(&mut transaction, projection.snapshot())
-                    .await
-                    .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+                if checkpoint.is_none() {
+                    persist_result_entries(&mut transaction, &projection).await?;
+                    insert_snapshot(&mut transaction, projection.snapshot())
+                        .await.map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+                }
                 if let Some(runner) = &self.runner_recovery {
                     let (settled, boundary) = runner
                         .settle_replacement_at_boundary(
@@ -1493,6 +1557,7 @@ impl PostgresToolLoopRepository {
                     crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
                         .await
                         .map_err(map_model_call_error)?;
+                if checkpoint.is_none() {
                 outbox::append(
                     &mut transaction,
                     OutboxEvent::ToolBatchTransition {
@@ -1503,6 +1568,7 @@ impl PostgresToolLoopRepository {
                     },
                 )
                 .await?;
+                }
                 let outcome = crate::model_execution::prepare_tool_continuation_call(
                     &mut transaction,
                     outbox_order_guard,
@@ -1528,6 +1594,7 @@ impl PostgresToolLoopRepository {
                     let rows = sqlx::query(
                         "UPDATE turn_lifecycle
                         SET active_tool_round_call_id = NULL,
+                            compaction_frontier_id = NULL,
                             approval_tool_request_id = NULL,
                             recovery_tool_attempt_id = NULL
                       WHERE turn_id = $1
@@ -2167,7 +2234,16 @@ async fn load_tool_round_result_window(
                AND round.turn_id = $2
                AND round.boundary_kind = 'continuing'
                AND terminal.member_count =
-                       boundary.member_count + round.request_count + $4
+                       boundary.member_count + round.request_count + $4 + (
+                           SELECT count(*) FROM context_frontier_member AS member
+                           JOIN semantic_transcript_entry AS entry
+                             ON entry.source_session_id = member.source_session_id
+                            AND entry.semantic_entry_id = member.semantic_entry_id
+                           WHERE member.owning_session_id = $1
+                             AND member.context_frontier_id = $3
+                             AND member.member_position > boundary.member_count + round.request_count
+                             AND entry.payload_kind = 'context_summary'
+                       )
          ), terminal_member AS MATERIALIZED (
             SELECT member_position,
                    source_session_id,

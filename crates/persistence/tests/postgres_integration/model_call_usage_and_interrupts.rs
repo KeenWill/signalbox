@@ -1806,10 +1806,8 @@ async fn unreported_tool_round_counts_replayed_provider_reasoning() -> Result<()
 }
 
 /// A successful dedicated compaction call becomes the provider-confirmed
-/// baseline until a later ordinary call reports usage. Its retained summary is
-/// already represented by reported output tokens and is not counted twice,
-/// while the reported input measures the source text that summary replaced and
-/// is retained by nothing.
+/// baseline until a later ordinary call reports usage. Headroom measures its
+/// admitted summary bytes independently of the dedicated call's billed output.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn context_compaction_usage_is_available_to_pre_activation_compaction()
@@ -1931,10 +1929,10 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
         !retained.input_is_retained(),
         "the summarized-away source the compaction reported as input is gone"
     );
-    assert!(retained.output_is_retained());
+    assert!(!retained.output_is_retained());
     assert_eq!(
         retained.projected_unreported_content_bytes(),
-        u64::try_from(retained_source_suffix.len() + suffix.len())?
+        u64::try_from(retained_source_suffix.len() + suffix.len() + 24)?
     );
 
     let fast_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -2173,8 +2171,8 @@ async fn queued_turn_activation_preview_scores_its_own_input() -> Result<(), Box
 /// summary was appended physically after the successor's through-entry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn automatic_compaction_advances_projected_coverage_and_rejects_summary_only_retry()
--> Result<(), Box<dyn Error>> {
+async fn automatic_compaction_can_summarize_a_retained_summary_again() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x6d88;
     let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
@@ -2280,7 +2278,7 @@ async fn automatic_compaction_advances_projected_coverage_and_rejects_summary_on
         .expect("the compacted frontier remains visible");
     assert_eq!(compacted.members().len(), 1);
     // A fresh repository models a later scheduler pass with no in-memory budget.
-    let exhausted = ContextCompactionRepository::new(pool.clone())
+    let repeated = ContextCompactionRepository::new(pool.clone())
         .prepare(PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(Uuid::now_v7()),
             session: fixture.session,
@@ -2297,10 +2295,19 @@ async fn automatic_compaction_advances_projected_coverage_and_rejects_summary_on
             result_frontier: ContextFrontierId::from_uuid(Uuid::now_v7()),
         })
         .await?;
-    assert!(matches!(
-        exhausted,
-        PrepareContextCompactionOutcome::AutomaticAlreadyAttempted
-    ));
+    let PrepareContextCompactionOutcome::Prepared(repeated) = repeated else {
+        panic!("a retained summary can be reduced by another compaction")
+    };
+    compaction_repository.authorize(&repeated).await?;
+    compaction_repository
+        .complete(
+            &repeated,
+            "successor summary",
+            ContextCompactionTokenUsage::unreported()
+                .with_input_tokens(Some(103))
+                .with_output_tokens(Some(13)),
+        )
+        .await?;
 
     // Twenty-eight ASCII characters and one two-byte "é": 30 UTF-8 bytes.
     let appended_input = "successor compaction suffix é";
@@ -2342,8 +2349,8 @@ async fn automatic_compaction_advances_projected_coverage_and_rejects_summary_on
     assert!(!retained.input_is_retained());
     assert_eq!(
         retained.projected_unreported_content_bytes(),
-        30,
-        "only the appended input remains model-visible after the successor compaction"
+        47,
+        "the 17-byte summary and 30-byte appended input remain model-visible"
     );
 
     pool.close().await;

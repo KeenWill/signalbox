@@ -16,8 +16,7 @@ use signalbox_domain::{
 };
 use signalbox_model_provider_runtime::{ContextCompactionModel, RuntimeModelCatalog};
 use signalbox_persistence::{
-    context_compaction::{AppliedContextCompaction, ContextCompactionRepository},
-    goal::GoalExecutionFailureRecoveryCause,
+    context_compaction::AppliedContextCompaction,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     start_eligible_turn::{
         CommitActivationPreviewError, CommitActivationPreviewOutcome,
@@ -157,7 +156,6 @@ struct ReportedUsageCompactionCandidate {
     preview: PreparedActivationPreview,
     turn: TurnId,
     continuation_selection: Option<DirectModelSelection>,
-    summary_exceeds_headroom: bool,
 }
 
 impl fmt::Debug for ReportedUsageCompaction {
@@ -234,6 +232,41 @@ impl ReportedUsageCompaction {
         session: SessionId,
         observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
     ) -> Result<(), ReportedUsageCompactionError> {
+        let checkpoint = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid)>(
+            "SELECT turn.turn_id, COALESCE(call.direct_model_selection_id, call.frozen_alias_selected_direct_id)
+               FROM turn_lifecycle AS turn
+               JOIN model_call AS call ON call.model_call_id = turn.active_tool_round_call_id
+              WHERE turn.session_id = $1 AND turn.state_kind = 'active'
+                AND turn.compaction_frontier_id IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM context_compaction AS summary
+                    WHERE summary.session_id = turn.session_id
+                      AND summary.source_frontier_id = turn.compaction_frontier_id)",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(self.model_calls.pool())
+        .await
+        .map_err(|error| ReportedUsageCompactionError::Continuation(
+            ContinuationCompactionError::Database(error),
+        ))?;
+        if let Some((turn, selection)) = checkpoint {
+            let turn = TurnId::from_uuid(turn);
+            compact_automatically(
+                &self.model_calls,
+                &self.model_configuration,
+                &self.compaction_model,
+                session,
+                turn,
+                Some(DirectModelSelection::from_uuid(selection)),
+                observe_prepared,
+                self.blob_registry.as_deref(),
+            )
+            .await
+            .map_err(|error| ReportedUsageCompactionError::Compaction {
+                turn,
+                failure_class: error.operator_failure_class(),
+                cause_code: error.operator_failure_cause_code(),
+            })?;
+        }
         self.enqueue_continuation(session).await?;
         self.compact_if_needed_for(session, observe_prepared, false)
             .await
@@ -270,52 +303,9 @@ impl ReportedUsageCompaction {
             if remaining.turn != turn {
                 return Ok(());
             }
-            if !remaining.summary_exceeds_headroom {
-                let frontier = ContextCompactionRepository::new(self.model_calls.pool().clone())
-                    .preview_automatic_range(session)
-                    .await
-                    .map_err(|error| ReportedUsageCompactionError::Compaction {
-                        turn: remaining.turn,
-                        failure_class: error.operator_failure_class(),
-                        cause_code: error.operator_failure_cause_code(),
-                    })?;
-                if frontier.is_some_and(|frontier| frontier.members().len() > 1) {
-                    candidate = ReportedUsageCompactionCandidate {
-                        continuation_selection,
-                        ..remaining
-                    };
-                    continue;
-                }
-            }
-            let remaining_turn = remaining.turn;
-            return match close_failed_compaction_turn(
-                &self.activation,
-                &self.model_calls,
-                remaining.preview,
-                TurnTerminalCause::ReportedUsageContextStillExceeded,
-                None,
-            )
-            .await
-            .map_err(|source| {
-                ReportedUsageCompactionError::CompactionFailureClosure {
-                    turn: remaining_turn,
-                    source,
-                }
-            })? {
-                CommitCompactionFailurePreviewOutcome::Failed(_) => {
-                    tracing::warn!(
-                        cause_code = "reported_usage_context_still_exceeded",
-                        session_id = %session.as_uuid(),
-                        turn_id = %remaining_turn.as_uuid(),
-                        "automatic compaction did not restore reserved context headroom; the queued turn was closed before provider dispatch"
-                    );
-                    Err(ReportedUsageCompactionError::Compaction {
-                        turn: remaining_turn,
-                        failure_class: OperatorFailureClass::CallerOrHubBug,
-                        cause_code: "reported_usage_context_still_exceeded",
-                    })
-                }
-                CommitCompactionFailurePreviewOutcome::Stale => Ok(()),
+            candidate = ReportedUsageCompactionCandidate {
+                continuation_selection,
+                ..remaining
             };
         }
     }
@@ -345,34 +335,6 @@ impl ReportedUsageCompaction {
         .await
         {
             Ok(applied) => applied,
-            Err(crate::process_runtime::AutomaticContextCompactionError::AlreadyAttempted) => {
-                match close_failed_compaction_turn(
-                    &self.activation,
-                    &self.model_calls,
-                    preview,
-                    TurnTerminalCause::ReportedUsageContextCompactionExhausted,
-                    None,
-                )
-                .await
-                .map_err(|source| {
-                    ReportedUsageCompactionError::CompactionFailureClosure { turn, source }
-                })? {
-                    CommitCompactionFailurePreviewOutcome::Failed(_) => {
-                        tracing::warn!(
-                            cause_code = "reported_usage_context_compaction_exhausted",
-                            session_id = %session.as_uuid(),
-                            turn_id = %turn.as_uuid(),
-                            "the queued turn's bounded automatic compaction attempt was already spent; the turn was closed before provider dispatch"
-                        );
-                        return Err(ReportedUsageCompactionError::Compaction {
-                            turn,
-                            failure_class: OperatorFailureClass::CallerOrHubBug,
-                            cause_code: "reported_usage_context_compaction_exhausted",
-                        });
-                    }
-                    CommitCompactionFailurePreviewOutcome::Stale => return Ok(None),
-                }
-            }
             Err(error) => {
                 let failure_class = error.operator_failure_class();
                 let cause_code = error.operator_failure_cause_code();
@@ -388,8 +350,7 @@ impl ReportedUsageCompaction {
                         &self.activation,
                         &self.model_calls,
                         preview,
-                        compaction_terminal_cause(&error),
-                        compaction_recovery_cause(&error),
+                        TurnTerminalCause::ContextCompactionFailed,
                     )
                     .await
                     .map_err(|source| {
@@ -446,7 +407,6 @@ impl ReportedUsageCompaction {
                 preview,
                 turn,
                 continuation_selection: Some(selection),
-                summary_exceeds_headroom: false,
             }));
         }
         let prospective = self
@@ -545,15 +505,6 @@ impl ReportedUsageCompaction {
             )
             .await
             .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
-        let summary_exceeds_headroom = reported.as_ref().is_some_and(|reported| {
-            !reported.input_is_retained()
-                && reported
-                    .usage()
-                    .output_tokens()
-                    .unwrap_or(0)
-                    .saturating_add(u64::from(definition.max_output_tokens()))
-                    > u64::from(definition.context_window_tokens())
-        });
         let reported_requires_compaction = reported.is_some_and(|reported| {
             reported_usage_requires_compaction(
                 reported.usage(),
@@ -592,7 +543,6 @@ impl ReportedUsageCompaction {
             preview,
             turn,
             continuation_selection: None,
-            summary_exceeds_headroom,
         }))
     }
 }
@@ -634,8 +584,6 @@ pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
     CountCancelled(TurnId),
     /// The prospective target was absent from the immutable runtime catalog.
     ContextWindowUnavailable(TurnId),
-    /// One automatic compaction still could not make the prospective input fit.
-    ContextStillExceeded(TurnId),
     /// The shared append-only compaction lifecycle failed.
     Compaction {
         /// Selected turn.
@@ -704,9 +652,7 @@ where
                 OperatorFailureClass::CallerOrHubBug
             }
             Self::Count { source, .. } => source.operator_failure_class(),
-            Self::ContextWindowUnavailable(_) | Self::ContextStillExceeded(_) => {
-                OperatorFailureClass::CallerOrHubBug
-            }
+            Self::ContextWindowUnavailable(_) => OperatorFailureClass::CallerOrHubBug,
             Self::Compaction { failure_class, .. } => *failure_class,
             Self::CompactionFailureClosure { source, .. } => source.operator_failure_class(),
             Self::WorkspaceInstructions { source, .. } => source.operator_failure_class(),
@@ -723,7 +669,6 @@ where
             Self::Count { source, .. } => source.operator_failure_cause_code(),
             Self::CountCancelled(_) => "model_input_count_cancelled",
             Self::ContextWindowUnavailable(_) => "context_window_unavailable",
-            Self::ContextStillExceeded(_) => "context_window_exceeded",
             Self::Compaction { cause_code, .. } => cause_code,
             Self::CompactionFailureClosure { source, .. } => source.operator_failure_cause_code(),
             Self::WorkspaceInstructions { source, .. } => source.operator_failure_cause_code(),
@@ -877,7 +822,6 @@ where
             | ContextGuardedTurnPassError::WorkspaceInstructions { turn, .. } => Some(*turn),
             ContextGuardedTurnPassError::CountCancelled(turn)
             | ContextGuardedTurnPassError::ContextWindowUnavailable(turn)
-            | ContextGuardedTurnPassError::ContextStillExceeded(turn)
             | ContextGuardedTurnPassError::ActivationSessionMismatch(turn) => Some(*turn),
         }
     }
@@ -941,7 +885,6 @@ where
                 (),
                 ContextGuardedTurnPassError<Counter::Error, Execution::Error>,
             > = async {
-                let mut compacted_turn = None;
                 loop {
                     let identities = activation_identities();
                     let preview = match activation.preview(session, identities).await {
@@ -1149,26 +1092,6 @@ where
                         u64::from(model.max_output_tokens()),
                         u64::from(model.context_window_tokens()),
                     ) {
-                        if compacted_turn == Some(turn) {
-                            match close_failed_compaction_turn(
-                                &activation,
-                                &model_calls,
-                                preview,
-                                TurnTerminalCause::ContextHeadroomExhausted,
-                                None,
-                            )
-                            .await
-                            .map_err(|source| {
-                                ContextGuardedTurnPassError::CompactionFailureClosure {
-                                    turn,
-                                    source,
-                                }
-                            })? {
-                                CommitCompactionFailurePreviewOutcome::Failed(_) => {}
-                                CommitCompactionFailurePreviewOutcome::Stale => continue,
-                            }
-                            return Err(ContextGuardedTurnPassError::ContextStillExceeded(turn));
-                        }
                         let compaction_window = occupancy_recovery
                             .as_ref()
                             .map(|recovery| recovery.compaction_window(session));
@@ -1189,26 +1112,6 @@ where
                         drop(compaction_window);
                         match compaction_result {
                             Ok(_) => {}
-                            Err(crate::process_runtime::AutomaticContextCompactionError::AlreadyAttempted) => {
-                                match close_failed_compaction_turn(
-                                    &activation,
-                                    &model_calls,
-                                    preview,
-                                    TurnTerminalCause::ContextHeadroomExhausted,
-                                    None,
-                                )
-                                .await
-                                .map_err(|source| {
-                                    ContextGuardedTurnPassError::CompactionFailureClosure {
-                                        turn,
-                                        source,
-                                    }
-                                })? {
-                                    CommitCompactionFailurePreviewOutcome::Failed(_) => {}
-                                    CommitCompactionFailurePreviewOutcome::Stale => continue,
-                                }
-                                return Err(ContextGuardedTurnPassError::ContextStillExceeded(turn));
-                            }
                             Err(error) => {
                                 let failure_class = error.operator_failure_class();
                                 let cause_code = error.operator_failure_cause_code();
@@ -1221,8 +1124,7 @@ where
                                         &activation,
                                         &model_calls,
                                         preview,
-                                        compaction_terminal_cause(&error),
-                                        compaction_recovery_cause(&error),
+                                        TurnTerminalCause::ContextCompactionFailed,
                                     )
                                     .await
                                     .map_err(|source| {
@@ -1242,7 +1144,6 @@ where
                                 });
                             }
                         }
-                        compacted_turn = Some(turn);
                         continue;
                     }
                     let prepared_instructions = if let Some(workspace_instructions) = &workspace_instructions {
@@ -1354,7 +1255,6 @@ fn guarded_failure_stage<CountError, ExecutionError>(
         ContextGuardedTurnPassError::Count { .. } => "input_token_count",
         ContextGuardedTurnPassError::CountCancelled(_) => "input_token_count",
         ContextGuardedTurnPassError::ContextWindowUnavailable(_) => "context_window",
-        ContextGuardedTurnPassError::ContextStillExceeded(_) => "context_window",
         ContextGuardedTurnPassError::Compaction { .. } => "context_compaction",
         ContextGuardedTurnPassError::CompactionFailureClosure { .. } => {
             "context_compaction_failure_closure"
@@ -1448,7 +1348,6 @@ async fn close_failed_compaction_turn(
     model_calls: &PostgresModelCallRepository,
     preview: PreparedActivationPreview,
     terminal_cause: TurnTerminalCause,
-    recovery_cause: Option<GoalExecutionFailureRecoveryCause>,
 ) -> Result<CommitCompactionFailurePreviewOutcome, CommitActivationPreviewError> {
     loop {
         let identities = FailedModelCallTurnIdentities::new(
@@ -1461,7 +1360,7 @@ async fn close_failed_compaction_turn(
                 model_calls,
                 identities,
                 terminal_cause,
-                recovery_cause,
+                None,
             )
             .await
         {
@@ -1500,32 +1399,6 @@ async fn close_counted_attachment_failure(
             Err(error) if compaction_failure_closure_collision_is_retryable(&error) => {}
             outcome => return outcome,
         }
-    }
-}
-
-fn compaction_recovery_cause(
-    error: &crate::process_runtime::AutomaticContextCompactionError,
-) -> Option<GoalExecutionFailureRecoveryCause> {
-    matches!(
-        error,
-        crate::process_runtime::AutomaticContextCompactionError::InputDoesNotFit
-    )
-    .then_some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
-}
-
-/// Classifies the turn-terminal cause a failed automatic compaction records.
-///
-/// An input the compactor cannot fit is the compaction wall and keeps its own
-/// spelling; every other compaction failure is recorded as such rather than
-/// borrowed from the wall.
-const fn compaction_terminal_cause(
-    error: &crate::process_runtime::AutomaticContextCompactionError,
-) -> TurnTerminalCause {
-    match error {
-        crate::process_runtime::AutomaticContextCompactionError::InputDoesNotFit => {
-            TurnTerminalCause::ContextCompactionWall
-        }
-        _ => TurnTerminalCause::ContextCompactionFailed,
     }
 }
 
@@ -1633,7 +1506,6 @@ mod tests {
     };
     use signalbox_persistence::{
         context_compaction::ContextCompactionRepositoryError,
-        goal::GoalExecutionFailureRecoveryCause,
         model_execution::{ModelCallIdentityCollision, ModelCallRepositoryError},
         start_eligible_turn::{
             CommitActivationPreviewError, StartEligibleTurnIdentityCollision,
@@ -1643,17 +1515,9 @@ mod tests {
 
     use super::{
         ContextGuardedTurnPassError, compaction_failure_closure_collision_is_retryable,
-        compaction_recovery_cause, guarded_failure_stage, persisted_preflight_prefix,
-        provider_count_admits, report_guarded_ambiguity,
+        guarded_failure_stage, persisted_preflight_prefix, provider_count_admits,
+        report_guarded_ambiguity,
     };
-
-    #[test]
-    fn no_fitting_compaction_input_requires_operator_recovery() {
-        assert_eq!(
-            compaction_recovery_cause(&AutomaticContextCompactionError::InputDoesNotFit),
-            Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
-        );
-    }
 
     #[test]
     fn provider_count_retains_conservative_headroom_for_admission() {
@@ -1662,13 +1526,6 @@ mod tests {
         assert!(!provider_count_admits(u64::MAX, 1, u64::MAX));
     }
 
-    #[test]
-    fn transient_compaction_failure_keeps_automatic_recovery() {
-        assert_eq!(
-            compaction_recovery_cause(&AutomaticContextCompactionError::Model),
-            None
-        );
-    }
     use crate::{
         ActivatedTurnExecution, FatalExecutionSignal, FatalExecutionSupervisor,
         TurnPassExecutionStage, process_runtime::AutomaticContextCompactionError,

@@ -4,9 +4,7 @@ use super::credential_pool::{
 };
 use super::live_turn::require_live_execution_with_targets;
 use super::persist_terminal::persist_failed_with_delegated_child_result;
-use super::persist_tool_round::{
-    persist_credential_pool_exhaustion, persist_tool_continuation_headroom_exhaustion,
-};
+use super::persist_tool_round::persist_credential_pool_exhaustion;
 use super::prepared::insert_prepared_call;
 use super::reread::{pending_reclassification_candidates, record_reclassified_turn_candidate};
 use super::{
@@ -123,9 +121,16 @@ pub(crate) async fn prepare_tool_continuation_call(
         .effective()
         .fast_mode();
     let resolved_target = targets.resolve(*execution.configuration().effective().model());
-    if let Ok(resolved) = resolved_target
+    let compacted = projection.entries().iter().any(|entry| {
+        matches!(
+            entry.payload(),
+            signalbox_domain::SemanticTranscriptEntryPayload::ContextSummary { .. }
+        )
+    });
+    if !compacted
+        && let Ok(resolved) = resolved_target
         && let Some(limit) = continuation_usage_limits.get(&(resolved.target(), fast_mode))
-        && let Some(evidence) = load_tool_continuation_headroom_evidence(
+        && load_tool_continuation_headroom_evidence(
             connection,
             session,
             turn,
@@ -141,43 +146,17 @@ pub(crate) async fn prepare_tool_continuation_call(
         )
         .await?
     {
-        let source_turn = execution.turn();
-        let reclassifications = steering_identities
-            .iter()
-            .map(|(_, reclassification)| *reclassification)
-            .collect::<Vec<_>>();
-        let mut proposed_turns = BTreeSet::new();
-        for reclassification in &reclassifications {
-            record_reclassified_turn_candidate(
-                source_turn,
-                reclassification.turn(),
-                &mut proposed_turns,
-            )?;
-        }
-        let required = execution
-            .require_context_compaction_after_tool_results(
-                producing_call,
-                failure_identities
-                    .clone()
-                    .with_pending_steering_reclassifications(reclassifications),
-            )
-            .map_err(|_| {
-                ModelCallRepositoryError::InvalidTransition(
-                    "context headroom exhaustion could not close tool continuation",
-                )
-            })?;
-        persist_failed_with_delegated_child_result(
-            connection,
-            required.failed(),
-            TurnTerminalCause::ContextHeadroomExhausted,
-            ProviderReportedTokenUsage::unreported(),
-            None,
-            None,
+        sqlx::query(
+            "UPDATE turn_lifecycle SET compaction_frontier_id = $3
+                      WHERE session_id = $1 AND turn_id = $2 AND state_kind = 'active'",
         )
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .bind(projection.snapshot().frontier().snapshot().into_uuid())
+        .execute(&mut *connection)
         .await?;
-        persist_tool_continuation_headroom_exhaustion(connection, &required, evidence).await?;
         return Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(
-            Box::new(required),
+            turn,
         ));
     }
     let selected = if let Ok(resolved) = resolved_target {
@@ -343,15 +322,6 @@ pub(crate) async fn prepare_tool_continuation_call(
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct ToolContinuationHeadroomEvidence {
-    pub(super) usage: ProviderReportedTokenUsage,
-    pub(super) input_includes_cache_tokens: bool,
-    pub(super) projected_result_content_bytes: u64,
-    pub(super) pending_steering_content_bytes: u64,
-    pub(super) limit: ToolContinuationUsageLimit,
-}
-
 async fn load_tool_continuation_headroom_evidence(
     connection: &mut PgConnection,
     session: SessionId,
@@ -360,7 +330,7 @@ async fn load_tool_continuation_headroom_evidence(
     pending_steering: Vec<sqlx::types::Uuid>,
     current_effective_target: ResolvedProviderTarget,
     limit: ToolContinuationUsageLimit,
-) -> Result<Option<ToolContinuationHeadroomEvidence>, ModelCallRepositoryError> {
+) -> Result<bool, ModelCallRepositoryError> {
     let row = sqlx::query(
         "SELECT effective_provider_model_identity_id,
                 usage_input_includes_cache_tokens,
@@ -485,7 +455,7 @@ async fn load_tool_continuation_headroom_evidence(
         ProviderModelIdentity::from_uuid(row.try_get("effective_provider_model_identity_id")?),
     );
     if producing_effective_target != current_effective_target {
-        return Ok(None);
+        return Ok(false);
     }
     let decode = |field: &'static str| -> Result<Option<u64>, ModelCallRepositoryError> {
         row.try_get::<Option<Decimal>, _>(field)?
@@ -516,7 +486,7 @@ async fn load_tool_continuation_headroom_evidence(
         ModelCallCorruption::Missing("pending steering content byte count"),
     )?;
     let Some(input_tokens) = usage.input_tokens() else {
-        return Ok(None);
+        return Ok(false);
     };
     let mut retained_input_tokens = decode("retained_input_tokens")?;
     let mut retained_output_tokens = decode("retained_output_tokens")?;
@@ -561,13 +531,7 @@ async fn load_tool_continuation_headroom_evidence(
         .saturating_add(pending_steering_content_bytes)
         .saturating_add(limit.max_output_tokens())
         > limit.context_window_tokens();
-    Ok(exhausted.then_some(ToolContinuationHeadroomEvidence {
-        usage,
-        input_includes_cache_tokens,
-        projected_result_content_bytes,
-        pending_steering_content_bytes,
-        limit,
-    }))
+    Ok(exhausted)
 }
 
 pub(crate) async fn resolve_session_credential(
