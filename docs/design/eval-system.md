@@ -36,11 +36,11 @@ trial never seals; no path rewrites or deletes the required lineage.
 ## Effects
 
 The native `ApprovalJudgeEval` program enumerates trials and scores their
-outcomes with pure library code. Rust and TypeScript use the same checked method
-records, grants, request ordinals and replay driver; program code receives no
-provider, database or filesystem handle. Corpus cases are read through
-`blob.read` by digest, decoded by the daemon-independent library and verified
-against the manifest at sealing.
+outcomes with pure library code. Evaluation effects use checked Rust-only
+records and grants with the workflow host's request ordinals and replay driver;
+program code receives no provider, database or filesystem handle. Corpus cases
+are read through `blob.read` by digest, decoded by the daemon-independent
+library and verified against the manifest at sealing.
 
 | Capability / operation                   | Contract                                                                                                                                                                                                                                                                                             |
 | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -94,7 +94,8 @@ The offline corpus scorecard requires a verdict for every case; a failed or
 ambiguous trial stops that run without a scorecard or seal. Cancelled, faulted
 or interrupted execution before sealing retains its manifest and journal and
 does not report a complete evaluation. Workflow cancellation, restart and
-unavailable-native-revision behavior follow the workflows contract.
+unavailable-native-revision behavior follow the
+[workflows contract](program-substrate.md).
 
 ## Launch boundary
 
