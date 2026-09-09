@@ -95,6 +95,20 @@ completion prevents success; after accepted success it records
 Cancelled and faulted receipts carry a null result. Equal cancellation retries
 replay their recorded outcome without appending frames.
 
+## Daemon runner
+
+The fenced daemon owns one local workflow runner. Internal registration and
+start admission retain executable identity, grants and exact input before waking
+it. Startup resumes registered runs without a terminal outcome, and an active
+run has one attempt at a time. Shutdown drops attempts; restart replays the
+retained requests and deliveries.
+
+The compiled catalog includes `clock` revision `1`: its input is a big-endian
+u64, and its result concatenates that input and a journaled big-endian u64 Unix
+time in seconds. The runner resolves admitted JavaScript artifacts from their
+registrations. Registration effects and the clock are composed; other effects
+and durable waits are not composed. There is no public launch command.
+
 ## Native programs
 
 `NativeCatalog` selects compiled `NativeProgram` implementations with checked
