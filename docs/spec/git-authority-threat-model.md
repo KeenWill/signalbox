@@ -20,7 +20,10 @@ implementations, and the typed Git library.
 A suite has two layers. The authority layer opens the live repository
 administration tree through pinned directory descriptors and captures
 configuration, references, lock state, and object data into private snapshots;
-the typed Git library, `git2`, works only on those snapshots.
+the typed Git library, `git2`, works only on those snapshots. Status, diff, and
+log capture objects on demand into a private database and revalidate their
+source bindings before returning; unrelated historical object contents are not
+copied.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
 destination is a remote the deployment configured, never one the caller chose. A

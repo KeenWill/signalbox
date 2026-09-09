@@ -145,6 +145,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         before_commit_publish: CommitHook,
     ) -> Result<String, LocalGitFailure> {
         self.validate_current_repository()?;
+        if matches!(
+            operation,
+            LocalOperation::Status | LocalOperation::Diff(_) | LocalOperation::Log(_)
+        ) {
+            return self.execute_read_operation(operation, before_read_return);
+        }
         let mut repository = self.repository_authority.repository()?;
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
         let persistent_object_database = Odb::new_ext(self.repository_authority.object_format)
@@ -159,10 +165,76 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         repository
             .set_odb(&object_database, &pinned_objects)
             .map_err(|_| LocalGitFailure::Operation)?;
-        let revalidate_captured_objects = matches!(
-            &operation,
-            LocalOperation::Status | LocalOperation::Diff(_) | LocalOperation::Log(_)
-        );
+        match operation {
+            LocalOperation::Status | LocalOperation::Diff(_) | LocalOperation::Log(_) => {
+                Err(LocalGitFailure::Operation)
+            }
+            LocalOperation::Stage(arguments) => {
+                let result = LocalGitResult::Stage(self.stage_with_pinned_objects(
+                    &repository,
+                    (
+                        &persistent_object_database,
+                        &object_database,
+                        &mempack,
+                        &pinned_objects,
+                    ),
+                    arguments,
+                    || {},
+                    || {},
+                )?);
+                encode_result(&result)
+            }
+            LocalOperation::Commit(arguments) => {
+                let result = LocalGitResult::Commit(commit(
+                    &mut repository,
+                    &self.identity,
+                    arguments,
+                    &self.repository_authority,
+                    (
+                        &persistent_object_database,
+                        &object_database,
+                        &pinned_objects,
+                    ),
+                    || {
+                        before_commit_publish();
+                        pinned_objects.validate_live(&self.repository_authority)?;
+                        self.validate_current_repository_identity()
+                    },
+                )?);
+                encode_result(&result)
+            }
+            LocalOperation::BranchCreate(arguments) => {
+                let result = LocalGitResult::BranchCreate(branch_create(
+                    &repository,
+                    &self.repository_authority,
+                    &object_database,
+                    &pinned_objects,
+                    arguments,
+                    || {
+                        pinned_objects.validate_live(&self.repository_authority)?;
+                        self.validate_current_repository()
+                    },
+                )?);
+                encode_result(&result)
+            }
+            LocalOperation::BranchSwitch(arguments) => {
+                let result = LocalGitResult::BranchSwitch(self.branch_switch_with_pinned_objects(
+                    &repository,
+                    &pinned_objects,
+                    arguments,
+                )?);
+                encode_result(&result)
+            }
+        }
+    }
+
+    fn execute_read_operation<ReadHook: FnOnce()>(
+        &self,
+        operation: LocalOperation,
+        before_read_return: ReadHook,
+    ) -> Result<String, LocalGitFailure> {
+        let repository = self.repository_authority.open_repository_shell()?;
+        repository.capture_objects_on_read(&self.repository_authority)?;
         let result = match operation {
             LocalOperation::Status => {
                 let index_snapshot = self.bind_index_snapshot(&repository)?;
@@ -204,67 +276,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             LocalOperation::Log(arguments) => {
                 LocalGitResult::Log(log(&repository, &self.repository_authority, arguments)?)
             }
-            LocalOperation::Stage(arguments) => {
-                let result = LocalGitResult::Stage(self.stage_with_pinned_objects(
-                    &repository,
-                    (
-                        &persistent_object_database,
-                        &object_database,
-                        &mempack,
-                        &pinned_objects,
-                    ),
-                    arguments,
-                    || {},
-                    || {},
-                )?);
-                return encode_result(&result);
-            }
-            LocalOperation::Commit(arguments) => {
-                let result = LocalGitResult::Commit(commit(
-                    &mut repository,
-                    &self.identity,
-                    arguments,
-                    &self.repository_authority,
-                    (
-                        &persistent_object_database,
-                        &object_database,
-                        &pinned_objects,
-                    ),
-                    || {
-                        before_commit_publish();
-                        pinned_objects.validate_live(&self.repository_authority)?;
-                        self.validate_current_repository_identity()
-                    },
-                )?);
-                return encode_result(&result);
-            }
-            LocalOperation::BranchCreate(arguments) => {
-                let result = LocalGitResult::BranchCreate(branch_create(
-                    &repository,
-                    &self.repository_authority,
-                    &object_database,
-                    &pinned_objects,
-                    arguments,
-                    || {
-                        pinned_objects.validate_live(&self.repository_authority)?;
-                        self.validate_current_repository()
-                    },
-                )?);
-                return encode_result(&result);
-            }
-            LocalOperation::BranchSwitch(arguments) => {
-                let result = LocalGitResult::BranchSwitch(self.branch_switch_with_pinned_objects(
-                    &repository,
-                    &pinned_objects,
-                    arguments,
-                )?);
-                return encode_result(&result);
-            }
+            _ => return Err(LocalGitFailure::Operation),
         };
-        if revalidate_captured_objects {
-            before_read_return();
-            pinned_objects.validate_live(&self.repository_authority)?;
-        }
+        before_read_return();
+        repository.validate_selected_objects(&self.repository_authority)?;
         self.validate_current_repository()?;
         encode_result(&result)
     }
