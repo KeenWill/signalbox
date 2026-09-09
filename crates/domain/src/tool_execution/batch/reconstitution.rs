@@ -366,7 +366,8 @@ fn reconstitute_batch(
                                     ToolAttemptEnd::AwaitingChild { .. }
                                 ) && matches!(
                                     input.phase,
-                                    ToolBatchPhaseReconstitutionInput::AwaitingChild { .. }
+                                    ToolBatchPhaseReconstitutionInput::AwaitingChild { request: waiting, .. }
+                                        if waiting == request.id()
                                 ))
                                 || matches!(
                                     ended.end(),
@@ -406,8 +407,9 @@ fn reconstitute_batch(
             ReconstitutedToolAttempt::Current(_) | ReconstitutedToolAttempt::Ended(_) => None,
         })
         .collect::<Vec<_>>();
-    let child_waits = attempts
-        .values()
+    let child_waits = requests
+        .iter()
+        .filter_map(|request| attempts.get(&request.id()))
         .filter_map(|attempt| match attempt {
             ReconstitutedToolAttempt::Ended(ended) => match ended.end() {
                 ToolAttemptEnd::AwaitingChild {
@@ -435,11 +437,9 @@ fn reconstitute_batch(
                 ));
             }
             ToolBatchPhaseReconstitutionInput::Executing { turn_attempt }
-                if earliest_undecided.is_none()
-                    && ambiguous_attempts.is_empty()
-                    && child_waits.len() <= 1 =>
+                if earliest_undecided.is_none() && ambiguous_attempts.is_empty() =>
             {
-                let child_wait_position = child_waits.first().and_then(|(request, _, _)| {
+                let child_wait_position = child_waits.last().and_then(|(request, _, _)| {
                     requests
                         .iter()
                         .position(|candidate| candidate.id() == *request)
@@ -488,7 +488,7 @@ fn reconstitute_batch(
             } if earliest_undecided.is_none()
                 && live_attempt_count == 0
                 && ambiguous_attempts.is_empty()
-                && child_waits == [(request, spawning_request, child)] =>
+                && child_waits.last() == Some(&(request, spawning_request, child)) =>
             {
                 ToolBatchPhase::AwaitingChild {
                     request,
