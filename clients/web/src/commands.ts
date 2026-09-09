@@ -428,8 +428,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.entry.first',
-    title: 'First entry',
-    description: 'Jump to the first entry.',
+    title: 'First loaded entry',
+    description: 'Jump to the first loaded entry.',
     category: 'Imports',
     bindings: [
       {
@@ -447,8 +447,8 @@ export const commandRegistry = [
   },
   {
     id: 'imports.entry.last',
-    title: 'Last entry',
-    description: 'Jump to the last entry.',
+    title: 'Last loaded entry',
+    description: 'Jump to the last loaded entry.',
     category: 'Imports',
     bindings: [
       {

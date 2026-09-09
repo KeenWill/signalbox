@@ -46,10 +46,10 @@ type FormatFilter = WebImportFormat | typeof EMPTY_FILTER
 type ModelKind = 'direct' | 'alias'
 
 const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
-  { value: EMPTY_FILTER, label: 'All source formats' },
-  { value: 'claude_code_session_jsonl_v2', label: 'Claude Code (v2)' },
-  { value: 'claude_code_session_jsonl_v1', label: 'Claude Code (v1)' },
-  { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout (v1)' },
+  { value: EMPTY_FILTER, label: 'All sources' },
+  { value: 'claude_code_session_jsonl_v2', label: 'Claude Code, converter 2' },
+  { value: 'claude_code_session_jsonl_v1', label: 'Claude Code, converter 1' },
+  { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout, converter 1' },
 ]
 
 const DEFINITIVE_CONTINUATION_ERRORS = new Set([
@@ -551,9 +551,9 @@ export function ImportsWorkspace({
               </h2>
               <div className="imports-filters">
                 <label>
-                  <span>Format</span>
+                  <span>Source</span>
                   <select
-                    aria-label="Filter imports by format"
+                    aria-label="Filter imports by source"
                     value={format}
                     disabled={hasRetainedCommand}
                     onChange={(event) => {
@@ -692,7 +692,7 @@ export function ImportsWorkspace({
                         <dd>{descriptor.imported_conversation_id}</dd>
                       </div>
                       <div>
-                        <dt>Format</dt>
+                        <dt>Source</dt>
                         <dd>{enumLabel(descriptor.source.format)}</dd>
                       </div>
                       <div>

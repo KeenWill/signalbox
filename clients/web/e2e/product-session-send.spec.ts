@@ -411,7 +411,7 @@ test('refuses new session input at the retained-command limit while allowing exa
   const last = ids[4]
   await open(last)
   await page.getByRole('textbox', { name: 'Message' }).fill('Wait for capacity.')
-  await expect(page.getByText('Too many unsent messages')).toBeVisible()
+  await expect(page.getByText('Too many unconfirmed messages')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Send message', exact: true })).toBeDisabled()
   expect(attempts).toHaveLength(4)
   await page.route(`**/api/sessions/${sessionId}/input`, (route) => {

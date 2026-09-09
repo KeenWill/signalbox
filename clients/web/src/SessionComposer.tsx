@@ -36,7 +36,7 @@ export function SessionComposer({
   const pending = useAppSelector((state) => selectPendingSessionInput(state, sessionId))
   const retained = pending?.input ?? null
   const capacityReached = useAppSelector(selectSessionInputCapacityReached)
-  const capacityNotice = 'Too many unsent messages'
+  const capacityNotice = 'Too many unconfirmed messages'
   const newInputBlocked = retained === null && capacityReached
   const [text, setText] = useState('')
   const [notice, setNotice] = useState('')

@@ -10,11 +10,11 @@ const IMPORT_TABLE_OVERSCAN_ROWS = 7
 const formatLabel = (format: WebImportSummary['format']): string => {
   switch (format) {
     case 'claude_code_session_jsonl_v1':
-      return 'Claude Code (v1)'
+      return 'Claude Code, converter 1'
     case 'claude_code_session_jsonl_v2':
-      return 'Claude Code (v2)'
+      return 'Claude Code, converter 2'
     case 'codex_rollout_jsonl_v1':
-      return 'Codex rollout (v1)'
+      return 'Codex rollout, converter 1'
   }
 }
 
@@ -50,7 +50,7 @@ export function ImportsTable({
       },
       {
         accessorKey: 'format',
-        header: 'Source format',
+        header: 'Source',
         cell: ({ row }) => formatLabel(row.original.format),
       },
       {
