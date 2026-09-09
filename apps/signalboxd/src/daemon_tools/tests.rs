@@ -57,6 +57,47 @@ use crate::{
 const GIT_AUTHOR_NAME: &str = "Signalbox Daemon";
 const GIT_AUTHOR_EMAIL: &str = "signalbox@example.test";
 
+#[test]
+fn workspace_binding_reads_only_a_dispatch_marker_in_the_bound_directories() {
+    use super::workspace_executors::read_dispatch_marker;
+    let workspace = tempfile::tempdir().expect("workspace exists");
+    let administration = workspace
+        .path()
+        .join(session_workspace_roots::GIT_ADMINISTRATION_DIRECTORY);
+    fs::create_dir(&administration).expect("administration directory exists");
+    let identity = composed_identity::ComposedWorkspaceIdentity::capture(workspace.path())
+        .expect("workspace identities exist");
+    let marker = administration.join(crate::repo_watch_checkout::DISPATCH_MARKER);
+    let dispatch = signalbox_domain::RepoWatchDispatchId::from_uuid(uuid::Uuid::now_v7());
+    let encoded = dispatch.into_uuid().to_string();
+    assert_eq!(read_dispatch_marker(workspace.path(), identity), None);
+    fs::write(&marker, &encoded).expect("dispatch marker is written");
+    assert_eq!(
+        read_dispatch_marker(workspace.path(), identity),
+        Some(dispatch)
+    );
+    fs::write(&marker, encoded.repeat(2)).expect("oversized marker is written");
+    assert_eq!(read_dispatch_marker(workspace.path(), identity), None);
+    fs::remove_file(&marker).expect("oversized marker is removed");
+    let outside = tempfile::NamedTempFile::new().expect("outside marker exists");
+    fs::write(outside.path(), &encoded).expect("outside marker is written");
+    std::os::unix::fs::symlink(outside.path(), &marker).expect("marker symlink exists");
+    assert_eq!(read_dispatch_marker(workspace.path(), identity), None);
+    fs::remove_file(&marker).expect("symlink is removed");
+    let replacement = tempfile::tempdir().expect("replacement administration exists");
+    fs::write(
+        replacement
+            .path()
+            .join(crate::repo_watch_checkout::DISPATCH_MARKER),
+        encoded,
+    )
+    .expect("replacement marker is written");
+    fs::remove_dir(&administration).expect("original administration is removed");
+    std::os::unix::fs::symlink(replacement.path(), &administration)
+        .expect("administration symlink exists");
+    assert_eq!(read_dispatch_marker(workspace.path(), identity), None);
+}
+
 fn git_identity() -> GitIdentity {
     GitIdentity::try_new(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL).expect("fixture Git identity is valid")
 }

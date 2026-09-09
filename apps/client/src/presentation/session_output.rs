@@ -631,6 +631,14 @@ impl<'a> Output<'a> {
             ));
         };
         match message.as_ref() {
+            OperatorStatusMessage::RepositoryIngestion(item) => {
+                writeln!(
+                    self.stdout,
+                    "repository_ingestion {}",
+                    serde_json::to_string(item).map_err(std::io::Error::other)?
+                )?;
+                Ok(())
+            }
             OperatorStatusMessage::LifecycleWeek(item) => {
                 let OperatorStatusLifecycleWeekMessage {
                     week_start_date,

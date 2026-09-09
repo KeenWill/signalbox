@@ -144,6 +144,13 @@ Conflicting identity reuse returns HTTP 409, and storage failures return HTTP
 503\. A frontier release supplies its observed generation and is stale after any
 intervening frontier commit.
 
+Operator status reports each configured repository's last successful
+observation, last poll start and outcome, last newly accepted webhook delivery,
+and events recorded in the current process. Poll evidence includes
+webhook-triggered fetches. These measurements reset at process startup and
+survive configuration reloads; replayed events and deliveries do not advance
+their counts or delivery timestamp.
+
 The module's repository task serializes polling and webhook wakes. Poll
 intervals are start-to-start; a wake received during an attempt waits for that
 attempt to finish and does not postpone the periodic poll deadline. Each attempt

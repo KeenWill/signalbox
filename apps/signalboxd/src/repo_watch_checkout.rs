@@ -342,7 +342,7 @@ fn create_directory(
     openat(parent, name, DIRECTORY_FLAGS, Mode::empty())
 }
 
-const DISPATCH_MARKER: &str = "signalbox-dispatch";
+pub(crate) const DISPATCH_MARKER: &str = "signalbox-dispatch";
 #[cfg(target_os = "linux")]
 const PUBLICATION_MARKER: &str = "user.signalbox.dispatch";
 
@@ -627,8 +627,40 @@ mod tests {
     #[test]
     #[ignore = "requires private user and mount namespaces"]
     fn removal_refuses_mount_crossings() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+
         const CHILD: &str = "SIGNALBOX_CHECKOUT_MOUNT_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
+            match Command::new("unshare")
+                .args([
+                    "--user",
+                    "--map-root-user",
+                    "--mount",
+                    "--propagation",
+                    "private",
+                    "true",
+                ])
+                .output()
+            {
+                Ok(probe) if probe.status.success() => {}
+                Ok(probe) => {
+                    writeln!(
+                        std::io::stderr(),
+                        "SKIP removal_refuses_mount_crossings: requires private user and mount namespaces: {}: {}",
+                        probe.status,
+                        String::from_utf8_lossy(&probe.stderr).trim()
+                    )?;
+                    return Ok(());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    writeln!(
+                        std::io::stderr(),
+                        "SKIP removal_refuses_mount_crossings: requires unshare for private user and mount namespaces: {error}"
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
             let result = Command::new("unshare")
                 .args([
                     "--user",

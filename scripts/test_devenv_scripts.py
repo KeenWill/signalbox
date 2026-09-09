@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import tomllib
@@ -12,6 +13,91 @@ import unittest
 
 
 class DevenvScriptsTests(unittest.TestCase):
+    def test_seeded_example_has_private_files_for_every_file_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary = root / "anthropic-api-key"
+            subprocess.run([
+                "signalbox-dev-credential", "", str(root / "absent-home-key"),
+                str(primary),
+            ], check=True, capture_output=True)
+            catalog = root / "catalog.toml"
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "config/signalboxd.example.toml", catalog)
+            subprocess.run([
+                "signalbox-seed-config", str(catalog), str(primary),
+                str(root / "staging"), str(root / "blobs"), "true",
+            ], check=True)
+            document = tomllib.loads(catalog.read_text())
+            profiles = [entry for entry in document["credential_profiles"] if entry["delivery"] == "file"]
+            paths = [Path(entry["file"]) for entry in profiles]
+            self.assertEqual(len(paths), len(set(paths)))
+            self.assertIn(primary, paths)
+            for path in paths:
+                with self.subTest(path=path):
+                    metadata = path.stat()
+                    self.assertTrue(stat.S_ISREG(metadata.st_mode))
+                    self.assertEqual(metadata.st_uid, os.geteuid())
+                    self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o600)
+                    self.assertEqual(path.read_bytes(), b"")
+            self.assertEqual(document["blob_storage"]["staging_directory"], str(root / "staging"))
+            self.assertEqual(document["blob_storage"]["stores"][0]["root_directory"], str(root / "blobs"))
+
+    def test_missing_integration_defaults_get_private_empty_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, preferred in [("github-token", str(root / "absent-home-token")), ("brave-api-key", "")]:
+                with self.subTest(integration=name):
+                    placeholder = root / name
+                    result = subprocess.run([
+                        "signalbox-dev-credential", "", preferred, str(placeholder),
+                    ], check=True, capture_output=True, text=True)
+                    self.assertEqual(result.stdout.strip(), str(placeholder))
+                    metadata = placeholder.stat()
+                    self.assertTrue(stat.S_ISREG(metadata.st_mode))
+                    self.assertEqual(metadata.st_uid, os.geteuid())
+                    self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o600)
+                    self.assertEqual(placeholder.read_bytes(), b"")
+
+    def test_explicit_credential_override_is_not_provisioned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            override = root / "supplied-key"
+            preferred = root / "home-key"
+            preferred.write_bytes(b"home-key-fixture")
+            placeholder = root / "placeholder"
+            result = subprocess.run([
+                "signalbox-dev-credential", str(override), str(preferred), str(placeholder),
+            ], check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout.strip(), str(override))
+            self.assertFalse(override.exists())
+            self.assertFalse(placeholder.exists())
+
+    def test_existing_home_credential_is_selected_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preferred = root / "home-key"
+            preferred.write_bytes(b"home-key-fixture")
+            preferred.chmod(0o400)
+            placeholder = root / "placeholder"
+            result = subprocess.run([
+                "signalbox-dev-credential", "", str(preferred), str(placeholder),
+            ], check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout.strip(), str(preferred))
+            self.assertEqual(preferred.read_bytes(), b"home-key-fixture")
+            self.assertEqual(stat.S_IMODE(preferred.stat().st_mode), 0o400)
+            self.assertFalse(placeholder.exists())
+
+    def test_existing_placeholder_contents_survive_provisioning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            placeholder = Path(directory) / "key"
+            placeholder.write_bytes(b"edited-key-fixture")
+            placeholder.chmod(0o600)
+            subprocess.run([
+                "signalbox-dev-credential", "", "", str(placeholder),
+            ], check=True, capture_output=True)
+            self.assertEqual(placeholder.read_bytes(), b"edited-key-fixture")
+            self.assertEqual(stat.S_IMODE(placeholder.stat().st_mode), 0o600)
+
     def test_config_materialization_resolves_the_default_supervisor(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.toml"

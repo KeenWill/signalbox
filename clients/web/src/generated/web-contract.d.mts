@@ -358,6 +358,7 @@ export type WebSessionTimelineDetailBody = {
   readonly cause: WebTimelineCreationCause;
   readonly imported_evidence?: WebTimelineImportedEvidence | null;
   readonly type: "session_created";
+  readonly workspace_root_kind?: WebSessionWorkspaceRootKind | null;
 } | {
   readonly detail: WebTimelineModelSettingsDetail;
   readonly type: "model_settings";
@@ -447,6 +448,8 @@ export type WebSessionWorkFacts = {
   readonly active_turn_count: WebU64;
   readonly queued_turn_count: WebU64;
 };
+
+export type WebSessionWorkspaceRootKind = "derived" | "configured" | "provisioned";
 
 export type WebTimelineAddress = {
   readonly event_sequence: WebTimelineEventSequence;
@@ -977,6 +980,7 @@ export type WebSessionTimelineDescriptor = {
   readonly session_id: WebSessionId;
   readonly sizes: WebSessionTimelineSizeFacts;
   readonly work: WebSessionWorkFacts;
+  readonly workspace_root_kind: "derived" | "configured" | "provisioned" | null;
 };
 
 export type WebSessionTimelineWindow = {

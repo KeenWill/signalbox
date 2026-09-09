@@ -55,6 +55,7 @@ pub struct OperatorStatusLifecycleDeadlineViolationMessage {
 
 ```rust
 pub struct OperatorStatusEndMessage {
+    pub repository_ingestion_count: CanonicalU64,
     pub lifecycle_week_count: CanonicalU64,
     pub lifecycle_deadline_violation_count: CanonicalU64,
 }
@@ -68,7 +69,46 @@ pub enum OperatorStatusMessage {
     Start {},
     LifecycleWeek(boxed::Box<OperatorStatusLifecycleWeekMessage>),
     LifecycleDeadlineViolation(boxed::Box<OperatorStatusLifecycleDeadlineViolationMessage>),
+    RepositoryIngestion(boxed::Box<OperatorStatusRepositoryIngestion>),
     End(boxed::Box<OperatorStatusEndMessage>),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## RepositoryPollOutcome
+
+```rust
+pub enum RepositoryPollOutcome {
+    InProgress,
+    Succeeded,
+    ClientFailed,
+    ObservationFailed,
+    StoreFailed,
+    FrontierConflict,
+    Cancelled,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## RepositoryPollAttempt
+
+```rust
+pub struct RepositoryPollAttempt {
+    pub attempted_at: string::String,
+    pub outcome: RepositoryPollOutcome,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## OperatorStatusRepositoryIngestion
+
+```rust
+pub struct OperatorStatusRepositoryIngestion {
+    pub repository: string::String,
+    pub last_successful_observation: option::Option<string::String>,
+    pub last_poll: option::Option<RepositoryPollAttempt>,
+    pub last_accepted_webhook: option::Option<string::String>,
+    pub events_recorded: CanonicalU64,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
