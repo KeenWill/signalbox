@@ -3,8 +3,8 @@
 use std::{num::NonZeroU64, sync::Arc};
 
 use signalbox_application::{
-    CompiledToolCatalog, CorrelatedToolExecutorEvidence, RenderedAttachmentSelector,
-    ToolExecutionInvocation, ToolExecutor,
+    CompiledToolCatalog, CorrelatedToolExecutorEvidence, OperatorFailureClass,
+    RenderedAttachmentSelector, ToolExecutionInvocation, ToolExecutor,
 };
 use signalbox_domain::{BlobDigest, ToolRequest, UserContentPart};
 use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, WorkerBinding};
@@ -18,7 +18,7 @@ use signalbox_file_media_runtime::{
     SourceReadError, SourceReadFuture, VerifiedBlobSource, VisiblePartSelector,
 };
 use signalbox_persistence::{
-    blob::{BlobCatalogEntry, BlobCatalogRepository},
+    blob::{BlobCatalogEntry, BlobCatalogRepository, BlobCatalogRepositoryError},
     tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_tools_file_media::{FileInspectServiceRequest, FileMediaTools};
@@ -27,7 +27,7 @@ use sqlx::PgPool;
 use super::DaemonToolExecutorError;
 use crate::{
     BlobStoreRegistry,
-    blob_read_runtime::{BlobReadError, read_blob_chunk, read_blob_entry},
+    blob_read_runtime::{BlobReadError, read_blob_chunk},
 };
 
 /// Store-backed file tool composition; every parser operation goes through the worker port.
@@ -162,7 +162,7 @@ impl FileUseResolver for DaemonFileUseResolver {
         request: FileInspectServiceRequest,
     ) -> FileUseResolverFuture<'_, Self::Source> {
         Box::pin(async move {
-            let invalid = || FileUseResolutionError::Internal;
+            let invalid = || operator_resolution_error(OperatorFailureClass::FailClosedCorruption);
             let selector = request
                 .visible_part()
                 .map(|value| {
@@ -179,11 +179,18 @@ impl FileUseResolver for DaemonFileUseResolver {
                     selector,
                 )
                 .await
-                .map_err(|_| FileUseResolutionError::BlobUnavailable)?
+                .map_err(|error| {
+                    FileUseResolutionError::Operator(
+                        signalbox_tools_file_media::FileMediaExecutorError::from_error(&error),
+                    )
+                })?
                 .ok_or(FileUseResolutionError::BlobNotVisible)?;
-            let entry = read_blob_entry(&self.catalog, digest)
+            let entry = self
+                .catalog
+                .find(digest)
                 .await
-                .map_err(resolution_error)?;
+                .map_err(catalog_resolution_error)?
+                .ok_or(FileUseResolutionError::BlobMissing)?;
             let length = NonZeroU64::new(entry.expected().byte_length()).ok_or_else(invalid)?;
             let UserContentPart::Attachment {
                 kind,
@@ -254,13 +261,26 @@ impl VerifiedBlobSource for CatalogFileSource {
     }
 }
 
-fn resolution_error(error: BlobReadError) -> FileUseResolutionError {
+fn operator_resolution_error(class: OperatorFailureClass) -> FileUseResolutionError {
+    FileUseResolutionError::Operator(
+        signalbox_tools_file_media::FileMediaExecutorError::from_class(class),
+    )
+}
+
+fn catalog_resolution_error(error: BlobCatalogRepositoryError) -> FileUseResolutionError {
     match error {
-        BlobReadError::NotFound | BlobReadError::Missing => FileUseResolutionError::BlobMissing,
-        BlobReadError::Corrupt => FileUseResolutionError::BlobCorrupt,
-        BlobReadError::Unavailable => FileUseResolutionError::BlobUnavailable,
-        BlobReadError::RangeOutOfBounds { .. } | BlobReadError::Integrity => {
-            FileUseResolutionError::Internal
+        BlobCatalogRepositoryError::Database(_) => {
+            operator_resolution_error(OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            })
+        }
+        BlobCatalogRepositoryError::CommitAmbiguous(_) => {
+            operator_resolution_error(OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            })
+        }
+        BlobCatalogRepositoryError::Corruption(_) => {
+            operator_resolution_error(OperatorFailureClass::FailClosedCorruption)
         }
     }
 }
@@ -269,6 +289,39 @@ fn resolution_error(error: BlobReadError) -> FileUseResolutionError {
 mod tests {
     use super::*;
     use signalbox_application::ToolCatalog;
+
+    #[test]
+    fn catalog_database_failures_keep_the_operator_path() {
+        use signalbox_application::ClassifyOperatorFailure as _;
+        for (failure, class) in [
+            (
+                BlobCatalogRepositoryError::Database(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+            ),
+            (
+                BlobCatalogRepositoryError::CommitAmbiguous(sqlx::Error::PoolClosed),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                },
+            ),
+            (
+                BlobCatalogRepositoryError::Corruption(
+                    signalbox_persistence::blob::BlobCatalogCorruption::InvalidDigest,
+                ),
+                OperatorFailureClass::FailClosedCorruption,
+            ),
+        ] {
+            let FileUseResolutionError::Operator(error) = catalog_resolution_error(failure) else {
+                panic!("database errors must not become file failures")
+            };
+            assert_eq!(
+                DaemonToolExecutorError::from_error(&error).operator_failure_class(),
+                class
+            );
+        }
+    }
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL and the delegated real file-media sandbox profile"]

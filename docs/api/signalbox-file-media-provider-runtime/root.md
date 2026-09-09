@@ -49,6 +49,7 @@ pub type FileUseResolverFuture<'a, Source> = pin::Pin<
 
 ```rust
 pub enum FileUseResolutionError {
+    Operator(signalbox_tools_file_media::FileMediaExecutorError),
     BlobNotVisible,
     BlobMissing,
     BlobCorrupt,
@@ -56,7 +57,7 @@ pub enum FileUseResolutionError {
     Internal,
 }
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
-impl convert::From<FileUseResolutionError> for signalbox_file_media_runtime::FileMediaFailure {
+impl convert::From<FileUseResolutionError> for signalbox_tools_file_media::FileMediaServiceFailure {
     fn from(value: FileUseResolutionError) -> Self;
 }
 ```
