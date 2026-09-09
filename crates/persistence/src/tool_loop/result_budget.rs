@@ -155,12 +155,17 @@ mod tests {
         let source = "界\n\"".repeat(100);
         let limit = 160;
         let bounded = context_text(&source, limit);
-        let (prefix, marker) = bounded
-            .split_once("\n[tool result truncated:")
-            .expect("marker");
-        assert!(source.starts_with(prefix));
-        assert!(marker.contains(&format!("retained {} bytes", prefix.len())));
-        assert!(marker.contains(&format!("dropped {} bytes", source.len() - prefix.len())));
+        let marker_start = bounded.rfind("\n[tool result truncated:").expect("marker");
+        let (prefix, marker) = bounded.split_at(marker_start);
+        assert_eq!(prefix, &source[..prefix.len()]);
+        assert_eq!(
+            marker,
+            format!(
+                "\n[tool result truncated: retained {} bytes; dropped {} bytes]",
+                prefix.len(),
+                source.len() - prefix.len(),
+            )
+        );
         assert!(serde_json::to_vec(&bounded).expect("text encodes").len() <= limit);
         assert_eq!(context_text(&bounded, limit), bounded);
     }

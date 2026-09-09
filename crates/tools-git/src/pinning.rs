@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fmt, fs,
     io::{Read, Seek},
@@ -72,7 +72,7 @@ pub(super) struct RepositoryOperationGuard {
 pub(super) struct RepositoryShell {
     repository: Repository,
     _directory: tempfile::TempDir,
-    unreadable_objects: RefCell<Option<Arc<HashSet<git2::Oid>>>>,
+    unreadable_objects: RefCell<Option<Arc<BTreeSet<git2::Oid>>>>,
     selected_objects: RefCell<Option<ObjectSource>>,
 }
 
@@ -83,7 +83,7 @@ pub(super) struct PinnedObjectDatabase {
     pack: OwnedFd,
     objects_identity: FileIdentity,
     bindings: Vec<ObjectChildBinding>,
-    unreadable_objects: Arc<HashSet<git2::Oid>>,
+    unreadable_objects: Arc<BTreeSet<git2::Oid>>,
 }
 
 impl RepositoryShell {
@@ -747,9 +747,9 @@ impl PinnedObjectDatabase {
     fn validate_object_inventory(
         &self,
         object_format: ObjectFormat,
-    ) -> Result<HashSet<git2::Oid>, LocalGitFailure> {
-        let mut object_ids = HashSet::new();
-        let mut unreadable_objects = HashSet::new();
+    ) -> Result<BTreeSet<git2::Oid>, LocalGitFailure> {
+        let mut object_ids = BTreeSet::new();
+        let mut unreadable_objects = BTreeSet::new();
         for binding in &self.bindings {
             if binding.name == OsStr::new("pack") {
                 collect_packed_object_ids(
@@ -783,8 +783,8 @@ fn collect_packed_object_ids(
     directory: &Path,
     leaves: &[ObjectLeafBinding],
     object_format: ObjectFormat,
-    object_ids: &mut HashSet<git2::Oid>,
-    unreadable_objects: &mut HashSet<git2::Oid>,
+    object_ids: &mut BTreeSet<git2::Oid>,
+    unreadable_objects: &mut BTreeSet<git2::Oid>,
 ) -> Result<(), LocalGitFailure> {
     let mut pairs = BTreeMap::<Vec<u8>, PackPair<'_>>::new();
     for leaf in leaves {
@@ -842,7 +842,7 @@ fn collect_packed_object_ids(
 }
 
 fn insert_bounded_object_id(
-    object_ids: &mut HashSet<git2::Oid>,
+    object_ids: &mut BTreeSet<git2::Oid>,
     object_id: git2::Oid,
 ) -> Result<(), LocalGitFailure> {
     object_ids.insert(object_id);
