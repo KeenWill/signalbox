@@ -2,8 +2,11 @@ import { defineProgram, evaluation, jsonCodec } from "@signalbox/program-sdk/v1"
 
 const output = jsonCodec((value: unknown): { verdicts: string[] } => {
   if (typeof value !== "object" || value === null || !("verdicts" in value)
-    || !Array.isArray(value.verdicts) || !value.verdicts.every((item: unknown) => typeof item === "string")) {
+    || !Array.isArray(value.verdicts)) {
     throw new TypeError("expected trial outcomes");
+  }
+  for (let index = 0; index < value.verdicts.length; index++) {
+    if (typeof value.verdicts[index] !== "string") throw new TypeError("expected trial outcomes");
   }
   return { verdicts: value.verdicts as string[] };
 });
