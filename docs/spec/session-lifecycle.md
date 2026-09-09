@@ -24,6 +24,10 @@ idle. A terminal session stays terminal. Core writes the session state in the
 same transaction as the turn or goal transition that changes the projection, so
 the two machines never disagree.
 
+For a repository-watch pull-request dispatch, accepted input remains queued with
+the start gate held until checkout provisioning is recorded and the command
+adapter releases the gate. A retired checkout follows the stop path.
+
 Waiting carries a typed kind and the party expected to end the wait. Only an
 owned session carries a deadline, and its state sets the kind: admission covers
 created and dispatched, active stall covers active and recovering, and waiting

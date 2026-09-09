@@ -675,7 +675,9 @@ async fn prepare_preview(
     requested_session: SessionId,
     identities: AcceptedInputTurnActivationIdentities,
 ) -> Result<Option<PreparedTurnActivation>, StartEligibleTurnRepositoryError> {
-    if session_runner_is_lost(connection, requested_session).await? {
+    if session_runner_is_lost(connection, requested_session).await?
+        || session_start_gate_is_held(connection, requested_session).await?
+    {
         return Ok(None);
     }
     let session = match load_session_from_connection(connection, requested_session).await {
