@@ -4150,11 +4150,6 @@ dependencies = [
  "serde_json",
  "signalbox-derive",
  "signalbox-domain",
- "signalbox-model-provider-runtime",
- "signalbox-model-runtime",
- "signalboxd",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -4996,12 +4991,14 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "signalbox-application",
+ "signalbox-approval-judge-eval",
  "signalbox-blob-store",
  "signalbox-blob-store-filesystem",
  "signalbox-blob-store-s3",
  "signalbox-convergence",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
+ "signalbox-derive",
  "signalbox-domain",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
