@@ -7,6 +7,9 @@ pub mod effects;
 pub mod native;
 pub mod session_effects;
 
+#[cfg(test)]
+mod sdk_tests;
+
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -42,6 +45,7 @@ pub const PROGRAM_SDK_V1_SPECIFIER: &str = "@signalbox/program-sdk/v1";
 
 const PROGRAM_SDK_INTERNAL_SPECIFIER: &str = "signalbox:program-sdk/v1";
 const PROGRAM_SDK_PRELOAD_SPECIFIER: &str = "signalbox:program/sdk-preload";
+const PROGRAM_ENTRYPOINT_SPECIFIER: &str = "signalbox:program/entrypoint";
 const PROGRAM_MAIN_SPECIFIER: &str = "signalbox:program/main";
 
 deno_core::extension!(
@@ -312,6 +316,7 @@ impl WorkflowHost {
             run,
             journal,
             artifact,
+            &[],
             &mut effects::NoEffects(live_deliveries),
         )
         .await
@@ -326,6 +331,7 @@ impl WorkflowHost {
         run: ProgramRunId,
         journal: ProgramJournal,
         artifact: &ProgramArtifact,
+        input: &[u8],
         live_deliveries: &mut impl LiveDeliverySource,
     ) -> Result<ProgramExecutionOutcome, WorkflowHostError> {
         if let Some(outcome) = journal_outcome(&journal) {
@@ -358,14 +364,17 @@ impl WorkflowHost {
         let sdk_specifier = ModuleSpecifier::parse(PROGRAM_SDK_PRELOAD_SPECIFIER)
             .map_err(JsErrorBox::from_err)
             .map_err(deno_core::error::CoreError::from)?;
-        module_loader.preload_admitted.set(true);
+        module_loader.host_module_admitted.set(true);
         let sdk_module = runtime
             .load_side_es_module_from_code(
                 &sdk_specifier,
-                format!("import {PROGRAM_SDK_V1_SPECIFIER:?};"),
+                format!(
+                    "import {PROGRAM_SDK_V1_SPECIFIER:?};\nconst input = new Uint8Array({input:?});\n{}",
+                    include_str!("program_entrypoint.js"),
+                ),
             )
             .await?;
-        module_loader.preload_admitted.set(false);
+        module_loader.host_module_admitted.set(false);
         let sdk_evaluation = runtime.mod_evaluate(sdk_module);
         runtime
             .run_event_loop(PollEventLoopOptions::default())
@@ -374,9 +383,24 @@ impl WorkflowHost {
         let main_specifier = ModuleSpecifier::parse(PROGRAM_MAIN_SPECIFIER)
             .map_err(JsErrorBox::from_err)
             .map_err(deno_core::error::CoreError::from)?;
-        let module = runtime
+        runtime
             .load_main_es_module_from_code(&main_specifier, artifact.source().to_owned())
             .await?;
+        let entrypoint_specifier = ModuleSpecifier::parse(PROGRAM_ENTRYPOINT_SPECIFIER)
+            .map_err(JsErrorBox::from_err)
+            .map_err(deno_core::error::CoreError::from)?;
+        module_loader.host_module_admitted.set(true);
+        let module = runtime
+            .load_side_es_module_from_code(
+                &entrypoint_specifier,
+                format!(
+                    "import invoke from {PROGRAM_SDK_PRELOAD_SPECIFIER:?};\n\
+                     import * as program from {PROGRAM_MAIN_SPECIFIER:?};\n\
+                     export default await invoke(program);"
+                ),
+            )
+            .await?;
+        module_loader.host_module_admitted.set(false);
         let mut evaluation = Box::pin(runtime.mod_evaluate(module));
         let mut completed_evaluation = None;
 
@@ -421,7 +445,8 @@ impl WorkflowHost {
                     }
                     if let Some(result) = completed_evaluation.take() {
                         result?;
-                        return self.complete(run, execution.durable_tail()).await;
+                        let result = entrypoint_result(&mut runtime, module)?;
+                        return self.complete(run, execution.durable_tail(), result).await;
                     }
                     true
                 }
@@ -445,7 +470,8 @@ impl WorkflowHost {
                     };
                     result?;
                     if at_live_tail {
-                        return self.complete(run, execution.durable_tail()).await;
+                        let result = entrypoint_result(&mut runtime, module)?;
+                        return self.complete(run, execution.durable_tail(), result).await;
                     }
                     return Err(WorkflowHostProtocolError::Stalled.into());
                 }
@@ -465,7 +491,8 @@ impl WorkflowHost {
                             };
                             result?;
                             if at_live_tail {
-                                return self.complete(run, execution.durable_tail()).await;
+                                let result = entrypoint_result(&mut runtime, module)?;
+                                return self.complete(run, execution.durable_tail(), result).await;
                             }
                             return Err(WorkflowHostProtocolError::Stalled.into());
                         }
@@ -490,9 +517,10 @@ impl WorkflowHost {
         &self,
         run: ProgramRunId,
         durable_tail: u64,
+        result: InlineFramePayload,
     ) -> Result<ProgramExecutionOutcome, WorkflowHostError> {
         self.journal
-            .complete_if_tail(run, durable_tail, InlineFramePayload::default())
+            .complete_if_tail(run, durable_tail, result)
             .await?;
         let journal = self
             .journal
@@ -636,11 +664,30 @@ async fn poll_runtime_once(
     .await
 }
 
+fn entrypoint_result(
+    runtime: &mut JsRuntime,
+    module: deno_core::ModuleId,
+) -> Result<InlineFramePayload, deno_core::error::CoreError> {
+    let namespace = runtime.get_module_namespace(module)?;
+    deno_core::scope!(scope, runtime);
+    let namespace = deno_core::v8::Local::new(scope, namespace);
+    let name = deno_core::v8::String::new(scope, "default")
+        .ok_or_else(|| JsErrorBox::generic("entrypoint export name allocation failed"))?;
+    let value = namespace
+        .get(scope, name.into())
+        .ok_or_else(|| JsErrorBox::generic("entrypoint result is missing"))?;
+    let value = deno_core::v8::Local::<deno_core::v8::Uint8Array>::try_from(value)
+        .map_err(|_| JsErrorBox::type_error("program entrypoint must return a Uint8Array"))?;
+    let mut bytes = vec![0; value.byte_length()];
+    value.copy_contents(&mut bytes);
+    Ok(InlineFramePayload::new(bytes))
+}
+
 fn isolate(
     sender: mpsc::UnboundedSender<HostRequest>,
 ) -> Result<(JsRuntime, Rc<ProgramModuleLoader>), deno_core::error::CoreError> {
     let module_loader = Rc::new(ProgramModuleLoader {
-        preload_admitted: Cell::new(false),
+        host_module_admitted: Cell::new(false),
     });
     let runtime = JsRuntime::new(RuntimeOptions {
         module_loader: Some(module_loader.clone()),
@@ -876,22 +923,32 @@ impl ExecutionState {
 }
 
 struct ProgramModuleLoader {
-    preload_admitted: Cell<bool>,
+    host_module_admitted: Cell<bool>,
 }
 
 impl ModuleLoader for ProgramModuleLoader {
     fn resolve(
         &self,
         specifier: &str,
-        _referrer: &str,
+        referrer: &str,
         kind: ResolutionKind,
     ) -> ModuleResolveResponse {
         if matches!(kind, ResolutionKind::MainModule) && specifier == PROGRAM_MAIN_SPECIFIER {
             return ModuleSpecifier::parse(PROGRAM_MAIN_SPECIFIER).map_err(JsErrorBox::from_err);
         }
-        if self.preload_admitted.get() && specifier == PROGRAM_SDK_PRELOAD_SPECIFIER {
-            return ModuleSpecifier::parse(PROGRAM_SDK_PRELOAD_SPECIFIER)
-                .map_err(JsErrorBox::from_err);
+        if self.host_module_admitted.get()
+            && ((referrer == "."
+                && matches!(
+                    specifier,
+                    PROGRAM_SDK_PRELOAD_SPECIFIER | PROGRAM_ENTRYPOINT_SPECIFIER
+                ))
+                || (referrer == PROGRAM_ENTRYPOINT_SPECIFIER
+                    && matches!(
+                        specifier,
+                        PROGRAM_SDK_PRELOAD_SPECIFIER | PROGRAM_MAIN_SPECIFIER
+                    )))
+        {
+            return ModuleSpecifier::parse(specifier).map_err(JsErrorBox::from_err);
         }
         if specifier == PROGRAM_SDK_V1_SPECIFIER {
             return ModuleSpecifier::parse(PROGRAM_SDK_INTERNAL_SPECIFIER)
@@ -925,7 +982,7 @@ mod tests {
     #[test]
     fn loader_rejects_a_relative_artifact_import() {
         let error = ProgramModuleLoader {
-            preload_admitted: Cell::new(false),
+            host_module_admitted: Cell::new(false),
         }
         .resolve("./other.js", PROGRAM_MAIN_SPECIFIER, ResolutionKind::Import)
         .expect_err("relative imports are outside the program artifact contract");
@@ -939,7 +996,7 @@ mod tests {
     #[test]
     fn loader_maps_only_the_canonical_sdk_import() {
         let resolved = ProgramModuleLoader {
-            preload_admitted: Cell::new(false),
+            host_module_admitted: Cell::new(false),
         }
         .resolve(
             super::PROGRAM_SDK_V1_SPECIFIER,
@@ -949,5 +1006,23 @@ mod tests {
         .expect("the canonical SDK import is admitted");
 
         assert_eq!(resolved.as_str(), PROGRAM_SDK_INTERNAL_SPECIFIER);
+    }
+
+    #[test]
+    fn artifact_cannot_import_private_host_modules_during_preload() {
+        let loader = ProgramModuleLoader {
+            host_module_admitted: Cell::new(true),
+        };
+        for specifier in [
+            PROGRAM_MAIN_SPECIFIER,
+            super::PROGRAM_SDK_PRELOAD_SPECIFIER,
+            super::PROGRAM_ENTRYPOINT_SPECIFIER,
+        ] {
+            assert!(
+                loader
+                    .resolve(specifier, PROGRAM_MAIN_SPECIFIER, ResolutionKind::Import)
+                    .is_err()
+            );
+        }
     }
 }
