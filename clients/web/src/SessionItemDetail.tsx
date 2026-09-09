@@ -399,7 +399,7 @@ const detailContent = (body: DetailBody): ReactNode => {
           {body.response ? (
             <TextDetail label="Model response" excerpt={body.response} />
           ) : (
-            <p className="session-detail-note">No response text.</p>
+            <p className="session-detail-note">No response text at this checkpoint.</p>
           )}
         </>
       )

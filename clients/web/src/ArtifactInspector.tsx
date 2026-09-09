@@ -181,7 +181,7 @@ export function ArtifactInspector({
             />
           </label>
           <label>
-            Media type
+            Media type (as declared)
             <input
               name="media-type"
               value={mediaType}
