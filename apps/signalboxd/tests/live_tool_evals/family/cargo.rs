@@ -67,8 +67,11 @@ pub(crate) fn cargo_diagnostics_workspace_matches_seed(
         &actual_entry_identities,
         execution_window,
     );
-    let target_attributes_are_empty =
-        cargo_target_attributes_are_empty(&actual_entries, &actual_extended_attributes);
+    let target_attributes_match = cargo_target_attributes_match(
+        &actual_entries,
+        &actual_extended_attributes,
+        seed_extended_attributes,
+    );
     let target_entries_are_safe = cargo_target_entries_are_safe(&actual_entries);
     Ok(seed_entries_preserved
         && additions_are_exact_target
@@ -77,7 +80,7 @@ pub(crate) fn cargo_diagnostics_workspace_matches_seed(
         && seed_extended_attributes_preserved
         && target_identities_match
         && target_times_match
-        && target_attributes_are_empty
+        && target_attributes_match
         && target_entries_are_safe
         && workspace_inode_flags_match_for_mutation_with_reference(
             root,
@@ -164,14 +167,70 @@ pub(crate) fn cargo_target_times_match(
     })
 }
 
-pub(crate) fn cargo_target_attributes_are_empty(
+pub(crate) fn cargo_target_attributes_match(
     entries: &BTreeMap<PathBuf, WorkspaceEntrySnapshot>,
     attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
+    seed_attributes: &BTreeMap<PathBuf, ExtendedAttributeSnapshot>,
 ) -> bool {
+    let expected = creation_extended_attributes(seed_attributes);
     entries
         .keys()
         .filter(|path| path.starts_with("target"))
-        .all(|path| attributes.get(path).is_some_and(BTreeMap::is_empty))
+        .all(|path| attributes.get(path) == Some(&expected))
+}
+
+#[test]
+fn cargo_target_attributes_require_the_seed_selinux_label() {
+    let fixture_label = b"synthetic fixture security context".to_vec();
+    let label_name = b"security.selinux".to_vec();
+    let seed_attributes = BTreeMap::from([(
+        PathBuf::new(),
+        BTreeMap::from([(label_name.clone(), fixture_label.clone())]),
+    )]);
+    let entries = BTreeMap::from([(
+        PathBuf::from("target"),
+        WorkspaceEntrySnapshot::Directory { mode: None },
+    )]);
+    let mut attributes = BTreeMap::from([(
+        PathBuf::from("target"),
+        BTreeMap::from([(label_name.clone(), fixture_label)]),
+    )]);
+    assert!(cargo_target_attributes_match(
+        &entries,
+        &attributes,
+        &seed_attributes,
+    ));
+
+    attributes.insert(
+        PathBuf::from("target"),
+        BTreeMap::from([(label_name, b"different synthetic security context".to_vec())]),
+    );
+    assert!(!cargo_target_attributes_match(
+        &entries,
+        &attributes,
+        &seed_attributes,
+    ));
+}
+
+#[test]
+fn creation_attributes_do_not_inherit_user_attributes() {
+    let fixture_label = b"synthetic fixture security context".to_vec();
+    let label_name = b"security.selinux".to_vec();
+    let seed = BTreeMap::from([(
+        PathBuf::new(),
+        BTreeMap::from([
+            (label_name.clone(), fixture_label.clone()),
+            (
+                SYNTHETIC_UNEXPECTED_XATTR_NAME.as_bytes().to_vec(),
+                SYNTHETIC_UNEXPECTED_XATTR_VALUE.to_vec(),
+            ),
+        ]),
+    )]);
+
+    assert_eq!(
+        creation_extended_attributes(&seed),
+        BTreeMap::from([(label_name, fixture_label)]),
+    );
 }
 
 #[test]

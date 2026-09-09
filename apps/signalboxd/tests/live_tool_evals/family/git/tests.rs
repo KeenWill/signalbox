@@ -1094,13 +1094,26 @@ fn forced_git_stage_verifier_accepts_the_exact_staged_blob() -> EvalResult {
 
 #[test]
 fn git_object_entry_inventory_accepts_an_exact_pack_publication() -> EvalResult {
-    let suite = FamilySuite::git()?;
+    let mut suite = FamilySuite::git()?;
     let repository = Repository::open(suite.workspace.path())?;
+    let object_id = Oid::hash_object(ObjectType::Blob, GIT_STAGE_CONTENT.as_bytes())?;
+    let loose_path = git_loose_object_relative_path(object_id);
+    let fanout = repository.path().join(GIT_OBJECTS_DIRECTORY).join(
+        loose_path
+            .parent()
+            .expect("loose objects have a fanout directory"),
+    );
+    fs::create_dir_all(&fanout)?;
+    fs::File::open(&fanout)?.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))?;
+    suite.git_seed_fixture.object_entries = git_object_entries(suite.workspace.path())?;
+    suite.git_seed_fixture.object_modified_times =
+        git_object_modified_times(suite.workspace.path())?;
+    suite.git_seed_fixture.object_entry_identities =
+        git_object_entry_identities(suite.workspace.path())?;
     let started = current_filesystem_recorded_time()?;
-    let object_id = repository.blob(GIT_STAGE_CONTENT.as_bytes())?;
     publish_git_object_pack_for_test(
         &repository,
-        &[object_id],
+        &[GIT_STAGE_CONTENT.as_bytes()],
         &suite.git_seed_fixture.object_entries,
     )?;
     let execution_window = FilesystemExecutionTimeWindow {
@@ -1137,11 +1150,10 @@ fn git_object_entry_inventory_rejects_a_pack_with_a_collateral_object() -> EvalR
     let suite = FamilySuite::git()?;
     let repository = Repository::open(suite.workspace.path())?;
     let started = current_filesystem_recorded_time()?;
-    let allowed_id = repository.blob(GIT_STAGE_CONTENT.as_bytes())?;
-    let collateral_id = repository.blob(GIT_COLLATERAL_OBJECT_CONTENT)?;
+    let allowed_id = Oid::hash_object(ObjectType::Blob, GIT_STAGE_CONTENT.as_bytes())?;
     publish_git_object_pack_for_test(
         &repository,
-        &[allowed_id, collateral_id],
+        &[GIT_STAGE_CONTENT.as_bytes(), GIT_COLLATERAL_OBJECT_CONTENT],
         &suite.git_seed_fixture.object_entries,
     )?;
     let execution_window = FilesystemExecutionTimeWindow {
