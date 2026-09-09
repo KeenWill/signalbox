@@ -71,12 +71,24 @@ pub enum FileReadServiceInput {
 ```rust
 pub type FileMediaAgentServiceFuture<'a, Output> = pin::Pin<
     boxed::Box<
-        dyn future::Future<
-                Output = result::Result<Output, signalbox_file_media_runtime::FileMediaFailure>,
-            > + marker::Send
+        dyn future::Future<Output = result::Result<Output, FileMediaServiceFailure>>
+            + marker::Send
             + 'a,
     >,
 >;
+```
+
+## FileMediaServiceFailure
+
+```rust
+pub enum FileMediaServiceFailure {
+    File(signalbox_file_media_runtime::FileMediaFailure),
+    Operator(FileMediaExecutorError),
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
+impl convert::From<signalbox_file_media_runtime::FileMediaFailure> for FileMediaServiceFailure {
+    fn from(failure: signalbox_file_media_runtime::FileMediaFailure) -> Self;
+}
 ```
 
 ## FileMediaAgentService
@@ -153,13 +165,17 @@ where
 ## FileMediaExecutorError
 
 ```rust
-pub struct FileMediaExecutorError;
+pub struct FileMediaExecutorError {/* private */}
 // derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 impl fmt::Display for FileMediaExecutorError {
     fn fmt(&self, __signalbox_formatter: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 impl error::Error for FileMediaExecutorError {
     fn source(&self) -> option::Option<&(dyn error::Error + 'static)>;
+}
+impl FileMediaExecutorError {
+    pub const fn from_class(class: signalbox_application::OperatorFailureClass) -> Self;
+    pub fn from_error(error: &impl signalbox_application::ClassifyOperatorFailure) -> Self;
 }
 impl signalbox_application::ClassifyOperatorFailure for FileMediaExecutorError {
     fn operator_failure_class(&self) -> signalbox_application::OperatorFailureClass;

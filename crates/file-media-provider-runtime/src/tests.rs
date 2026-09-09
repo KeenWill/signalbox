@@ -201,7 +201,10 @@ async fn continuation_preserves_options_and_cannot_select_another_visible_use() 
             },
         ))
         .await;
-    assert_eq!(wrong_use, Err(FileMediaFailure::InvalidViewArguments));
+    assert_eq!(
+        wrong_use,
+        Err(FileMediaFailure::InvalidViewArguments.into())
+    );
     assert_eq!(calls.load(Relaxed), 1);
     let second = service
         .read(request(
@@ -223,7 +226,7 @@ async fn continuation_preserves_options_and_cannot_select_another_visible_use() 
             FileReadServiceInput::Continuation { cursor },
         ))
         .await;
-    assert_eq!(hidden, Err(FileMediaFailure::BlobNotVisible));
+    assert_eq!(hidden, Err(FileMediaFailure::BlobNotVisible.into()));
     assert_eq!(calls.load(Relaxed), 2);
 }
 
@@ -247,11 +250,11 @@ async fn invisible_digest_and_unselected_repeated_use_never_reach_the_processor(
             Some(VisiblePartSelector::try_new("entry_0").unwrap()),
         ))
         .await;
-    assert_eq!(hidden, Err(FileMediaFailure::BlobNotVisible));
+    assert_eq!(hidden, Err(FileMediaFailure::BlobNotVisible.into()));
     let repeated = service
         .inspect(FileInspectServiceRequest::from_parts(Source.digest(), None))
         .await;
-    assert_eq!(repeated, Err(FileMediaFailure::BlobNotVisible));
+    assert_eq!(repeated, Err(FileMediaFailure::BlobNotVisible.into()));
     assert_eq!(calls.load(Relaxed), 0);
 }
 
