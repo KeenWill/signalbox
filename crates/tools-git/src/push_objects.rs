@@ -16,7 +16,7 @@ use rustix::fs::{Mode, OFlags, openat};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
     os::fd::AsFd,
@@ -52,7 +52,7 @@ impl PushObjectSnapshot {
         let repository = authority.open_repository_shell()?;
         let database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
         let mut source = ObjectSource::open(authority, deadline)?;
-        let mut excluded = HashSet::new();
+        let mut excluded = BTreeSet::new();
         if let Some(fence) = fence {
             source.capture(&database, fence)?;
             let commit = repository
@@ -86,7 +86,7 @@ impl PushObjectSnapshot {
                 .map_err(|_| LocalGitFailure::Operation)?;
         }
         let mut commits = vec![target];
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut trees = Vec::new();
         while let Some(commit) = commits.pop() {
             source.check_deadline()?;

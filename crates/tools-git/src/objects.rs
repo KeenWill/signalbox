@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs, io::Write};
+use std::{collections::BTreeSet, fs, io::Write};
 
 use git2::{Buf, Indexer, Odb, PackBuilder};
 
@@ -35,7 +35,7 @@ pub(super) fn persist_objects(
     let mut builder = repository
         .packbuilder()
         .map_err(|_| LocalGitFailure::Operation)?;
-    let mut inserted = HashSet::new();
+    let mut inserted = BTreeSet::new();
     let mut budget = PackTraversalBudget::default();
     for root in roots {
         match root {
@@ -144,7 +144,7 @@ pub(super) fn insert_missing_pack_object(
     repository: &RepositoryShell,
     persistent_objects: &Odb<'_>,
     builder: &mut PackBuilder<'_>,
-    inserted: &mut HashSet<git2::Oid>,
+    inserted: &mut BTreeSet<git2::Oid>,
     budget: &mut PackTraversalBudget,
     oid: git2::Oid,
 ) -> Result<bool, LocalGitFailure> {
@@ -162,7 +162,7 @@ pub(super) fn insert_missing_commit_graph(
     repository: &RepositoryShell,
     persistent_objects: &Odb<'_>,
     builder: &mut PackBuilder<'_>,
-    inserted: &mut HashSet<git2::Oid>,
+    inserted: &mut BTreeSet<git2::Oid>,
     budget: &mut PackTraversalBudget,
     root: git2::Oid,
 ) -> Result<(), LocalGitFailure> {
@@ -201,7 +201,7 @@ pub(super) fn insert_missing_tree_graph(
     repository: &RepositoryShell,
     persistent_objects: &Odb<'_>,
     builder: &mut PackBuilder<'_>,
-    inserted: &mut HashSet<git2::Oid>,
+    inserted: &mut BTreeSet<git2::Oid>,
     budget: &mut PackTraversalBudget,
     root: git2::Oid,
 ) -> Result<(), LocalGitFailure> {
