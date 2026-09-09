@@ -674,7 +674,7 @@ async fn rejected_kickoff_retries_once_and_keeps_the_hold_until_recovery()
         submitted,
         Err(
             signalbox_module_repo_watch_v2::dispatch::SubmissionError::Sink(
-                signalboxd::repo_watch_dispatch::RepositoryWatchCommandError::KickoffRejected
+                signalboxd::repo_watch_dispatch::RepositoryWatchCommandError::KickoffDefaultsChanged
             )
         )
     ));
@@ -744,6 +744,147 @@ async fn rejected_kickoff_retries_once_and_keeps_the_hold_until_recovery()
         .fetch_one(&fixture.core)
         .await?;
     assert_eq!(inputs, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn unavailable_kickoff_alias_retires_once_across_stop_recovery() -> Result<(), Box<dyn Error>>
+{
+    use signalbox_domain::{SubmitInputRejectedResult, SubmitInputResult};
+    use signalbox_module_repo_watch_v2::checkout::CheckoutRetirementReason;
+    use signalbox_persistence::submit_input::SubmitInputRepository;
+
+    let mut fixture = CheckoutFixture::new().await?;
+    // Interrupt publication so the next command-loop tick uses a reloaded model catalog.
+    sqlx::raw_sql("CREATE FUNCTION interrupt_kickoff() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.command_kind = 'submit_input' THEN RAISE EXCEPTION 'fixture kickoff interruption'; END IF;
+        RETURN NEW; END $$;
+        CREATE TRIGGER interrupt_kickoff BEFORE INSERT ON durable_command
+        FOR EACH ROW EXECUTE FUNCTION interrupt_kickoff();").execute(&fixture.core).await?;
+    let configuration = fixture
+        .sink
+        .models
+        .repository_watch()
+        .expect("configuration")
+        .clone();
+    assert!(
+        submit_pending_with_runner(
+            &fixture.store,
+            &configuration,
+            &mut fixture.sink,
+            fixture.runner.clone()
+        )
+        .await
+        .is_err()
+    );
+    let kickoff: Uuid =
+        sqlx::query_scalar("SELECT kickoff_command_id FROM dispatch_ledger WHERE command_id = $1")
+            .bind(fixture.command.into_uuid())
+            .fetch_one(&fixture.module)
+            .await?;
+    // This is the alias selected by the fixture's watch template; reload removes that identity.
+    fixture.sink.models = Arc::new(HubModelConfiguration::parse(&fixture.catalog.replace(
+        "540ce009-c2ec-4a04-b823-c411ea189778",
+        &Uuid::now_v7().to_string(),
+    ))?);
+    sqlx::raw_sql(
+        "DROP TRIGGER interrupt_kickoff ON durable_command;
+        DROP FUNCTION interrupt_kickoff();
+        CREATE FUNCTION interrupt_stop() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'fixture stop interruption'; END $$;
+        CREATE TRIGGER interrupt_stop BEFORE INSERT ON session_lifecycle_command
+        FOR EACH ROW EXECUTE FUNCTION interrupt_stop();",
+    )
+    .execute(&fixture.core)
+    .await?;
+    assert!(
+        submit_pending_with_runner(
+            &fixture.store,
+            &configuration,
+            &mut fixture.sink,
+            fixture.runner.clone()
+        )
+        .await
+        .is_err()
+    );
+    let checkout = fixture
+        .store
+        .dispatch_checkout(fixture.command)
+        .await?
+        .expect("retired checkout");
+    assert_eq!(
+        checkout.retired_reason,
+        Some(CheckoutRetirementReason::KickoffRejected)
+    );
+    let stop = checkout.stop_command.expect("durable stop identity");
+    let rejected = SubmitInputRepository::new(fixture.core.clone())
+        .load(DurableCommandId::from_uuid(kickoff))
+        .await?
+        .expect("recorded rejection");
+    assert!(matches!(
+        rejected.result(),
+        SubmitInputResult::Rejected(SubmitInputRejectedResult::UnknownModelAlias { .. })
+    ));
+    sqlx::raw_sql(
+        "DROP TRIGGER interrupt_stop ON session_lifecycle_command; DROP FUNCTION interrupt_stop();",
+    )
+    .execute(&fixture.core)
+    .await?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.submit_without_lifecycle_settlement().await;
+    let lifecycle = signalbox_session_ownership::LifecycleEventSource::new(fixture.core.clone());
+    let mut factory = FixtureSessionFactory {
+        next_command: Uuid::now_v7().as_u128(),
+        model: Uuid::now_v7().as_u128(),
+    };
+    while let Some(event) = lifecycle.next().await? {
+        fixture
+            .store
+            .react_to_lifecycle(
+                &event,
+                &mut factory,
+                &mut RepositoryWatchCommandCodec,
+                &lifecycle,
+            )
+            .await?;
+        lifecycle.acknowledge(&event).await?;
+    }
+    fixture.dispatch().await;
+    fixture.dispatch().await;
+    // Replay after terminal settlement must retain both identities and never retry the kickoff.
+    sqlx::query("UPDATE dispatch_ledger SET submission_pending = true WHERE command_id = $1")
+        .bind(fixture.command.into_uuid())
+        .execute(&fixture.module)
+        .await?;
+    fixture.store = RepoWatchStore::new(fixture.module.clone());
+    fixture.dispatch().await;
+    let session = fixture.session().await;
+    let terminal: bool = sqlx::query_scalar("SELECT state_kind = 'terminal' AND terminal_outcome_kind = 'stopped' AND NOT terminal_stop_sticky FROM session_lifecycle WHERE session_id = $1")
+        .bind(session.into_uuid()).fetch_one(&fixture.core).await?;
+    assert!(terminal);
+    let settled: bool = sqlx::query_scalar("SELECT NOT submission_pending AND singleton_released_at IS NOT NULL AND kickoff_command_id = $2 AND checkout_stop_command_id = $3 AND checkout_retired_reason = 'kickoff_rejected' FROM dispatch_ledger WHERE command_id = $1")
+        .bind(fixture.command.into_uuid()).bind(kickoff).bind(stop.into_uuid()).fetch_one(&fixture.module).await?;
+    assert!(settled);
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM durable_command WHERE command_kind = 'submit_input'",
+    )
+    .fetch_one(&fixture.core)
+    .await?;
+    assert_eq!(
+        attempts, 1,
+        "non-recoverable rejection never mints another kickoff identity"
+    );
+    let inputs: i64 = sqlx::query_scalar("SELECT count(*) FROM accepted_input")
+        .fetch_one(&fixture.core)
+        .await?;
+    assert_eq!(inputs, 0);
+    let stops: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM session_lifecycle_command WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&fixture.core)
+            .await?;
+    assert_eq!(stops, 1, "stop recovery replays the retained identity");
     Ok(())
 }
 

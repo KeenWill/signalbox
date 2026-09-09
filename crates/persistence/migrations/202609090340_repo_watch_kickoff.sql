@@ -5,5 +5,11 @@ ALTER TABLE dispatch_ledger
     ADD COLUMN kickoff_text text,
     ADD COLUMN kickoff_command_id uuid UNIQUE;
 
+ALTER TABLE dispatch_ledger
+    DROP CONSTRAINT dispatch_ledger_checkout_retired_reason_check,
+    ADD CHECK (checkout_retired_reason IN (
+        'checkout_provisioning_failed', 'repository_unconfigured', 'kickoff_rejected'
+    ));
+
 RESET search_path;
 RESET ROLE;

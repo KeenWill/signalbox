@@ -191,9 +191,10 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
         let session = applied.session();
         let stop = if let Some(stop) = checkout.stop_command {
             let sticky = match checkout.retired_reason {
-                Some(CheckoutRetirementReason::RepositoryUnconfigured) => {
-                    StopStickiness::Redispatchable
-                }
+                Some(
+                    CheckoutRetirementReason::RepositoryUnconfigured
+                    | CheckoutRetirementReason::KickoffRejected,
+                ) => StopStickiness::Redispatchable,
                 _ => StopStickiness::Sticky,
             };
             Some((stop, sticky))
@@ -335,8 +336,8 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                 .await
                 .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
             {
-                match self.core.submit_kickoff(kickoff, session, text).await {
-                    Err(RepositoryWatchCommandError::KickoffRejected) => {
+                let kickoff_result = match self.core.submit_kickoff(kickoff, session, text).await {
+                    Err(RepositoryWatchCommandError::KickoffDefaultsChanged) => {
                         let (retry, text) = self
                             .store
                             .retry_dispatch_kickoff(
@@ -347,7 +348,38 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
                             .await
                             .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
                             .ok_or(RepositoryWatchCommandError::CoreCommandFailed)?;
-                        self.core.submit_kickoff(retry, session, text).await?;
+                        self.core.submit_kickoff(retry, session, text).await
+                    }
+                    result => result,
+                };
+                match kickoff_result {
+                    Err(RepositoryWatchCommandError::KickoffRejected) => {
+                        let stop = self
+                            .store
+                            .retire_dispatch_checkout(
+                                id,
+                                CheckoutRetirementReason::KickoffRejected,
+                                "submit_input",
+                                "rejected",
+                                DurableCommandId::from_uuid(Uuid::now_v7()),
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+                        let stop = SessionLifecycleCommand::new(
+                            stop,
+                            session,
+                            SessionLifecycleOperation::Stop {
+                                sticky: StopStickiness::Redispatchable,
+                                descendant_scope: DescendantTerminationScope::ParentAlone,
+                            },
+                        );
+                        if !matches!(
+                            self.core.submit_lifecycle(stop).await?,
+                            CommandSubmission::Accepted
+                        ) {
+                            return Err(RepositoryWatchCommandError::CoreCommandFailed);
+                        }
+                        return Ok(result);
                     }
                     result => result?,
                 }
@@ -465,6 +497,7 @@ pub enum RepositoryWatchCommandError {
     TemplateUnavailable,
     UnsupportedCommand,
     CoreCommandFailed,
+    KickoffDefaultsChanged,
     KickoffRejected,
     InterruptFailed,
     CheckoutRemovalFailed,
@@ -490,7 +523,8 @@ impl RepositoryWatchCommandSink {
         };
         use signalbox_domain::{
             DeliveryRequest, ModelSelectionOverride, ParentTerminationKind,
-            PerInputConfigurationChoices, SubmitInputResult, UserContent,
+            PerInputConfigurationChoices, SubmitInputRejectedResult, SubmitInputResult,
+            UserContent,
         };
         let repository =
             signalbox_persistence::submit_input::SubmitInputRepository::with_model_capabilities(
@@ -541,6 +575,9 @@ impl RepositoryWatchCommandSink {
         );
         match service.execute(request).await {
             Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(_))) => Ok(()),
+            Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::SessionDefaultsVersionMismatch { .. },
+            ))) => Err(RepositoryWatchCommandError::KickoffDefaultsChanged),
             Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(_))) => {
                 Err(RepositoryWatchCommandError::KickoffRejected)
             }

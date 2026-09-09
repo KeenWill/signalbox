@@ -355,13 +355,15 @@ head SHA, base branch, and rule instruction at dispatch, and retains the submit
 command identity and publication instruction before submission; pending creation
 replay preserves recorded command delivery through core command idempotency. New
 kickoff submissions read the current session defaults version. A recorded
-rejection retains the provisioning hold and replaces the kickoff identity for
-one retry per dispatch attempt; only an applied result releases the hold. Failed
-provisioning submits no input. `labeled-review-response` requests thread repair,
-validation, commit, push with `git_push_configured`, replies naming the commit,
-and thread resolution; a stored observation with no unresolved threads instead
-requests a one-turn mergeability and gating-check convergence check, a plain
-pull request reply, and a clean finish. `renovate-merge-forward` requests
+defaults-version mismatch retains the provisioning hold and replaces the kickoff
+identity for one retry per dispatch attempt; only an applied result releases the
+hold. Other recorded rejections retire the dispatch with `kickoff_rejected` and
+a durable nonsticky stop, preserving the rejected kickoff command for diagnosis.
+Failed provisioning submits no input. `labeled-review-response` requests thread
+repair, validation, commit, push with `git_push_configured`, replies naming the
+commit, and thread resolution; a stored observation with no unresolved threads
+instead requests a one-turn mergeability and gating-check convergence check, a
+plain pull request reply, and a clean finish. `renovate-merge-forward` requests
 merging the base forward, resolving only conflicts, validating, committing,
 pushing, and reporting the result. Push instructions require the same configured
 authority as `git_push_configured`: a push credential and a head in the watched
