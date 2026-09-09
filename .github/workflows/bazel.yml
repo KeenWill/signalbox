@@ -27,13 +27,35 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
+      - name: Record cache study evidence
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/cache-study"
+          cat >> .bazelrc.local <<EOF
+          build --build_event_json_file=$RUNNER_TEMP/cache-study/bep.json
+          build --execution_log_json_file=$RUNNER_TEMP/cache-study/execution.json
+          build --profile=$RUNNER_TEMP/cache-study/profile.json.gz
+          build --experimental_remote_grpc_log=$RUNNER_TEMP/cache-study/grpc.bin
+          EOF
+          date -u +%FT%TZ > "$RUNNER_TEMP/cache-study/start.txt"
+          hostname > "$RUNNER_TEMP/cache-study/hostname.txt"
+          df -hT > "$RUNNER_TEMP/cache-study/filesystems.txt"
       - name: Fetch dependencies for the compile-fail fixture compiler
         run: cargo fetch --locked
       - name: Build and test the Bazel migration slice
         run: |
           bazel test --jobs=4 --local_resources=cpu=4 --local_resources=memory=4096 --local_test_jobs=1 //:rust_build //:bazel_tests //:rust_clippy_tests //:rust_documentation
 
+      - name: Upload cache study evidence
+        if: always() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-study-${{ github.job }}-${{ matrix.suite || 'ordinary' }}-${{ matrix.shard_index || '0' }}
+          path: ${{ runner.temp }}/cache-study
+
   bazel-host-integration:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -86,7 +108,12 @@ jobs:
         with:
           persist-credentials: false
       - id: matrix
-        run: echo "matrix=$(python3 scripts/postgres_integration_suites.py --matrix)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            echo 'matrix={"include":[{"suite":"persistence","shard_index":1},{"suite":"workflow-runtime","shard_index":0}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix=$(python3 scripts/postgres_integration_suites.py --matrix)" >> "$GITHUB_OUTPUT"
+          fi
 
   bazel-postgres:
     if: github.event_name == 'workflow_dispatch' || inputs.postgres
@@ -104,8 +131,28 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           remote-cache: ${{ vars.BAZEL_REMOTE_CACHE }}
+      - name: Record cache study evidence
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/cache-study"
+          cat >> .bazelrc.local <<EOF
+          build --build_event_json_file=$RUNNER_TEMP/cache-study/bep.json
+          build --execution_log_json_file=$RUNNER_TEMP/cache-study/execution.json
+          build --profile=$RUNNER_TEMP/cache-study/profile.json.gz
+          build --experimental_remote_grpc_log=$RUNNER_TEMP/cache-study/grpc.bin
+          EOF
+          date -u +%FT%TZ > "$RUNNER_TEMP/cache-study/start.txt"
+          hostname > "$RUNNER_TEMP/cache-study/hostname.txt"
+          df -hT > "$RUNNER_TEMP/cache-study/filesystems.txt"
       - name: Run the manifest PostgreSQL suite
         env:
           BAZEL_POSTGRES_SUITE: ${{ matrix.suite }}
           BAZEL_POSTGRES_SHARD_INDEX: ${{ matrix.shard_index }}
         run: python3 scripts/postgres_integration_suites.py --run-suite "$BAZEL_POSTGRES_SUITE" --shard-index "$BAZEL_POSTGRES_SHARD_INDEX"
+      - name: Upload cache study evidence
+        if: always() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-study-${{ github.job }}-${{ matrix.suite || 'ordinary' }}-${{ matrix.shard_index || '0' }}
+          path: ${{ runner.temp }}/cache-study
