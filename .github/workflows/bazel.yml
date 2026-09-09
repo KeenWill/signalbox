@@ -8,6 +8,12 @@ on:
         type: boolean
         default: true
   workflow_dispatch:
+    inputs:
+      cache-mode:
+        description: Cache option for the measurement run.
+        type: choice
+        options: [baseline, compression, minimal]
+        default: baseline
 
 permissions:
   contents: read
@@ -38,6 +44,10 @@ jobs:
           build --profile=$RUNNER_TEMP/cache-study/profile.json.gz
           build --experimental_remote_grpc_log=$RUNNER_TEMP/cache-study/grpc.bin
           EOF
+          case '${{ inputs.cache-mode }}' in
+            compression) echo 'build --remote_cache_compression' >> .bazelrc.local ;;
+            minimal) echo 'build --remote_download_minimal' >> .bazelrc.local ;;
+          esac
           date -u +%FT%TZ > "$RUNNER_TEMP/cache-study/start.txt"
           hostname > "$RUNNER_TEMP/cache-study/hostname.txt"
           df -hT > "$RUNNER_TEMP/cache-study/filesystems.txt"
@@ -142,6 +152,10 @@ jobs:
           build --profile=$RUNNER_TEMP/cache-study/profile.json.gz
           build --experimental_remote_grpc_log=$RUNNER_TEMP/cache-study/grpc.bin
           EOF
+          case '${{ inputs.cache-mode }}' in
+            compression) echo 'build --remote_cache_compression' >> .bazelrc.local ;;
+            minimal) echo 'build --remote_download_minimal' >> .bazelrc.local ;;
+          esac
           date -u +%FT%TZ > "$RUNNER_TEMP/cache-study/start.txt"
           hostname > "$RUNNER_TEMP/cache-study/hostname.txt"
           df -hT > "$RUNNER_TEMP/cache-study/filesystems.txt"
