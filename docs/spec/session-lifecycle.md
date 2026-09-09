@@ -205,6 +205,8 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
 
 ## Planned
 
+- Supervised failure parking and reconciliation on operator resume for either
+  ownership state; see [daemon survival design](../design/daemon-survival.md).
 - Failure parking of owned sessions: a structural failure, an unknown failure,
   or an exhausted retry budget on a live owned session parks it with the typed
   cause instead of terminalizing it or stopping silently; see
