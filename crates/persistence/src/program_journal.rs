@@ -137,6 +137,13 @@ impl ProgramJournalRepository {
         &self,
         runs: &[ProgramRunId],
     ) -> Result<ProgramJournalWake, ProgramJournalRepositoryError> {
+        let mut wake = self.listen_all().await?;
+        wake.runs = Some(runs.to_vec());
+        Ok(wake)
+    }
+
+    /// Listens for committed answers from all source runs; notifications are hints.
+    pub async fn listen_all(&self) -> Result<ProgramJournalWake, ProgramJournalRepositoryError> {
         let listener_pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy_with(self.pool.connect_options().as_ref().clone());
@@ -144,7 +151,7 @@ impl ProgramJournalRepository {
         listener.listen("signalbox_program_journal").await?;
         Ok(ProgramJournalWake {
             listener,
-            runs: runs.to_vec(),
+            runs: None,
         })
     }
 
@@ -1138,7 +1145,7 @@ impl signalbox_application::program_session::ProgramRunVerifier for ProgramJourn
 /// A disposable notification listener; callers must catch up after listening and every wake.
 pub struct ProgramJournalWake {
     listener: sqlx::postgres::PgListener,
-    runs: Vec<ProgramRunId>,
+    runs: Option<Vec<ProgramRunId>>,
 }
 
 impl ProgramJournalWake {
@@ -1147,7 +1154,11 @@ impl ProgramJournalWake {
             if notification
                 .payload()
                 .parse::<uuid::Uuid>()
-                .is_ok_and(|run| self.runs.contains(&ProgramRunId::from_uuid(run)))
+                .is_ok_and(|run| {
+                    self.runs
+                        .as_ref()
+                        .is_none_or(|runs| runs.contains(&ProgramRunId::from_uuid(run)))
+                })
             {
                 return Ok(());
             }
