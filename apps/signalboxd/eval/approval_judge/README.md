@@ -52,8 +52,10 @@ argument vector and shell history.
 Eval calls deliberately never enter `tool_approval_judge_model_call`: its
 triggers demand the live-request linkage — an active delegated wait and a
 reserved global call identity — that replayed synthetic cases do not have. The
-connection takes the same URL-only posture as the daemon's, so ambient `PG*`
-variables are refused rather than silently shaping it.
+connection URL must state its host, user, and password. Ambient `PG*` variables
+and a default password file do not refuse an eval run; the explicit password
+prevents password-file lookup, while other inherited settings remain part of the
+operator-controlled launch environment.
 
 The tables come from the daemon's migration set, and the daemon is what applies
 it; a database missing them, a role lacking the privileges recording exercises
