@@ -267,7 +267,15 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         failures.append(f"{WORKFLOW} bazel-postgres must be blocking")
     if _resolved_runs_on(run.get("runs-on", "")) != "signalbox-integration-tests":
         failures.append(f"{WORKFLOW} bazel-postgres must run on signalbox-integration-tests")
+    gate = "github.event_name == 'workflow_dispatch' || inputs.postgres"
+    for name in ("postgres-matrix", "bazel-postgres"):
+        if jobs.get(name, {}).get("if") != gate:
+            failures.append(f"{WORKFLOW} {name} does not use the PostgreSQL scope gate")
+    if run.get("needs") != "postgres-matrix":
+        failures.append(f"{WORKFLOW} bazel-postgres does not depend on postgres-matrix")
     rust_jobs = workflow_document((root / RUST_WORKFLOW).read_text(encoding="utf-8")).get("jobs", {})
+    if rust_jobs.get("bazel", {}).get("with", {}).get("postgres") != "${{ needs.rust-change-scope.outputs.postgres == 'true' }}":
+        failures.append(f"{RUST_WORKFLOW} does not pass the PostgreSQL change scope")
     if rust_jobs.get("bazel", {}).get("uses") != "./.github/workflows/bazel.yml":
         failures.append(f"{RUST_WORKFLOW} does not call the Bazel workflow")
     aggregate = rust_jobs.get("validate", {})
