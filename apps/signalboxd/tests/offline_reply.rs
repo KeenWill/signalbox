@@ -6,6 +6,7 @@
 
 mod support;
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::{error::Error, process::Command, time::Duration};
 
 use signalbox_application::{
@@ -40,11 +41,8 @@ use signalbox_model_runtime::{
 use signalbox_persistence::goal::GoalRecoveryProgress;
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository},
     goal_turn::GoalTurnCandidates,
-    local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{ProcessReadRepository, ProcessTranscriptEntry},
     scheduler::PostgresEligibilitySweep,
@@ -57,21 +55,13 @@ use signalboxd::{
     FatalExecutionSupervisor, GoalModeNumericBounds, PostgresGoalPassDisposition,
     PostgresProviderModelExecution,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
+use sqlx::{PgPool, types::Uuid};
 use tokio::time::timeout;
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 /// The undated provider-model spelling the fixture deployment configures.
 const CONFIGURED_PROVIDER_MODEL: &str = "claude-haiku-4-5";
 /// The canonical dated form of that same family, as a provider echoes it.
 const SERVED_PROVIDER_MODEL: &str = "claude-haiku-4-5-20251001";
-const DATABASE_NAME: &str = "signalboxd_e2e";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const SCHEDULED_EXECUTION_FAILURE_NEED: &str = "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal.";
 // numeric-bound: test - identifies the first durable recovery event
 #[cfg(feature = "test-support")]
@@ -157,27 +147,8 @@ impl ToolExecutor for UnexpectedToolExecutor {
     }
 }
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool, database_url))
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool, String), Box<dyn Error>> {
+    signalbox_persistence::test_support::postgres::migrated_postgres(8).await
 }
 
 async fn wait_for_terminal(pool: &PgPool, session: SessionId, turn: TurnId) {
@@ -554,7 +525,7 @@ async fn runtime_bridge_persists_scripted_assistant_reply() -> Result<(), Box<dy
     )
 )]
 struct GoalFailureFixture<Pass, Probe> {
-    container: ContainerAsync<Postgres>,
+    container: TestDatabase,
     pool: PgPool,
     goal: Goal,
     scheduler: SchedulerLoop<InProcessEligibilityWorkSource<PostgresEligibilitySweep>, Pass>,

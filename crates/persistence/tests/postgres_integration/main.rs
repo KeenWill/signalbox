@@ -19,6 +19,8 @@ use fixtures::plan::*;
 use fixtures::session_admission::*;
 use fixtures::tool_rounds::*;
 use fixtures::turn_activation::*;
+use signalbox_persistence::migrate;
+use signalbox_persistence::test_support::postgres::TestDatabase;
 
 #[path = "../support/mod.rs"]
 mod support;
@@ -161,7 +163,7 @@ use signalbox_persistence::{
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
-    local_test_connection_options, migrate,
+    local_test_connection_options,
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
@@ -359,7 +361,7 @@ async fn append_raw_parent_lifecycle_update(
 
 async fn prepared_complete_delegation_outbox(
     seed: u128,
-) -> Result<(ContainerAsync<Postgres>, PgPool, RawDelegationFixture), Box<dyn Error>> {
+) -> Result<(TestDatabase, PgPool, RawDelegationFixture), Box<dyn Error>> {
     let spawn_arguments = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
@@ -606,12 +608,8 @@ impl EligibilityNudge for AcceptingEligibilityNudge {
     }
 }
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
-    let (container, pool, database_url) = unmigrated_postgres().await?;
-
-    migrate(&pool).await?;
-
-    Ok((container, pool, database_url))
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool, String), Box<dyn Error>> {
+    signalbox_persistence::test_support::postgres::migrated_postgres(8).await
 }
 
 async fn record_empty_instruction_manifest(

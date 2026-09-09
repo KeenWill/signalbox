@@ -6,34 +6,21 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::{collections::VecDeque, error::Error, future::Future, pin::Pin};
 
 use signalbox_domain::{
     DeliveryKind, InlineFramePayload, JournalFrame, ProgramFault, ProgramRunId, ReplayCursor,
     RequestFrame, RequestKind, RequestOrdinal,
 };
-use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options, migrate,
-    program_journal::ProgramJournalRepository,
-};
+use signalbox_persistence::program_journal::ProgramJournalRepository;
 use signalbox_workflow_runtime::{
     LiveDeliveryFailure, LiveDeliverySource, PROGRAM_SDK_V1_SPECIFIER, ProgramArtifact,
     ProgramExecutionOutcome, WorkflowHost, WorkflowHostError, WorkflowHostProtocolError,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-#[path = "../../../tooling/postgres_test_image.rs"]
-mod postgres_test_image;
-use postgres_test_image::POSTGRES_IMAGE_TAG;
-const DATABASE_NAME: &str = "signalbox_program_host";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const RUN_ID: u128 = 0x5100_0200;
 const REPLAY_REQUEST_BYTE: u8 = 1;
 const REPLAY_ANSWER_BYTE: u8 = 11;
@@ -45,27 +32,10 @@ const DIVERGENT_REQUEST_BYTE: u8 = 9;
 const RUN_CANCEL_BYTE: u8 = 44;
 const THROWN_MESSAGE: &str = "the artifact threw";
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+    Ok((database, pool))
 }
 
 fn run_id() -> ProgramRunId {
@@ -1783,7 +1753,7 @@ async fn a_cancellation_after_the_initial_load_outranks_successful_completion()
     let cancel = async {
         loop {
             let registration_read_blocked: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation = 'program_registration'::regclass AND mode = 'AccessShareLock' AND NOT granted)",
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND relation = 'program_registration'::regclass AND mode = 'AccessShareLock' AND NOT granted)",
             ).fetch_one(&pool).await?;
             if registration_read_blocked {
                 break;

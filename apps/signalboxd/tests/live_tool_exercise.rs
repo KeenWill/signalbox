@@ -14,6 +14,7 @@
 
 mod support;
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::{
     error::Error,
     fs, io,
@@ -36,8 +37,6 @@ use signalbox_model_runtime::{
     ToolCallId, ToolCallProposal, ToolName,
 };
 use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
 };
@@ -66,11 +65,7 @@ use signalboxd::{
     ProcessRuntime, READ_FILE_NAME, SEARCH_FILES_NAME, SessionTemplateConfiguration,
     SystemCurrentTimeClock, WRITE_FILE_NAME,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
+use sqlx::{PgPool, types::Uuid};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{
@@ -81,10 +76,6 @@ use tokio::{
     time::timeout,
 };
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-const DATABASE_NAME: &str = "signalbox_live_tool_exercise";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const FIXTURE_REPOSITORY: &str = "KeenWill/signalbox";
 const FIXTURE_PULL_REQUEST: u64 = 94;
 const FIXTURE_HEAD_REVISION: &str = "59af8a3634792a30cfb9480bea08cb04acd17bbf";
@@ -1270,27 +1261,10 @@ fn command() -> SmokeResult<CommandId> {
     Ok(CommandId::try_from_uuid(Uuid::now_v7())?)
 }
 
-async fn migrated_postgres() -> SmokeResult<(ContainerAsync<Postgres>, PgPool)> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
+async fn migrated_postgres() -> SmokeResult<(TestDatabase, PgPool)> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(8).await?;
+    Ok((database, pool))
 }
 
 fn cleanup_socket_lock(socket: &Path) {
