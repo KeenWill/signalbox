@@ -6098,7 +6098,7 @@ async fn program_register_reads_the_executable_and_grants_from_json() -> Result<
         },
     )
     .await?;
-    assert!(String::from_utf8(stdout)?.contains(&registration_id.to_string()));
+    assert!(String::from_utf8(stderr)?.contains(&registration_id.to_string()));
     server.await??;
     Ok(())
 }

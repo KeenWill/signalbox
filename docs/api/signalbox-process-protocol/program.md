@@ -2,6 +2,76 @@
 
 # program
 
+## ProgramExecutableInput
+
+```rust
+pub enum ProgramExecutableInput {
+    JavaScript {
+        source: vec::Vec<u8>,
+        artifact: string::String,
+    },
+    Native {
+        entry: string::String,
+        revision: string::String,
+    },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ProgramGrant
+
+```rust
+pub enum ProgramGrant {
+    Time,
+    Random,
+    Sleep,
+    Subscribe,
+    Session,
+    Judge,
+    ExecStage,
+    Corpus,
+    EvalRecord,
+    Blob,
+    Register,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ProgramRegistrationInput
+
+```rust
+pub struct ProgramRegistrationInput {
+    pub name: string::String,
+    pub revision: string::String,
+    pub executable: ProgramExecutableInput,
+    pub grants: vec::Vec<ProgramGrant>,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ProgramRunState
+
+```rust
+pub enum ProgramRunState {
+    Running {},
+    Cancelled {},
+    Faulted {},
+    Succeeded { result: vec::Vec<u8> },
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## ProgramRun
+
+```rust
+pub struct ProgramRun {
+    pub registration_id: CanonicalUuid,
+    pub input: vec::Vec<u8>,
+    pub outcome: ProgramRunState,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
 ## ProgramRunCancelledState
 
 ```rust

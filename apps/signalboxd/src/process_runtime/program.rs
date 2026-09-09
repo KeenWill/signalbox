@@ -1,4 +1,4 @@
-//! User-authorized cancellation of retained program journals.
+//! User-authorized program admission and retained journal reads and cancellation.
 
 use super::*;
 use signalbox_domain::ProgramRunId;
