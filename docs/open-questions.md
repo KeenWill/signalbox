@@ -715,11 +715,9 @@ and ordering.
   lifecycle require a future foundation decision. Blocks platform goal mode.
 - **Standing update-subscription lifecycle.** Identity, lifetime, delivery, and
   cancellation for client-facing standing update subscriptions require a future
-  foundation decision. Blocks the planned callback surface. Narrowed: durable
-  program event subscriptions — identity, wake delivery, and cancellation for
-  registered programs — are decided and owned by
-  [program-substrate](spec/program-substrate.md), and are no longer part of this
-  question.
+  foundation decision. Blocks the planned callback surface. Individual program
+  event waits use the request identity committed in
+  [workflows design](design/program-substrate.md#waits).
 - **Review-workflow orchestration.** The
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
   pass, finding, external-link, and store contracts. The caller-driven

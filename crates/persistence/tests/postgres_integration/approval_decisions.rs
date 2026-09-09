@@ -1,6 +1,7 @@
 //! Approval judge preparation and the approval guard over user, delegate, and automatic decisions.
 
 use crate::*;
+use signalbox_domain::DecideToolRequestRejectedResult;
 use signalbox_persistence::approval_judge::ApprovalJudgeRepositoryError;
 
 /// A second fixture tool, distinct from `APPROVAL_TOOL_NAME`, so a mixed batch
@@ -2208,7 +2209,7 @@ async fn approval_guard_user_cannot_decide_delegated_request_before_escalation()
     let [request] = requests.as_slice() else {
         panic!("the fixture has one delegated request")
     };
-    let error = PostgresToolLoopRepository::new(pool.clone())
+    let prepared = PostgresToolLoopRepository::new(pool.clone())
         .decide(
             decide_tool_request(
                 DurableCommandId::from_uuid(Uuid::from_u128(APPROVAL_COMMAND_SEED)),
@@ -2217,14 +2218,13 @@ async fn approval_guard_user_cannot_decide_delegated_request_before_escalation()
             ),
             || TurnAttemptId::from_uuid(Uuid::from_u128(APPROVAL_NEXT_ATTEMPT_SEED)),
         )
-        .await
-        .expect_err("delegated authority requires recorded escalation");
-    let ToolLoopRepositoryError::Database { source, .. } = error else {
-        panic!("the authority guard returns its database constraint")
-    };
+        .await?;
     assert_eq!(
-        database_constraint(&source),
-        Some("tool_approval_user_requires_human_authority")
+        prepared.result(),
+        &DecideToolRequestResult::Rejected(
+            DecideToolRequestRejectedResult::AwaitingApprovalJudge { request: *request }
+        ),
+        "a pending delegated judge must retain approval authority",
     );
 
     pool.close().await;

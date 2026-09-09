@@ -129,6 +129,7 @@ where
         git_identity: GitIdentity,
         exec_runner: ExecRunner,
         cargo_registry_cache: Option<&Path>,
+        sandbox: &signalbox_tools_exec::SandboxConfiguration,
     ) -> Result<Self, DaemonToolsConstructionError> {
         // Each family below resolves the same pathname independently, so a
         // rename or replacement between two of them would leave one family
@@ -160,6 +161,7 @@ where
             None => SandboxedExecTool::try_new(exec_runner.clone(), root),
         }
         .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let sandboxed_exec = sandboxed_exec.with_sandbox_configuration(sandbox.clone());
         let unsandboxed_exec = UnsandboxedExecTool::try_new(exec_runner.clone(), root)
             .map_err(|_| DaemonToolsConstructionError::Exec)?;
         let cargo_diagnostics = match cargo_registry_cache {
@@ -169,6 +171,7 @@ where
             None => CargoDiagnosticsTool::try_new(exec_runner, root),
         }
         .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let cargo_diagnostics = cargo_diagnostics.with_sandbox_configuration(sandbox.clone());
         let (workspace_read_catalog, workspace_read) = workspace_read.into_parts();
         let (workspace_mutation_catalog, workspace_mutation) = workspace_mutation.into_parts();
         let (local_git_catalog, local_git) = local_git.into_parts();
@@ -244,6 +247,7 @@ pub(super) struct ConfiguredWorkspaceComposition<
     pub(super) git_identity: GitIdentity,
     pub(super) exec_runner: ExecRunner,
     pub(super) cargo_registry_cache: Option<PathBuf>,
+    pub(super) sandbox: signalbox_tools_exec::SandboxConfiguration,
 }
 
 /// Credential channels required by the daemon's base tool composition.

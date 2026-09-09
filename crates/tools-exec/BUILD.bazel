@@ -67,6 +67,11 @@ rust_integration_test(
         "CI": "true",
         "NEXTEST_BIN_EXE_signalbox_exec_supervisor": "$(rootpath :signalbox-exec-supervisor)",
     },
+    env_inherit = [
+        "HOME",
+        "PATH",
+        "RUSTUP_HOME",
+    ],
     proc_macro_deps = ["//crates/derive:signalbox_derive"],
     rustc_env = {
         "CARGO_MANIFEST_DIR": "crates/tools-exec",

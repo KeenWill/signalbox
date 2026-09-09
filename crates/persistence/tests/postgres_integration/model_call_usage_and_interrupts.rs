@@ -2173,7 +2173,8 @@ async fn queued_turn_activation_preview_scores_its_own_input() -> Result<(), Box
 /// summary was appended physically after the successor's through-entry.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn successor_compaction_coverage_follows_projected_order() -> Result<(), Box<dyn Error>> {
+async fn automatic_compaction_advances_projected_coverage_and_rejects_summary_only_retry()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x6d88;
     let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
@@ -2207,7 +2208,7 @@ async fn successor_compaction_coverage_follows_projected_order() -> Result<(), B
             command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x30)),
             session: fixture.session,
             requested_through_position: Some(1),
-            automatic_for_turn: None,
+            automatic_for_turn: Some(fixture.turn),
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
             target,
@@ -2233,12 +2234,21 @@ async fn successor_compaction_coverage_follows_projected_order() -> Result<(), B
         )
         .await?;
 
+    let remaining_source = compaction_repository
+        .preview_automatic_range(fixture.session)
+        .await?
+        .expect("the predecessor retains its terminal suffix");
+    let through = remaining_source
+        .members()
+        .last()
+        .expect("a nonempty suffix")
+        .position();
     let PrepareContextCompactionOutcome::Prepared(successor) = compaction_repository
         .prepare(PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x38)),
             session: fixture.session,
-            requested_through_position: Some(2),
-            automatic_for_turn: None,
+            requested_through_position: Some(through),
+            automatic_for_turn: Some(fixture.turn),
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
             target,
@@ -2263,6 +2273,34 @@ async fn successor_compaction_coverage_follows_projected_order() -> Result<(), B
                 .with_output_tokens(Some(13)),
         )
         .await?;
+
+    let compacted = compaction_repository
+        .preview_automatic_range(fixture.session)
+        .await?
+        .expect("the compacted frontier remains visible");
+    assert_eq!(compacted.members().len(), 1);
+    // A fresh repository models a later scheduler pass with no in-memory budget.
+    let exhausted = ContextCompactionRepository::new(pool.clone())
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::now_v7()),
+            session: fixture.session,
+            requested_through_position: Some(compacted.members()[0].position()),
+            automatic_for_turn: Some(fixture.turn),
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: predecessor.selection(),
+            target,
+            input_includes_cache_tokens: true,
+            credential_reference: String::from("successor compaction credential"),
+            call: ModelCallId::from_uuid(Uuid::now_v7()),
+            compaction: ContextCompactionId::from_uuid(Uuid::now_v7()),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::now_v7()),
+        })
+        .await?;
+    assert!(matches!(
+        exhausted,
+        PrepareContextCompactionOutcome::AutomaticAlreadyAttempted
+    ));
 
     // Twenty-eight ASCII characters and one two-byte "é": 30 UTF-8 bytes.
     let appended_input = "successor compaction suffix é";
@@ -3970,7 +4008,7 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
     let ordinary_failed_assertion: String = sqlx::query_scalar(
         "SELECT pg_get_functiondef(oid)
            FROM pg_proc
-          WHERE proname = 'assert_failed_terminal_execution_before_credential_pools'",
+          WHERE proname = 'assert_failed_terminal_execution_before_credential_wait_release'",
     )
     .fetch_one(&pool)
     .await?;

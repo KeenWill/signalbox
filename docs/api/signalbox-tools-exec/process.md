@@ -71,6 +71,7 @@ impl<Runner: ProcessRunner> SandboxedExecTool<Runner> {
         workspace_root: impl convert::AsRef<path::Path>,
         cargo_registry: impl convert::AsRef<path::Path>,
     ) -> result::Result<Self, ExecToolConstructionError>;
+    pub fn with_sandbox_configuration(self, configuration: SandboxConfiguration) -> Self;
     pub fn into_parts(
         self,
     ) -> (
@@ -255,6 +256,29 @@ pub enum SandboxProcessNamespace {
 // derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
 ```
 
+## SandboxNetwork
+
+```rust
+pub enum SandboxNetwork {
+    None,
+    Host,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
+```
+
+## SandboxConfiguration
+
+```rust
+pub struct SandboxConfiguration {
+    pub network: SandboxNetwork,
+    pub read_only_binds: vec::Vec<path::PathBuf>,
+    pub path_prepend: vec::Vec<path::PathBuf>,
+    pub rustup_home: option::Option<path::PathBuf>,
+    pub rustup_toolchain: option::Option<string::String>,
+}
+// derives: clone::Clone, fmt::Debug, default::Default, cmp::Eq, cmp::PartialEq
+```
+
 ## SandboxedCommandRunner
 
 ```rust
@@ -275,6 +299,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         workspace_root: impl convert::AsRef<path::Path>,
         process_namespace: SandboxProcessNamespace,
     ) -> result::Result<Self, ExecToolConstructionError>;
+    pub fn with_sandbox_configuration(self, configuration: SandboxConfiguration) -> Self;
     pub async fn try_run(
         &mut self,
         arguments: ExecArguments,

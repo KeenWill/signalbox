@@ -1595,6 +1595,7 @@ async fn run_hub(
             tool_configuration.git_identity().clone(),
             tool_configuration.exec_supervisor_executable(),
             tool_configuration.cargo_registry_cache(),
+            tool_configuration.sandbox(),
             model_configuration.web_fetch_egress_policy(),
         ),
         None => DaemonTools::try_new_without_tool_mappings(

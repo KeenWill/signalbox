@@ -818,6 +818,13 @@ export const validateDetailContinuation = (
   if (continuation === null) return
   const initial = page.items[0]
   const address = continuation.type === 'more_at' ? continuation.address : continuation.body.address
+  if (
+    !initial &&
+    continuation.type === 'more_at' &&
+    page.continuation?.type === 'more_at' &&
+    page.continuation.address.event_sequence === address.event_sequence
+  )
+    return
   if (initial?.address.event_sequence !== address.event_sequence)
     throw new TypeError('Transcript detail does not match the requested continuation address')
   if (continuation.type !== 'more_body') return

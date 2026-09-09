@@ -9,6 +9,70 @@ final class ProcessProtocolTests: XCTestCase {
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"
   private let blobDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+  func testSettingsOverlayEncodesUntouchedMembersAsInherit() throws {
+    var overlay = SignalboxModelSettingsOverlay.inheritAll
+    overlay.reasoningLevel = .value(.high)
+    let encoded = try SignalboxJSONCoding.encoder().encode(overlay)
+    XCTAssertEqual(String(decoding: encoded, as: UTF8.self),
+      #"{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"value","value":"high"},"service_tier":{"kind":"inherit"}}"#)
+  }
+
+  func testSettingsOverlayPreservesProviderDefaultSeparatelyFromExplicitNone() throws {
+    let overlay = SignalboxModelSettingsOverlay(reasoningLevel: .value(.none),
+      fastMode: .value(.enabled), serviceTier: .providerDefault)
+    let encoded = try SignalboxJSONCoding.encoder().encode(overlay)
+    XCTAssertEqual(String(decoding: encoded, as: UTF8.self),
+      #"{"fast_mode":{"kind":"value","value":"enabled"},"reasoning_level":{"kind":"value","value":"none"},"service_tier":{"kind":"provider_default"}}"#)
+    XCTAssertEqual(try SignalboxJSONCoding.decoder().decode(SignalboxModelSettingsOverlay.self,
+      from: encoded), overlay)
+  }
+
+  func testModelCapabilityChoicesComeFromTheResolvedAliasRecord() throws {
+    let directID = try SignalboxCanonicalUUID(validating: turnID)
+    let aliasID = try SignalboxCanonicalUUID(validating: sessionID)
+    let item = try SignalboxJSONCoding.decoder().decode(SignalboxModelCapabilityItem.self,
+      from: Data(#"{"type":"model_capability_item","selection_id":"\#(turnID)","capabilities":{"reasoning_levels":["low","high"],"fast_mode_supported":false,"service_tiers":[{"provider":"open_ai","value":"priority"}]}}"#.utf8))
+    let selected = try XCTUnwrap(SignalboxModelCapabilities.selected(.alias(aliasID: aliasID),
+      catalog: [item], aliases: [.init(aliasID: aliasID, selectionID: directID)]))
+    XCTAssertEqual(selected.reasoningLevels, [.low, .high])
+    XCTAssertEqual(selected.serviceTiers, [.openAI(.priority)])
+    XCTAssertFalse(selected.fastModeSupported)
+
+  }
+
+  func testMissingAliasTargetOffersNoCapabilityValues() throws {
+    let aliasID = try SignalboxCanonicalUUID(validating: sessionID)
+    let directID = try SignalboxCanonicalUUID(validating: turnID)
+    XCTAssertNil(SignalboxModelCapabilities.selected(.alias(aliasID: aliasID), catalog: [],
+      aliases: [.init(aliasID: aliasID, selectionID: directID)]))
+  }
+
+  /// Canonical order is the declaration order in crates/process-protocol/src/settings.rs.
+  func testModelCapabilitiesAcceptCanonicalOrderRatherThanAlphabeticalOrder() throws {
+    let capabilities = try SignalboxJSONCoding.decoder().decode(SignalboxModelCapabilities.self,
+      from: Data(#"{"reasoning_levels":["none","high","max"],"fast_mode_supported":false,"service_tiers":[{"provider":"open_ai","value":"scale"},{"provider":"open_ai","value":"priority"},{"provider":"open_ai","value":"fast"},{"provider":"codex_cli","value":"priority"},{"provider":"codex_cli","value":"flex"}]}"#.utf8))
+    XCTAssertEqual(capabilities.reasoningLevels, [.none, .high, .max])
+    XCTAssertEqual(capabilities.serviceTiers,
+      [.openAI(.scale), .openAI(.priority), .openAI(.fast), .codexCLI(.priority), .codexCLI(.flex)])
+  }
+
+  func testModelCapabilitiesRejectUnsortedAndRepeatedValues() throws {
+    for reasoning in [#"["high","low"]"#, #"["high","high"]"#] {
+      XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(SignalboxModelCapabilities.self,
+        from: Data(#"{"reasoning_levels":\#(reasoning),"fast_mode_supported":false,"service_tiers":[]}"#.utf8)))
+    }
+    for tiers in [
+      #"[{"provider":"open_ai","value":"fast"},{"provider":"open_ai","value":"priority"}]"#,
+      #"[{"provider":"codex_cli","value":"flex"},{"provider":"codex_cli","value":"priority"}]"#,
+      #"[{"provider":"codex_cli","value":"priority"},{"provider":"open_ai","value":"priority"}]"#,
+      #"[{"provider":"anthropic","value":"standard_only"},{"provider":"anthropic","value":"auto"}]"#,
+      #"[{"provider":"open_ai","value":"priority"},{"provider":"open_ai","value":"priority"}]"#,
+    ] {
+      XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(SignalboxModelCapabilities.self,
+        from: Data(#"{"reasoning_levels":[],"fast_mode_supported":false,"service_tiers":\#(tiers)}"#.utf8)))
+    }
+  }
+
   func testOverrideRequestEncodesTheExactMutationShape() throws {
     let request = SignalboxProcessClientRequest.overrideDeniedToolRequest(
       commandID: try SignalboxCommandID(validating: turnID),
@@ -1124,7 +1188,7 @@ final class ProcessProtocolTests: XCTestCase {
         SignalboxFollowedSessionEvent(
           cursor: SignalboxCanonicalUInt64(rawValue: 12),
           sessionID: try SignalboxCanonicalUUID(validating: sessionID),
-          event: .sessionModelSettingsChanged
+          event: .sessionModelSettingsChanged(adjustments: [])
         )
       )
     )
@@ -1219,7 +1283,7 @@ final class ProcessProtocolTests: XCTestCase {
         SignalboxFollowedSessionEvent(
           cursor: SignalboxCanonicalUInt64(rawValue: 12),
           sessionID: try SignalboxCanonicalUUID(validating: sessionID),
-          event: .turnModelSettingsResolved
+          event: .turnModelSettingsResolved(adjustments: [])
         )
       )
     )
@@ -1236,6 +1300,32 @@ final class ProcessProtocolTests: XCTestCase {
     )
 
     XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
+  func testTranscriptTurnRejectsSettingsEvidenceForAnotherOrigin() throws {
+    let eventFrame = ProcessProtocolFixture.turnModelSettingsEventFrame(
+      sessionID: sessionID, turnID: turnID,
+      requestedModel: #"{"kind":"direct","selection_id":"\#(turnID)"}"#,
+      selectedDirectID: turnID)
+    let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: eventFrame) as? [String: Any])
+    let message = try XCTUnwrap(envelope["message"] as? [String: Any])
+    var evidence = try XCTUnwrap(message["event"] as? [String: Any])
+    evidence.removeValue(forKey: "type")
+    let turn: [String: Any] = ["type": "transcript_turn", "turn_id": turnID,
+      "acceptance_position": "1", "model_settings": evidence,
+      "state": ["type": "queued", "accepted_input_id": toolRequestID,
+        "content": [["type": "text", "text": "Fixture input"]]]]
+    XCTAssertNoThrow(try SignalboxJSONCoding.decoder().decode(SignalboxTranscriptTurn.self,
+      from: JSONSerialization.data(withJSONObject: turn)))
+
+    for identity in ["turn_id", "accepted_input_id"] {
+      var mismatchedEvidence = evidence
+      mismatchedEvidence[identity] = sessionID
+      var mismatchedTurn = turn
+      mismatchedTurn["model_settings"] = mismatchedEvidence
+      XCTAssertThrowsError(try SignalboxJSONCoding.decoder().decode(SignalboxTranscriptTurn.self,
+        from: JSONSerialization.data(withJSONObject: mismatchedTurn)), identity)
+    }
   }
 
   func testTurnSettingsSessionEventRejectsPerCallProvenanceMismatch() throws {
@@ -1288,7 +1378,11 @@ final class ProcessProtocolTests: XCTestCase {
       )
     )
 
-    XCTAssertNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+    guard case .sessionEvent(let followed) = frame.message else {
+      return XCTFail("Expected the recorded settings event.")
+    }
+    XCTAssertEqual(followed.event,
+      .turnModelSettingsResolved(adjustments: [.reasoningLevelClamped(from: .high, to: .low)]))
   }
 
   func testSettingsChangeSessionEventRejectsUnknownMembers() throws {

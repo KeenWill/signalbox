@@ -1122,3 +1122,16 @@ pub(crate) const LOST_RUNNER_TOOL_REQUESTS: &str = "SELECT request.request_id FR
            AND (request.request_id = $3 OR NOT EXISTS (SELECT 1 FROM tool_approval_decision AS decision WHERE decision.request_id = request.request_id AND decision.decision_kind = 'deny'))
            AND NOT EXISTS (SELECT 1 FROM tool_approval_judge_model_call AS judge WHERE judge.request_id = request.request_id AND judge.state_kind = 'in_flight')
          ORDER BY request.request_ordinal FOR UPDATE OF request";
+
+pub(crate) const RUNNER_REPLACEMENT_STAGE: &str =
+    "SELECT command_id FROM runner_replacement_stage WHERE session_id = $1 FOR UPDATE";
+
+pub(crate) const RUNNER_REPLACEMENT_TERMINAL_BATCH: &str = "SELECT stage.command_id
+        FROM runner_replacement_stage AS stage JOIN turn_lifecycle AS turn USING (session_id)
+        WHERE stage.session_id = $1 AND turn.turn_id = $2
+          AND (turn.active_tool_round_call_id IS NOT NULL OR EXISTS (
+              SELECT 1 FROM tool_round AS round WHERE round.session_id = turn.session_id
+                  AND round.turn_id = turn.turn_id AND round.boundary_kind = 'closed_by_turn_end'
+          )) FOR UPDATE OF stage";
+
+pub(crate) const MODEL_FRONTIER_WRITE_IDENTITY: &str = "SELECT pg_advisory_xact_lock($1)";

@@ -254,12 +254,14 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
             git_identity.clone(),
             process_runner.clone(),
             None,
+            &Default::default(),
         )
         .expect("workspace-bound tools compile"),
         roots: SessionWorkspaceRoots::try_new(workspace).expect("session workspace roots derive"),
         git_identity,
         exec_runner: process_runner,
         cargo_registry_cache: None,
+        sandbox: Default::default(),
     };
     let conversations = ConversationTools::try_new(OfflineConversationPort)
         .expect("offline conversation tools compile");
@@ -342,6 +344,7 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
         git_identity(),
         &std::env::current_exe().expect("test executable path is available"),
         None,
+        &Default::default(),
         WebFetchEgressPolicy::deny_all(),
     )
     .expect("production daemon tools compile");

@@ -66,6 +66,16 @@ public struct SignalboxProcessSession: Identifiable, Equatable, Sendable {
     self.archived = metadata.archived
   }
 
+  public init(session: SignalboxProcessSession, defaults: SignalboxSessionDefaultsRead) {
+    self.id = session.id
+    self.defaultsVersion = defaults.defaultsVersion
+    self.modelSelection = defaults.modelSelection
+    self.dangerousToolAutoApproval = defaults.dangerousToolAutoApproval
+    self.title = session.title
+    self.tags = session.tags
+    self.archived = session.archived
+  }
+
   public var displayTitle: String {
     guard let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return "Session \(id.rawValue.prefix(8))"

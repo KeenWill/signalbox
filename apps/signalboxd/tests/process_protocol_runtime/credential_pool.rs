@@ -453,16 +453,8 @@ async fn pool_projection_terminal_wait_release_correlates_the_predecessor_over_t
     ));
     loop {
         let frame = response_within(&mut follower).await?;
-        if let ServerMessage::SessionEvent {
-            event:
-                SessionEvent::TurnFailed {
-                    turn_id: failed_turn,
-                    ..
-                },
-            ..
-        } = frame.message()
-        {
-            assert_eq!(*failed_turn, turn_id);
+        if let ServerMessage::Error { code, .. } = frame.message() {
+            assert_eq!(*code, ErrorCode::ResyncRequired);
             break;
         }
     }

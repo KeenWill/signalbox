@@ -473,14 +473,6 @@ impl FileMediaRegistry {
             .readers
             .get(&candidate.reader)
             .ok_or(FileMediaFailure::ProcessorFailed)?;
-        if candidate.evidence_bytes
-            > self
-                .ceilings
-                .validation_source_bytes
-                .min(reader.validation().source_bytes())
-        {
-            return Err(FileMediaFailure::ProcessorFailed);
-        }
         let raw = processor
             .validate(
                 reader.identity(),
@@ -503,7 +495,17 @@ impl FileMediaRegistry {
                 cancellation,
             )
             .await?;
-        match sanitize_validation(reader, &candidate.media_type, evidence, raw)? {
+        let validation = sanitize_validation(reader, &candidate.media_type, evidence, raw)?;
+        if candidate.evidence_bytes
+            > self
+                .ceilings
+                .validation_source_bytes
+                .min(reader.validation().source_bytes())
+            && !matches!(validation, SanitizedValidation::Malformed { .. })
+        {
+            return Err(FileMediaFailure::ProcessorFailed);
+        }
+        match validation {
             SanitizedValidation::Validated { metadata } => {
                 if let Ok(declared) = request.source.declared_media_type().canonical_essence()
                     && declared != candidate.media_type
