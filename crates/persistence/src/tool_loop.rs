@@ -917,7 +917,13 @@ impl PostgresToolLoopRepository {
                     )
                 })?
                 .into_attempt();
-            insert_prepared_attempt(&mut transaction, &prepared).await?;
+            let context_result_byte_limit = result_budget::result_byte_limit(
+                &mut transaction,
+                batch.producing_call(),
+                &self.continuation_usage_limits,
+            )
+            .await?;
+            insert_prepared_attempt(&mut transaction, &prepared, context_result_byte_limit).await?;
             Ok(Some(prepared))
         }
         .await;
@@ -976,16 +982,10 @@ impl PostgresToolLoopRepository {
             if let Some(detail) = admission.into_detail()? {
                 return Ok(ToolAttemptAuthorizationOutcome::PreauthorizationRejected { detail });
             }
-            let context_result_byte_limit = result_budget::result_byte_limit(
-                &mut transaction,
-                batch.producing_call(),
-                &self.continuation_usage_limits,
-            )
-            .await?;
             mark_issuing_turn_attempt_running(&mut transaction, authorized.attempt()).await?;
             let rows = sqlx::query(
                 "UPDATE tool_attempt
-                    SET state_kind = 'in_flight', context_result_byte_limit = $7
+                    SET state_kind = 'in_flight'
                   WHERE attempt_id = $1
                     AND request_id = $2
                     AND session_id = $3
@@ -1000,7 +1000,6 @@ impl PostgresToolLoopRepository {
             .bind(turn_id_to_uuid(turn))
             .bind(authorized.attempt().issuing_attempt().into_uuid())
             .bind(Decimal::from(authorized.attempt().generation().as_u64()))
-            .bind(context_result_byte_limit)
             .execute(&mut *transaction)
             .await?
             .rows_affected();
@@ -3259,6 +3258,7 @@ async fn load_current_attempt(
 async fn insert_prepared_attempt(
     connection: &mut PgConnection,
     attempt: &CurrentToolAttempt,
+    context_result_byte_limit: Option<i64>,
 ) -> Result<(), ToolLoopRepositoryError> {
     if attempt.state() != CurrentToolAttemptState::Prepared {
         return Err(ToolLoopRepositoryError::InvalidTransition(
@@ -3269,8 +3269,8 @@ async fn insert_prepared_attempt(
         "INSERT INTO tool_attempt
             (attempt_id, request_id, session_id, turn_id,
              issuing_turn_attempt_id, effect_class, dispatch_generation,
-             state_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'prepared')",
+             state_kind, context_result_byte_limit)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'prepared', $8)",
     )
     .bind(tool_attempt_id_to_uuid(attempt.attempt()))
     .bind(tool_request_id_to_uuid(attempt.request()))
@@ -3282,6 +3282,7 @@ async fn insert_prepared_attempt(
         ToolEffectClass::ExternalEffect => "external_effect",
     })
     .bind(Decimal::from(attempt.generation().as_u64()))
+    .bind(context_result_byte_limit)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -3300,24 +3301,31 @@ pub(crate) async fn persist_ended_attempt(
         wait_spawning_request,
         wait_child,
     ) = encode_attempt_end(attempt.end());
-    let context_result_text = if let Some(text) = result_text {
-        let limit: Option<i64> = sqlx::query_scalar(
-            "SELECT context_result_byte_limit FROM tool_attempt WHERE attempt_id = $1",
-        )
-        .bind(attempt.attempt().into_uuid())
-        .fetch_one(&mut *connection)
-        .await?;
-        Some(match limit {
-            Some(limit) => result_budget::context_text(
-                text,
-                usize::try_from(limit)
-                    .map_err(|_| ToolLoopCorruption::Inconsistent("tool result limit"))?,
-            ),
-            None => text.to_owned(),
-        })
-    } else {
-        None
-    };
+    let (limit, error_framing): (Option<i64>, i32) = sqlx::query_as(
+        "SELECT context_result_byte_limit,
+                octet_length(jsonb_build_object('error', jsonb_build_object(
+                    'kind', $2::text, 'detail', ''
+                ))::text)
+           FROM tool_attempt WHERE attempt_id = $1",
+    )
+    .bind(attempt.attempt().into_uuid())
+    .bind(error_kind)
+    .fetch_one(&mut *connection)
+    .await?;
+    let limit = limit
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| ToolLoopCorruption::Inconsistent("tool result limit"))?;
+    let context_result_text = result_text.map(|text| match limit {
+        Some(limit) => result_budget::context_text(text, limit),
+        None => text.to_owned(),
+    });
+    let context_error_detail = error_detail.map(|text| match limit {
+        Some(limit) => {
+            result_budget::context_error_detail(text, limit.saturating_sub(error_framing as usize))
+        }
+        None => text.to_owned(),
+    });
     let rows = sqlx::query(
         "UPDATE tool_attempt
             SET state_kind = 'terminal',
@@ -3325,6 +3333,7 @@ pub(crate) async fn persist_ended_attempt(
                 result_content_kind = $2,
                 result_text = $3,
                 context_result_text = $14,
+                context_error_detail = $15,
                 error_kind = $4,
                 error_detail = $5,
                 wait_spawning_request_id = $6,
@@ -3352,6 +3361,7 @@ pub(crate) async fn persist_ended_attempt(
     .bind(attempt.issuing_attempt().into_uuid())
     .bind(Decimal::from(attempt.generation().as_u64()))
     .bind(context_result_text)
+    .bind(context_error_detail)
     .execute(&mut *connection)
     .await?
     .rows_affected();

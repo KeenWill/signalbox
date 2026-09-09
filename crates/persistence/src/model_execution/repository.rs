@@ -437,7 +437,7 @@ impl PostgresModelCallRepository {
                                         COALESCE(octet_length(attempt.context_result_text), 0)
                                    ELSE octet_length(jsonb_build_object('error',
                                         jsonb_build_object('kind', attempt.error_kind,
-                                                          'detail', attempt.error_detail))::text)
+                                                          'detail', attempt.context_error_detail))::text)
                                    END
                                     WHEN 'tool_denied' THEN
                                         octet_length(jsonb_build_object('error', jsonb_build_object(

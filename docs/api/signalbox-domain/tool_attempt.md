@@ -69,6 +69,7 @@ pub enum ToolExecutionErrorKind {
 pub struct ToolExecutionErrorDetail(/* private */);
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ToolExecutionErrorDetail {
+    pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: string::String) -> result::Result<Self, ToolExecutionErrorDetailError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> string::String;
