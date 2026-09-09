@@ -266,8 +266,8 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         failures.append(f"{WORKFLOW} bazel-postgres does not use the manifest matrix")
     if run.get("continue-on-error", False) is not False:
         failures.append(f"{WORKFLOW} bazel-postgres must be blocking")
-    if _resolved_runs_on(run.get("runs-on", "")) != "signalbox-docker":
-        failures.append(f"{WORKFLOW} bazel-postgres must run on signalbox-docker")
+    if _resolved_runs_on(run.get("runs-on", "")) != "signalbox-integration-tests":
+        failures.append(f"{WORKFLOW} bazel-postgres must run on signalbox-integration-tests")
     rust_jobs = workflow_document((root / RUST_WORKFLOW).read_text(encoding="utf-8")).get("jobs", {})
     if rust_jobs.get("bazel", {}).get("uses") != "./.github/workflows/bazel.yml":
         failures.append(f"{RUST_WORKFLOW} does not call the Bazel workflow")

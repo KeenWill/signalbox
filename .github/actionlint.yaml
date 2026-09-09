@@ -1,4 +1,7 @@
 self-hosted-runner:
   labels:
-    - signalbox
-    - signalbox-docker
+    - signalbox-orchestration
+    - signalbox-builds
+    - signalbox-integration-tests
+    - signalbox-reports
+    - signalbox-coverage

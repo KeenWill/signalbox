@@ -147,7 +147,7 @@ env:
 jobs:
   eligibility:
     name: Tool eval eligibility
-    runs-on: signalbox
+    runs-on: signalbox-orchestration
     timeout-minutes: 5
     outputs:
       allowed: ${{ steps.eligibility.outputs.allowed }}
@@ -187,11 +187,11 @@ jobs:
       matrix:
         include:
           - family: git
-            runner: signalbox-docker
+            runner: signalbox-coverage
           - family: workspace
-            runner: signalbox-docker
+            runner: signalbox-coverage
           - family: web
-            runner: signalbox-docker
+            runner: signalbox-coverage
           - family: exec
             runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
