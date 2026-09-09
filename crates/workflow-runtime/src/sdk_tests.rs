@@ -814,3 +814,14 @@ async fn evaluation_judge_codec_preserves_full_width_usage() {
     result.unwrap();
     assert_eq!(requests.len(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn evaluation_blob_codec_refuses_trailing_digest_bytes_before_request() {
+    let (result, requests) = sdk_script(
+        "await sdk.evaluation.blob({ digest: 'sha256:' + 'a'.repeat(64) + '\\n' });",
+        [],
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(requests.is_empty());
+}

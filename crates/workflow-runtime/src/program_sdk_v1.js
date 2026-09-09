@@ -244,7 +244,8 @@
     return value;
   };
   const digest = (value) => {
-    if (regexExec(/^sha256:[0-9a-f]{64}$/, string(value)) === null) throw new CodecTypeError("invalid blob digest");
+    const text = string(value);
+    if (text.length !== 71 || regexExec(/^sha256:[0-9a-f]{64}$/, text) === null) throw new CodecTypeError("invalid blob digest");
     return value;
   };
   const list = (value, check) => {
