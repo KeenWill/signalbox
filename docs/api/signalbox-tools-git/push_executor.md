@@ -8,6 +8,7 @@
 pub struct GitPushExecutor<Transport> {/* private */}
 // derives: fmt::Debug
 impl<Transport> GitPushExecutor<Transport> {
+    pub fn with_commit_fence(self, commit: string::String) -> Self;
     pub fn with_branch_fence(self, branch: string::String) -> Self;
 }
 impl<Transport: GitPushTransport> signalbox_application::ToolExecutor

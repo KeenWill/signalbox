@@ -31,13 +31,17 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
             ("GIT_CONFIG_NOSYSTEM", "1"),
             ("GIT_CONFIG_GLOBAL", "/dev/null"),
             ("GIT_TERMINAL_PROMPT", "0"),
-            ("GIT_CONFIG_COUNT", "4"),
+            ("GIT_CONFIG_COUNT", "6"),
             ("GIT_CONFIG_KEY_1", "credential.helper"),
             ("GIT_CONFIG_VALUE_1", ""),
             ("GIT_CONFIG_KEY_2", "core.hooksPath"),
             ("GIT_CONFIG_VALUE_2", "/dev/null"),
             ("GIT_CONFIG_KEY_3", "http.followRedirects"),
             ("GIT_CONFIG_VALUE_3", "false"),
+            ("GIT_CONFIG_KEY_4", "pack.window"),
+            ("GIT_CONFIG_VALUE_4", "0"),
+            ("GIT_CONFIG_KEY_5", "pack.depth"),
+            ("GIT_CONFIG_VALUE_5", "0"),
             ("LC_ALL", "C"),
         ]
         .into_iter()

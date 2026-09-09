@@ -786,9 +786,29 @@ async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposit
     local
         .config()?
         .set_str("remote.origin.pushurl", "/unavailable/other.git")?;
-    local
-        .config()?
-        .set_str("url./unavailable/rewrite/.insteadOf", "https://github.com/")?;
+    let redirected_path = fixture._files.path().join("redirected.git");
+    let redirected = git2::build::RepoBuilder::new().bare(true).clone(
+        fixture.runner.bare.to_str().expect("fixture path"),
+        &redirected_path,
+    )?;
+    local.config()?.set_str(
+        &format!("url.{}.insteadOf", redirected_path.display()),
+        fixture.runner.bare.to_str().expect("fixture path"),
+    )?;
+    // The fixture substitutes this local destination for the deployment URL.
+    let rewritten = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-remote", "--get-url"])
+        .arg(&fixture.runner.bare)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()?;
+    assert!(rewritten.status.success());
+    assert_eq!(
+        std::str::from_utf8(&rewritten.stdout)?.trim(),
+        redirected_path.to_str().expect("fixture path")
+    );
     let rejected = run_git_tool_evidence(
         &catalog,
         &executor,
@@ -828,6 +848,10 @@ async fn dispatched_push_advances_only_its_retained_head_and_survives_recomposit
     assert_eq!(
         remote.find_reference("refs/heads/review")?.target(),
         Some(head)
+    );
+    assert_eq!(
+        redirected.find_reference("refs/heads/review")?.target(),
+        Some(git2::Oid::from_str(fixture.head.as_str())?)
     );
     // A new executor and turn reread both durable authority and a rotated file.
     std::fs::write(&credential, "rotated-push-fixture-token\n")?;

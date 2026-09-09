@@ -87,6 +87,7 @@ where
         root: &Path,
         repository: &crate::WatchedRepositoryConfiguration,
         branch: signalbox_domain::BranchName,
+        commit: signalbox_domain::CommitSha,
         runner: ExecRunner,
         filesystem: &FileSystem,
     ) -> Result<
@@ -112,7 +113,9 @@ where
             signalbox_tools_git::GitPushTools::try_new(filesystem, root, remote, transport)
                 .map_err(|_| DaemonToolsConstructionError::LocalGit)?
                 .into_parts();
-        Ok(executor.with_branch_fence(branch.as_str().to_owned()))
+        Ok(executor
+            .with_branch_fence(branch.as_str().to_owned())
+            .with_commit_fence(commit.as_str().to_owned()))
     }
 
     /// Composes every workspace-root-bound family around one root.
