@@ -5463,8 +5463,28 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "abandoned_actions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "generation": {
                 "$ref": "#/$defs/WebPositiveU64"
+              },
+              "settling_turn_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebUuid"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "type": {
                 "const": "user_stopped",
@@ -5473,7 +5493,9 @@ const schemas = {
             },
             "required": [
               "type",
-              "generation"
+              "generation",
+              "settling_turn_id",
+              "abandoned_actions"
             ],
             "type": "object"
           },
@@ -6561,6 +6583,11 @@ const schemas = {
       "WebU64": {
         "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
         "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       }
     },

@@ -2216,21 +2216,12 @@ mod tests {
     };
     use signalbox_persistence::{
         create_session::CreateSessionRepository,
-        disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-        disposable_test_container_labels, local_test_connection_options, migrate,
+        local_test_connection_options,
         runner_protocol::{RunnerConnectionCause, RunnerConnectionState},
         session_credentials::{SessionCredentialPin, SessionModelCredential},
     };
     use sqlx::{PgPool, postgres::PgPoolOptions};
-    use testcontainers_modules::{
-        postgres::Postgres,
-        testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-    };
 
-    const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-    const DATABASE_USER: &str = "signalbox";
-    const DATABASE_PASSWORD: &str = "signalbox-test";
-    const DATABASE_NAME: &str = "signalbox";
     const CONFIGURED_REPOSITORY: &str = "signalbox";
     const ARBITRARY_HEARTBEAT_CHALLENGE_SEQUENCE: u64 = 1;
     const ARBITRARY_HEARTBEAT_RUNNER_SEQUENCE: u64 = 1;
@@ -2520,40 +2511,17 @@ mod tests {
             .expect("the configured registration-only catalog is internally consistent")
     }
 
-    async fn postgres_store() -> (ContainerAsync<Postgres>, String, RunnerProtocolStore) {
-        let container = Postgres::default()
-            .with_user(DATABASE_USER)
-            .with_password(DATABASE_PASSWORD)
-            .with_db_name(DATABASE_NAME)
-            .with_cmd(disposable_postgres_server_args())
-            .with_mount(
-                disposable_postgres_state_tmpfs_from_example()
-                    .expect("checked-in example provides the test database bound"),
-            )
-            .with_tag(POSTGRES_IMAGE_TAG)
-            .with_labels(disposable_test_container_labels())
-            .start()
-            .await
-            .expect("the hermetic PostgreSQL container starts");
-        let host = container
-            .get_host()
-            .await
-            .expect("the PostgreSQL host is available");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("the PostgreSQL port is available");
-        let database_url =
-            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-        let pool = fresh_pool(&database_url).await;
-        migrate(&pool)
-            .await
-            .expect("the runner schema migration succeeds");
-        migrate(&pool)
-            .await
-            .expect("the runner schema migration is idempotent");
+    async fn postgres_store() -> (
+        signalbox_persistence::test_support::postgres::TestDatabase,
+        String,
+        RunnerProtocolStore,
+    ) {
+        let (database, pool, database_url) =
+            signalbox_persistence::test_support::postgres::migrated_postgres(8)
+                .await
+                .expect("the isolated migrated PostgreSQL fixture starts");
         let store = RunnerProtocolStore::new(pool, empty_catalog());
-        (container, database_url, store)
+        (database, database_url, store)
     }
 
     async fn fresh_pool(database_url: &str) -> PgPool {

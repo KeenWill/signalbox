@@ -1108,6 +1108,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
 ```rust
 pub enum AcceptedInputTurnSchedulingRecordState {
     Queued,
+    Retired,
     Active {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,

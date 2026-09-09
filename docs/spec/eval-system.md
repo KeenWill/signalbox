@@ -16,10 +16,11 @@ Each case pairs a tool request and its frozen authority context with the
 expected disposition and free-text provenance for that label. The corpus is
 consumed directly as opaque evaluation input after JSON shape decoding.
 
-The library loads a corpus, replays each case through the judge, and scores the
-verdicts into a scorecard. The offline entry point replays recorded provider
-responses in corpus order through a scripted model adapter, requires one
-response per corpus case, and prints the scorecard as JSON.
+The daemon-independent library decodes both corpus shapes and computes their
+distinct scorecards. Both entry points live in the daemon package. The offline
+entry point replays recorded provider responses in corpus order through a
+scripted model adapter, requires one response per corpus case, and prints the
+scorecard as JSON.
 
 The live-provider runner in the daemon is not part of the harness. It reads its
 own JSONL case file in its own case shape, sends each case to a configured

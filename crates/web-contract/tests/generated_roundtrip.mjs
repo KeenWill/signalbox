@@ -3221,7 +3221,7 @@ test("tool batches accept only tool-produced goal events", () => {
   for (const goal of [
     { ...event, type: "commissioned" },
     { ...event, type: "resumed" },
-    { generation: "1", type: "user_stopped" },
+    { generation: "1", type: "user_stopped", settling_turn_id: null, abandoned_actions: null },
     { ...event, type: "superseded" },
     { generation: "1", type: "session_closed", outcome: "stopped" },
     { ...event, type: "blocked", reason: "execution_failure" },
@@ -3239,7 +3239,7 @@ test("goal evidence belongs to the enclosing detail session", () => {
   const page = userInputDetailPage();
   page.items[0].kind = "goal_changed";
   page.items[0].body = { type: "goal_event", session_id: page.session_id,
-    event: { type: "user_stopped", generation: "1" } };
+    event: { type: "user_stopped", generation: "1", settling_turn_id: null, abandoned_actions: null } };
   page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
   page.items[0].body.session_id = "00000000-0000-0000-0000-000000000992";
@@ -3418,4 +3418,19 @@ test("generated detail decoder accepts an exhaustion fact and rejects a mismatch
   assert.deepEqual(decodeWebSessionTimelineDetailPage(page).items[0].body, page.items[0].body);
   page.items[0].kind = "turn_reconciliation_required";
   assert.throws(() => decodeWebSessionTimelineDetailPage(page), /matching header-only event kind/);
+});
+
+test("goal stop accounting fields require explicit presence", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "goal_changed";
+  page.items[0].body = { type: "goal_event", session_id: page.session_id, event: {
+    type: "user_stopped", generation: "1", settling_turn_id: null, abandoned_actions: null,
+  } };
+  page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+  for (const field of ["settling_turn_id", "abandoned_actions"]) {
+    const malformed = structuredClone(page);
+    delete malformed.items[0].body.event[field];
+    assert.throws(() => decodeWebSessionTimelineDetailPage(malformed));
+  }
 });

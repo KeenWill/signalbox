@@ -155,13 +155,14 @@ def rust_api_json(name = "api_json", **kwargs):
     kwargs.setdefault("visibility", ["//:__pkg__"])
     _rust_doc(name = name, **kwargs)
 
-def rust_postgres_suite(name, binaries, json_preserve_order = True):
+def rust_postgres_suite(name, binaries, json_preserve_order = True, tags = ["external"]):
     """Select ignored tests and shards from the shared suite manifest.
 
     Args:
         name: Manifest suite name.
         binaries: Compiled Bazel test labels mapped to Cargo test binary names.
         json_preserve_order: Whether the Cargo suite enables serde_json/preserve_order.
+        tags: Additional test tags; external disables result reuse by default.
     """
     suite = SUITES[name]
     selected = []
@@ -178,7 +179,7 @@ def rust_postgres_suite(name, binaries, json_preserve_order = True):
             args = ["--ignored"] + _TEST_ARGS + [arg for skip in suite["skip"] for arg in ["--skip", skip]],
             env = {"RUST_MIN_STACK": "8388608"},
             shard_count = suite["shards"],
-            tags = ["manual", "external", "no-sandbox", "requires-network"],
+            tags = ["manual", "no-sandbox", "requires-network"] + tags,
             size = "enormous",
         )
         selected.append(":" + target)

@@ -51,7 +51,7 @@
     },
     {
       "customType": "regex",
-      "managerFilePatterns": ["/^\\.github/workflows/(?:bazel|rust|coverage|web)\\.yml$/"],
+      "managerFilePatterns": ["/^\\.github/actions/setup-bazel/action\\.yml$/"],
       "matchStrings": ["bazelisk-version: (?<currentValue>[0-9.]+)"],
       "depNameTemplate": "bazelbuild/bazelisk",
       "datasourceTemplate": "github-releases",

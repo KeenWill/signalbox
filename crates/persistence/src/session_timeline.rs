@@ -1520,15 +1520,33 @@ async fn load_goal_change_event(
     let generation = nonnegative(row.try_get("generation")?, "goal generation")?;
     let event_kind: String = row.try_get("event_kind")?;
     let reason: Option<String> = row.try_get("blocked_reason")?;
-    timeline_goal_event(
+    let mut event = timeline_goal_event(
         generation,
         &event_kind,
         reason.as_deref(),
         row.try_get::<Option<String>, _>("session_outcome_kind")?
             .as_deref(),
         text,
-    )
-    .map_err(Into::into)
+    )?;
+    if let TimelineGoalEvent::UserStopped {
+        settling_turn,
+        abandoned_actions,
+        ..
+    } = &mut event
+    {
+        let stop = sqlx::query("SELECT turn_id, abandoned_actions FROM goal_stop_settlement WHERE session_id = $1 AND event_ordinal = $2")
+            .bind(session.into_uuid()).bind(Decimal::from(goal_event_ordinal))
+            .fetch_one(&mut **transaction).await?;
+        *settling_turn = stop
+            .try_get::<Option<uuid::Uuid>, _>("turn_id")?
+            .map(TurnId::from_uuid);
+        *abandoned_actions = stop
+            .try_get::<Option<i64>, _>("abandoned_actions")?
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| SessionTimelineCorruption::InvalidStoredValue("abandoned actions"))?;
+    }
+    Ok(event)
 }
 
 fn timeline_goal_event(
@@ -1584,7 +1602,11 @@ fn timeline_goal_event(
             ))?,
         }),
         StoredGoalEventKind::UserStopped if reason.is_none() && text.is_none() => {
-            Ok(TimelineGoalEvent::UserStopped { generation })
+            Ok(TimelineGoalEvent::UserStopped {
+                generation,
+                settling_turn: None,
+                abandoned_actions: None,
+            })
         }
         StoredGoalEventKind::Superseded if reason.is_none() => Ok(TimelineGoalEvent::Superseded {
             generation,

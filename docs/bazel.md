@@ -6,6 +6,11 @@ Install [Bazelisk](https://github.com/bazelbuild/bazelisk). Bazelisk selects
 groups updates to it with `rust-toolchain.toml`; manual toolchain changes update
 both files.
 
+The toolchain extension reads Rust's published release manifests for archive
+checksums and retains the manifest digests in `MODULE.bazel.lock`. Stable and
+dated-nightly version updates resolve their checksums automatically; commit the
+refreshed lockfile with the version change.
+
 ```bash
 bazel build //:rust_build
 bazel test //:bazel_tests
@@ -86,12 +91,15 @@ workspace dependency graph also serves the program host's insertion-ordered JSON
 requirements.
 
 The shared image digest, migrations, and example configuration are declared
-compilation inputs. PostgreSQL targets are manual and external: compilation is
-cacheable, tests always execute. The runtime partitions libtest's ignored-test
-inventory across each target's manifest-derived shards. CI gives each manifest
-shard its own matrix worker; each worker runs one partition per binary at a time
-with 16 test threads. The Rust workflow calls `bazel.yml` and binds its ordinary
-and PostgreSQL results to `validate` under the Rust change-scope gate.
+compilation inputs. The manual `//:postgres_workflow_runtime` suite caches
+successful test results, including in the shared remote cache. Its tests create
+fresh databases from the pinned image. Other PostgreSQL suites retain the
+`external` tag: compilation is cacheable, tests always execute. The runtime
+partitions libtest's ignored-test inventory across each target's
+manifest-derived shards. CI gives each manifest shard its own matrix worker;
+each worker runs one partition per binary at a time with 16 test threads. The
+Rust workflow calls `bazel.yml` and binds its ordinary and PostgreSQL results to
+`validate` under the Rust change-scope gate.
 
 The checker job runs its Python suites with
 `bazel test //:python_checker_tests`. Bazel supplies Python 3.14, packages from
@@ -168,3 +176,14 @@ lockfile supplies package versions; its pnpm translation is generated input. The
 browser runtime follows the locked Playwright package, with image checksums
 retained in the Bazel lockfile and declared DejaVu fonts. Browser evidence is
 retained in the test's undeclared outputs. The web CI job uses the shared cache.
+
+CI uses `.github/actions/setup-bazel` to configure build-result and archive
+download caching from `BAZEL_REMOTE_CACHE` on self-hosted runners. Downloads
+fall back to the origin if the proxy cannot serve them. Local builds can use the
+same service through `.bazelrc.local`:
+
+```text
+build --remote_cache=grpc://cache.example:9092
+build --experimental_remote_downloader=grpc://cache.example:9092
+build --experimental_remote_downloader_local_fallback
+```

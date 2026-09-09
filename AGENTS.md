@@ -197,12 +197,15 @@ check out a branch by name in a second worktree: worktrees share branch refs, so
 a commit can move another worktree's HEAD. Use
 `git checkout --detach origin/<branch>` and `git push origin HEAD:<branch>`.
 
-The Postgres integration suites start one container per test through
-testcontainers, and only `ContainerAsync`'s `Drop` removes it, so a test process
-that dies without unwinding leaves containers that hold host memory. Start test
-containers through the test harness,
-`signalbox_persistence::disposable_test_container_labels`, which attaches the
-label the sweep selects on. Remove leftover containers with
+On Linux, ordinary nextest PostgreSQL fixtures share a run-owned container; each
+test owns a database clone and a guardian removes the container when the runner
+exits. Fixtures using testcontainers, including ordinary Cargo/Bazel runs, rely
+on `ContainerAsync` drop to remove their containers; a test process that dies
+without unwinding can leave those containers holding host memory. Test harnesses
+attach the disposable label selected by the sweep, using
+`signalbox_persistence::disposable_test_container_labels` for testcontainers.
+`TESTCONTAINERS_COMMAND=keep` preserves containers and database clones for
+inspection. Remove leftover containers with
 [`tooling/sweep-test-containers.sh`](tooling/sweep-test-containers.sh): it
 reports without `--apply`, and removes only labeled containers older than two
 hours (by default). On a shared machine, run the sweep on a timer.

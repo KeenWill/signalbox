@@ -172,6 +172,7 @@ function CommandPalette({
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
   const focusSearchAfterClose = useRef(false)
+  const openArtifactAfterClose = useRef(false)
   return (
     <Dialog.Root
       open={open}
@@ -186,6 +187,12 @@ function CommandPalette({
           aria-describedby="product-palette-description"
           onEscapeKeyDown={(event) => event.stopPropagation()}
           onCloseAutoFocus={(event) => {
+            if (openArtifactAfterClose.current) {
+              event.preventDefault()
+              openArtifactAfterClose.current = false
+              invokeProductCommand('artifact.open', context)
+              return
+            }
             if (focusSearchAfterClose.current) {
               event.preventDefault()
               focusSearchAfterClose.current = false
@@ -233,13 +240,14 @@ function CommandPalette({
                   key={command.id}
                   type="button"
                   onClick={() => {
+                    openArtifactAfterClose.current = command.id === 'artifact.open'
                     focusSearchAfterClose.current = command.id === 'search.focus'
                     focusTimelineAfterClose.current =
                       command.id.startsWith('selection.') &&
                       productCommandAvailable(command.id, context)
                     if (command.id === 'help.open') helpOpenerRef.current = openerRef.current
                     invokeProductCommand('surface.escape', context)
-                    invokeProductCommand(command.id, context)
+                    if (!openArtifactAfterClose.current) invokeProductCommand(command.id, context)
                   }}
                 >
                   <span>
@@ -635,8 +643,9 @@ export function ProductApp({
   useEffect(() => {
     void surface
     void sessionState.session
+    void sessionState.workspace
     if (document.activeElement === document.body) mainRef.current?.focus()
-  }, [surface, sessionState.session])
+  }, [surface, sessionState.session, sessionState.workspace])
   const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
     productHotkeyBindings
