@@ -262,11 +262,12 @@ the database transaction timestamp, not a client clock.
 
 Except for immutable credential-pool policy validation, every read that holds a
 pooled connection across more than one statement takes one snapshot-reader
-admission; the single-statement defaults read takes none, while blob metadata
-reads take one. Pool-policy validation takes no admission so a follower can
-validate its snapshot while holding one. Every request states its admission
-class before dispatch, so no read verb reaches the pool by omission. The reader
-budget leaves at least two pool connections outside snapshot work.
+admission. Single-statement defaults and blob metadata reads take no
+snapshot-reader permit before dispatch; the blob metadata handler acquires one
+before its database read. Pool-policy validation takes no admission so a
+follower can validate its snapshot while holding one. Every request states its
+admission class before dispatch, so no read verb reaches the pool by omission.
+The reader budget leaves at least two pool connections outside snapshot work.
 
 The imported seed frontier is selected only when no persisted turn-start lineage
 exists; a queued but unstarted first native turn does not hide it.
