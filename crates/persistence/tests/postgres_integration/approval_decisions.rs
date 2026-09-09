@@ -752,27 +752,23 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
     Ok(())
 }
 
-/// A judge decides under the goal statement it read while being prepared, and
-/// the session is unlocked for the whole provider round-trip that follows, so a
-/// user stop lands between the read and the commit. Completion resolves the
-/// statement again under its own lock and finds nothing, which withdraws the
-/// authority the recommendation was formed under: the approval the judge
-/// returned never becomes a decision, and the request stays parked for the
-/// human who now owns it.
+/// Superseding the judged generation during the provider round-trip withdraws
+/// its authority while leaving the request pending. Completion must escalate
+/// the offered approval and leave the request parked for a human decision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
+async fn approval_judge_completion_escalates_after_the_judged_goal_is_superseded()
 -> Result<(), Box<dyn Error>> {
-    assert_judge_escalation_after_goal_stop(false).await
+    assert_judge_escalation_after_goal_supersession(false).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn headless_escalation_preserves_a_placement_loss_result() -> Result<(), Box<dyn Error>> {
-    assert_judge_escalation_after_goal_stop(true).await
+    assert_judge_escalation_after_goal_supersession(true).await
 }
 
-async fn assert_judge_escalation_after_goal_stop(
+async fn assert_judge_escalation_after_goal_supersession(
     headless_loss: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
@@ -839,7 +835,23 @@ async fn assert_judge_escalation_after_goal_stop(
     );
 
     repository.authorize(&prepared).await?;
-    stop_fixture_session_goal(&pool, fixture.session, seed + 0xf4).await?;
+    let superseded = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf4)),
+                fixture.session,
+                GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                    "pursue the replacement approval fixture goal",
+                ))?),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0xf5)),
+                TurnId::from_uuid(Uuid::from_u128(seed + 0xf6)),
+            )),
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(superseded);
     let outcome = repository
         .complete(
             &prepared,
