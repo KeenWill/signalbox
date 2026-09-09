@@ -7,10 +7,13 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   realpathSync,
+  renameSync,
   statSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,6 +25,8 @@ const temporary = process.env.TEST_TMPDIR
 const libraries = join(runtime, 'usr/lib/x86_64-linux-gnu')
 const loader = join(libraries, 'ld-linux-x86-64.so.2')
 const browsers = join(temporary, 'ms-playwright')
+const fontconfig = join(temporary, 'fonts.conf')
+const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`
 const copiedFiles = new Map()
 function materialize(source, destination) {
   if (statSync(source).isDirectory()) {
@@ -51,7 +56,23 @@ function patchExecutable(path) {
   } finally {
     closeSync(descriptor)
   }
-  if (!header.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) return
+  if (!header.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) {
+    if (path.endsWith('/MiniBrowser')) {
+      // WebKit's launcher must preserve the relocated runtime for its child processes.
+      writeFileSync(
+        path,
+        readFileSync(path, 'utf8').replace(
+          'export LD_LIBRARY_PATH="',
+          [
+            `export LIBGL_DRIVERS_PATH=${quote(join(libraries, 'dri'))}`,
+            `export __EGL_VENDOR_LIBRARY_DIRS=${quote(join(runtime, 'usr/share/glvnd/egl_vendor.d'))}`,
+            'export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:',
+          ].join('\n'),
+        ),
+      )
+    }
+    return
+  }
   const interpreter = spawnSync(patchelf, ['--print-interpreter', path], {
     encoding: 'utf8',
   })
@@ -60,6 +81,14 @@ function patchExecutable(path) {
     encoding: 'utf8',
   })
   if (patched.status !== 0) throw new Error(patched.stderr)
+  if (path.endsWith('/firefox')) {
+    renameSync(path, `${path}.bin`)
+    writeFileSync(
+      path,
+      `#!/bin/sh\nunset FONTCONFIG_SYSROOT\nexport FONTCONFIG_FILE=${quote(fontconfig)}\nexec ${quote(`${path}.bin`)} "$@"\n`,
+      { mode: 0o755 },
+    )
+  }
 }
 
 for (const entry of readdirSync(browsers, {
@@ -78,8 +107,12 @@ for (const entry of readdirSync(process.cwd())) {
 symlinkSync(realpathSync('node_modules'), join(project, 'node_modules'))
 const evidence = process.env.TEST_UNDECLARED_OUTPUTS_DIR
 mkdirSync(evidence, { recursive: true })
-const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`
 const vite = join(dirname(fileURLToPath(import.meta.resolve('vite/package.json'))), 'bin/vite.js')
+// Firefox opens fontconfig's returned paths directly, without applying FONTCONFIG_SYSROOT.
+writeFileSync(
+  fontconfig,
+  `<fontconfig><include>${join(runtime, 'etc/fonts/fonts.conf')}</include><reset-dirs/><dir>${join(project, 'e2e/fonts')}</dir></fontconfig>`,
+)
 const environment = {
   ...process.env,
   PATH: `${join(runtime, 'usr/bin')}:${process.env.PATH}`,
@@ -88,6 +121,8 @@ const environment = {
   FONTCONFIG_SYSROOT: runtime,
   GSETTINGS_SCHEMA_DIR: join(runtime, 'usr/share/glib-2.0/schemas'),
   PLAYWRIGHT_BROWSERS_PATH: browsers,
+  // Host ldconfig cannot validate the pinned libraries supplied by this runner.
+  PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1',
   PLAYWRIGHT_HTML_OUTPUT_DIR: join(evidence, 'playwright-report'),
   SIGNALBOX_WEB_PREVIEW_COMMAND: `${quote(node)} ${quote(vite)} preview --host 127.0.0.1 --port 4173`,
   TMPDIR: temporary,
