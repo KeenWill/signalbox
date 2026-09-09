@@ -440,6 +440,7 @@ kbd {
   margin-top: 0.8rem;
 }
 .settings-actions button {
+  font-size: 0.75rem;
   padding: 0.4rem 0.65rem;
   border: 1px solid var(--border-strong);
   border-radius: 3px;
