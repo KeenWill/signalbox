@@ -146,6 +146,8 @@ impl TimelineWindowLimits {
 /// Closed durable event categories exposed by the historical foundation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionTimelineEventKind {
+    /// Automatic reconciliation requires an operator decision.
+    AutomaticReconciliationExhausted,
     /// A session was durably created.
     SessionCreated,
     /// The session's lifecycle state changed.

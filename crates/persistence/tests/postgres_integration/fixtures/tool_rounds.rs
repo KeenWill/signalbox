@@ -305,6 +305,7 @@ pub(crate) fn announcement_for(
                 | DispatchedTurnTerminalDisposition::Cancelled { .. },
         } if *turn == fixture_turn => AmbiguityAnnouncement::DefinitiveTurnOutcome,
         DispatchedOutboxEventKind::ToolBatchTransition { .. }
+        | DispatchedOutboxEventKind::AutomaticReconciliationExhausted(_)
         | DispatchedOutboxEventKind::CredentialPoolExhausted(_)
         | DispatchedOutboxEventKind::TurnTerminal { .. }
         | DispatchedOutboxEventKind::SessionCreated(_)

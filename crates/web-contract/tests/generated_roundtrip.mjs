@@ -3409,6 +3409,19 @@ test("runner detail accounts for working directory UTF-8 bytes", () => {
   }
 });
 
+test("generated detail decoder accepts an exhaustion fact and rejects a mismatched header", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "automatic_reconciliation_exhausted";
+  page.items[0].projected_body_bytes = 128;
+  page.projected_body_bytes = 128;
+  page.items[0].body = {
+    type: "event_fact",
+    kind: "automatic_reconciliation_exhausted",
+  };
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page).items[0].body, page.items[0].body);
+  page.items[0].kind = "turn_reconciliation_required";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /matching header-only event kind/);
+});
 
 test("goal stop accounting fields require explicit presence", () => {
   const page = userInputDetailPage();
