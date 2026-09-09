@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::Value;
-use signalbox_ownership_seam::{
+use signalbox_session_ownership::{
     BranchName, CommitSha, OffsetDateTime, PullRequestNumber,
     RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
     RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
@@ -123,7 +123,7 @@ impl RepoWatchStore {
                     Some(number) => RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
                         identity,
                         sequence,
-                        signalbox_ownership_seam::PullRequestNumber::new(
+                        signalbox_session_ownership::PullRequestNumber::new(
                             number
                                 .to_u64()
                                 .and_then(std::num::NonZeroU64::new)
