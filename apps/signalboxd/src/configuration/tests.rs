@@ -6274,3 +6274,48 @@ fn checked_in_example_parses_unbounded_git_object_content() {
         Some(Some(1048576))
     );
 }
+
+#[test]
+fn repository_ssh_push_accepts_a_key_or_agent_and_redacts_the_destination() {
+    for remote in [
+        "ssh://git@example.test/project.git",
+        "git@example.test:project.git",
+    ] {
+        for key in [None, Some("/unused/ssh-push-key")] {
+            let mut document = configuration_with_repository_watch()
+                .parse::<toml_edit::DocumentMut>()
+                .expect("watch document");
+            let repository = document["repository_watch"]["repositories"]
+                .as_array_of_tables_mut()
+                .expect("repositories")
+                .get_mut(0)
+                .expect("first repository");
+            repository["push_remote_url"] = toml_edit::value(remote);
+            if let Some(key) = key {
+                repository["push_credential_file"] = toml_edit::value(key);
+            }
+            let parsed =
+                HubModelConfiguration::parse(&document.to_string()).expect("SSH configuration");
+            let repository = &parsed.repository_watch().expect("watch").repositories()[0];
+            assert!(repository.git_push_enabled());
+            assert_eq!(
+                repository.push_remote_url().expect("remote").as_str(),
+                remote
+            );
+            assert_eq!(
+                repository.push_credential_file(),
+                key.map(std::path::Path::new)
+            );
+            assert!(!format!("{repository:?}").contains(remote));
+        }
+    }
+}
+
+#[test]
+fn repository_push_refuses_an_unadmitted_destination() {
+    let document = configuration_with_repository_watch().replace(
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+        &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\"\npush_remote_url = \"file:///tmp/remote.git\""),
+    );
+    assert!(HubModelConfiguration::parse(&document).is_err());
+}

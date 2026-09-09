@@ -106,6 +106,7 @@ pub struct WatchedRepositoryConfiguration {
     poll_interval: Duration,
     credential_file: PathBuf,
     push_credential_file: Option<PathBuf>,
+    push_remote_url: Option<signalbox_domain::GitRemoteUrl>,
     webhook: Option<WatchedRepositoryWebhookConfiguration>,
     convergence_pull_requests: Box<[PullRequestNumber]>,
 }
@@ -129,6 +130,19 @@ impl WatchedRepositoryConfiguration {
     /// Returns the optional deployment-owned credential file for configured pushes.
     pub fn push_credential_file(&self) -> Option<&Path> {
         self.push_credential_file.as_deref()
+    }
+
+    /// Returns the explicitly configured push destination, when supplied.
+    pub fn push_remote_url(&self) -> Option<&signalbox_domain::GitRemoteUrl> {
+        self.push_remote_url.as_ref()
+    }
+
+    pub(crate) fn git_push_enabled(&self) -> bool {
+        self.push_credential_file.is_some()
+            || self
+                .push_remote_url
+                .as_ref()
+                .is_some_and(|remote| !remote.as_str().starts_with("https://"))
     }
 
     /// Returns the non-secret request credential reference for this repository.
@@ -172,6 +186,7 @@ impl fmt::Debug for WatchedRepositoryConfiguration {
                     .as_ref()
                     .map(|_| "[REDACTED REFERENCE]"),
             )
+            .field("push_remote_url", &self.push_remote_url)
             .field("webhook", &self.webhook)
             .field("convergence_pull_requests", &self.convergence_pull_requests)
             .finish()
@@ -365,6 +380,7 @@ pub(super) fn parse_repository_watch_configuration(
                 "poll_interval_seconds",
                 "credential_file",
                 "push_credential_file",
+                "push_remote_url",
                 "webhook_hook_id",
                 "webhook_secret_file",
                 "webhook_mode",
@@ -414,6 +430,15 @@ pub(super) fn parse_repository_watch_configuration(
                     return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
                 }
                 Ok(path)
+            })
+            .transpose()?;
+        let push_remote_url = repository
+            .get("push_remote_url")
+            .map(|_| {
+                let value = required_string(repository, "push_remote_url")
+                    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+                signalbox_domain::GitRemoteUrl::try_new(value.to_owned())
+                    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
             })
             .transpose()?;
         let resolved_credential_file = resolved_credential_file_reference(&credential_file)?;
@@ -499,6 +524,7 @@ pub(super) fn parse_repository_watch_configuration(
             poll_interval: interval,
             credential_file,
             push_credential_file,
+            push_remote_url,
             webhook: repository_webhook,
             convergence_pull_requests: convergence_pull_requests.into_boxed_slice(),
         });

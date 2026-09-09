@@ -12,7 +12,8 @@ use crate::repo_watch_credentials::RepositoryWatchClientLoader;
 
 pub(super) struct ProcessGitPushTransport<Runner> {
     pub(super) runner: Runner,
-    pub(super) credential_file: PathBuf,
+    pub(super) credential_file: Option<PathBuf>,
+    pub(super) ssh_agent_socket: Option<OsString>,
 }
 
 impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner> {
@@ -20,10 +21,6 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
         &mut self,
         request: GitPushRequest,
     ) -> Result<GitPushReceipt, GitPushTransportFailure> {
-        let authorization = RepositoryWatchClientLoader::for_git_push(self.credential_file.clone())
-            .git_authorization()
-            .await
-            .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
         if !request.repository_root().is_dir() {
             return Err(GitPushTransportFailure::PreDispatchInfrastructure);
         }
@@ -31,33 +28,71 @@ impl<Runner: ProcessRunner> GitPushTransport for ProcessGitPushTransport<Runner>
             ("GIT_CONFIG_NOSYSTEM", "1"),
             ("GIT_CONFIG_GLOBAL", "/dev/null"),
             ("GIT_TERMINAL_PROMPT", "0"),
-            ("GIT_CONFIG_COUNT", "9"),
-            ("GIT_CONFIG_KEY_1", "credential.helper"),
-            ("GIT_CONFIG_VALUE_1", ""),
-            ("GIT_CONFIG_KEY_2", "core.hooksPath"),
-            ("GIT_CONFIG_VALUE_2", "/dev/null"),
-            ("GIT_CONFIG_KEY_3", "http.followRedirects"),
-            ("GIT_CONFIG_VALUE_3", "false"),
-            ("GIT_CONFIG_KEY_4", "pack.window"),
+            ("GIT_CONFIG_COUNT", "8"),
+            ("GIT_CONFIG_KEY_0", "credential.helper"),
+            ("GIT_CONFIG_VALUE_0", ""),
+            ("GIT_CONFIG_KEY_1", "core.hooksPath"),
+            ("GIT_CONFIG_VALUE_1", "/dev/null"),
+            ("GIT_CONFIG_KEY_2", "http.followRedirects"),
+            ("GIT_CONFIG_VALUE_2", "false"),
+            ("GIT_CONFIG_KEY_3", "pack.window"),
+            ("GIT_CONFIG_VALUE_3", "0"),
+            ("GIT_CONFIG_KEY_4", "pack.depth"),
             ("GIT_CONFIG_VALUE_4", "0"),
-            ("GIT_CONFIG_KEY_5", "pack.depth"),
-            ("GIT_CONFIG_VALUE_5", "0"),
-            ("GIT_CONFIG_KEY_6", "core.bigFileThreshold"),
-            ("GIT_CONFIG_VALUE_6", "1"),
-            ("GIT_CONFIG_KEY_7", "core.packedGitWindowSize"),
-            ("GIT_CONFIG_VALUE_7", "1m"),
-            ("GIT_CONFIG_KEY_8", "core.packedGitLimit"),
-            ("GIT_CONFIG_VALUE_8", "8m"),
+            ("GIT_CONFIG_KEY_5", "core.bigFileThreshold"),
+            ("GIT_CONFIG_VALUE_5", "1"),
+            ("GIT_CONFIG_KEY_6", "core.packedGitWindowSize"),
+            ("GIT_CONFIG_VALUE_6", "1m"),
+            ("GIT_CONFIG_KEY_7", "core.packedGitLimit"),
+            ("GIT_CONFIG_VALUE_7", "8m"),
             ("LC_ALL", "C"),
         ]
         .into_iter()
         .map(|(key, value)| (key.into(), value.into()))
         .collect();
-        environment.insert(
-            "GIT_CONFIG_KEY_0".into(),
-            format!("http.{}.extraheader", request.remote().url()).into(),
-        );
-        environment.insert("GIT_CONFIG_VALUE_0".into(), authorization.into());
+        let _private_key = if request.remote().url().starts_with("https://") {
+            let path = self
+                .credential_file
+                .clone()
+                .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
+            let authorization = RepositoryWatchClientLoader::for_git_push(path)
+                .git_authorization()
+                .await
+                .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
+            environment.insert("GIT_CONFIG_COUNT".into(), "9".into());
+            environment.insert(
+                "GIT_CONFIG_KEY_8".into(),
+                format!("http.{}.extraheader", request.remote().url()).into(),
+            );
+            environment.insert("GIT_CONFIG_VALUE_8".into(), authorization.into());
+            None
+        } else {
+            let private_key = match &self.credential_file {
+                Some(path) => Some(snapshot_ssh_key(path).await?),
+                None => None,
+            };
+            let mut command = String::from("ssh -F /dev/null -o BatchMode=yes");
+            if let Some(key) = &private_key {
+                let path = key
+                    .path()
+                    .to_str()
+                    .ok_or(GitPushTransportFailure::PreDispatchInfrastructure)?;
+                command.push_str(" -o IdentitiesOnly=yes -i '");
+                command.push_str(&path.replace('\'', "'\\''"));
+                command.push('\'');
+            } else {
+                if self.ssh_agent_socket.is_none() {
+                    return Err(GitPushTransportFailure::PreDispatchInfrastructure);
+                }
+                command.push_str(" -o IdentityFile=none");
+            }
+            if let Some(socket) = &self.ssh_agent_socket {
+                environment.insert("SSH_AUTH_SOCK".into(), socket.clone());
+            }
+            environment.insert("GIT_SSH_COMMAND".into(), command.into());
+            environment.insert("GIT_SSH_VARIANT".into(), "ssh".into());
+            private_key
+        };
         environment.insert(
             "GIT_DIR".into(),
             request.git_directory().as_os_str().to_owned(),
@@ -136,6 +171,27 @@ impl<Runner: ProcessRunner> ProcessGitPushTransport<Runner> {
             })
             .await
     }
+}
+
+async fn snapshot_ssh_key(
+    path: &std::path::Path,
+) -> Result<tempfile::NamedTempFile, GitPushTransportFailure> {
+    use signalbox_model_runtime::{CredentialAccess, CredentialReference};
+    use std::io::Write;
+    let reference =
+        CredentialReference::new(crate::repo_watch_credentials::GIT_PUSH_CREDENTIAL_REFERENCE);
+    let access = crate::FileCredentialAccess::new(path.to_owned(), reference.clone());
+    let key = access
+        .resolve(&reference)
+        .await
+        .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
+    let mut snapshot = tempfile::NamedTempFile::new()
+        .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
+    snapshot
+        .write_all(key.expose_bytes())
+        .and_then(|()| snapshot.write_all(b"\n"))
+        .map_err(|_| GitPushTransportFailure::PreDispatchInfrastructure)?;
+    Ok(snapshot)
 }
 
 fn classify_push(result: &ProcessRunResult) -> Result<(), GitPushTransportFailure> {
@@ -262,3 +318,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "git_push_tests.rs"]
+mod ssh_tests;

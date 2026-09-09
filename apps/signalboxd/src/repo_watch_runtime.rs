@@ -41,7 +41,7 @@ pub(crate) fn git_push_repository<'a>(
     configuration.repositories().iter().find(|repository| {
         repository.repository() == event.repository()
             && repository.repository() == context.head_repository()
-            && repository.push_credential_file().is_some()
+            && repository.git_push_enabled()
     })
 }
 

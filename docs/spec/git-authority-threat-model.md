@@ -80,8 +80,12 @@ records a withdrawal rather than editing or deleting the mint. The live
 destination table is derived from those facts, so a mint stands in it until its
 withdrawal is recorded.
 
-A push destination is `https` only; the durable mint and the configured remote
-judge a URL by one type, so both refuse the same set.
+Push destinations accept HTTPS, `ssh://`, and `git@host:` forms. The durable
+mint and the configured remote use the same destination type. SSH uses a
+configured private key file or the host SSH agent exposed to the sandbox. Push
+approval, branch and commit fences, captured object authority, non-forced
+updates, and remote confirmation apply to both transports. SSH runs in batch
+mode with user SSH configuration disabled.
 
 Workspace roots are globally unique by canonical spelling, and the key carries
 no runner or location dimension. Why: the single-runner rule means no two
@@ -171,8 +175,9 @@ workspace.
 Operator workspace registration canonicalizes the root once in the daemon
 filesystem and stores its unique spelling with the registering command.
 Workspace comparisons use the resulting identity. Git remote minting records one
-HTTPS destination per workspace and name; withdrawal retires exactly one mint
-and frees its name. Neither operation changes which roots the daemon may open.
+HTTPS or SSH destination per workspace and name; withdrawal retires exactly one
+mint and frees its name. Neither operation changes which roots the daemon may
+open.
 
 ## Planned
 

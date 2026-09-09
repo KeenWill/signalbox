@@ -748,14 +748,19 @@ credential needs read access for polling and checkout provisioning; it does not
 need push or workflow-write authority. Classic `repo` is broader than read-only
 access, so a fine-grained read credential limits that role to the watched
 repositories. An optional absolute `push_credential_file` on
-`[[repository_watch.repositories]]` supplies a deployment-owned token with push
-authority; each push rereads it through `FileCredentialAccess` and passes
-authorization only in the child environment. Push credential files participate
-in the repository-watch credential isolation checks, including symlink and
+`[[repository_watch.repositories]]` supplies a deployment-owned HTTPS token or
+SSH private key. Optional `push_remote_url` selects an exact HTTPS, `ssh://`, or
+`git@host:` destination; its default is the watched repository's GitHub HTTPS
+URL. HTTPS requires the push token. SSH uses the configured key when present, or
+the host SSH agent exposed through `SSH_AUTH_SOCK` in the sandbox. Each push
+rereads the credential through `FileCredentialAccess`; HTTPS passes
+authorization in the child environment, and SSH retains a private temporary key
+file through push and remote confirmation. Push credential files participate in
+the repository-watch credential isolation checks, including symlink and
 hard-link aliases of polling, push, and webhook credentials. The push family is
 registered from the configuration installed by durable reload recovery at
-startup; a repository-watch reload that adds or removes `push_credential_file`
-takes effect for registration at the next boot.
+startup; a repository-watch reload that changes push registration takes effect
+at the next boot.
 
 The optional `[repository_watch]` section composes the
 [repository-watch module](repo-watch.md). Its `enabled` boolean defaults to
