@@ -56,11 +56,21 @@ dispatch records; there is no second dispatch ledger or singleton table. A
 successor run recovering business work adopts those records before selecting new
 work. Read-only context can be reread before a durable side effect; a replayed
 delivery uses its recorded bytes. Host event waits use durable repository/core
-source positions; poll timing uses host time/sleep requests and preserves
-start-to-start deadlines and queued webhook wakes
-(`crates/modules/repo-watch-v2/src/ingest.rs:273`).
+source positions.
 
 ### Retained daemon authority
+
+The retained daemon module owns the launcher for finite runs. Poll ticks and
+applied primary webhook receipts launch `ObserveRepository`; accepted repository
+events launch `EvaluateRule`; core lifecycle and pull-request close/merge facts
+launch `ReactToLifecycle`. At startup and after each completion, the launcher
+resumes admitted unfinished runs and launches remaining units from module
+cursors and receipts without waiting for another notification; terminal runs are
+not reused. It preserves serialized start-to-start polls and queued webhook
+wakes (`crates/modules/repo-watch-v2/src/ingest.rs:273`), with the cutover's
+single owner. The launcher survives removal of the superseded orchestration; the
+host executes and resumes runs but supplies no successor scheduler
+(`docs/design/workflows.md:96`).
 
 The authenticated webhook listener persists deliveries and retains its
 primary/shadow meaning; polling credentials remain repository-scoped daemon
@@ -134,6 +144,11 @@ rule A `renovate-merge-forward` version 5 and rule B `labeled-review-response`
 version 6. The fixture pins every matcher, event kind, ordered action, singleton
 scope, cooldown and template.
 
+Rule A's mergeable-state qualifier accepts only `mergeable_state_changed`
+payloads (`crates/domain/src/repo_watch/matcher.rs:259`). Its retained
+`head_changed` event kind therefore does not fire the rule; parity tests expect
+a nonmatch and no dispatch for that event.
+
 Parity tests load those definitions unchanged and compare held commands,
 checkout and retirement across equivalent disposable databases. Both use
 `EvaluateRule`; neither gets a special engine branch. Acceptance also covers
@@ -151,6 +166,7 @@ and both handoff directions pass. The owner enables it through ordinary reload.
 
 After the owner confirms successful operation, remove the flag and superseded
 repository-task, evaluation and lifecycle orchestration. Workflows become the
-sole orchestrator; retain pure reducers, module SQL/receipts, ingestion/cache,
-checkout adapters, provenance readers, journal data and the convergence sweep.
-The removed flag fails ordinary unknown-field configuration admission.
+sole orchestrator; retain the daemon launcher, pure reducers, module
+SQL/receipts, ingestion/cache, checkout adapters, provenance readers, journal
+data and the convergence sweep. The removed flag fails ordinary unknown-field
+configuration admission.
