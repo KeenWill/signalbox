@@ -179,40 +179,6 @@ impl ProgramJournalRepository {
         .transpose()
     }
 
-    /// Reconstitutes the unresolved sleep and event requests of an incomplete run.
-    pub async fn outstanding_waits(
-        &self,
-        run: ProgramRunId,
-    ) -> Result<Vec<RequestFrame>, ProgramJournalRepositoryError> {
-        let journal = self
-            .load(run)
-            .await?
-            .ok_or(ProgramJournalCorruption::MissingStream)?;
-        if journal.terminal_delivery().is_some() {
-            return Ok(Vec::new());
-        }
-        let mut waits = std::collections::BTreeMap::new();
-        for entry in journal.entries() {
-            match entry.frame() {
-                JournalFrame::Request(frame)
-                    if matches!(
-                        frame.kind(),
-                        RequestKind::Sleep(_) | RequestKind::AwaitEvent(_)
-                    ) =>
-                {
-                    waits.insert(frame.ordinal(), frame.clone());
-                }
-                JournalFrame::Delivery(frame) => {
-                    if let Some(ordinal) = frame.kind().resolves() {
-                        waits.remove(&ordinal);
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(waits.into_values().collect())
-    }
-
     /// Creates the journal anchor for one new run under frame contract v1.
     pub async fn create_stream(
         &self,

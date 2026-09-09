@@ -78,13 +78,6 @@ impl program_journal::ProgramJournalRepository {
         option::Option<signalbox_domain::program_primitives::ProgramEvent>,
         program_journal::ProgramJournalRepositoryError,
     >;
-    pub async fn outstanding_waits(
-        &self,
-        run: signalbox_domain::ProgramRunId,
-    ) -> result::Result<
-        vec::Vec<signalbox_domain::RequestFrame>,
-        program_journal::ProgramJournalRepositoryError,
-    >;
     pub async fn create_stream(
         &self,
         run: signalbox_domain::ProgramRunId,

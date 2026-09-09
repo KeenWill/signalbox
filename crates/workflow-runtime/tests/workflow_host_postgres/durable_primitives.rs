@@ -6,6 +6,36 @@ use signalbox_domain::{ProgramCapability, program_registration::ProgramGrants};
 use signalbox_workflow_runtime::primitives::{DurablePrimitives, PrimitiveClock};
 use std::{cell::Cell, rc::Rc};
 
+async fn outstanding_waits(
+    repository: &ProgramJournalRepository,
+    run: ProgramRunId,
+) -> Result<Vec<RequestFrame>, Box<dyn Error>> {
+    let journal = repository.load(run).await?.expect("registered fixture run");
+    if journal.terminal_delivery().is_some() {
+        return Ok(Vec::new());
+    }
+    let mut waits = std::collections::BTreeMap::new();
+    for entry in journal.entries() {
+        match entry.frame() {
+            JournalFrame::Request(frame)
+                if matches!(
+                    frame.kind(),
+                    RequestKind::Sleep(_) | RequestKind::AwaitEvent(_)
+                ) =>
+            {
+                waits.insert(frame.ordinal(), frame.clone());
+            }
+            JournalFrame::Delivery(frame) => {
+                if let Some(ordinal) = frame.kind().resolves() {
+                    waits.remove(&ordinal);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(waits.into_values().collect())
+}
+
 struct FixedClock {
     now: UnixMillis,
     draws: Rc<Cell<usize>>,
@@ -77,7 +107,7 @@ return deadline;
     let execute = host.execute_registered(run, &mut primitives, &mut effects);
     let observe = async {
         loop {
-            if !journal.outstanding_waits(run).await?.is_empty() {
+            if !outstanding_waits(&journal, run).await?.is_empty() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -103,7 +133,7 @@ return deadline;
         1,
         "partial replay must consume no new randomness"
     );
-    assert!(journal.outstanding_waits(run).await?.is_empty());
+    assert!(outstanding_waits(&journal, run).await?.is_empty());
     pool.close().await;
     Ok(())
 }
@@ -141,7 +171,7 @@ return wake.value;
         .await?;
     drop(journal);
     let restarted = ProgramJournalRepository::new(pool.clone());
-    assert_eq!(restarted.outstanding_waits(run).await?, vec![admitted]);
+    assert_eq!(outstanding_waits(&restarted, run).await?, vec![admitted]);
     let mut primitives = DurablePrimitives::new(
         restarted.clone(),
         FixedClock {
@@ -153,7 +183,7 @@ return wake.value;
         .execute_registered(run, &mut primitives, &mut no_effects())
         .await?;
     assert_eq!(outcome, ProgramExecutionOutcome::Completed(payload(input)));
-    assert!(restarted.outstanding_waits(run).await?.is_empty());
+    assert!(outstanding_waits(&restarted, run).await?.is_empty());
     pool.close().await;
     Ok(())
 }
