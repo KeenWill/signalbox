@@ -2,16 +2,17 @@
 
 use std::fs;
 
-use git2::Odb;
+use git2::{Odb, Repository};
 
-use crate::arguments::LocalOperation;
+use crate::arguments::{GitDiffArguments, GitLogArguments, LocalOperation};
 use crate::failure::LocalGitFailure;
 use crate::limits::{MAX_OBJECT_DATABASE_BYTES, MAX_PACK_FILE_BYTES};
 use crate::objects::{PackRoot, persist_objects};
 use crate::pack_install::{OBJECT_PUBLICATION_LOCK, ObjectPublicationLock};
 use crate::pinning::PinnedObjectDatabase;
 use crate::tests::planting::plant_sparse_pack;
-use crate::tests::support::{Fixture, UNTRACKED_CONTENT, create_fifo, plant_packed_blob};
+use crate::tests::push::plant_uncompressed_push_pack;
+use crate::tests::support::{Fixture, UNTRACKED_CONTENT, create_fifo, execute, plant_packed_blob};
 
 #[test]
 fn pinned_object_database_never_reopens_a_replacement_fifo() {
@@ -70,9 +71,9 @@ fn oversized_pack_file_is_rejected_before_object_database_attachment() {
 
     let executor = fixture.executor();
 
-    let failure = executor
-        .execute_operation(LocalOperation::Status)
-        .expect_err("oversized captured pack rejects");
+    let failure = PinnedObjectDatabase::capture(&executor.repository_authority)
+        .err()
+        .expect("oversized captured pack rejects");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }
@@ -93,9 +94,9 @@ fn aggregate_object_database_bytes_are_rejected_before_attachment() {
 
     let executor = fixture.executor();
 
-    let failure = executor
-        .execute_operation(LocalOperation::Status)
-        .expect_err("aggregate captured object bytes reject");
+    let failure = PinnedObjectDatabase::capture(&executor.repository_authority)
+        .err()
+        .expect("aggregate captured object bytes reject");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }
@@ -157,4 +158,41 @@ fn object_publication_lock_serializes_budget_check_and_installation() {
             .join(OBJECT_PUBLICATION_LOCK)
             .exists()
     );
+}
+
+#[test]
+fn git_reads_capture_selected_objects_from_a_pack_larger_than_the_snapshot_budget() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let archive = repository
+        .blob(&vec![b'x'; MAX_OBJECT_DATABASE_BYTES + 1])
+        .expect("unrelated over-budget blob writes");
+    let commit = repository
+        .find_commit(fixture.initial)
+        .expect("fixture commit");
+    let tree = commit.tree().expect("fixture tree");
+    let mut packed = vec![archive, commit.id(), tree.id()];
+    packed.extend(tree.iter().map(|entry| entry.id()));
+    let pack = plant_uncompressed_push_pack(&repository, &packed);
+    assert!(fs::metadata(pack).expect("fixture pack").len() > MAX_OBJECT_DATABASE_BYTES as u64);
+    let executor = fixture.executor();
+
+    let status = execute(&executor, LocalOperation::Status);
+    let diff = execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+    let log = execute(
+        &executor,
+        LocalOperation::Log(GitLogArguments {
+            revision: "HEAD".to_owned(),
+            max_entries: 1,
+        }),
+    );
+
+    assert!(
+        status["entries"]
+            .as_array()
+            .expect("status entries")
+            .is_empty()
+    );
+    assert_eq!(diff["patch"], "");
+    assert_eq!(log["commits"][0]["commit"], fixture.initial.to_string());
 }
