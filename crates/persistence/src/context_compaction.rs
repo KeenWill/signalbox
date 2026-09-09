@@ -212,7 +212,7 @@ pub enum PrepareContextCompactionOutcome {
     InvalidBoundary,
     /// Equal replay names a previously recorded failed command.
     FailedReplay,
-    /// This queued turn already owns one durable automatic attempt.
+    /// A prior automatic attempt is unapplied, or this attempt cannot reduce the visible frontier.
     AutomaticAlreadyAttempted,
 }
 
@@ -1030,6 +1030,7 @@ async fn prepare_in_transaction(
                    FROM compact_session_command
                   WHERE session_id = $1
                     AND automatic_for_turn_id = $2
+                    AND result_kind <> 'applied'
              )",
         )
         .bind(session_id_to_uuid(request.session))
@@ -1105,6 +1106,29 @@ async fn prepare_in_transaction(
     let Some(through_index) = through_index else {
         return Ok((false, PrepareContextCompactionOutcome::InvalidBoundary));
     };
+    // Every successor attempt must replace at least two visible entries. The
+    // first may replace one; thereafter successful attempts strictly decrease
+    // the frontier length, including across scheduler passes and restarts.
+    if let Some(turn) = request.automatic_for_turn
+        && through_index == 0
+    {
+        let has_predecessor: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM compact_session_command
+                  WHERE session_id = $1 AND automatic_for_turn_id = $2
+             )",
+        )
+        .bind(session_uuid)
+        .bind(turn.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?;
+        if has_predecessor {
+            return Ok((
+                false,
+                PrepareContextCompactionOutcome::AutomaticAlreadyAttempted,
+            ));
+        }
+    }
     if !range_closes_tool_exchanges(&visible[..=through_index]) {
         return Ok((false, PrepareContextCompactionOutcome::InvalidBoundary));
     }
