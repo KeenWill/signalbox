@@ -60,7 +60,7 @@ pub(super) async fn load_active_acceptance_tail(
             replacement_model_alias_id,
             model_settings_override,
             CASE
-                WHEN goal_turn_is_runtime_relevant(
+                WHEN goal_turn_is_scheduling_relevant(
                     accepted.session_id, accepted.origin_turn_id
                 ) THEN 'runtime_relevant'
                 ELSE 'retired_goal'

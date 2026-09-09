@@ -581,6 +581,8 @@ pub enum TimelineGoalEvent {
     },
     UserStopped {
         generation: u64,
+        settling_turn: Option<TurnId>,
+        abandoned_actions: Option<u64>,
     },
     SessionClosed {
         generation: u64,

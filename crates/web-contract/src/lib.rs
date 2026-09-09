@@ -1308,6 +1308,8 @@ pub enum WebTimelineGoalEvent {
     },
     UserStopped {
         generation: WebPositiveU64,
+        settling_turn_id: Option<WebUuid>,
+        abandoned_actions: Option<WebU64>,
     },
     SessionClosed {
         generation: WebPositiveU64,

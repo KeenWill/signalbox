@@ -4,6 +4,9 @@
 //! replay it through the domain aggregate; no mutable current-state row exists.
 
 mod compaction;
+mod stop;
+
+pub use stop::GoalStopSettlement;
 
 use std::num::NonZeroU64;
 

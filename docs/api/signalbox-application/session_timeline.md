@@ -552,6 +552,8 @@ pub enum TimelineGoalEvent {
     },
     UserStopped {
         generation: u64,
+        settling_turn: option::Option<signalbox_domain::TurnId>,
+        abandoned_actions: option::Option<u64>,
     },
     SessionClosed {
         generation: u64,

@@ -271,4 +271,23 @@ impl goal::GoalRepository {
             signalbox_domain::FrozenAliasDefinition,
         >;
 }
+impl goal::GoalRepository {
+    pub async fn load_stop_settlements(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<vec::Vec<goal::GoalStopSettlement>, goal::GoalRepositoryError>;
+}
+```
+
+## GoalStopSettlement
+
+```rust
+pub struct GoalStopSettlement {
+    pub event: signalbox_domain::GoalEventOrdinal,
+    pub turn: option::Option<signalbox_domain::TurnId>,
+    pub defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+    pub interrupt_command: signalbox_domain::DurableCommandId,
+    pub abandoned_actions: option::Option<u64>,
+}
+// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

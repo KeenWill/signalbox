@@ -123,6 +123,8 @@ pub enum GoalHistoryEvent {
     },
     UserStopped {
         command_id: CommandId,
+        settling_turn_id: option::Option<CanonicalUuid>,
+        abandoned_actions: option::Option<CanonicalU64>,
     },
     Superseded {
         replacement_statement: string::String,

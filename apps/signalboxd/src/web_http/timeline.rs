@@ -959,8 +959,16 @@ fn goal_event_dto(
             generation: web_positive(generation)?,
             outcome: session_outcome_detail_dto(outcome),
         },
-        TimelineGoalEvent::UserStopped { generation } => WebTimelineGoalEvent::UserStopped {
+        TimelineGoalEvent::UserStopped {
+            generation,
+            settling_turn,
+            abandoned_actions,
+        } => WebTimelineGoalEvent::UserStopped {
             generation: web_positive(generation)?,
+            settling_turn_id: settling_turn.map(|turn| {
+                signalbox_web_contract::WebUuid::from_validated_uuid(turn.into_uuid().to_string())
+            }),
+            abandoned_actions: abandoned_actions.map(WebU64::from_u64),
         },
         TimelineGoalEvent::Superseded { generation, text } => WebTimelineGoalEvent::Superseded {
             generation: web_positive(generation)?,

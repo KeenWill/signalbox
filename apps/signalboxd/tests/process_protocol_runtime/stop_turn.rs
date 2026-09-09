@@ -699,3 +699,94 @@ async fn stop_against_a_tool_round_stays_fail_closed_then_deny_and_stop_release(
     drop(connection);
     runtime.stop().await
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn goal_stop_requests_cancellation_and_replays_its_settled_count()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    connection
+        .request(
+            2,
+            ClientRequest::AttachGoal {
+                command_id: command()?,
+                session_id,
+                statement: "finish the task".to_owned(),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::GoalTransitionApplied { .. }
+    ));
+    let (calls, issued, _) = authorize_issued_model_call(&runtime.pool, session_id).await?;
+    let stop_command = command()?;
+    connection
+        .request(
+            3,
+            ClientRequest::StopGoal {
+                command_id: stop_command,
+                session_id,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    let receipt = response_within(&mut connection).await?.message().clone();
+    assert!(matches!(
+        receipt,
+        ServerMessage::GoalTransitionApplied { .. }
+    ));
+    let history = read_goal_messages(&mut connection, 4, session_id).await?;
+    assert!(history.iter().any(|message| matches!(
+        message,
+        ServerMessage::GoalHistoryItem {
+            event: GoalHistoryEvent::UserStopped {
+                settling_turn_id: Some(_),
+                abandoned_actions: None,
+                ..
+            },
+            ..
+        }
+    )));
+    calls
+        .apply_terminal_observation(
+            SessionId::from_uuid(session_id.into_uuid()),
+            issued
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Cancelled),
+            ModelCallTerminalIdentities::PhysicalCancellation(
+                PhysicalCancellationModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
+                    ContextFrontierId::from_uuid(Uuid::now_v7()),
+                ),
+            ),
+            |_| panic!("no pending steering"),
+        )
+        .await?;
+    connection
+        .request(
+            5,
+            ClientRequest::StopGoal {
+                command_id: stop_command,
+                session_id,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    assert_eq!(response_within(&mut connection).await?.message(), &receipt);
+    let history = read_goal_messages(&mut connection, 6, session_id).await?;
+    assert!(history.iter().any(|message| matches!(message,
+        ServerMessage::GoalHistoryItem { event: GoalHistoryEvent::UserStopped {
+            settling_turn_id: Some(_), abandoned_actions: Some(count), .. }, .. } if count.value() == 0)));
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_lifecycle WHERE session_id = $1 AND state_kind <> 'terminal'",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(live, 0);
+    drop(connection);
+    runtime.stop().await
+}

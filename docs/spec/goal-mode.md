@@ -83,6 +83,11 @@ events and commands reserve no delegation variant.
 
 ## Boundary contracts
 
+Goal stop records the active turn as settling and returns once its stop is
+durably requested; the turn ends through ordinary physical cancellation
+settlement. That settlement abandons approved but unexecuted actions and records
+their count with the goal closure for the transcript.
+
 When an execution failure blocks a session that has an owner, the daemon
 automatically resumes the session within a bound. The execution-failure class
 that requires an operator is excluded. The daemon derives the command identity

@@ -75,6 +75,7 @@ where
 {
     let issuer = admitted_issuer(command.actor(), principal)?;
     let command_id = command.command_id();
+    let session = command.session();
     match inspect_registry(connection, command_id).await? {
         Some(CommandKind::SubmitInput) => {
             return Ok(TransactionDecision::Rollback(replayed_outcome(
@@ -307,13 +308,38 @@ where
                     )
                     .into());
                 }
-                let ended = match current.classify_crash_loss() {
-                    signalbox_domain::ToolAttemptCrashOutcome::KnownFailed(ended) => ended,
-                    signalbox_domain::ToolAttemptCrashOutcome::Ambiguous(_) => {
-                        return Err(SubmitInputCorruption::Inconsistent(
-                            "prepared tool attempt classified ambiguous",
-                        )
-                        .into());
+                let goal_stop: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM goal_stop_settlement
+                                     WHERE interrupt_command_id = $1)",
+                )
+                .bind(durable_command_id_to_uuid(command_id))
+                .fetch_one(&mut *connection)
+                .await?;
+                let ended = if goal_stop {
+                    current
+                        .end_preflight_error(signalbox_domain::ToolExecutionError::new(
+                            signalbox_domain::ToolExecutionErrorKind::PreauthorizationRejected,
+                            Some(
+                                signalbox_domain::ToolExecutionErrorDetail::try_new(
+                                    "goal_stopped".to_owned(),
+                                )
+                                .map_err(|_| {
+                                    SubmitInputCorruption::Inconsistent("goal stop detail")
+                                })?,
+                            ),
+                        ))
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent("goal stop prepared attempt")
+                        })?
+                } else {
+                    match current.classify_crash_loss() {
+                        signalbox_domain::ToolAttemptCrashOutcome::KnownFailed(ended) => ended,
+                        signalbox_domain::ToolAttemptCrashOutcome::Ambiguous(_) => {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "prepared tool attempt classified ambiguous",
+                            )
+                            .into());
+                        }
                     }
                 };
                 persist_ended_attempt(connection, &ended)
@@ -999,6 +1025,36 @@ where
         None
     };
     insert_prepared_effects(connection, prepared).await?;
+    if settles_closure {
+        // The interrupt's successor is proof of admission, not new goal work.
+        let retired: Option<sqlx::types::Uuid> = sqlx::query_scalar(
+            "UPDATE turn_lifecycle SET state_kind = 'terminal',
+                terminal_disposition_kind = 'retired',
+                terminal_cause_kind = $3
+          WHERE turn_id = $1 AND state_kind = 'queued'
+            AND EXISTS (SELECT 1 FROM goal_stop_settlement
+                         WHERE interrupt_command_id = $2)
+          RETURNING turn_id",
+        )
+        .bind(turn.map(TurnId::into_uuid))
+        .bind(durable_command_id_to_uuid(command_id))
+        .bind(crate::mapping::turn_terminal_cause_to_str(
+            signalbox_domain::TurnTerminalCause::GoalTurnIneligible,
+        ))
+        .fetch_optional(&mut *connection)
+        .await?;
+        if let Some(retired) = retired {
+            crate::outbox::append(
+                connection,
+                crate::outbox::OutboxEvent::TurnTerminal {
+                    session,
+                    turn: TurnId::from_uuid(retired),
+                    disposition: crate::outbox::TurnTerminalOutboxDisposition::Retired,
+                },
+            )
+            .await?;
+        }
+    }
     match interrupt_outcome {
         Some(ModelCallInterruptOutcome::Cancelled(cancelled)) => {
             persist_terminal_outcome(

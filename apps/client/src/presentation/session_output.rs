@@ -402,11 +402,24 @@ impl<'a> Output<'a> {
                 )?;
                 self.goal_text_field("report", report)
             }
-            GoalHistoryEvent::UserStopped { command_id } => writeln!(
-                self.stdout,
-                "event={ordinal} generation={generation} type=user_stopped command={}",
-                command_id.into_uuid().hyphenated()
-            ),
+            GoalHistoryEvent::UserStopped {
+                command_id,
+                settling_turn_id,
+                abandoned_actions,
+            } => {
+                write!(
+                    self.stdout,
+                    "event={ordinal} generation={generation} type=user_stopped command={}",
+                    command_id.into_uuid().hyphenated()
+                )?;
+                if let Some(turn) = settling_turn_id {
+                    write!(self.stdout, " turn={turn}")?;
+                }
+                match abandoned_actions {
+                    Some(count) => writeln!(self.stdout, " abandoned_actions={}", count.value()),
+                    None => writeln!(self.stdout, " settlement=pending"),
+                }
+            }
             GoalHistoryEvent::Superseded {
                 replacement_statement,
                 command_id,
