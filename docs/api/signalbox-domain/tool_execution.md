@@ -105,7 +105,7 @@ impl ToolBatch {
         &self,
         entry_ids: vec::Vec<SemanticTranscriptEntryId>,
         continuation_frontier: ContextFrontierId,
-        outcome: DelegationOutcome,
+        outcomes: map::BTreeMap<ToolRequestId, DelegationOutcome>,
     ) -> result::Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_failure_projection(
         &self,
@@ -121,7 +121,7 @@ impl ToolBatch {
         &self,
         entry_ids: vec::Vec<SemanticTranscriptEntryId>,
         result_frontier: ContextFrontierId,
-        outcome: option::Option<DelegationOutcome>,
+        outcomes: map::BTreeMap<ToolRequestId, DelegationOutcome>,
     ) -> result::Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_reconciliation_projection(
         &self,
