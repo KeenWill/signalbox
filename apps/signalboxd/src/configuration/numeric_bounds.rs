@@ -22,6 +22,9 @@ pub struct NumericBoundsConfiguration {
 }
 
 const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
+    ("guard_recovery_initial_delay", NumericBoundKind::Duration),
+    ("guard_recovery_maximum_delay", NumericBoundKind::Duration),
+    ("guard_recovery_elapsed_bound", NumericBoundKind::Duration),
     ("client_frame_deadline", NumericBoundKind::Duration),
     ("client_write_progress_deadline", NumericBoundKind::Duration),
     (

@@ -24,6 +24,7 @@ pub struct FencedHubDatabase {
     guard: Option<SingleHubGuard>,
     pool: PgPool,
     generation: HubFenceGeneration,
+    recovery: Option<crate::guard_recovery::GuardRecoveryObserver>,
 }
 
 impl FencedHubDatabase {
@@ -70,7 +71,17 @@ impl FencedHubDatabase {
             guard: Some(guard),
             pool,
             generation,
+            recovery: None,
         })
+    }
+
+    /// Reports guard loss before pool shutdown starts consuming the recovery bound.
+    pub fn with_recovery_observer(
+        mut self,
+        observer: crate::guard_recovery::GuardRecoveryObserver,
+    ) -> Self {
+        self.recovery = Some(observer);
+        self
     }
 
     /// Borrows the fenced application pool.
@@ -85,10 +96,16 @@ impl FencedHubDatabase {
 
     /// Proves that this incarnation's exact guarded session remains usable.
     pub async fn check_guard(&mut self) -> Result<(), SingleHubGuardError> {
-        let Some(guard) = self.guard.as_mut() else {
-            return Err(SingleHubGuardError::GuardLost(None));
+        let result = match self.guard.as_mut() {
+            Some(guard) => guard.check().await,
+            None => Err(SingleHubGuardError::GuardLost(None)),
         };
-        guard.check().await
+        if result.is_err()
+            && let Some(observer) = &self.recovery
+        {
+            observer.guard_lost();
+        }
+        result
     }
 
     /// Globally closes the fenced pool, waits for every outstanding checkout,
@@ -98,14 +115,15 @@ impl FencedHubDatabase {
         let Some(guard) = self.guard.as_mut() else {
             return Err(SingleHubGuardError::GuardLost(None));
         };
-        retire_hub_fence_generation(guard.connection_mut(), self.generation)
+        let retirement = retire_hub_fence_generation(guard.connection_mut(), self.generation)
             .await
-            .map_err(|error| SingleHubGuardError::GuardLost(Some(error)))?;
+            .map_err(|error| SingleHubGuardError::GuardLost(Some(error)));
         let guard = self
             .guard
             .take()
             .ok_or(SingleHubGuardError::GuardLost(None))?;
-        guard.close().await
+        let closed = guard.close().await;
+        retirement.and(closed)
     }
 }
 

@@ -334,6 +334,11 @@ acquires the matching session-level lock before commit and holds it through
 construction of the new pool. `fenced_pool_options` caps connections at
 `FENCED_POOL_MAX_CONNECTIONS` and accepts an optional minimum.
 
+Guard reacquisition in one process closes the old pool before releasing its
+guard connection and advances the generation before constructing a replacement
+pool. A failed retirement does not retain the dedicated connection after the
+pool has drained. The daemon never reuses a pool whose guard was lost.
+
 The bottom pull request of a stack that adds migrations declares a reserved
 prefix block in its description, and sibling stacks pick disjoint blocks.
 
@@ -663,8 +668,6 @@ retaining registration and history.
 
 ## Planned
 
-- Successive fenced runtime incarnations after database guard loss; see
-  [daemon survival design](../design/daemon-survival.md).
 - Retiring an unacknowledged workspace release:
   [persistence-protocol design](../design/persistence-protocol.md).
 - General runner operation-failure evidence stored before acknowledgement:

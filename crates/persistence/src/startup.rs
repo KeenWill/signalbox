@@ -1,4 +1,4 @@
-//! Atomic PostgreSQL recovery of prior-process active attempts.
+//! Atomic PostgreSQL recovery of abandoned active attempts.
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -179,23 +179,11 @@ impl PostgresStartupScanRepository {
     }
 
     /// Reads the finite active-session inventory in deterministic order.
-    pub async fn active_sessions(&self) -> Result<Box<[SessionId]>, StartupScanRepositoryError> {
-        let rows = sqlx::query_scalar::<_, Uuid>(
-            "SELECT session_id
-               FROM (
-                    SELECT session_id
-                      FROM turn_lifecycle
-                     WHERE state_kind = 'active'
-                       AND NOT delegation_runtime_terminal
-                    UNION
-                    SELECT session_id
-                      FROM context_compaction_model_call
-                     WHERE state_kind <> 'terminal'
-               ) AS recovery_inventory
-              ORDER BY session_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    pub async fn sessions(&self) -> Result<Box<[SessionId]>, StartupScanRepositoryError> {
+        let rows =
+            sqlx::query_scalar::<_, Uuid>("SELECT session_id FROM session ORDER BY session_id")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows
             .into_iter()
             .map(session_id_from_uuid)
@@ -203,7 +191,7 @@ impl PostgresStartupScanRepository {
             .into_boxed_slice())
     }
 
-    /// Locks one session and atomically terminalizes its prior-process attempt.
+    /// Locks one session and atomically terminalizes its abandoned attempt.
     pub async fn recover<Generator>(
         &self,
         session: SessionId,
@@ -241,8 +229,28 @@ impl PostgresStartupScanRepository {
 impl StartupScanRepository for PostgresStartupScanRepository {
     type Error = StartupScanRepositoryError;
 
-    async fn active_sessions(&mut self) -> Result<Box<[SessionId]>, Self::Error> {
-        PostgresStartupScanRepository::active_sessions(self).await
+    async fn sessions(&mut self) -> Result<Box<[SessionId]>, Self::Error> {
+        PostgresStartupScanRepository::sessions(self).await
+    }
+
+    async fn park_corrupt_session(
+        &mut self,
+        session: SessionId,
+        error: &Self::Error,
+    ) -> Result<(), Self::Error> {
+        crate::session_lifecycle::SessionLifecycleRepository::new(self.pool.clone())
+            .park_supervision_failure(session, error)
+            .await
+            .map_err(|failure| match failure {
+                crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source) => {
+                    StartupScanRepositoryError::from_database(source, false)
+                }
+                crate::session_lifecycle::SessionLifecycleRepositoryError::CommitAmbiguous(
+                    source,
+                ) => StartupScanRepositoryError::from_database(source, true),
+                _ => StartupScanCorruption::Inconsistent("startup operator item").into(),
+            })?;
+        Ok(())
     }
 
     async fn recover<Generator>(
@@ -258,7 +266,7 @@ impl StartupScanRepository for PostgresStartupScanRepository {
     }
 }
 
-async fn recover_in_transaction<Generator>(
+pub(crate) async fn recover_in_transaction<Generator>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,

@@ -20,6 +20,11 @@
 
 use std::{error::Error, fmt};
 
+use signalbox_application::{
+    ClassifyOperatorFailure, OperatorFailureClass, StartupScanIdGenerator,
+    UuidV7StartupScanIdGenerator,
+};
+
 use signalbox_domain::{
     CoreAgency, DispatchingModule, DurableCommandId, FinishCondition, Goal, GoalState,
     LifecycleActor, SessionClosureOutcome, SessionCreationCause, SessionFailureCause, SessionId,
@@ -69,8 +74,7 @@ pub enum SessionLifecycleCorruption {
 pub enum SessionLifecycleRejection {
     /// The lifecycle algebra does not admit the transition from the held state.
     TransitionNotAdmitted,
-    /// `release` on a `parked` session: `parked` is an owned-only state, so
-    /// the park is closed or resumed first.
+    /// A parked session must be closed or resumed before ownership release.
     ReleaseWhileParked,
     /// The session already holds the ownership the flip would install.
     OwnershipUnchanged,
@@ -79,8 +83,7 @@ pub enum SessionLifecycleRejection {
     GoalGenerationStillOpen,
     /// The session holds no committed terminal handoff to settle.
     NoPendingTerminal,
-    /// `parked` is an owned-only state, so an unmonitored conversation
-    /// cannot be parked: nothing would be watching it afterwards.
+    /// Ordinary park requests require ownership; supervision records its own operator obligation.
     ParkWhileUnmonitored,
     /// A different terminal outcome is already committed to this session's
     /// settlement, and the first decision is the one that stands.
@@ -191,6 +194,17 @@ impl From<GoalRepositoryError> for SessionLifecycleRepositoryError {
     }
 }
 
+/// Durable supervision evidence retained through an operator resume.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionSupervisionFailureRecord {
+    /// Closed operator failure classification.
+    pub class: OperatorFailureClass,
+    /// Sanitized adapter cause token.
+    pub cause_code: String,
+    /// Whether operator reconciliation is still required.
+    pub pending: bool,
+}
+
 /// One session's durable lifecycle facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionLifecycleRecord {
@@ -201,9 +215,15 @@ pub struct SessionLifecycleRecord {
     pending_terminal: Option<SessionTerminalOutcome>,
     pending_terminal_actor: Option<LifecycleActor>,
     finish_condition: Option<FinishCondition>,
+    supervision_failure: Option<SessionSupervisionFailureRecord>,
 }
 
 impl SessionLifecycleRecord {
+    /// Returns retained supervision evidence for the operator queue.
+    pub const fn supervision_failure(&self) -> Option<&SessionSupervisionFailureRecord> {
+        self.supervision_failure.as_ref()
+    }
+
     /// Returns the session these facts describe.
     pub const fn session(&self) -> SessionId {
         self.session
@@ -289,6 +309,53 @@ impl SessionLifecycleRepository {
         Ok(parked)
     }
 
+    /// Parks a failed session without changing ownership or its execution evidence.
+    pub async fn park_supervision_failure(
+        &self,
+        session: SessionId,
+        failure: &(impl ClassifyOperatorFailure + Sync),
+    ) -> Result<(), SessionLifecycleRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let held = load_locked(&mut transaction, session).await?;
+        if !held.state.is_parked() && !matches!(held.state, SessionLifecycleState::Terminal { .. })
+        {
+            write_state(
+                &mut transaction,
+                &held,
+                SessionLifecycleState::Parked {
+                    cause: SessionParkCause::UnknownFailure,
+                    responder: SessionParkResponder::Operator,
+                    standing: None,
+                },
+                LifecycleActor::Core {
+                    agency: CoreAgency::Daemon,
+                },
+            )
+            .await?;
+        }
+        let class = match failure.operator_failure_class() {
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            } => "infrastructure",
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            } => "commit_ambiguous",
+            OperatorFailureClass::FailClosedCorruption => "corruption",
+            OperatorFailureClass::IdentityCollision => "identity_collision",
+            OperatorFailureClass::CallerOrHubBug => "bug",
+        };
+        sqlx::query(
+            "UPDATE session_lifecycle SET supervision_failure_class = $2,
+            supervision_cause_code = $3, supervision_pending = true WHERE session_id = $1",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(class)
+        .bind(failure.operator_failure_cause_code())
+        .execute(&mut *transaction)
+        .await?;
+        commit(transaction).await
+    }
+
     /// Returns a parked session to the state its suspended turn maps to.
     ///
     /// The mapping is recomputed rather than remembered: the turn kept its
@@ -304,6 +371,7 @@ impl SessionLifecycleRepository {
         session: SessionId,
     ) -> Result<SessionLifecycleState, SessionLifecycleRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        lock_supervision_frontier(&mut transaction, session).await?;
         let resumed = match resume_in_transaction(
             &mut transaction,
             session,
@@ -440,6 +508,83 @@ impl SessionLifecycleRepository {
         journal_ownership(&mut transaction, session, transition, actor).await?;
         commit(transaction).await
     }
+}
+
+/// Locks a supervised turn's delegation frontier before the session lock.
+pub(crate) async fn lock_supervision_frontier(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    crate::model_execution::lock_delegated_child_endpoint_sessions(connection, session)
+        .await
+        .map_err(supervision_frontier_error)?;
+    let turn: Option<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id FROM turn_lifecycle
+         WHERE session_id = $1 AND state_kind = 'active'
+           AND NOT delegation_runtime_terminal
+           AND EXISTS (SELECT 1 FROM session_lifecycle
+                       WHERE session_id = $1 AND supervision_pending)",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    if let Some(turn) = turn {
+        crate::model_execution::lock_delegated_turn_terminal_frontier(
+            connection,
+            session,
+            crate::mapping::turn_id_from_uuid(turn),
+        )
+        .await
+        .map_err(supervision_frontier_error)?;
+    }
+    Ok(())
+}
+
+fn supervision_frontier_error(
+    error: crate::model_execution::ModelCallRepositoryError,
+) -> SessionLifecycleRepositoryError {
+    match error {
+        crate::model_execution::ModelCallRepositoryError::Database { source, .. } => {
+            SessionLifecycleRepositoryError::Database(source)
+        }
+        _ => SessionLifecycleCorruption::Inconsistent("supervision delegation frontier").into(),
+    }
+}
+
+/// Reconstitutes supervised evidence before an operator makes the session eligible.
+pub(crate) async fn reconcile_supervision_in_transaction(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), SessionLifecycleRepositoryError> {
+    let pending: Option<bool> = sqlx::query_scalar(
+        "SELECT supervision_pending FROM session_lifecycle WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    if pending != Some(true) {
+        return Ok(());
+    }
+    let mut ids = UuidV7StartupScanIdGenerator;
+    let identities = signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+        ids.next_failure_entry_id(),
+        ids.next_terminal_frontier_id(),
+    );
+    crate::startup::recover_in_transaction(connection, session, identities, &mut ids)
+        .await
+        .map_err(|error| match error {
+            crate::startup::StartupScanRepositoryError::Database { source, .. } => {
+                SessionLifecycleRepositoryError::Database(source)
+            }
+            _ => {
+                SessionLifecycleCorruption::Inconsistent("supervised session reconstitution").into()
+            }
+        })?;
+    sqlx::query("UPDATE session_lifecycle SET supervision_pending = false WHERE session_id = $1")
+        .bind(session_id_to_uuid(session))
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
 }
 
 /// Parks one session inside the caller's transaction.
@@ -587,6 +732,7 @@ async fn lift_park_from_held(
             });
         }
     }
+    reconcile_supervision_in_transaction(connection, held.session).await?;
     let admission_state: Option<String> = sqlx::query_scalar(
         "SELECT CASE
             WHEN (
@@ -1389,7 +1535,7 @@ pub(crate) async fn load_optional(
                 pending_terminal_superseded_by, pending_terminal_actor_kind,
                 pending_terminal_actor_module, pending_terminal_actor_turn_id,
                 pending_terminal_actor_tool_request_id, finish_condition_kind,
-                finish_condition
+                finish_condition, supervision_failure_class, supervision_cause_code, supervision_pending
            FROM session_lifecycle
           WHERE session_id = $1",
     )
@@ -1618,6 +1764,32 @@ fn encode_actor(
     }
 }
 
+fn decode_supervision_failure(
+    row: &PgRow,
+) -> Result<Option<SessionSupervisionFailureRecord>, SessionLifecycleRepositoryError> {
+    let class: Option<String> = row.try_get("supervision_failure_class")?;
+    let Some(class) = class else {
+        return Ok(None);
+    };
+    let class = match class.as_str() {
+        "infrastructure" => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        },
+        "commit_ambiguous" => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: true,
+        },
+        "corruption" => OperatorFailureClass::FailClosedCorruption,
+        "identity_collision" => OperatorFailureClass::IdentityCollision,
+        "bug" => OperatorFailureClass::CallerOrHubBug,
+        _ => return Err(SessionLifecycleCorruption::Inconsistent("supervision class").into()),
+    };
+    Ok(Some(SessionSupervisionFailureRecord {
+        class,
+        cause_code: required(row, "supervision_cause_code")?,
+        pending: required(row, "supervision_pending")?,
+    }))
+}
+
 fn decode_record(row: &PgRow) -> Result<SessionLifecycleRecord, SessionLifecycleRepositoryError> {
     let session = session_id_from_uuid(required(row, "session_id")?);
     let owned: bool = required(row, "owned")?;
@@ -1635,6 +1807,7 @@ fn decode_record(row: &PgRow) -> Result<SessionLifecycleRecord, SessionLifecycle
     Ok(SessionLifecycleRecord {
         session,
         state: decode_state(row)?,
+        supervision_failure: decode_supervision_failure(row)?,
         finish_condition,
         ownership: if owned {
             SessionOwnership::Owned

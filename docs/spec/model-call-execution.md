@@ -312,11 +312,10 @@ unrelated model-call writers while the guard still prevents a
 credential/allocator cycle.
 
 A failure with retained execution evidence after its one reconciliation pass, an
-ambiguous commit outcome, an unwind, or cancellation raises the fatal signal and
-the process exits nonzero. Why: startup recovery is the one audited path that
-classifies an issued call from durable evidence, and a live process that cannot
-construct a trustworthy result must stop rather than improvise. Repeated
-same-incarnation reconciliation drains are exercised only by tests.
+ambiguous commit outcome, an unwind, or unexpected cancellation suspends only
+that session. The supervisor records the classified cause in its durable
+operator park. Other sessions remain eligible. Operator resume reconstitutes
+retained evidence before lifting the park and supplies no execution proof.
 
 An aggregate usage read consumes a bounded count of newest matching calls and
 returns a bounded count of groups, recording truncation when either bound is
@@ -539,8 +538,6 @@ rendering instead of inventing text.
 
 ## Planned
 
-- Session-scoped fatal execution parking and operator reconciliation; see
-  [daemon survival design](../design/daemon-survival.md).
 - Multipart attachment rendering ([design](../design/model-call-execution.md)).
 - The executable session-tool snapshot
   ([design](../design/model-call-execution.md)).

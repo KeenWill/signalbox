@@ -3215,3 +3215,78 @@ async fn a_causeless_failure_is_rejected() -> Result<(), Box<dyn Error>> {
     drop(container);
     Ok(())
 }
+
+/// A corrupt session projection has durable operator evidence without preventing other recovery.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_skips_corrupt_session_while_healthy_turn_reconstitutes()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let corrupt = creation_session(101);
+    let healthy = creation_session(102);
+    let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    create.handle(interactive_creation(101)).await?;
+    create.handle(interactive_creation(102)).await?;
+    let healthy_turn = activate_first_turn(&pool, healthy, 102).await?;
+    sqlx::query("DROP TRIGGER session_is_append_only ON session")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session DROP CONSTRAINT session_creation_cause_shape,
+        DROP CONSTRAINT session_spawning_request_fk, DROP CONSTRAINT session_delegation_relation_fk")
+        .execute(&pool).await?;
+    sqlx::query("UPDATE session SET spawning_tool_request_id = $2 WHERE session_id = $1")
+        .bind(corrupt.into_uuid())
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await?;
+    let mut scan = signalbox_application::StartupScanService::new(
+        signalbox_application::UuidV7StartupScanIdGenerator,
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+
+    let outcome = scan.execute().await?;
+
+    assert_eq!(outcome.skipped_corrupt_sessions(), &[corrupt]);
+    assert_eq!(outcome.recovered_turn_count(), 1);
+    let healthy_terminal: bool =
+        sqlx::query_scalar("SELECT state_kind = 'terminal' FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(healthy_turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(healthy_terminal);
+    let lifecycle = SessionLifecycleRepository::new(pool.clone());
+    let parked = lifecycle
+        .load(corrupt)
+        .await?
+        .expect("operator item remains readable");
+    assert!(parked.state().is_parked());
+    assert_eq!(
+        parked.supervision_failure().unwrap().class,
+        OperatorFailureClass::FailClosedCorruption
+    );
+    assert!(parked.supervision_failure().unwrap().pending);
+    let repeated = scan.execute().await?;
+    assert_eq!(repeated.skipped_corrupt_sessions(), &[corrupt]);
+    assert!(
+        lifecycle.resume(corrupt).await.is_err(),
+        "unreconstitutable evidence cannot resume"
+    );
+    assert!(lifecycle.load(corrupt).await?.unwrap().state().is_parked());
+
+    sqlx::query("UPDATE session SET spawning_tool_request_id = NULL WHERE session_id = $1")
+        .bind(corrupt.into_uuid())
+        .execute(&pool)
+        .await?;
+    lifecycle.resume(corrupt).await?;
+    let resumed = lifecycle.load(corrupt).await?.unwrap();
+    assert!(!resumed.state().is_parked());
+    let retained = resumed.supervision_failure().unwrap();
+    assert!(!retained.pending);
+    assert_eq!(
+        retained.cause_code,
+        parked.supervision_failure().unwrap().cause_code
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

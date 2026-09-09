@@ -34,11 +34,12 @@ owned session carries a deadline, and its state sets the kind: admission covers
 created and dispatched, active stall covers active and recovering, and waiting
 covers waiting, each of those states with exactly one deadline record; blocked
 and parked carry none. The admission and waiting bounds come from configuration.
-A parked session, reached only by an expired waiting deadline or a module park,
-carries a machine-readable cause and the responder who must act, the operator
-queue or one module. The operator queue is every parked session; the recorded
-responder does not filter it. Module park restoration projects all outstanding
-module authorities; lifting one leaves the session parked while another holds.
+A parked session, reached by an expired waiting deadline, a module park, or
+execution supervision, carries a machine-readable cause and the responder who
+must act, the operator queue or one module. The operator queue is every parked
+session; the recorded responder does not filter it. Module park restoration
+projects all outstanding module authorities; lifting one leaves the session
+parked while another holds.
 
 Terminal carries one outcome from a closed vocabulary. Achievement is verified
 when a finish check passed and declared when no check ran; a failed check blocks
@@ -152,6 +153,13 @@ of lifecycle state and turn phase, never an independent machine.
 An absent configured bound leaves a deadline unbounded. An owned session in a
 deadline-bearing state with no deadline row is a violation.
 
+Execution supervision parks either ownership state without changing ownership.
+The operator queue retains the failure classification, sanitized cause, and
+whether reconciliation remains pending. Session resume and goal resume
+reconstitute supervised evidence in their transaction before lifting the park; a
+failed reconstitution leaves the park pending. Successful resume retains the
+cause. A failed park write retains the local suspension and reports its cause.
+
 A park suspends an in-flight scheduler pass at its next durable operation
 boundary. The current operation settles, and the turn resumes only after the
 park lifts. This applies to every park cause. A stop ends the active turn. A
@@ -207,8 +215,6 @@ The five lifecycle metrics are defined on durable columns, never on proxies.
 
 ## Planned
 
-- Supervised failure parking and reconciliation on operator resume for either
-  ownership state; see [daemon survival design](../design/daemon-survival.md).
 - Failure parking of owned sessions: a structural failure, an unknown failure,
   or an exhausted retry budget on a live owned session parks it with the typed
   cause instead of terminalizing it or stopping silently; see

@@ -311,3 +311,43 @@ async fn successor_waits_for_every_prior_fenced_pool_session() -> Result<(), Box
     drop(container);
     Ok(())
 }
+
+/// Guard loss releases the drained incarnation and reacquisition advances the fence.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn guard_recovery_rebuilds_a_fenced_pool_after_loss() -> Result<(), Box<dyn Error>> {
+    let (container, control_pool, database_url) = postgres().await?;
+    let options = local_test_connection_options(&database_url)?;
+    let mut first = FencedHubDatabase::connect_with(options.clone(), None).await?;
+    let previous_generation = first.generation();
+    let old_pool = first.pool().clone();
+    let guard_backend: i32 = sqlx::query_scalar(
+        "SELECT DISTINCT pid FROM pg_locks
+         WHERE locktype = 'advisory' AND mode = 'ExclusiveLock' AND granted
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .fetch_one(&control_pool)
+    .await?;
+    sqlx::query("SELECT pg_terminate_backend($1)")
+        .bind(guard_backend)
+        .execute(&control_pool)
+        .await?;
+
+    assert!(matches!(
+        first.check_guard().await,
+        Err(SingleHubGuardError::GuardLost(_))
+    ));
+    assert!(first.close().await.is_err());
+    assert!(old_pool.is_closed());
+    let mut recovered = FencedHubDatabase::connect_with(options, None).await?;
+    assert!(recovered.generation().get() > previous_generation.get());
+    recovered.check_guard().await?;
+    assert!(matches!(
+        SingleHubGuard::acquire(&control_pool).await,
+        Err(SingleHubGuardError::AlreadyRunning)
+    ));
+    recovered.close().await?;
+    control_pool.close().await;
+    drop(container);
+    Ok(())
+}

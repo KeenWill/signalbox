@@ -483,6 +483,7 @@ enum ShutdownOutcome {
     ExecutionFailed,
     ExecutionFailedAfterGraceWindow,
     GuardLost,
+    GuardRecoveryExhausted,
     RuntimeFailed,
     RuntimeFailedAfterGraceWindow,
     RuntimeDefect,
@@ -527,6 +528,7 @@ enum RuntimeTaskExit {
     TurnLiveness,
     LifecycleDeadline,
     LifecycleMetrics,
+    SessionSupervision,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -572,6 +574,7 @@ enum RuntimeTaskDefect {
     TurnLivenessCompletedBeforeShutdown,
     LifecycleDeadlineCompletedBeforeShutdown,
     LifecycleMetricsCompletedBeforeShutdown,
+    SessionSupervisionCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -597,6 +600,9 @@ impl RuntimeTaskDefect {
             }
             Self::LifecycleMetricsCompletedBeforeShutdown => {
                 "lifecycle_metrics_completed_before_shutdown"
+            }
+            Self::SessionSupervisionCompletedBeforeShutdown => {
+                "session_supervision_completed_before_shutdown"
             }
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
@@ -1001,7 +1007,8 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Workflows(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness)
         | Ok(RuntimeTaskExit::LifecycleDeadline)
-        | Ok(RuntimeTaskExit::LifecycleMetrics) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::LifecycleMetrics)
+        | Ok(RuntimeTaskExit::SessionSupervision) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
@@ -1175,6 +1182,84 @@ async fn initialize_prometheus(
 
 async fn run_hub(
     telemetry_configuration: &TelemetryConfiguration,
+) -> Result<ShutdownOutcome, HubRuntimeError> {
+    use signalboxd::guard_recovery::{
+        GuardRecoveryPolicy, GuardRecoveryStop, GuardedIncarnationOutcome, run_guarded_incarnations,
+    };
+    let configuration = HubConfiguration::from_environment().map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Configuration(&error),
+        )
+    })?;
+    let on_disk = fs::read_to_string(configuration.model_configuration_file()).map_err(|_| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::ModelConfiguration(&HubModelConfigurationError::Read),
+        )
+    })?;
+    let bounds = HubModelConfiguration::startup_numeric_bounds(&on_disk).map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::ModelConfiguration(&error),
+        )
+    })?;
+    let policy = bounds
+        .duration("guard_recovery_initial_delay")
+        .flatten()
+        .zip(bounds.duration("guard_recovery_maximum_delay").flatten())
+        .and_then(|(initial, maximum)| {
+            GuardRecoveryPolicy::new(
+                initial,
+                maximum,
+                bounds.duration("guard_recovery_elapsed_bound").flatten(),
+            )
+        })
+        .ok_or_else(|| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_guard_recovery_backoff"),
+            )
+        })?;
+    let mut recovery_signals = TerminationSignals::new();
+    match run_guarded_incarnations(
+        policy,
+        |observer| async move {
+            match run_hub_incarnation(telemetry_configuration, observer.clone()).await {
+                Ok(ShutdownOutcome::GuardLost) => GuardedIncarnationOutcome::Reacquire,
+                Err(error)
+                    if observer.is_recovering()
+                        && error.phase == RuntimePhase::DatabaseConnection
+                        && matches!(
+                            error.failure_class,
+                            OperatorFailureClass::Infrastructure { .. }
+                        ) =>
+                {
+                    GuardedIncarnationOutcome::Reacquire
+                }
+                result => GuardedIncarnationOutcome::Finished(result),
+            }
+        },
+        async {
+            if shutdown_requested(&mut recovery_signals).await {
+                tracing::error!("termination signal listener failed during guard recovery");
+            }
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(GuardRecoveryStop::ShutdownRequested) => Ok(ShutdownOutcome::Clean),
+        Err(reason @ GuardRecoveryStop::ElapsedBoundExhausted) => {
+            tracing::error!(?reason, "database guard recovery bound exhausted");
+            Ok(ShutdownOutcome::GuardRecoveryExhausted)
+        }
+    }
+}
+
+async fn run_hub_incarnation(
+    telemetry_configuration: &TelemetryConfiguration,
+    guard_recovery: signalboxd::guard_recovery::GuardRecoveryObserver,
 ) -> Result<ShutdownOutcome, HubRuntimeError> {
     let configuration = HubConfiguration::from_environment().map_err(|error| {
         erase_startup_cause(
@@ -1436,7 +1521,8 @@ async fn run_hub(
             | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
         };
         erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
-    })?;
+    })?
+    .with_recovery_observer(guard_recovery.clone());
     let pool = database.pool().clone();
     let fenced_pool_floor_pool = pool.clone();
     migrate_hub_database(&pool).await?;
@@ -1759,6 +1845,13 @@ async fn run_hub(
                     outcome.awaiting_recovery_decision_sessions().len(),
                 "daemon startup phase completed"
             );
+            for session in outcome.skipped_corrupt_sessions() {
+                tracing::error!(
+                    session = %session.as_uuid(),
+                    cause = "durable_state_corruption",
+                    "startup skipped corrupt session; durable operator item recorded"
+                );
+            }
             for session in outcome.awaiting_recovery_decision_sessions() {
                 tracing::warn!(
                     phase = ?RuntimePhase::StartupScan,
@@ -2156,6 +2249,7 @@ async fn run_hub(
     let text_deltas = process_runtime.provider_text_delta_sink();
     let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
     let (execution_supervisor, fatal_execution) = FatalExecutionSupervisor::new(());
+    let session_supervision = execution_supervisor.recovery_reporter();
     let process_runtime =
         process_runtime.with_recovery_reporter(execution_supervisor.recovery_reporter());
     let pass_pool = scheduler_pool.clone();
@@ -2333,6 +2427,15 @@ async fn run_hub(
     let (lifecycle_deadline_shutdown, lifecycle_deadline_shutdown_receiver) = watch::channel(false);
     let (lifecycle_metrics_shutdown, lifecycle_metrics_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
+    let supervision_pool = pool.clone();
+    let mut supervision_shutdown = process_shutdown.subscribe();
+    runtime_tasks.spawn(async move {
+        select! {
+            () = session_supervision.park_failed_sessions(supervision_pool) => {},
+            _ = supervision_shutdown.changed() => {},
+        }
+        RuntimeTaskExit::SessionSupervision
+    });
     runtime_tasks.spawn(async move {
         let result = async {
             let (_service, workflows) = workflows?;
@@ -2408,6 +2511,7 @@ async fn run_hub(
             RuntimeTaskExit::LifecycleMetrics
         });
     }
+    guard_recovery.runtime_ready();
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
     let mut termination_signals = TerminationSignals::new();
 
@@ -2423,7 +2527,7 @@ async fn run_hub(
                     RuntimeStopCause::Requested
                 }
             }
-            () = fatal_execution.wait() => RuntimeStopCause::ExecutionFailed,
+            () = fatal_execution.wait_for_process_recovery() => RuntimeStopCause::ExecutionFailed,
             () = &mut guard_loss => RuntimeStopCause::GuardLost,
             completed = runtime_tasks.join_next() => {
                 match completed {
@@ -2475,6 +2579,12 @@ async fn run_hub(
                     Some(Ok(RuntimeTaskExit::WebHttp(Ok(())))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::WebHttpCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::SessionSupervision)) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::SessionSupervisionCompletedBeforeShutdown,
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
@@ -2562,7 +2672,7 @@ async fn run_hub(
     // was aborted. Waiting for an ordinary pool drain here would silently
     // extend the shutdown window. Guard loss is different: tasks are cancelled
     // immediately and the old fenced sessions must be terminated before
-    // returning control to process exit.
+    // constructing a replacement incarnation.
     if outcome != ShutdownOutcome::GuardLost && database.check_guard().await.is_err() {
         outcome = ShutdownOutcome::GuardLost;
     }
@@ -2801,7 +2911,7 @@ async fn main() -> ExitCode {
             );
             ExitCode::FAILURE
         }
-        Ok(ShutdownOutcome::GuardLost) => {
+        Ok(ShutdownOutcome::GuardLost | ShutdownOutcome::GuardRecoveryExhausted) => {
             let error = HubRuntimeError::infrastructure(RuntimePhase::Runtime);
             tracing::error!(
                 phase = ?error.phase,

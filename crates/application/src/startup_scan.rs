@@ -61,7 +61,7 @@ impl StartupScanIdGenerator for UuidV7StartupScanIdGenerator {
 pub enum StartupScanSessionOutcome {
     /// The inventory observation was stale or the session was already healed.
     NoActiveTurn,
-    /// The prior-process attempt and logical turn terminalized atomically.
+    /// The abandoned attempt and logical turn terminalized atomically.
     Recovered(Box<FailedAcceptedInputTurn>),
     /// A durable model call received its call-aware restart classification.
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
@@ -102,9 +102,14 @@ pub trait StartupScanRepository {
     type Error: ClassifyOperatorFailure;
 
     /// Reads the finite startup inventory in deterministic order.
-    fn active_sessions(
+    fn sessions(&mut self) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send;
+
+    /// Records a durable operator park for one failed reconstitution.
+    fn park_corrupt_session(
         &mut self,
-    ) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send;
+        session: SessionId,
+        error: &Self::Error,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Locks and reconstitutes one session, then commits failure atomically.
     fn recover<Generator>(
@@ -121,11 +126,17 @@ pub trait StartupScanRepository {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupScanOutcome {
     recovered_turn_count: usize,
+    skipped_corrupt_sessions: Box<[SessionId]>,
     awaiting_recovery_decision_sessions: Box<[SessionId]>,
 }
 
 impl StartupScanOutcome {
-    /// Returns the number of prior-process turns terminalized or newly parked
+    /// Returns sessions excluded with durable reconstitution-failure evidence.
+    pub fn skipped_corrupt_sessions(&self) -> &[SessionId] {
+        &self.skipped_corrupt_sessions
+    }
+
+    /// Returns the number of abandoned turns terminalized or newly parked
     /// on model-call recovery by this scan.
     pub const fn recovered_turn_count(&self) -> usize {
         self.recovered_turn_count
@@ -217,17 +228,18 @@ where
     /// Scans the initial inventory and retries only fresh-identity collisions.
     ///
     /// Each session transaction independently rechecks authority under lock.
-    /// A crash or ambiguous infrastructure failure stops startup; a later
-    /// invocation safely inventories only work still active.
+    /// Infrastructure failure stops startup. Corrupt sessions are parked individually;
+    /// every other session continues through reconstitution.
     pub async fn execute(
         &mut self,
     ) -> Result<StartupScanOutcome, StartupScanError<Repository::Error>> {
         let sessions = self
             .repository
-            .active_sessions()
+            .sessions()
             .await
             .map_err(StartupScanError::inventory)?;
         let mut recovered_turn_count = 0_usize;
+        let mut skipped_corrupt_sessions = Vec::new();
         let mut awaiting_recovery_decision_sessions = Vec::new();
 
         for session in sessions {
@@ -276,6 +288,17 @@ where
                     {
                         continue;
                     }
+                    Err(error)
+                        if error.operator_failure_class()
+                            == OperatorFailureClass::FailClosedCorruption =>
+                    {
+                        self.repository
+                            .park_corrupt_session(session, &error)
+                            .await
+                            .map_err(|error| StartupScanError::recovery(session, error))?;
+                        skipped_corrupt_sessions.push(session);
+                        break;
+                    }
                     Err(error) => return Err(StartupScanError::recovery(session, error)),
                 }
             }
@@ -283,6 +306,7 @@ where
 
         Ok(StartupScanOutcome {
             recovered_turn_count,
+            skipped_corrupt_sessions: skipped_corrupt_sessions.into_boxed_slice(),
             awaiting_recovery_decision_sessions: awaiting_recovery_decision_sessions
                 .into_boxed_slice(),
         })
@@ -336,11 +360,13 @@ mod tests {
     enum FakeError {
         Collision,
         Infrastructure,
+        Corruption,
     }
 
     impl ClassifyOperatorFailure for FakeError {
         fn operator_failure_class(&self) -> OperatorFailureClass {
             match self {
+                Self::Corruption => OperatorFailureClass::FailClosedCorruption,
                 Self::Collision => OperatorFailureClass::IdentityCollision,
                 Self::Infrastructure => OperatorFailureClass::Infrastructure {
                     commit_ambiguous: false,
@@ -354,15 +380,25 @@ mod tests {
         inventory: Option<Result<Box<[SessionId]>, FakeError>>,
         responses: VecDeque<Result<StartupScanSessionOutcome, FakeError>>,
         observed: Vec<SessionId>,
+        parked: Vec<SessionId>,
     }
 
     impl StartupScanRepository for FakeRepository {
         type Error = FakeError;
 
-        fn active_sessions(
+        fn sessions(
             &mut self,
         ) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send {
             ready(self.inventory.take().expect("one inventory response"))
+        }
+
+        async fn park_corrupt_session(
+            &mut self,
+            session: SessionId,
+            _error: &Self::Error,
+        ) -> Result<(), Self::Error> {
+            self.parked.push(session);
+            Ok(())
         }
 
         fn recover<Generator>(
@@ -377,6 +413,27 @@ mod tests {
             self.observed.push(session);
             ready(self.responses.pop_front().expect("one recovery response"))
         }
+    }
+
+    #[test]
+    fn startup_parks_corruption_and_reconstitutes_remaining_sessions() {
+        let corrupt = session(1);
+        let healthy = session(2);
+        let repository = FakeRepository {
+            inventory: Some(Ok(vec![corrupt, healthy].into_boxed_slice())),
+            responses: VecDeque::from([
+                Err(FakeError::Corruption),
+                Ok(StartupScanSessionOutcome::NoActiveTurn),
+            ]),
+            observed: Vec::new(),
+            parked: Vec::new(),
+        };
+        let mut scan = StartupScanService::new(FakeIds { next: 10, calls: 0 }, repository);
+        let outcome = run_ready(scan.execute()).unwrap();
+        assert_eq!(outcome.skipped_corrupt_sessions(), &[corrupt]);
+        let (_, repository) = scan.into_parts();
+        assert_eq!(repository.parked, [corrupt]);
+        assert_eq!(repository.observed, [corrupt, healthy]);
     }
 
     fn run_ready<Output>(future: impl Future<Output = Output>) -> Output {
@@ -403,6 +460,7 @@ mod tests {
                 Ok(StartupScanSessionOutcome::NoActiveTurn),
             ]),
             observed: Vec::new(),
+            parked: Vec::new(),
         };
         let mut service = StartupScanService::new(FakeIds { next: 10, calls: 0 }, repository);
 
@@ -429,6 +487,7 @@ mod tests {
                 Ok(StartupScanSessionOutcome::NoActiveTurn),
             ]),
             observed: Vec::new(),
+            parked: Vec::new(),
         };
         let mut service = StartupScanService::new(FakeIds { next: 10, calls: 0 }, repository);
 
@@ -447,6 +506,7 @@ mod tests {
             inventory: Some(Ok(vec![requested].into_boxed_slice())),
             responses: VecDeque::from([Err(FakeError::Infrastructure)]),
             observed: Vec::new(),
+            parked: Vec::new(),
         };
         let mut service = StartupScanService::new(FakeIds { next: 10, calls: 0 }, repository);
 

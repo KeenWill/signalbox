@@ -108,6 +108,13 @@ resolution and the `RuntimeModelCatalog` for the provider bridge. The optional
 `repository_watch_poll_request_budget` defaults to 100 and accepts integers from
 2 through 1,000, including the quota preflight request in each attempt.
 
+`guard_recovery_initial_delay` and `guard_recovery_maximum_delay` are positive
+durations, with the maximum no smaller than the initial delay.
+`guard_recovery_elapsed_bound` limits one guard-loss recovery episode, including
+pool shutdown and runtime reconstruction; `none` leaves it unbounded.
+[Turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md) owns
+reacquisition before admission resumes.
+
 The `[[tool_mappings]]` array composes the deployment-mapped tool families and
 binds one configured workspace root. Each session's workspace root is derived
 from that root by a fixed formula: `<name>.sessions/<session uuid>` beside the

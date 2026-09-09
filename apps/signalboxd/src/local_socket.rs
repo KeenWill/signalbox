@@ -220,6 +220,7 @@ fn clear_stale_identity_pin(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(LocalSocketError::ReadExistingEntry(error)),
     }
+    require_no_listener(&pin_path)?;
     let revalidated_pin =
         fs::symlink_metadata(&pin_path).map_err(LocalSocketError::ReadPinnedIdentity)?;
     if !identity.matches(&revalidated_pin, effective_user) {
@@ -411,6 +412,17 @@ fn prepare_final_entry(path: &Path) -> Result<(), LocalSocketError> {
         .ok_or(LocalSocketError::ExistingSocketOwnerMismatch)?;
     let _identity_pin = SocketIdentityPin::create(path, identity, effective_user)?;
 
+    require_no_listener(path)?;
+
+    let second_metadata =
+        fs::symlink_metadata(path).map_err(LocalSocketError::RevalidateExistingSocket)?;
+    if !identity.matches(&second_metadata, effective_user) {
+        return Err(LocalSocketError::ExistingSocketChanged);
+    }
+    fs::remove_file(path).map_err(LocalSocketError::RemoveStaleSocket)
+}
+
+fn require_no_listener(path: &Path) -> Result<(), LocalSocketError> {
     let probe = socket(AddressFamily::UNIX, SocketType::STREAM, None)
         .map_err(|error| LocalSocketError::ProbeExistingSocket(rustix_error(error)))?;
     fcntl_setfd(&probe, FdFlags::CLOEXEC)
@@ -432,12 +444,7 @@ fn prepare_final_entry(path: &Path) -> Result<(), LocalSocketError> {
         }
     }
 
-    let second_metadata =
-        fs::symlink_metadata(path).map_err(LocalSocketError::RevalidateExistingSocket)?;
-    if !identity.matches(&second_metadata, effective_user) {
-        return Err(LocalSocketError::ExistingSocketChanged);
-    }
-    fs::remove_file(path).map_err(LocalSocketError::RemoveStaleSocket)
+    Ok(())
 }
 
 fn rustix_error(error: rustix::io::Errno) -> io::Error {
@@ -805,6 +812,25 @@ mod tests {
         assert!(!path.exists());
         assert!(fs::symlink_metadata(directory.identity_path())?.is_file());
         drop(pin);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_orphan_identity_pin_prevents_startup_cleanup() -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let path = directory.socket_path();
+        let identity_path = directory.identity_path();
+        let live = std::os::unix::net::UnixListener::bind(&path)?;
+        fs::hard_link(&path, &identity_path)?;
+        fs::remove_file(&path)?;
+        let original = fs::symlink_metadata(&identity_path)?;
+
+        let result = LocalProcessListener::bind(&path);
+
+        assert!(matches!(result, Err(LocalSocketError::ExistingSocketLive)));
+        assert_eq!(fs::symlink_metadata(&identity_path)?.ino(), original.ino());
+        assert!(!path.exists());
+        drop(live);
         Ok(())
     }
 

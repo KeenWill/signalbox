@@ -433,6 +433,19 @@ impl GoalRepository {
                     .await?;
             }
 
+            if matches!(command.action(), GoalUserAction::Resume(_)) {
+                crate::session_lifecycle::lock_supervision_frontier(
+                    &mut transaction,
+                    command.session(),
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source) => {
+                        GoalRepositoryError::Database(source)
+                    }
+                    _ => GoalCorruption::Inconsistent("supervision delegation frontier").into(),
+                })?;
+            }
             let session_exists = lock_session(&mut transaction, command.session()).await?;
 
             if matches!(command.action(), GoalUserAction::Stop { .. })
@@ -1887,9 +1900,25 @@ async fn apply_user_command(
         ),
     };
     match transitioned {
-        Ok(goal) => Ok(UserCommandApplication::Recorded(
-            GoalCommandResult::Applied(latest_event(&goal)?),
-        )),
+        Ok(goal) => {
+            if matches!(command.action(), GoalUserAction::Resume(_)) {
+                crate::session_lifecycle::reconcile_supervision_in_transaction(
+                    connection,
+                    command.session(),
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::session_lifecycle::SessionLifecycleRepositoryError::Database(source)
+                    | crate::session_lifecycle::SessionLifecycleRepositoryError::CommitAmbiguous(
+                        source,
+                    ) => GoalRepositoryError::Database(source),
+                    _ => GoalCorruption::Inconsistent("supervised session reconstitution").into(),
+                })?;
+            }
+            Ok(UserCommandApplication::Recorded(
+                GoalCommandResult::Applied(latest_event(&goal)?),
+            ))
+        }
         Err(error) => Ok(UserCommandApplication::Recorded(
             GoalCommandResult::Rejected(rejection_from_transition(error.failure())?),
         )),

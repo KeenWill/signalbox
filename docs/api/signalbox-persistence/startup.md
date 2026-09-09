@@ -81,7 +81,7 @@ pub struct PostgresStartupScanRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl startup::PostgresStartupScanRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
-    pub async fn active_sessions(
+    pub async fn sessions(
         &self,
     ) -> result::Result<
         boxed::Box<[signalbox_domain::SessionId]>,
@@ -101,12 +101,17 @@ impl startup::PostgresStartupScanRepository {
 }
 impl signalbox_application::StartupScanRepository for startup::PostgresStartupScanRepository {
     type Error = startup::StartupScanRepositoryError;
-    async fn active_sessions(
+    async fn sessions(
         &mut self,
     ) -> result::Result<
         boxed::Box<[signalbox_domain::SessionId]>,
         <Self as signalbox_application::StartupScanRepository>::Error,
     >;
+    async fn park_corrupt_session(
+        &mut self,
+        session: signalbox_domain::SessionId,
+        error: &<Self as signalbox_application::StartupScanRepository>::Error,
+    ) -> result::Result<(), <Self as signalbox_application::StartupScanRepository>::Error>;
     async fn recover<Generator>(
         &mut self,
         session: signalbox_domain::SessionId,
