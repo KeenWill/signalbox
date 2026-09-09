@@ -2437,8 +2437,8 @@ fn repo_watch_event_stream_identity_v1(key: RepoWatchEventStreamKeyV1<'_>) -> [u
 ///
 /// Both sides come from `hash_identified_content`, the same framing the identity
 /// is computed over, so this cannot disagree with the digest about which members
-/// identify a fact: the random `RepoWatchEventId` and a workflow's mutable
-/// display name are excluded from both.
+/// identify a fact: random event IDs and provider-fact presentation are excluded
+/// from both.
 pub fn repo_watch_events_have_equal_identified_content(
     left: &RepoWatchEvent,
     right: &RepoWatchEvent,
@@ -2473,22 +2473,29 @@ fn hash_identified_content(hash: &mut RepoWatchIdentityHasher, event: &RepoWatch
             hash.text("pull_request");
             hash.u64(context.number().get());
             hash.text(context.head_sha().as_str());
-            hash.text(context.head_repository().as_str());
-            hash.text(context.base_branch().as_str());
-            hash.text(context.head_branch().as_str());
-            hash.text(context.title().as_str());
-            hash.text(context.body().as_str());
-            hash.u64(context.labels().len() as u64);
-            for label in context.labels() {
-                hash.text(label.as_str());
-            }
-            hash.boolean(context.draft());
-            match context.author() {
-                Some(author) => {
-                    hash.frame(&[1]);
-                    hash.text(author.as_str());
+            if !matches!(
+                event.kind(),
+                RepoWatchEventKindV1::ChecksCompleted { .. }
+                    | RepoWatchEventKindV1::CheckRunCompleted { .. }
+                    | RepoWatchEventKindV1::ReviewSubmitted { .. }
+            ) {
+                hash.text(context.head_repository().as_str());
+                hash.text(context.base_branch().as_str());
+                hash.text(context.head_branch().as_str());
+                hash.text(context.title().as_str());
+                hash.text(context.body().as_str());
+                hash.u64(context.labels().len() as u64);
+                for label in context.labels() {
+                    hash.text(label.as_str());
                 }
-                None => hash.frame(&[0]),
+                hash.boolean(context.draft());
+                match context.author() {
+                    Some(author) => {
+                        hash.frame(&[1]);
+                        hash.text(author.as_str());
+                    }
+                    None => hash.frame(&[0]),
+                }
             }
         }
         RepoWatchEventTarget::Branch => hash.text("branch"),
@@ -2501,20 +2508,16 @@ fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKind
     match kind {
         RepoWatchEventKindV1::PullRequestOpened
         | RepoWatchEventKindV1::PullRequestClosed
-        | RepoWatchEventKindV1::PullRequestMerged => {}
+        | RepoWatchEventKindV1::PullRequestMerged
+        | RepoWatchEventKindV1::ChecksCompleted { .. }
+        | RepoWatchEventKindV1::CheckRunCompleted { .. }
+        | RepoWatchEventKindV1::ReviewSubmitted { .. } => {}
         RepoWatchEventKindV1::HeadChanged { previous, current } => {
             hash.text(previous.as_str());
             hash.text(current.as_str());
         }
         RepoWatchEventKindV1::MergeableStateChanged { current } => {
             hash.text(mergeable_state_discriminator(*current));
-        }
-        RepoWatchEventKindV1::ChecksCompleted { outcome } => {
-            hash.text(checks_outcome_discriminator(*outcome));
-        }
-        RepoWatchEventKindV1::CheckRunCompleted { name, conclusion } => {
-            hash.text(name.as_str());
-            hash.text(check_conclusion_discriminator(*conclusion));
         }
         // The workflow display name is deliberately excluded. It is
         // rule-visible payload, not an identifying member: the differ
@@ -2533,15 +2536,6 @@ fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKind
         } => {
             hash.text(branch.as_str());
             hash.text(check_conclusion_discriminator(*conclusion));
-        }
-        RepoWatchEventKindV1::ReviewSubmitted {
-            reviewer,
-            state,
-            commit,
-        } => {
-            hash.text(reviewer.as_str());
-            hash.text(review_state_discriminator(*state));
-            hash.text(commit.as_str());
         }
         RepoWatchEventKindV1::ThreadOpened { thread }
         | RepoWatchEventKindV1::ThreadResolved { thread } => hash.text(thread.as_str()),
@@ -2605,13 +2599,6 @@ const fn mergeable_state_discriminator(value: MergeableState) -> &'static str {
     }
 }
 
-const fn checks_outcome_discriminator(value: ChecksOutcome) -> &'static str {
-    match value {
-        ChecksOutcome::Success => "success",
-        ChecksOutcome::Failure => "failure",
-    }
-}
-
 const fn check_conclusion_discriminator(value: CheckConclusion) -> &'static str {
     match value {
         CheckConclusion::Success => "success",
@@ -2623,14 +2610,6 @@ const fn check_conclusion_discriminator(value: CheckConclusion) -> &'static str 
         CheckConclusion::ActionRequired => "action_required",
         CheckConclusion::Stale => "stale",
         CheckConclusion::StartupFailure => "startup_failure",
-    }
-}
-
-const fn review_state_discriminator(value: ReviewState) -> &'static str {
-    match value {
-        ReviewState::Approved => "approved",
-        ReviewState::ChangesRequested => "changes_requested",
-        ReviewState::Commented => "commented",
     }
 }
 
@@ -4536,6 +4515,91 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_ne!(events[0].content_identity(), events[1].content_identity());
         assert_eq!(frontier.entries().len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn provider_fact_identity_ignores_pull_request_presentation() -> Result<(), Box<dyn Error>> {
+        let original = pull_request(PullRequestFacts::matching(PULL_REQUEST_NUMBER))?;
+        let context = original.context();
+        let edited = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: context.number(),
+            head_sha: context.head_sha().clone(),
+            head_repository: RepositorySlug::try_new(String::from("edited/fork"))?,
+            base_branch: BranchName::try_new(String::from("edited-base"))?,
+            head_branch: BranchName::try_new(String::from("edited-head"))?,
+            title: PullRequestTitle::try_new(String::from("Edited title"))?,
+            body: PullRequestBody::try_new(String::from("Edited body"))?,
+            labels: vec![LabelName::try_new(String::from("edited-label"))?],
+            draft: true,
+            author: None,
+        });
+        let generation = completion_generation(CHECK_COMPLETION_GENERATION)?;
+        for (kind, key) in [
+            (
+                RepoWatchEventKindV1::ChecksCompleted {
+                    outcome: ChecksOutcome::Success,
+                },
+                RepoWatchEventStreamKeyV1::CheckSuite {
+                    number: context.number(),
+                    suite: object_id(CHECK_SUITE_ID),
+                    completion_generation: &generation,
+                },
+            ),
+            (
+                RepoWatchEventKindV1::CheckRunCompleted {
+                    name: CheckRunName::try_new(String::from(CHECK_NAME))?,
+                    conclusion: CheckConclusion::Success,
+                },
+                RepoWatchEventStreamKeyV1::CheckRun {
+                    number: context.number(),
+                    run: object_id(CHECK_RUN_ID),
+                    completion_generation: &generation,
+                },
+            ),
+            (
+                RepoWatchEventKindV1::ReviewSubmitted {
+                    reviewer: reviewer(REVIEWER)?,
+                    state: ReviewState::Approved,
+                    commit: CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+                },
+                RepoWatchEventStreamKeyV1::Review {
+                    number: context.number(),
+                    review: object_id(REVIEW_ID),
+                },
+            ),
+        ] {
+            let mut ids = FixedEventIds::new();
+            let first = RepoWatchEvent::try_pull_request(
+                ids.next_event_id(),
+                repository()?,
+                context.clone(),
+                kind.clone(),
+            )?;
+            let after_edit = RepoWatchEvent::try_pull_request(
+                ids.next_event_id(),
+                repository()?,
+                edited.clone(),
+                kind,
+            )?;
+            let stream = repo_watch_event_stream_identity_v1(key);
+
+            assert_eq!(
+                repo_watch_event_content_identity_v1(&first, stream, NonZeroU64::MIN),
+                repo_watch_event_content_identity_v1(&after_edit, stream, NonZeroU64::MIN),
+                "{:?}",
+                first.kind().name(),
+            );
+            assert!(repo_watch_events_have_equal_identified_content(
+                &first,
+                &after_edit
+            ));
+            assert_ne!(
+                first.target(),
+                after_edit.target(),
+                "matcher payload remains complete"
+            );
+        }
         Ok(())
     }
 
