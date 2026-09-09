@@ -20,9 +20,10 @@ Compiled Rust programs and checked effect adapters live in
 `apps/signalboxd/src/workflows/repo_watch/`. `ObserveRepository` accepts one
 poll/webhook observation unit; `EvaluateRule` evaluates one retained event for
 one checked rule revision; `ReactToLifecycle` applies one retained lifecycle
-unit. Runs are finite, with immutable input and journaled results; subsequent
-work resumes from module cursors and receipts, including after a native run ends
-`ContractRetired` under the host's executable-pinning contract.
+unit; `CleanupCheckout` invokes `repo.cleanupCheckout` for one retained removal
+candidate. Runs are finite, with immutable input and journaled results;
+subsequent work resumes from module cursors and receipts, including after a
+native run ends `ContractRetired` under the host's executable-pinning contract.
 
 Programs sequence checked operations and pure matcher/reaction planning through
 `WorkflowContext`. Adapters own I/O, identities, time, template resolution and
@@ -35,16 +36,18 @@ workflow runtime or core persistence.
 
 One `RepoWatch` capability admits the following methods, with checked request
 and result codecs. The host journals requests before effects and deliveries
-before resuming programs. Each mutating adapter binds the run/request identity
-and exact input to its module receipt; equal recovery adopts the retained result
-and changed reuse conflicts. Recovery checks receipts before active
-configuration. An externally committed operation without sufficient receipt
-evidence returns ambiguity; multi-step submission and checkout are not declared
-idempotent as a whole.
+before resuming programs. Each mutating request carries a stable effect identity
+independent of its run and request ordinal. The adapter binds that effect
+identity, method and exact input to its module receipt; equal recovery adopts
+the retained result and changed input under the same effect identity conflicts.
+Run/request identity identifies the journal delivery, not the receipt. Recovery
+checks receipts before active configuration. An externally committed operation
+without sufficient receipt evidence returns ambiguity; multi-step submission and
+checkout are not declared idempotent as a whole.
 
 | Method                                      | Operation and recovery contract                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `repo.observe`                              | Fetch, normalize, diff and atomically commit one complete observation. Add invocation identity and exact frontier/event-range result to the retained frontier commit, including an unchanged observation. Serialize observations per repository and adopt a committed result into the journal before another observation can replace its receipt. Generation and candidate digest alone are not invocation receipts (`docs/spec/repo-watch.md:104`).                                                                                                                                     |
+| `repo.observe`                              | Fetch, normalize, diff and atomically commit one complete observation. Add effect identity and exact frontier/event-range result to the retained frontier commit, including an unchanged observation. Serialize observations per repository and adopt a committed result into the journal before another observation can replace its receipt. Generation and candidate digest alone are not effect receipts (`docs/spec/repo-watch.md:104`).                                                                                                                                             |
 | `repo.nextRuleEvent`                        | Return the active checked revision, next retained event and checked matcher/singleton context as journaled bytes. This read reserves no dispatch; activation-tail and cursor selection remain module-owned (`crates/modules/repo-watch-v2/src/dispatch.rs:65`).                                                                                                                                                                                                                                                                                                                          |
 | `repo.commitEvaluation`                     | Revalidate the exact event/revision and proposed pure action plan against module authority. Mint identities and freeze complete resolved commands host-side; acquire the existing singleton and commit commands, outcome receipt and evaluation cursor together. Retain the exact nonmatch, suppression or dispatch result on evaluation/dispatch records until journal adoption, without recomputing from changed configuration. Existing command retention and singleton admission remain authoritative (`docs/spec/repo-watch.md:184`, `docs/spec/repo-watch.md:198`).                |
 | `repo.submitPending`                        | Submit the retained command identity and exact bytes through core handlers, adopt core command receipts, and complete retained follow-ups before reporting completion. Pull-request creation provisions its checkout inside this effect; there is no separate provisioning effect. The adapter adopts or resumes from ledger location, core session, ownership, provisioned SHA and retirement evidence. Preserve ordered actions, settlement and synchronous conflict rejection (`crates/modules/repo-watch-v2/src/dispatch.rs:304`, `apps/signalboxd/src/repo_watch_dispatch.rs:160`). |
@@ -52,11 +55,17 @@ idempotent as a whole.
 | `repo.nextLifecycle`, `repo.commitReaction` | Journal retained core/seam or close/merge facts and original dispatch context; revalidate terminal state and commit exact release/stop commands and settlement before advancing the module cursor, then acknowledge the seam source. Retain the outcome for lost-answer adoption, including no reaction (`crates/modules/repo-watch-v2/src/dispatch.rs:149`, `apps/signalboxd/src/repo_watch_runtime.rs:716`).                                                                                                                                                                           |
 
 Receipt additions belong to the existing module frontier, evaluation and
-dispatch records; there is no second dispatch ledger or singleton table. A
-successor run recovering business work adopts those records before selecting new
-work. Read-only context can be reread before a durable side effect; a replayed
-delivery uses its recorded bytes. Host event waits use durable repository/core
-source positions.
+dispatch records; there is no second dispatch ledger or singleton table. The
+launcher checks receipts awaiting journal adoption before selecting work from
+cursors, even when the committing run is `ContractRetired` and its cursor has
+advanced. It passes the retained effect identity and exact input to a successor
+run. The adapter returns the retained result without repeating the committed
+effect or resolving new configuration, and the host journals that result under
+the successor's request ordinal. Durable delivery in either run permits receipt
+release or replacement, including the next observation; no acknowledgement from
+the retired run or rewrite of its journal is required. Read-only context can be
+reread before a durable side effect; a replayed delivery uses its recorded
+bytes. Host event waits use durable repository/core source positions.
 
 ### Retained daemon authority
 
@@ -71,6 +80,14 @@ wakes (`crates/modules/repo-watch-v2/src/ingest.rs:273`), with the cutover's
 single owner. The launcher survives removal of the superseded orchestration; the
 host executes and resumes runs but supplies no successor scheduler
 (`docs/design/workflows.md:96`).
+
+The retained module also launches `CleanupCheckout` at startup and through a
+periodic cleanup sweep using the existing worker cadence
+(`apps/signalboxd/src/repo_watch_runtime.rs:542`). It selects retained removal
+candidates through the scavenger's eligibility and ownership checks
+(`apps/signalboxd/src/repo_watch_dispatch.rs:87`), independently of repository
+or lifecycle facts and even when repository watch is disabled or unconfigured.
+Pending removals remain eligible on later sweeps until cleanup settles.
 
 The authenticated webhook listener persists deliveries and retains its
 primary/shadow meaning; polling credentials remain repository-scoped daemon
@@ -155,6 +172,12 @@ checkout and retirement across equivalent disposable databases. Both use
 nonmatch/suppression recovery, lost journal answers, revision activation,
 multi-action ordering, removed configuration, terminal facts pending at the
 cursor and checkout interruption.
+
+Recovery acceptance interrupts a committed effect before journal delivery,
+retires its run on upgrade, and verifies successor adoption without repeating
+the effect or blocking the next observation. Cleanup acceptance leaves a pending
+removal with no repository or lifecycle fact, then verifies startup and periodic
+launches with repository watch disabled or unconfigured.
 
 Reload stops and joins the previous engine before starting its replacement from
 retained cursors, receipts and accepted webhook/event backlog. It preserves the
