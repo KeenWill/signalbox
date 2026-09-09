@@ -835,7 +835,23 @@ async fn assert_judge_escalation_after_goal_supersession(
     );
 
     repository.authorize(&prepared).await?;
-    supersede_fixture_session_goal(&pool, fixture.session, seed + 0xf4).await?;
+    let superseded = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf4)),
+                fixture.session,
+                GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                    "pursue the replacement approval fixture goal",
+                ))?),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0xf5)),
+                TurnId::from_uuid(Uuid::from_u128(seed + 0xf6)),
+            )),
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(superseded);
     let outcome = repository
         .complete(
             &prepared,
