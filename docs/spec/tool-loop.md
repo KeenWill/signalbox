@@ -268,6 +268,10 @@ undecodable arguments, deny requests explicitly outside scope, approve plainly
 covered requests and their ordinary constituents, otherwise escalate. Exec
 pushes require both a dispatch fence and an immutable permitted remote in the
 frozen prompt; a mutable remote alias alone does not establish the destination.
+The judge identifies `git_push_configured` as the built-in configured-repository
+transport and judges its branch scope without requiring a remote URL in the
+frozen prompt. An explicit remote-URL restriction still requires a verified
+destination match; an unknown match escalates.
 
 For repository-watch pull-request sessions, dispatch authority comes from the
 session's `dispatch_ref`, dispatch ledger, and retained GitHub event: dispatch
