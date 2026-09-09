@@ -255,7 +255,8 @@ impl ProcessReadRepository {
     }
 
     /// Reads only the exact source-qualified semantic entries selected for a
-    /// compaction range, preserving their one-based physical positions.
+    /// compaction range, preserving their one-based physical positions and
+    /// using admitted context text for completed tool results.
     pub async fn read_selected_transcript_entries(
         &self,
         positions: &[u64],

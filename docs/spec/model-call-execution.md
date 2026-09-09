@@ -50,14 +50,14 @@ with its own durable prepared, in-flight, and terminal lifecycle, separate from
 ordinary calls. The compaction call's own input budget is its context window
 less the output ceiling and the required prompt. Before completed tool results
 enter context, each result receives an equal share of the smaller of that
-safe-prefix budget and the producing call's remaining headroom, reserving batch
-framing. Oversized text is truncated at a UTF-8 boundary with an explicit marker
-naming the retained and dropped byte counts; JSON escaping and the marker count
-against the share. The admitted text is durable and used by ordinary rendering,
-compaction, and headroom accounting; exact executor text remains observation
-evidence. When even framing and empty-prefix markers or other indivisible
-content cannot fit the first safe prefix, no call is prepared and one
-transaction fails the turn as a last-resort compaction wall. Automatic
+safe-prefix budget and the producing call's remaining headroom, reserving result
+envelope framing. Oversized text is truncated at a UTF-8 boundary with an
+explicit marker naming the retained and dropped byte counts; JSON escaping and
+the marker count against the share. The admitted text is durable and used by
+ordinary rendering, compaction, and headroom accounting; exact executor text
+remains observation evidence. When even framing and empty-prefix markers or
+other indivisible content cannot fit the first safe prefix, no call is prepared
+and one transaction fails the turn as a last-resort compaction wall. Automatic
 compaction targets the first safe boundary at or beyond half the rendered bytes
 and falls back to the latest safe boundary that fits. At two points a headroom
 guard adds the newest reported input for the pinned target, a byte allowance for

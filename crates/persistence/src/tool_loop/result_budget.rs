@@ -27,15 +27,23 @@ pub(super) async fn result_byte_limit(
                 ) AS input_is_retained,
                 (SELECT count(*) FROM tool_request request
                   WHERE request.producing_model_call_id = call.model_call_id) AS result_count,
-                (SELECT COALESCE(sum(octet_length(row_to_json(request)::text)), 0)::bigint
-                   FROM tool_request request
-                  WHERE request.producing_model_call_id = call.model_call_id)
-                + (SELECT COALESCE(sum(octet_length(row_to_json(entry)::text)), 0)::bigint
-                     FROM semantic_transcript_entry entry
-                    WHERE entry.producing_model_call_id = call.model_call_id) AS framing_bytes
+                (SELECT COALESCE(sum(octet_length(jsonb_build_object(
+                    'position', $2::numeric,
+                    'source_session_id', request.session_id,
+                    'entry_id', request.request_id,
+                    'type', 'tool_execution_result',
+                    'tool_request_id', request.request_id,
+                    'tool_attempt_id', request.request_id,
+                    'content', ''
+                )::text)), 0)::bigint FROM tool_request request
+                  WHERE request.producing_model_call_id = call.model_call_id) AS framing_bytes
            FROM model_call call WHERE call.model_call_id = $1",
     )
     .bind(producing_call.into_uuid())
+    // Result entry/attempt identities are assigned later; all UUID encodings
+    // have the request ID's width. Reserve the widest physical position and
+    // the empty result envelope, without charging source response payloads.
+    .bind(Decimal::from(u64::MAX))
     .fetch_one(&mut *connection)
     .await?;
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(

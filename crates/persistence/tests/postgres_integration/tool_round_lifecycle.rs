@@ -5488,6 +5488,26 @@ async fn assert_headroom_case(pool: &PgPool, case: HeadroomCase) -> Result<(), B
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
 -> Result<(), Box<dyn Error>> {
+    assert_bounded_269_kib_batch("{}").await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn source_arguments_do_not_consume_the_result_envelope_allowance()
+-> Result<(), Box<dyn Error>> {
+    let small_arguments = "{}";
+    let large_arguments = serde_json::json!({"source": "x".repeat(64 * 1024)}).to_string();
+    let small_limits = assert_bounded_269_kib_batch(small_arguments).await?;
+    let large_limits = assert_bounded_269_kib_batch(&large_arguments).await?;
+    assert_eq!(
+        large_limits, small_limits,
+        "source response payloads must not be counted again as result envelopes"
+    );
+    Ok(())
+}
+
+async fn assert_bounded_269_kib_batch(arguments: &str) -> Result<Vec<i64>, Box<dyn Error>> {
     const FIXTURE_SEED: u128 = 0x269_0900;
     const COMPACTION_PROMPT: &str = "Summarize prior work for continuation.";
     let (container, pool, _) = migrated_postgres().await?;
@@ -5517,10 +5537,10 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
         FIXTURE_SEED,
         (fixture, repository, *authorized),
         &[
-            ("current_time", "{}"),
-            ("current_time", "{}"),
-            ("current_time", "{}"),
-            ("current_time", "{}"),
+            ("current_time", arguments),
+            ("current_time", arguments),
+            ("current_time", arguments),
+            ("current_time", arguments),
         ],
         InitialToolApproval::PolicyAuto,
         ProviderReportedTokenUsage::unreported()
@@ -5532,6 +5552,8 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
     let tools = repository.tool_loop_repository();
     let raw = "x".repeat(269 * 1024 / requests.len());
     let mut projected_bytes = 0;
+    let mut admitted_texts = Vec::new();
+    let mut result_limits = Vec::new();
     for request in &requests {
         let attempt = ToolAttemptId::from_uuid(Uuid::now_v7());
         tools
@@ -5560,6 +5582,7 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
         let (stored, context, limit): (String, String, i64) = sqlx::query_as(
             "SELECT result_text, context_result_text, context_result_byte_limit FROM tool_attempt WHERE request_id = $1",
         ).bind(request.into_uuid()).fetch_one(&pool).await?;
+        result_limits.push(limit);
         assert_eq!(stored, raw);
         let (prefix, marker) = context
             .split_once("\n[tool result truncated:")
@@ -5568,20 +5591,22 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
         assert!(marker.contains(&format!("dropped {} bytes", raw.len() - prefix.len())));
         assert!(serde_json::to_vec(&context)?.len() <= limit as usize);
         projected_bytes += context.len();
+        admitted_texts.push(context);
     }
     assert!(89_090 + 777 + projected_bytes + 8_192 <= 258_400);
     let continuation = ModelCallId::from_uuid(Uuid::now_v7());
     let frontier = ContextFrontierId::from_uuid(Uuid::now_v7());
+    let result_entries: Vec<_> = requests
+        .iter()
+        .map(|_| SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()))
+        .collect();
     let outcome = tools
         .prepare_continuation(
             fixture.session,
             fixture.turn,
             fixture.call,
             signalbox_application::ToolContinuationIdentities::new(
-                requests
-                    .iter()
-                    .map(|_| SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()))
-                    .collect(),
+                result_entries.clone(),
                 frontier,
                 continuation,
                 FailedModelCallTurnIdentities::new(
@@ -5605,7 +5630,46 @@ async fn a_269_kib_tool_result_batch_continues_without_exhausting_headroom()
         reported.projected_unreported_content_bytes(),
         projected_bytes as u64
     );
+    let reads = ProcessReadRepository::new(pool.clone());
+    let transcript = reads
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the session is readable");
+    let client_results: Vec<_> = transcript
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            ProcessTranscriptEntry::ToolExecutionResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        client_results,
+        vec![raw.as_str(); requests.len()],
+        "client transcripts retain exact executor output"
+    );
+    let compacted_entries = reads
+        .read_selected_transcript_entries(
+            &[1, 2, 3, 4],
+            &result_entries
+                .iter()
+                .map(|entry| SemanticTranscriptEntryRef::from_source(fixture.session, *entry))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    let context_results: Vec<_> = compacted_entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ProcessTranscriptEntry::ToolExecutionResult { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        context_results,
+        admitted_texts.iter().collect::<Vec<_>>(),
+        "compaction reads use the same bounded text as model continuation"
+    );
     pool.close().await;
     drop(container);
-    Ok(())
+    Ok(result_limits)
 }
