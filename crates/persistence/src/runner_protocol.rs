@@ -2781,8 +2781,9 @@ impl RunnerProtocolStore {
             "INSERT INTO tool_attempt
                 (attempt_id, request_id, session_id, turn_id,
                  issuing_turn_attempt_id, effect_class, dispatch_generation,
-                 state_kind)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_flight')",
+                 state_kind, context_result_byte_limit)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_flight',
+                     (SELECT context_result_byte_limit FROM tool_attempt WHERE attempt_id = $8))",
         )
         .bind(dispatch.attempt().into_uuid())
         .bind(dispatch.request().into_uuid())
@@ -2794,6 +2795,7 @@ impl RunnerProtocolStore {
             ToolEffectClass::ExternalEffect => "external_effect",
         })
         .bind(Decimal::from(dispatch.generation().as_u64()))
+        .bind(retired.attempt().into_uuid())
         .execute(&mut *transaction)
         .await?;
         append_lease_event_in(&mut transaction, retry).await?;

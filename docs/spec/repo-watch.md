@@ -232,6 +232,12 @@ action even after configuration removes the rule. The module commits lifecycle
 effects before advancing its application cursor; the daemon acknowledges the
 corresponding seam event afterward.
 
+Pull-request dispatch atomically creates the session with a provisioning hold
+that public start and ownership releases cannot clear. Input accepted during
+provisioning remains queued until the checkout head is recorded and the command
+adapter clears the provisioning hold and releases the start gate, nudging turn
+eligibility.
+
 The command adapter copies complete resolved template defaults without initial
 input or repository credentials and stamps the module issuer on creation claims;
 pull-request dispatch provisions the watched repository at the session's derived

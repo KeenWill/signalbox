@@ -63,6 +63,10 @@ inspection bound. The transport disables delta compression against omitted
 historical blobs. Object-ID collections compare the object format and its active
 identifier bytes.
 
+Push layout validation, reference resolution, and object capture run off the
+async worker with a 300-second preparation deadline; expiry returns
+`PreDispatchInfrastructure` without invoking the transport.
+
 Minting a destination is a human act, and a session cannot mint a workspace or a
 destination; pushing to a minted destination is an approval-gated agent act.
 

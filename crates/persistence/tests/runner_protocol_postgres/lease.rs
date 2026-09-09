@@ -2306,3 +2306,59 @@ async fn relational_retry_rejects_claimed_attempt_reuse() -> Result<(), Box<dyn 
     drop(pool);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn claimed_retry_preserves_the_issued_tool_result_limit() -> Result<(), Box<dyn Error>> {
+    const RESULT_LIMIT: i64 = 4_096;
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin) = stored_pin_fixture(&pool).await?;
+    // The fixture inserts an already-issued attempt; seed its frozen boundary
+    // before exercising the production retry transaction.
+    let mut fixture = pool.begin().await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *fixture)
+        .await?;
+    sqlx::query("UPDATE tool_attempt SET context_result_byte_limit = $1 WHERE attempt_id = $2")
+        .bind(RESULT_LIMIT)
+        .bind(uuid(INITIAL_PHYSICAL_ATTEMPT.attempt))
+        .execute(&mut *fixture)
+        .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&mut *fixture)
+        .await?;
+    fixture.commit().await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the issued lease claims");
+    store.store_lease(&claimed).await?;
+    let loss = claimed.lose().expect("effect-free work admits recovery");
+    store_fixture_retryable_loss(&store, &pool, &loss).await?;
+    let replacement =
+        authorize_fixture_claimed_retry(&store, &loss, ToolEffectClass::EffectFree).await?;
+    let (_batch, retired, retry_authorization) = replacement.into_parts();
+    let retry = pin
+        .placement
+        .offer_retry(
+            &expected_enrollment,
+            registration.registration(),
+            pin.grant.as_ref(),
+            loss,
+            retry_authorization,
+        )
+        .expect("the replacement receives its successor lease");
+    store_fixture_claimed_retry_replacement(&store, &pool, &retired, &retry).await?;
+    let replacement_limit: Option<i64> = sqlx::query_scalar(
+        "SELECT context_result_byte_limit FROM tool_attempt WHERE attempt_id = $1",
+    )
+    .bind(uuid(RETRY_PHYSICAL_ATTEMPT.attempt))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        replacement_limit,
+        Some(RESULT_LIMIT),
+        "runner recovery must not turn a bounded result into an unbounded result"
+    );
+    drop(pool);
+    Ok(())
+}

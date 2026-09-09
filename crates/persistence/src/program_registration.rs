@@ -146,19 +146,20 @@ impl ProgramRegistrationRepository {
         &self,
         run: ProgramRunId,
         registration: ProgramRegistrationId,
+        input: &[u8],
     ) -> Result<ProgramRunId, ProgramRegistrationError> {
         let mut transaction = self.pool.begin().await?;
         let inserted = sqlx::query("INSERT INTO program_run_journal_stream (run_id, frame_contract_version) VALUES ($1, $2) ON CONFLICT (run_id) DO NOTHING")
             .bind(run.into_uuid()).bind(FRAME_CONTRACT_VERSION).execute(&mut *transaction).await?;
         if inserted.rows_affected() == 0 {
-            let bound: Option<Uuid> = sqlx::query_scalar(
-                "SELECT registration_id FROM program_run_registration WHERE run_id = $1",
+            let bound: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
+                "SELECT registration_id, input FROM program_run_registration WHERE run_id = $1",
             )
             .bind(run.into_uuid())
             .fetch_optional(&mut *transaction)
             .await?;
             transaction.rollback().await?;
-            return if bound == Some(registration.into_uuid()) {
+            return if bound == Some((registration.into_uuid(), input.to_vec())) {
                 Ok(run)
             } else {
                 Err(ProgramRegistrationError::RunConflict { run })
@@ -169,10 +170,11 @@ impl ProgramRegistrationRepository {
             .execute(&mut *transaction)
             .await?;
         sqlx::query(
-            "INSERT INTO program_run_registration (run_id, registration_id) VALUES ($1, $2)",
+            "INSERT INTO program_run_registration (run_id, registration_id, input) VALUES ($1, $2, $3)",
         )
         .bind(run.into_uuid())
         .bind(registration.into_uuid())
+        .bind(input)
         .execute(&mut *transaction)
         .await?;
         transaction
@@ -183,6 +185,19 @@ impl ProgramRegistrationRepository {
                 source,
             })?;
         Ok(run)
+    }
+
+    /// Loads the immutable exact run input without loading executable code.
+    pub async fn input_for_run(
+        &self,
+        run: ProgramRunId,
+    ) -> Result<Option<signalbox_domain::InlineFramePayload>, ProgramRegistrationError> {
+        let input: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT input FROM program_run_registration WHERE run_id = $1")
+                .bind(run.into_uuid())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(input.map(signalbox_domain::InlineFramePayload::new))
     }
 
     /// Adopts an immutable registration only when its complete requested content matches.

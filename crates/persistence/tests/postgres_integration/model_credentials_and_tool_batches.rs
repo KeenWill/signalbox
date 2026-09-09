@@ -990,9 +990,10 @@ async fn batch_reload_restores_retired_attempt_identities() -> Result<(), Box<dy
             (attempt_id, request_id, session_id, turn_id,
              issuing_turn_attempt_id, effect_class, dispatch_generation,
              state_kind, terminal_disposition_kind, result_content_kind,
-             result_text)
+             result_text, context_result_text)
          VALUES ($1, $2, $3, $4, $5, 'effect_free', 1,
-                 'terminal', 'completed', 'text', 'replacement completed')",
+                 'terminal', 'completed', 'text',
+                 'replacement completed', 'replacement completed')",
     )
     .bind(replacement.into_uuid())
     .bind(first_request.into_uuid())

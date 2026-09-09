@@ -67,16 +67,17 @@ impl WorkflowHost {
             .await?
             .ok_or(WorkflowHostError::JournalMissing(run))?;
         let registrations = self.journal.registrations();
+        if let Some(outcome) = crate::journal_outcome(&journal) {
+            registrations
+                .input_for_run(run)
+                .await?
+                .ok_or(ProgramRegistrationError::RunMissing)?;
+            return Ok(outcome);
+        }
         let registration = registrations
             .for_run(run)
             .await?
             .ok_or(ProgramRegistrationError::RunMissing)?;
-        if let Some(outcome) = journal
-            .terminal_delivery()
-            .and_then(crate::terminal_outcome)
-        {
-            return Ok(outcome);
-        }
         let recovered = journal
             .entries()
             .iter()
@@ -97,11 +98,12 @@ impl WorkflowHost {
         let result = self
             .execute_loaded(run, journal, &artifact, &mut deliveries)
             .await;
-        if let Some(outcome) = self.journal.load(run).await?.and_then(|journal| {
-            journal
-                .terminal_delivery()
-                .and_then(crate::terminal_outcome)
-        }) {
+        if let Some(outcome) = self
+            .journal
+            .load(run)
+            .await?
+            .and_then(|journal| crate::journal_outcome(&journal))
+        {
             return Ok(outcome);
         }
         result

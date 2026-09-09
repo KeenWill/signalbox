@@ -224,6 +224,7 @@ jobs:
       - name: Run native snapshot suite (report only)
         id: snapshots
         continue-on-error: true
+        timeout-minutes: 15
         # Not test-xcode.sh with a suite named here: test-snapshots.sh takes
         # both the suite and the simulator from scripts/lib/snapshots.sh, which
         # is the same owner the recording script reads, so a golden is never

@@ -226,6 +226,19 @@ impl StartEligibleTurnRepository {
         Self { pool }
     }
 
+    /// Clears the daemon-owned hold after the dispatch checkout head is recorded.
+    /// The ordinary lifecycle start gate remains independently controlled.
+    pub async fn complete_checkout_provisioning(
+        &self,
+        session: SessionId,
+    ) -> Result<(), StartEligibleTurnRepositoryError> {
+        sqlx::query("UPDATE session_lifecycle SET checkout_provisioning_pending = false WHERE session_id = $1")
+            .bind(session_id_to_uuid(session))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Derives one exact activation candidate without committing it.
     pub async fn preview(
         &self,
@@ -675,7 +688,9 @@ async fn prepare_preview(
     requested_session: SessionId,
     identities: AcceptedInputTurnActivationIdentities,
 ) -> Result<Option<PreparedTurnActivation>, StartEligibleTurnRepositoryError> {
-    if session_runner_is_lost(connection, requested_session).await? {
+    if session_runner_is_lost(connection, requested_session).await?
+        || session_start_gate_is_held(connection, requested_session).await?
+    {
         return Ok(None);
     }
     let session = match load_session_from_connection(connection, requested_session).await {
@@ -1022,15 +1037,13 @@ async fn session_runner_is_lost(
         .bind(session.into_uuid()).fetch_one(&mut *connection).await?)
 }
 
-/// Whether the locked session is suspended in place.
-/// A held start gate keeps queued input from activating until `release_start`,
-/// including across a module park and resume.
+/// Both the public start gate and the daemon-owned checkout hold prevent activation.
 async fn session_start_gate_is_held(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<bool, StartEligibleTurnRepositoryError> {
     let held: Option<bool> =
-        sqlx::query_scalar("SELECT start_gate_held FROM session_lifecycle WHERE session_id = $1")
+        sqlx::query_scalar("SELECT start_gate_held OR checkout_provisioning_pending FROM session_lifecycle WHERE session_id = $1")
             .bind(session_id_to_uuid(session))
             .fetch_optional(&mut *connection)
             .await?;

@@ -45,6 +45,7 @@ import {
   type SignalboxImageArtifact,
   type TextArtifact,
 } from './artifactTypes'
+import { useVerifiedDerivedImage } from './derivedImageService'
 import { useVerifiedOriginalImage } from './originalImageService'
 import { admitRemoteMediaUrl } from './remoteMediaPreference'
 import './artifacts.css'
@@ -241,6 +242,17 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
       ? candidate
       : undefined
 
+  const derivedQuery = useVerifiedDerivedImage(
+    rendered?.kind === 'preview' || rendered?.kind === 'thumbnail' ? rendered : undefined,
+  )
+  const derivedFailed = derivedQuery.isError
+  const automaticUrl = automatic?.content_url
+  useEffect(() => {
+    if (!derivedFailed || automaticUrl === undefined) return
+    setFailedAutomaticUrls((current) => new Set([...current, automaticUrl]))
+  }, [derivedFailed, automaticUrl])
+  const renderedUrl = rendered?.kind === 'browser_native' ? verifiedOriginalUrl : derivedQuery.url
+
   // The object URL is allocated and revoked by one effect owning its lifecycle: allocation during
   // render would strand the extra URL produced by development double-rendering unrevoked.
   useEffect(() => {
@@ -282,13 +294,9 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
   return (
     <div className="artifact-image-layout">
       <div className="artifact-visual">
-        {rendered ? (
+        {rendered && renderedUrl ? (
           <img
-            src={
-              rendered.kind === 'browser_native' && verifiedOriginalUrl !== null
-                ? verifiedOriginalUrl
-                : rendered.content_url
-            }
+            src={renderedUrl}
             alt={`${imageViewLabel(rendered.kind)} of ${artifact.displayName}`}
             loading="lazy"
             onLoad={() => {
@@ -449,7 +457,8 @@ function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
   const derivation = rendered
     ? selectProvenViewDerivation(artifact.source.descriptor, rendered)
     : undefined
-  const loadFailed = rendered?.content_url === failedContentUrl
+  const verified = useVerifiedDerivedImage(derivation ? rendered : undefined)
+  const loadFailed = rendered?.content_url === failedContentUrl || verified.isError
 
   if (!rendered || !derivation || loadFailed) {
     return (
@@ -465,12 +474,14 @@ function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
   return (
     <div className="artifact-image-layout">
       <div className="artifact-visual">
-        <img
-          src={rendered.content_url}
-          alt={`Derived ${artifact.viewKind} of ${artifact.displayName}`}
-          loading="lazy"
-          onError={() => setFailedContentUrl(rendered.content_url)}
-        />
+        {verified.url && (
+          <img
+            src={verified.url}
+            alt={`Derived ${artifact.viewKind} of ${artifact.displayName}`}
+            loading="lazy"
+            onError={() => setFailedContentUrl(rendered.content_url)}
+          />
+        )}
       </div>
       <ArtifactMetadata
         renderer={`${artifact.viewKind} derivative`}

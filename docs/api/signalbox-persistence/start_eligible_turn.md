@@ -143,6 +143,10 @@ pub struct StartEligibleTurnRepository {/* private */}
 // derives: clone::Clone, fmt::Debug
 impl start_eligible_turn::StartEligibleTurnRepository {
     pub fn new(pool: sqlx_postgres::PgPool) -> Self;
+    pub async fn complete_checkout_provisioning(
+        &self,
+        session: signalbox_domain::SessionId,
+    ) -> result::Result<(), start_eligible_turn::StartEligibleTurnRepositoryError>;
     pub async fn preview(
         &self,
         session: signalbox_domain::SessionId,
