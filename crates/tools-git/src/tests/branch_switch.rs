@@ -21,6 +21,50 @@ use crate::tests::support::{
     raw_commit_with_tree,
 };
 
+#[test]
+fn branch_switch_rejects_a_directory_appearing_at_a_deleted_file() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository opens");
+    let empty_tree = repository
+        .treebuilder(None)
+        .expect("empty tree")
+        .write()
+        .expect("tree writes");
+    let target = raw_commit_with_tree(&repository, empty_tree, fixture.initial);
+    repository
+        .branch(
+            FIX_BRANCH,
+            &repository.find_commit(target).expect("target commit"),
+            false,
+        )
+        .expect("target branch");
+    let executor = fixture.executor();
+    let failure = executor.branch_switch_with_quarantine_hook(
+        GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        },
+        || {
+            fs::remove_file(fixture.root().join(TRACKED_PATH)).expect("tracked file retires");
+            fs::create_dir(fixture.root().join(TRACKED_PATH)).expect("foreign directory appears");
+            fs::write(
+                fixture.root().join(TRACKED_PATH).join("foreign.txt"),
+                b"foreign",
+            )
+            .expect("foreign content");
+        },
+    );
+    assert!(failure.is_err());
+    assert_eq!(
+        repository.head().expect("HEAD remains").target(),
+        Some(fixture.initial)
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH).join("foreign.txt"))
+            .expect("foreign file preserved"),
+        b"foreign"
+    );
+}
+
 fn create_over_depth_quarantine_chain(root: PathBuf) {
     let _deepest = (0..=MAX_QUARANTINE_DEPTH).fold(root, |parent, index| {
         let child = parent.join(format!("d{index}"));
@@ -439,6 +483,7 @@ fn branch_switch_preserves_a_prepared_target_replaced_before_publication() {
     commit_all(&repository, "nested source");
     let executor = fixture.executor();
 
+    let foreign_path = std::cell::RefCell::new(None);
     let failure = executor
         .branch_switch_with_target_publish_hook(
             GitBranchSwitchArguments {
@@ -448,11 +493,12 @@ fn branch_switch_preserves_a_prepared_target_replaced_before_publication() {
                 let prepared_target = cleanup_file(fixture.root(), Path::new("src"));
                 fs::rename(&prepared_target, prepared_target.with_file_name("retired"))
                     .expect("prepared target retires");
+                foreign_path.replace(Some(prepared_target.clone()));
                 fs::write(prepared_target, foreign_content).expect("foreign target writes");
             },
         )
         .expect_err("prepared target replacement rejects publication");
-    let retained_foreign = cleanup_file(fixture.root(), Path::new("src"));
+    let retained_foreign = foreign_path.into_inner().expect("replaced path records");
 
     assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
@@ -495,6 +541,7 @@ fn branch_switch_preserves_a_prepared_target_rewritten_before_publication() {
     commit_all(&repository, "nested source");
     let executor = fixture.executor();
 
+    let foreign_path = std::cell::RefCell::new(None);
     let failure = executor
         .branch_switch_with_target_publish_hook(
             GitBranchSwitchArguments {
@@ -502,11 +549,12 @@ fn branch_switch_preserves_a_prepared_target_rewritten_before_publication() {
             },
             || {
                 let prepared_target = cleanup_file(fixture.root(), Path::new("src"));
+                foreign_path.replace(Some(prepared_target.clone()));
                 fs::write(prepared_target, foreign_content).expect("foreign target bytes write");
             },
         )
         .expect_err("in-place prepared target rewrite rejects publication");
-    let retained_foreign = cleanup_file(fixture.root(), Path::new("src"));
+    let retained_foreign = foreign_path.into_inner().expect("rewritten path records");
 
     assert_eq!(failure, LocalGitFailure::Ambiguous);
     assert_eq!(
@@ -1159,7 +1207,7 @@ fn branch_switch_rejects_a_target_tree_over_the_checkout_budget() {
 }
 
 #[test]
-fn branch_switch_rejects_target_tree_blob_bytes_over_the_aggregate_budget() {
+fn branch_switch_checks_out_large_aggregate_tree_content() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let oversized = aggregate_blob_tree_commit(&repository, fixture.initial);
@@ -1171,7 +1219,7 @@ fn branch_switch_rejects_target_tree_blob_bytes_over_the_aggregate_budget() {
         .expect("aggregate-tree fixture branch creates");
     let executor = fixture.executor();
 
-    let failure = executor
+    let result = executor
         .branch_switch(
             &executor
                 .repository_authority
@@ -1181,12 +1229,12 @@ fn branch_switch_rejects_target_tree_blob_bytes_over_the_aggregate_budget() {
                 name: FIX_BRANCH.to_owned(),
             },
         )
-        .expect_err("aggregate target-tree bytes reject");
+        .expect("large aggregate tree checks out");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(result.head, oversized.id().to_string());
     assert_eq!(
         repository.head().expect("fixture HEAD remains").target(),
-        Some(fixture.initial)
+        Some(oversized.id())
     );
 }
 

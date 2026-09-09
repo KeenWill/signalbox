@@ -20,6 +20,7 @@ pub enum ToolApprovalDecision {
 pub struct ToolApprovalResolution {/* private */}
 // derives: clone::Clone, fmt::Debug, cmp::Eq, hash::Hash, cmp::PartialEq
 impl ToolApprovalResolution {
+    pub fn approval_timeout(request: ToolRequestId) -> Self;
     pub const fn request(&self) -> ToolRequestId;
     pub const fn decision(&self) -> &ToolApprovalDecision;
     pub const fn source(&self) -> ToolDecisionSource;
@@ -170,6 +171,10 @@ impl DecideToolRequest {
         request: &ToolRequest,
     ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
     pub fn prepare_lifecycle_closure_applied(
+        self,
+        request: &ToolRequest,
+    ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
+    pub fn prepare_approval_timeout_applied(
         self,
         request: &ToolRequest,
     ) -> result::Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;

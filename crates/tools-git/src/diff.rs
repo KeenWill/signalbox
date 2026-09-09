@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use git2::{DiffFormat, DiffOptions, ErrorCode, Patch};
+use git2::{DiffOptions, Patch};
 use rustix::{
     fs::{Mode, OFlags, openat, readlinkat_raw},
     io::dup,
@@ -21,12 +21,10 @@ use crate::bounded::{
 };
 use crate::executor::regular_file_mode;
 use crate::failure::LocalGitFailure;
-use crate::limits::{GITLINK_MODE, MAX_DIFF_BYTES, MAX_OBJECT_BYTES};
+use crate::limits::{GITLINK_MODE, MAX_DIFF_BYTES};
 use crate::pinning::{PinnedRepository, RepositoryShell, repository_filemode};
 use crate::result::DiffResult;
-use crate::status::{
-    charge_worktree_bytes, conflicted_index_paths, index_backed_worktree_files, index_files,
-};
+use crate::status::{conflicted_index_paths, index_backed_worktree_files, index_files};
 use crate::status_reference::StatusHeadSnapshot;
 
 pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
@@ -49,7 +47,47 @@ pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
     let diff = repository
         .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut options))
         .map_err(|_| LocalGitFailure::Operation)?;
-    let result = render_diff(&diff)?;
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    for delta in diff.deltas() {
+        let path = delta
+            .new_file()
+            .path()
+            .or(delta.old_file().path())
+            .ok_or(LocalGitFailure::Operation)?;
+        let mut buffers = Vec::new();
+        for file in [delta.old_file(), delta.new_file()] {
+            if file.id().is_zero() {
+                buffers.push(Vec::new());
+                continue;
+            }
+            let content = diff_object_buffer(repository, file.id(), u32::from(file.mode()))?;
+            if u32::from(file.mode()) != GITLINK_MODE {
+                let (size, _) = repository
+                    .read_object_header(file.id())
+                    .map_err(|_| LocalGitFailure::Operation)?;
+                truncated |= size > MAX_DIFF_BYTES;
+            }
+            buffers.push(content);
+        }
+        let old_mode =
+            (!delta.old_file().id().is_zero()).then_some(u32::from(delta.old_file().mode()));
+        let new_mode =
+            (!delta.new_file().id().is_zero()).then_some(u32::from(delta.new_file().mode()));
+        let patch = Patch::from_buffers(
+            &buffers[0],
+            old_mode.map(|_| path),
+            &buffers[1],
+            new_mode.map(|_| path),
+            None,
+        )
+        .map_err(|_| LocalGitFailure::Operation)?;
+        append_bounded(&mut bytes, patch, path, old_mode, new_mode, &mut truncated)?;
+        if truncated {
+            break;
+        }
+    }
+    let result = render_patch_bytes(bytes, truncated)?;
     base_snapshot.validate(authority)?;
     head_snapshot.validate(authority)?;
     Ok(result)
@@ -96,7 +134,6 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
     let mut bytes = Vec::new();
     let mut truncated = false;
     let filemode = repository_filemode(repository)?;
-    let mut worktree_bytes = 0_usize;
     let paths = head_files
         .keys()
         .chain(diff_index_files.keys())
@@ -105,6 +142,17 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
         .cloned()
         .collect::<BTreeSet<_>>();
     for path in paths {
+        let mut content_truncated = false;
+        let mut worktree_oid = None;
+        if let Some((oid, mode)) = head_files.get(&path)
+            && *mode != GITLINK_MODE
+        {
+            content_truncated |= repository
+                .read_object_header(*oid)
+                .map_err(|_| LocalGitFailure::Operation)?
+                .0
+                > MAX_DIFF_BYTES;
+        }
         let old_buffer = match head_files.get(&path) {
             Some((oid, mode)) => Some((diff_object_buffer(repository, *oid, *mode)?, *mode)),
             None => None,
@@ -127,8 +175,8 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
                 }
                 Ok(WorkspaceEntryKind::Symlink)
                 | Err(WorkspaceResolveError::Rejected(WorkspacePathRejection::Symlink)) => {
-                    let bytes = read_worktree_symlink(authority, &path, MAX_OBJECT_BYTES)?;
-                    charge_worktree_bytes(&mut worktree_bytes, bytes.len())?;
+                    let bytes =
+                        read_worktree_symlink(authority, &path, repository.object_byte_limit())?;
                     Some((bytes, 0o120000))
                 }
                 Ok(WorkspaceEntryKind::Other) => return Err(LocalGitFailure::Path),
@@ -143,18 +191,23 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
                 Err(WorkspaceResolveError::Rejected(_)) => return Err(LocalGitFailure::Path),
                 Err(WorkspaceResolveError::Io { .. }) => return Err(LocalGitFailure::Operation),
                 Ok(WorkspaceEntryKind::File) => {
-                    match filesystem.read_file_prefix(root, &path, MAX_OBJECT_BYTES) {
-                        Ok(read) if read.truncated => return Err(LocalGitFailure::Operation),
-                        Ok(read) => {
-                            charge_worktree_bytes(&mut worktree_bytes, read.bytes.len())?;
-                            let observed_mode = if read.mode & 0o111 == 0 {
+                    match crate::streamed_object::worktree_content(
+                        filesystem,
+                        root,
+                        &path,
+                        authority.max_object_bytes,
+                    ) {
+                        Ok((mut content, content_mode)) => {
+                            content_truncated |= content.size > MAX_DIFF_BYTES;
+                            worktree_oid = Some(content.oid(authority.object_format)?);
+                            let observed_mode = if content_mode & 0o111 == 0 {
                                 0o100644
                             } else {
                                 0o100755
                             };
                             let indexed_mode = index_files.get(&path).map(|(_, mode)| *mode);
                             let mode = regular_file_mode(observed_mode, indexed_mode, filemode);
-                            Some((read.bytes, mode))
+                            Some((content.prefix(MAX_DIFF_BYTES)?, mode))
                         }
                         Err(WorkspaceResolveError::Rejected(_)) => {
                             return Err(LocalGitFailure::Path);
@@ -168,6 +221,17 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
         } else {
             None
         };
+        if let (Some((old_oid, old_mode)), Some((_, new_mode))) =
+            (head_files.get(&path), new_buffer.as_ref())
+            && *old_mode == *new_mode
+            && (worktree_oid == Some(*old_oid)
+                || index_backed_worktree_files
+                    .get(&path)
+                    .is_some_and(|(oid, _)| oid == old_oid))
+        {
+            continue;
+        }
+        truncated |= content_truncated;
         let mut options = DiffOptions::new();
         options.force_text(true);
         let patch = match (old_buffer.as_ref(), new_buffer.as_ref()) {
@@ -206,10 +270,7 @@ pub(super) fn diff_object_buffer(
     if crate::bounded::validate_object_header(repository, oid)? != git2::ObjectType::Blob {
         return Err(LocalGitFailure::Operation);
     }
-    repository
-        .find_blob(oid)
-        .map(|blob| blob.content().to_vec())
-        .map_err(|_| LocalGitFailure::Operation)
+    repository.object_content(oid)?.prefix(MAX_DIFF_BYTES)
 }
 
 pub(super) fn gitlink_buffer(oid: git2::Oid) -> Vec<u8> {
@@ -238,10 +299,10 @@ pub(super) fn read_worktree_symlink(
         )
         .map_err(|_| LocalGitFailure::Path)?;
     }
-    let mut buffer = vec![0_u8; max_bytes.saturating_add(1)];
+    let mut buffer = vec![0_u8; max_bytes.min(4096).saturating_add(1)];
     let length =
         readlinkat_raw(&directory, leaf, &mut buffer).map_err(|_| LocalGitFailure::Operation)?;
-    if length > max_bytes {
+    if length > max_bytes || length == buffer.len() {
         return Err(LocalGitFailure::Operation);
     }
     buffer.truncate(length);
@@ -347,38 +408,6 @@ pub(super) fn quoted_diff_path(prefix: &[u8], path: &Path) -> Vec<u8> {
     }
     quoted.push(b'"');
     quoted
-}
-
-pub(super) fn render_diff(diff: &git2::Diff<'_>) -> Result<DiffResult, LocalGitFailure> {
-    let mut bytes = Vec::new();
-    let mut truncated = false;
-    let printed = diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
-        let prefix = match line.origin() {
-            '+' | '-' | ' ' => Some(line.origin() as u8),
-            _ => None,
-        };
-        let content = line.content();
-        let remaining = MAX_DIFF_BYTES.saturating_sub(bytes.len());
-        if let Some(origin) = prefix {
-            if remaining > 0 {
-                bytes.push(origin);
-            } else {
-                truncated = true;
-            }
-        }
-        let remaining = MAX_DIFF_BYTES.saturating_sub(bytes.len());
-        if content.len() <= remaining {
-            bytes.extend_from_slice(content);
-        } else {
-            bytes.extend_from_slice(&content[..remaining]);
-            truncated = true;
-        }
-        !truncated
-    });
-    if printed.is_err_and(|error| !truncated || error.code() != ErrorCode::User) {
-        return Err(LocalGitFailure::Operation);
-    }
-    render_patch_bytes(bytes, truncated)
 }
 
 pub(super) fn render_patch_bytes(

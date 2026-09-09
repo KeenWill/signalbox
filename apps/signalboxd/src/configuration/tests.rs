@@ -128,6 +128,7 @@ pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
+max_git_object_bytes = "none"
 client_frame_deadline = "30s"
 client_write_progress_deadline = "30s"
 repository_watch_webhook_retention = "604800s"
@@ -6263,4 +6264,76 @@ fn file_media_requires_blob_storage_before_worker_startup() {
             .expect("disabled file tools require no store")
             .file_media()
     );
+}
+
+#[test]
+fn checked_in_example_parses_unbounded_git_object_content() {
+    let configuration =
+        super::checked_in_example_configuration().expect("checked-in example parses");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_git_object_bytes"),
+        Some(None)
+    );
+    let configured = CONFIGURATION.replace(
+        "max_git_object_bytes = \"none\"",
+        "max_git_object_bytes = 1048576",
+    );
+    let configuration =
+        HubModelConfiguration::parse(&configured).expect("finite Git object policy parses");
+    assert_eq!(
+        configuration
+            .numeric_bounds()
+            .integer("max_git_object_bytes"),
+        Some(Some(1048576))
+    );
+}
+
+#[test]
+fn checked_in_example_admits_unlisted_web_origins() {
+    use signalbox_application::ToolCatalog;
+    let configuration = super::checked_in_example_configuration().expect("example parses");
+    let (catalog, _) = signalbox_tools_web::WebFetchTool::try_new_production(
+        configuration.web_fetch_egress_policy(),
+    )
+    .expect("web transport constructs")
+    .into_parts();
+    let name =
+        signalbox_domain::ToolName::try_new(String::from(WEB_FETCH_NAME)).expect("valid name");
+    let arguments = signalbox_domain::NormalizedToolArguments::try_from_provider_text(
+        String::from(r#"{"url":"https://unlisted.example/documentation"}"#),
+    )
+    .expect("valid arguments");
+    assert_eq!(catalog.validate_arguments(&name, &arguments), Ok(()));
+}
+
+#[test]
+fn human_approval_wait_accepts_a_duration_or_none() {
+    let timed = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"2m\"\n"
+    ))
+    .expect("duration is valid");
+    assert_eq!(
+        timed.approval_wait_timeout(),
+        Some(Duration::from_secs(120))
+    );
+    let unbounded = HubModelConfiguration::parse(&format!(
+        "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"none\"\n"
+    ))
+    .expect("none is valid");
+    assert_eq!(unbounded.approval_wait_timeout(), None);
+}
+
+#[test]
+fn human_approval_wait_rejects_zero_and_invalid_durations() {
+    for value in ["0s", "-1s", "forever"] {
+        assert!(
+            HubModelConfiguration::parse(&format!(
+                "{CONFIGURATION}\n[tool_settings]\napproval_wait_timeout = \"{value}\"\n"
+            ))
+            .is_err(),
+            "{value}"
+        );
+    }
 }

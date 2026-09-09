@@ -4,10 +4,8 @@ use std::{fs, path::Path};
 
 use git2::{IndexEntry, IndexTime, ObjectType, Oid, Repository, Signature};
 
-use crate::limits::{
-    MAX_INDEX_ENTRIES, MAX_OBJECT_BYTES, MAX_STAGE_FILE_BYTES, MAX_STAGE_TOTAL_BYTES,
-    MAX_TREE_BLOB_BYTES, MAX_WORKTREE_INSPECTIONS,
-};
+use crate::limits::{MAX_INDEX_ENTRIES, MAX_WORKTREE_INSPECTIONS};
+use crate::tests::support::TEST_OBJECT_BYTES as MAX_OBJECT_BYTES;
 use crate::tests::support::{
     AUTHOR_EMAIL, AUTHOR_NAME, Fixture, MODEL_MESSAGE, TRACKED_PATH, commit_all, index_extension,
     install_deleted_conflict, raw_commit_with_tree,
@@ -34,8 +32,8 @@ pub(super) fn plant_over_budget_entries(directory: &Path) {
 }
 
 pub(super) fn plant_aggregate_stage_files(root: &Path) -> Vec<String> {
-    let bytes = vec![b'x'; MAX_STAGE_FILE_BYTES];
-    let count = MAX_STAGE_TOTAL_BYTES / MAX_STAGE_FILE_BYTES + 1;
+    let bytes = vec![b'x'; MAX_OBJECT_BYTES];
+    let count = 17;
     let mut paths = Vec::with_capacity(count);
     for sequence in 0..count {
         let path = format!("aggregate-{sequence:02}.txt");
@@ -43,14 +41,6 @@ pub(super) fn plant_aggregate_stage_files(root: &Path) -> Vec<String> {
         paths.push(path);
     }
     paths
-}
-
-pub(super) fn plant_sparse_pack(root: &Path, name: &str, bytes: u64) {
-    let path = root.join(".git/objects/pack").join(name);
-    fs::File::create(path)
-        .expect("pack-budget fixture file creates")
-        .set_len(bytes)
-        .expect("pack-budget fixture length sets");
 }
 
 pub(super) fn plant_shallow_entries(root: &Path, oid: Oid, count: usize) {
@@ -123,7 +113,7 @@ pub(super) fn install_resolve_undo_extension(fixture: &Fixture, content: &str) -
 pub(super) fn plant_index_over_blob_budget(repository: &Repository) {
     let mut index = repository.index().expect("fixture index opens");
     index.clear().expect("fixture index clears");
-    let count = MAX_TREE_BLOB_BYTES / MAX_OBJECT_BYTES + 1;
+    let count = 65_usize;
     for sequence in 0..count {
         let mut bytes = vec![b'x'; MAX_OBJECT_BYTES];
         bytes[..std::mem::size_of::<usize>()].copy_from_slice(&sequence.to_le_bytes());
@@ -185,7 +175,7 @@ pub(super) fn aggregate_blob_tree_commit(repository: &Repository, parent: Oid) -
     let mut builder = repository
         .treebuilder(None)
         .expect("aggregate-tree builder opens");
-    let count = MAX_TREE_BLOB_BYTES / MAX_OBJECT_BYTES + 1;
+    let count = 65_usize;
     for sequence in 0..count {
         builder
             .insert(format!("large-{sequence:02}.bin"), blob, 0o100644)

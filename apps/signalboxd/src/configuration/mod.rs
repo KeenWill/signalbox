@@ -150,6 +150,7 @@ pub struct HubModelConfiguration {
     web_fetch_egress_policy: WebFetchEgressPolicy,
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
+    approval_wait_timeout: Option<std::time::Duration>,
     approval_judge_selection: Option<DirectModelSelection>,
     convergence: Option<signalbox_convergence::ConvergencePolicy>,
     repository_watch: Option<RepositoryWatchConfiguration>,
@@ -198,6 +199,7 @@ impl HubModelConfiguration {
             credential_profiles,
             credential_pools,
             tool_approval_postures,
+            approval_wait_timeout,
             approval_judge_selection,
             convergence,
             workspace_instructions,
@@ -615,6 +617,7 @@ impl HubModelConfiguration {
             web_fetch_egress_policy,
             daemon_tools,
             tool_approval_postures,
+            approval_wait_timeout,
             approval_judge_selection,
             convergence,
             repository_watch,
@@ -1173,6 +1176,11 @@ impl HubModelConfiguration {
     /// call to supply the default when configuration omits the table.
     pub const fn configured_approval_judge_selection(&self) -> Option<DirectModelSelection> {
         self.approval_judge_selection
+    }
+
+    /// Returns the human approval deadline duration; `None` disables expiry.
+    pub const fn approval_wait_timeout(&self) -> Option<std::time::Duration> {
+        self.approval_wait_timeout
     }
 
     /// Returns explicitly configured daemon tool dependencies, when present.

@@ -126,7 +126,11 @@ rust_binary(
 
 rust_binary(
     name = "signalbox-approval-judge-eval",
-    compile_data = CRATE_COMPILE_DATA + ["//crates/approval-judge-eval:corpora/seed-v1.json"],
+    compile_data = CRATE_COMPILE_DATA + [
+        "//crates/approval-judge-eval:corpora/seed-responses-v1.json",
+        "//crates/approval-judge-eval:corpora/seed-scorecard-v1.json",
+        "//crates/approval-judge-eval:corpora/seed-v1.json",
+    ],
     crate_features = CRATE_FEATURES,
     crate_root = "src/bin/signalbox-approval-judge-eval.rs",
     proc_macro_deps = CRATE_PROC_MACRO_DEPS,

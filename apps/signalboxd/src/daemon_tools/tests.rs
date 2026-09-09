@@ -119,6 +119,7 @@ fn local_git_construction_telemetry_omits_the_workspace_path() {
                 None,
                 &Default::default(),
                 None,
+                None,
             ),
             Err(DaemonToolsConstructionError::LocalGit)
         ));
@@ -324,6 +325,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
             None,
             &Default::default(),
             None,
+            None,
         )
         .expect("workspace-bound tools compile"),
         roots: SessionWorkspaceRoots::try_new(workspace).expect("session workspace roots derive"),
@@ -331,6 +333,7 @@ fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
         exec_runner: process_runner,
         cargo_registry_cache: None,
         sandbox: Default::default(),
+        max_git_object_bytes: None,
         sandboxed_exec_timeout_bound: None,
     };
     let conversations = ConversationTools::try_new(OfflineConversationPort)
@@ -415,6 +418,7 @@ fn production_constructor_matches_the_complete_mapped_catalog() {
         &std::env::current_exe().expect("test executable path is available"),
         None,
         &Default::default(),
+        None,
         None,
         WebFetchEgressPolicy::deny_all(),
     )
@@ -4232,10 +4236,9 @@ fn composed_catalog_applies_an_enforceable_posture() {
     );
 }
 
-/// The shipped posture table and daemon catalog compose both egress tools
-/// into user-approved requests while their declarations stay fail-closed.
+/// The shipped posture table sends both web tools to the judge.
 #[test]
-fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
+fn shipped_web_postures_resolve_both_daemon_tools_to_delegated_approval() {
     let configuration = crate::configuration::checked_in_example_configuration()
         .expect("checked-in configuration is valid");
     let (web_fetch_catalog, _executor) =
@@ -4266,11 +4269,11 @@ fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
 
     assert_eq!(
         web_fetch_definition.approval_posture(),
-        Some(ToolApprovalPosture::Human)
+        Some(ToolApprovalPosture::Delegated)
     );
     assert_eq!(
         web_search_definition.approval_posture(),
-        Some(ToolApprovalPosture::Human)
+        Some(ToolApprovalPosture::Delegated)
     );
     assert_eq!(
         web_fetch_definition.permission_default(),
@@ -4280,6 +4283,35 @@ fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
         web_search_definition.permission_default(),
         ToolPermissionDefault::Confirm
     );
+}
+
+#[test]
+fn web_postures_delegate_unless_a_human_is_explicitly_configured() {
+    let (web_catalog, _) = WebFetchTool::try_new(OfflineTransport, WebFetchEgressPolicy::default())
+        .expect("web tool compiles")
+        .into_parts();
+    let name = ToolName::try_new(String::from(WEB_FETCH_NAME)).expect("web name is valid");
+    let catalog = DaemonToolCatalog::try_new([web_catalog]).expect("one web tool");
+    for (configured, expected) in [
+        (ToolApprovalPosture::Auto, ToolApprovalPosture::Delegated),
+        (
+            ToolApprovalPosture::Delegated,
+            ToolApprovalPosture::Delegated,
+        ),
+        (ToolApprovalPosture::Human, ToolApprovalPosture::Human),
+    ] {
+        let configured_catalog = catalog
+            .clone()
+            .with_approval_postures([(name.clone(), configured)])
+            .expect("composed posture is admitted");
+        assert_eq!(
+            configured_catalog
+                .definition(&name)
+                .expect("web remains composed")
+                .approval_posture(),
+            Some(expected)
+        );
+    }
 }
 
 #[test]

@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::descriptor_identity::descriptor_identity;
 use crate::failure::LocalGitFailure;
-use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_TREE_BLOB_BYTES, MAX_WORKTREE_INSPECTIONS};
+use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_WORKTREE_INSPECTIONS};
 
 pub(super) const MAX_QUARANTINE_DEPTH: usize = 128;
 
@@ -105,13 +105,11 @@ impl QuarantineSnapshot {
     pub(super) fn capture(directory: &OwnedFd) -> Result<Self, LocalGitFailure> {
         let mut entries = BTreeMap::new();
         let mut inspections = 0_usize;
-        let mut content_bytes = 0_usize;
         snapshot_pinned_directory_bounded(
             directory,
             Path::new(""),
             0,
             &mut inspections,
-            &mut content_bytes,
             &mut entries,
         )?;
         Ok(Self { entries })
@@ -292,7 +290,6 @@ fn snapshot_pinned_directory_bounded(
     prefix: &Path,
     depth: usize,
     inspections: &mut usize,
-    content_bytes: &mut usize,
     entries: &mut BTreeMap<PathBuf, QuarantineSnapshotEntry>,
 ) -> Result<(), LocalGitFailure> {
     if depth > MAX_QUARANTINE_DEPTH {
@@ -326,14 +323,7 @@ fn snapshot_pinned_directory_bounded(
                 Mode::empty(),
             )
             .map_err(|_| LocalGitFailure::Operation)?;
-            snapshot_pinned_directory_bounded(
-                &child,
-                &path,
-                depth + 1,
-                inspections,
-                content_bytes,
-                entries,
-            )?;
+            snapshot_pinned_directory_bounded(&child, &path, depth + 1, inspections, entries)?;
         } else {
             #[allow(clippy::unnecessary_cast)]
             let identity = FileSnapshotIdentity {
@@ -360,20 +350,26 @@ fn snapshot_pinned_directory_bounded(
                 }
                 let length =
                     usize::try_from(metadata.len()).map_err(|_| LocalGitFailure::Operation)?;
-                *content_bytes = content_bytes
-                    .checked_add(length)
-                    .filter(|bytes| *bytes <= MAX_TREE_BLOB_BYTES)
-                    .ok_or(LocalGitFailure::Operation)?;
-                let mut bytes = Vec::with_capacity(length);
-                Read::by_ref(&mut file)
-                    .take((length + 1) as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(|_| LocalGitFailure::Operation)?;
+                let mut digest = Sha256::new();
+                let mut buffer = vec![0_u8; crate::streamed_object::IO_BYTES];
+                let mut read_length = 0usize;
+                loop {
+                    let count = file
+                        .read(&mut buffer)
+                        .map_err(|_| LocalGitFailure::Operation)?;
+                    if count == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..count]);
+                    read_length = read_length
+                        .checked_add(count)
+                        .ok_or(LocalGitFailure::Operation)?;
+                }
                 let final_metadata = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
-                if bytes.len() != length || file_snapshot_identity(&final_metadata) != identity {
+                if read_length != length || file_snapshot_identity(&final_metadata) != identity {
                     return Err(LocalGitFailure::Operation);
                 }
-                Some(Sha256::digest(&bytes).into())
+                Some(digest.finalize().into())
             } else {
                 None
             };

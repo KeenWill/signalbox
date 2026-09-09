@@ -30,6 +30,7 @@ mod pinning;
 mod push_arguments;
 mod push_catalog;
 mod push_executor;
+mod push_merge;
 mod push_objects;
 mod push_transport;
 mod reference_lock;
@@ -39,6 +40,7 @@ mod result;
 mod rollback;
 mod status;
 mod status_reference;
+mod streamed_object;
 #[cfg(test)]
 mod tests;
 

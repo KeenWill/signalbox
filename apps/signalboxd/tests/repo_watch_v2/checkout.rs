@@ -2072,6 +2072,7 @@ async fn assert_checkout_keeps_composed_runner(
         None,
         &Default::default(),
         None,
+        None,
         WebFetchEgressPolicy::deny_all(),
     )?;
     fixture.sink.checkout_runner = tools.process_runner();
@@ -3441,6 +3442,12 @@ impl CheckoutFixture {
             configuration.exec_supervisor_executable(),
             configuration.cargo_registry_cache(),
             configuration.sandbox(),
+            self.sink
+                .models
+                .numeric_bounds()
+                .integer("max_git_object_bytes")
+                .flatten()
+                .map(|bytes| bytes as usize),
             configuration.sandboxed_exec_timeout_bound(),
             self.sink.models.web_fetch_egress_policy(),
         )?;

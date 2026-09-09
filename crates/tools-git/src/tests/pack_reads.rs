@@ -10,8 +10,8 @@ use sha2::Sha256;
 use crate::arguments::LocalOperation;
 use crate::diff::diff_object_buffer;
 use crate::failure::LocalGitFailure;
-use crate::limits::MAX_OBJECT_BYTES;
 use crate::pinning::{PinnedObjectDatabase, PinnedRepository};
+use crate::tests::support::TEST_OBJECT_BYTES as MAX_OBJECT_BYTES;
 use crate::tests::support::{Fixture, Sha256Fixture, execute};
 
 #[test]

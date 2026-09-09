@@ -26,13 +26,11 @@ use crate::layout::{
     validate_repository_layout, validate_shallow_file_at_with_test_hook,
 };
 
-use crate::limits::{MAX_BRANCH_BYTES, MAX_OBJECT_BYTES, MAX_REFERENCE_BYTES};
-use crate::pinning::{
-    PinnedObjectDatabase, PinnedRepository, live_object_database_bytes_with_test_hook,
-    repository_filemode, validate_pack_file,
-};
+use crate::limits::{MAX_BRANCH_BYTES, MAX_REFERENCE_BYTES};
+use crate::pinning::{PinnedObjectDatabase, PinnedRepository, repository_filemode};
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
+use crate::tests::support::TEST_OBJECT_BYTES as MAX_OBJECT_BYTES;
 use crate::tests::support::{
     Fixture, Sha256Fixture, TRACKED_PATH, commit_all, plant_loose_blob,
     plant_loose_blob_with_claimed_id, plant_packed_blob, real_git_packed_replacement_reference,
@@ -363,12 +361,11 @@ fn object_capture_rejects_a_loose_directory_replaced_after_scan() {
     let loose = objects.join(prefix);
     let retired_loose = objects.join(format!("{prefix}.retired"));
 
-    let failure = PinnedObjectDatabase::capture_with_test_hook(&authority, || {
+    let failure = capture_selected_with_hook(&authority, fixture.initial, || {
         fs::rename(&loose, &retired_loose).expect("loose object directory retires");
         fs::create_dir(&loose).expect("replacement loose object directory constructs");
     })
-    .err()
-    .expect("replacement loose object directory rejects capture");
+    .expect_err("replacement loose object directory rejects capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
     assert!(loose.is_dir());
@@ -393,18 +390,17 @@ fn object_capture_rejects_a_loose_object_replaced_after_scan() {
     let original = fs::read(&object_path).expect("fixture loose object reads");
     let replacement = vec![b'x'; original.len()];
 
-    let failure = PinnedObjectDatabase::capture_with_test_hook(&authority, || {
+    let failure = capture_selected_with_hook(&authority, fixture.initial, || {
         fs::remove_file(&object_path).expect("loose object removes after scan");
         fs::write(&object_path, &replacement).expect("loose object replaces after scan")
     })
-    .err()
-    .expect("replaced loose object rejects capture");
+    .expect_err("replaced loose object rejects capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }
 
 #[test]
-fn object_capture_rejects_a_loose_object_added_after_scan() {
+fn selected_object_capture_allows_an_unrelated_loose_object_added_after_read() {
     let fixture = Fixture::new();
     let expected =
         validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
@@ -418,13 +414,15 @@ fn object_capture_rejects_a_loose_object_added_after_scan() {
         .join(&object_id[..2])
         .join("0".repeat(object_id.len() - 2));
 
-    let failure = PinnedObjectDatabase::capture_with_test_hook(&authority, || {
+    capture_selected_with_hook(&authority, fixture.initial, || {
         fs::write(&added_path, b"actor object").expect("loose object adds after scan")
     })
-    .err()
-    .expect("added loose object rejects capture");
+    .expect("unrelated object does not invalidate selected content");
 
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        fs::read(added_path).expect("unrelated object remains"),
+        b"actor object"
+    );
 }
 
 #[test]
@@ -456,9 +454,7 @@ fn pack_validation_rejects_a_trailer_that_overlaps_the_header() {
     let mut bytes = b"PACK\0\0\0\x02\0\0\0".to_vec();
     let checksum = Sha1::digest(&bytes);
     bytes.extend_from_slice(&checksum);
-    let expected = git2::Oid::from_bytes(&checksum).expect("fixture checksum parses");
-
-    let failure = validate_pack_file(&bytes, expected, ObjectFormat::Sha1)
+    let failure = crate::pack_read_bounds::validate_pack_header(&bytes[..12], bytes.len() - 20, 0)
         .expect_err("overlapping pack trailer rejects");
 
     assert_eq!(failure, LocalGitFailure::Repository);
@@ -486,24 +482,31 @@ fn object_capture_rejects_an_alternate_added_after_final_leaf_validation() {
 }
 
 #[test]
-fn object_byte_count_rejects_a_loose_object_added_after_measurement() {
+fn selected_object_capture_rejects_a_loose_object_rewritten_after_read() {
     let fixture = Fixture::new();
-    let expected =
-        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
-            .expect("fixture layout validates");
-    let authority =
-        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
-
-    let failure = live_object_database_bytes_with_test_hook(&authority, || {
-        plant_loose_blob(fixture.root(), b"actor object added after measurement");
-    })
-    .expect_err("added loose object rejects byte count");
-
-    assert_eq!(failure, LocalGitFailure::Repository);
+    let executor = fixture.executor();
+    let authority = &executor.repository_authority;
+    let repository = authority.open_repository_shell().expect("shell opens");
+    repository
+        .capture_objects_on_read(authority)
+        .expect("object source opens");
+    repository
+        .read_object_header(fixture.initial)
+        .expect("selected commit captures");
+    let hex = fixture.initial.to_string();
+    let path = fixture
+        .root()
+        .join(".git/objects")
+        .join(&hex[..2])
+        .join(&hex[2..]);
+    fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .expect("fixture object becomes writable");
+    fs::write(path, b"rewritten").expect("selected object changes");
+    assert!(repository.validate_selected_objects(authority).is_err());
 }
 
 #[test]
-fn object_byte_count_rejects_a_pack_directory_replaced_after_measurement() {
+fn object_capture_rejects_a_pack_directory_replaced_after_open() {
     let fixture = Fixture::new();
     plant_packed_blob(fixture.root(), b"packed fixture content");
     let pack = fixture.root().join(".git/objects/pack");
@@ -514,11 +517,12 @@ fn object_byte_count_rejects_a_pack_directory_replaced_after_measurement() {
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
-    let failure = live_object_database_bytes_with_test_hook(&authority, || {
+    let failure = PinnedObjectDatabase::capture_with_test_hook(&authority, || {
         fs::rename(&pack, &retired_pack).expect("measured pack directory retires");
         fs::create_dir(&pack).expect("replacement pack directory constructs");
     })
-    .expect_err("replacement pack directory rejects byte count");
+    .err()
+    .expect("replacement pack directory rejects capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }
@@ -1242,9 +1246,10 @@ fn loose_object_content_limit_applies_when_the_blob_is_read() {
     let expected =
         validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
             .expect("fixture layout validates");
-    let authority =
+    let mut authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
+    authority.max_object_bytes = Some(MAX_OBJECT_BYTES);
     let snapshot = PinnedObjectDatabase::capture(&authority)
         .expect("unrelated oversized object admits capture");
     let database = git2::Odb::new().expect("snapshot object database");
@@ -1275,9 +1280,12 @@ fn object_capture_rejects_trailing_bytes_after_a_loose_object_stream() {
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
-    let failure = PinnedObjectDatabase::capture(&authority)
-        .err()
-        .expect("trailing loose-object bytes reject capture");
+    let failure = capture_selected_with_hook(
+        &authority,
+        git2::Oid::hash_object(ObjectType::Blob, b"fixture object").expect("fixture ID"),
+        || {},
+    )
+    .expect_err("trailing loose-object bytes reject capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }
@@ -1294,9 +1302,8 @@ fn object_capture_rejects_a_loose_object_stored_under_an_unrelated_id() {
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
-    let failure = PinnedObjectDatabase::capture(&authority)
-        .err()
-        .expect("mismatched loose object rejects capture");
+    let failure = capture_selected_with_hook(&authority, claimed_id, || {})
+        .expect_err("mismatched loose object rejects capture");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }
@@ -1312,9 +1319,10 @@ fn packed_object_content_limit_applies_when_the_blob_is_read() {
     let expected =
         validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
             .expect("fixture layout validates");
-    let authority =
+    let mut authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
+    authority.max_object_bytes = Some(MAX_OBJECT_BYTES);
     let snapshot = PinnedObjectDatabase::capture(&authority)
         .expect("unrelated oversized object admits capture");
     let database = git2::Odb::new().expect("snapshot object database");
@@ -1434,4 +1442,19 @@ fn sha256_index_publication_writes_a_sha256_checksum() {
             .expect("published SHA-256 index checksum validates");
 
     assert_eq!(published_index.len(), index.len());
+}
+
+fn capture_selected_with_hook(
+    authority: &PinnedRepository,
+    oid: git2::Oid,
+    hook: impl FnOnce(),
+) -> Result<(), LocalGitFailure> {
+    let mut source = crate::push_objects::ObjectSource::open(
+        authority,
+        std::time::Instant::now() + crate::push_executor::PUSH_PREPARATION_TIMEOUT,
+    )?;
+    let database = git2::Odb::new_ext(authority.object_format).expect("fixture object database");
+    source.capture(&database, oid)?;
+    hook();
+    source.validate(authority)
 }
