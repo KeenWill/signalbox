@@ -26,6 +26,10 @@ pub enum GoalCommandHandlingOutcome {
     TargetBusy {
         session: signalbox_domain::SessionId,
     },
+    StopAwaitingApproval {
+        turn: signalbox_domain::TurnId,
+        request: signalbox_domain::ToolRequestId,
+    },
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq
 ```

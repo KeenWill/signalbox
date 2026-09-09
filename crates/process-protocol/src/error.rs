@@ -180,6 +180,15 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// A goal stop was rejected without changing the goal or its pending approval.
+    GoalStopAwaitingApproval {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Authoritative active turn.
+        active_turn_id: CanonicalUuid,
+        /// The pending request the caller must deny first.
+        tool_request_id: CanonicalUuid,
+    },
     /// A next-safe-point input targeted a turn that is already stopping.
     SafePointUnavailableWhileStopping {
         /// Target session.
@@ -484,6 +493,7 @@ impl RejectionDetail {
             | Self::TurnNotAwaitingReconciliation { .. }
             | Self::InterruptAlreadyApplied { .. }
             | Self::InterruptUnavailableWhileAwaitingApproval { .. }
+            | Self::GoalStopAwaitingApproval { .. }
             | Self::SafePointUnavailableWhileStopping { .. }
             | Self::ToolRequestNotFound { .. }
             | Self::ToolRequestAlreadyResolved { .. }
@@ -609,6 +619,7 @@ pub(crate) fn validate_rejection_detail(
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
         | RejectionDetail::InterruptAlreadyApplied { .. }
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::GoalStopAwaitingApproval { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
@@ -723,6 +734,7 @@ pub(crate) fn validate_conversation_import_detail(
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
         | RejectionDetail::InterruptAlreadyApplied { .. }
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::GoalStopAwaitingApproval { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestNotFound { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }

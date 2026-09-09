@@ -790,3 +790,108 @@ async fn goal_stop_requests_cancellation_and_replays_its_settled_count()
     drop(connection);
     runtime.stop().await
 }
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn goal_stop_preserves_approval_wait_until_the_caller_denies() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    connection
+        .request(
+            2,
+            ClientRequest::AttachGoal {
+                command_id: command()?,
+                session_id,
+                statement: "finish the task".to_owned(),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::GoalTransitionApplied { .. }
+    ));
+    let pending = CanonicalUuid::from_uuid(Uuid::now_v7());
+    park_turn_on_tool_approval(&runtime.pool, session_id, &[pending]).await?;
+    let active = CanonicalUuid::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active'",
+        )
+        .bind(session_id.into_uuid())
+        .fetch_one(&runtime.pool)
+        .await?,
+    );
+    let stop_command = command()?;
+    connection
+        .request(
+            3,
+            ClientRequest::StopGoal {
+                command_id: stop_command,
+                session_id,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    assert_eq!(
+        rejected_detail(response_within(&mut connection).await?.message()),
+        RejectionDetail::GoalStopAwaitingApproval {
+            session_id,
+            active_turn_id: active,
+            tool_request_id: pending,
+        }
+    );
+    let parked = read_transcript_messages(&mut connection, 4, session_id).await?;
+    assert_eq!(
+        turn_state_of(&parked, active),
+        TurnState::ActiveAwaitingToolApproval {
+            tool_request_id: pending
+        }
+    );
+    assert_eq!(tool_denied_entry_count(&parked, pending), 0);
+    let last_goal: String = sqlx::query_scalar("SELECT event_kind FROM goal_event WHERE session_id = $1 ORDER BY event_ordinal DESC LIMIT 1")
+        .bind(session_id.into_uuid()).fetch_one(&runtime.pool).await?;
+    assert_eq!(last_goal, "commissioned");
+    connection
+        .request(
+            5,
+            ClientRequest::DecideToolRequest {
+                command_id: command()?,
+                session_id,
+                tool_request_id: pending,
+                decision: ToolDecision::Deny {
+                    reason: "stop the tool round".to_owned(),
+                },
+            },
+        )
+        .await?;
+    assert_eq!(
+        decided_receipt(response_within(&mut connection).await?.message()).0,
+        pending
+    );
+    connection
+        .request(
+            6,
+            ClientRequest::StopGoal {
+                command_id: stop_command,
+                session_id,
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        )
+        .await?;
+    assert!(matches!(
+        response_within(&mut connection).await?.message(),
+        ServerMessage::GoalTransitionApplied { .. }
+    ));
+    let history = read_goal_messages(&mut connection, 7, session_id).await?;
+    assert!(history.iter().any(|message| matches!(message,
+        ServerMessage::GoalHistoryItem { event: GoalHistoryEvent::UserStopped {
+            abandoned_actions: Some(count), .. }, .. } if count.value() == 0)));
+    let settled = read_transcript_messages(&mut connection, 8, session_id).await?;
+    assert!(matches!(
+        turn_state_of(&settled, active),
+        TurnState::Cancelled { .. }
+    ));
+    assert_eq!(tool_denied_entry_count(&settled, pending), 1);
+    drop(connection);
+    runtime.stop().await
+}

@@ -671,6 +671,19 @@ where
             )
             .await
         }
+        Ok(GoalCommandHandlingOutcome::StopAwaitingApproval { turn, request }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::GoalStopAwaitingApproval {
+                    session_id,
+                    active_turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+                    tool_request_id: CanonicalUuid::from_uuid(request.into_uuid()),
+                }),
+            )
+            .await
+        }
         Ok(GoalCommandHandlingOutcome::ConflictingReuse { .. }) => {
             write_error(
                 writer,

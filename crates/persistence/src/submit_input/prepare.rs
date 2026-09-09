@@ -296,7 +296,16 @@ where
             SubmitInputCorruption::Inconsistent("session has a pending terminal handoff").into(),
         );
     }
-    if settles_closure
+    if pending_terminal
+        && settles_closure
+        && !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM goal_stop_settlement WHERE interrupt_command_id = $1)",
+        )
+        .bind(crate::mapping::durable_command_id_to_uuid(
+            command.command_id(),
+        ))
+        .fetch_one(&mut *connection)
+        .await?
         && let DeliveryRequest::Interrupt {
             expected_active_turn,
             ..

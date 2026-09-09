@@ -20,7 +20,8 @@ use signalbox_domain::{
     GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
     GoalTransitionFailure, GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance,
     LifecycleActor, ModelAlias, ModelSelectionOverride, OriginConfiguration,
-    ReconstitutedGoalCommand, SessionClosureOutcome, SessionId, SessionTerminalOutcome, TurnId,
+    ReconstitutedGoalCommand, SessionClosureOutcome, SessionId, SessionTerminalOutcome,
+    ToolRequestId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -95,6 +96,13 @@ pub enum GoalCommandHandlingOutcome {
     TargetBusy {
         /// The competing live session.
         session: SessionId,
+    },
+    /// A stop cannot decide or bypass this approval wait; the command is unspent.
+    StopAwaitingApproval {
+        /// The active turn that retains the wait.
+        turn: TurnId,
+        /// The pending request the caller must deny before stopping.
+        request: ToolRequestId,
     },
 }
 
@@ -412,6 +420,24 @@ impl GoalRepository {
                 }
             }
         };
+        if matches!(command.action(), GoalUserAction::Stop { .. })
+            && matches!(&result, GoalCommandResult::Applied(_))
+            && let Some((turn, request)) = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT turn_id, approval_tool_request_id FROM turn_lifecycle
+                  WHERE session_id = $1 AND state_kind = 'active'
+                    AND active_phase_kind = 'awaiting_tool_approval'
+                    AND NOT delegation_runtime_terminal",
+            )
+            .bind(session_id_to_uuid(command.session()))
+            .fetch_optional(&mut *transaction)
+            .await?
+        {
+            transaction.rollback().await?;
+            return Ok(GoalCommandHandlingOutcome::StopAwaitingApproval {
+                turn: turn_id_from_uuid(turn),
+                request: tool_request_id_from_uuid(request),
+            });
+        }
         let starts_pursuit = match &result {
             GoalCommandResult::Applied(event) => event_starts_pursuit(event),
             GoalCommandResult::Rejected(_) => false,

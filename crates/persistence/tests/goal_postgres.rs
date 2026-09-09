@@ -5587,8 +5587,8 @@ async fn goal_stop_settles_after_cancellation_evidence_without_leaving_active_or
 async fn goal_stop_abandons_and_counts_approved_unexecuted_actions() -> Result<(), Box<dyn Error>> {
     use signalbox_domain::{
         AssistantResponsePart, DecideToolRequest, InitialToolApproval, NormalizedToolArguments,
-        ToolApprovalDecision, ToolCallProposal, ToolName, ToolResponsePartIdentity,
-        ToolRoundModelCallIdentities, ToolUsingAssistantResponse,
+        ToolApprovalDecision, ToolCallProposal, ToolDenialReason, ToolName,
+        ToolResponsePartIdentity, ToolRoundModelCallIdentities, ToolUsingAssistantResponse,
     };
     let (container, pool) = migrated_postgres().await?;
     let (calls, issued) = goal_stop_fixture(&pool).await?;
@@ -5647,6 +5647,65 @@ async fn goal_stop_abandons_and_counts_approved_unexecuted_actions() -> Result<(
                 ToolApprovalDecision::Approve,
             )
             .expect("fixture approval command"),
+            || TurnAttemptId::from_uuid(Uuid::now_v7()),
+        )
+        .await?;
+    let goals = GoalRepository::new(pool.clone());
+    let stopped = goals
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(STOP_COMMAND),
+                session(SESSION),
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    assert_eq!(
+        stopped,
+        GoalCommandHandlingOutcome::StopAwaitingApproval {
+            turn: turn_candidates(0xb61).turn(),
+            request: requests[1],
+        }
+    );
+    assert_eq!(
+        goals
+            .load_goal(session(SESSION))
+            .await?
+            .unwrap()
+            .current()
+            .state(),
+        &GoalState::Pursuing
+    );
+    assert!(goals.load_command(command(STOP_COMMAND)).await?.is_none());
+    assert!(
+        goals
+            .load_stop_settlements(session(SESSION))
+            .await?
+            .is_empty()
+    );
+    let decisions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tool_approval_decision WHERE request_id = $1")
+            .bind(requests[1].into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(decisions, 0);
+    calls
+        .tool_loop_repository()
+        .decide(
+            DecideToolRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                requests[1],
+                ToolApprovalDecision::Deny {
+                    reason: Some(
+                        ToolDenialReason::try_new("stop the tool round".to_owned()).unwrap(),
+                    ),
+                },
+            )
+            .unwrap(),
             || TurnAttemptId::from_uuid(Uuid::now_v7()),
         )
         .await?;

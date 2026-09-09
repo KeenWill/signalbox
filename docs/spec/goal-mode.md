@@ -88,6 +88,9 @@ durably requested; the turn ends through ordinary physical cancellation
 settlement. That settlement abandons approved but unexecuted actions and records
 their count with the goal closure for the transcript.
 
+A goal stop awaiting tool approval is rejected without changing the goal or
+deciding the request; the rejection names the pending request to deny first.
+
 When an execution failure blocks a session that has an owner, the daemon
 automatically resumes the session within a bound. The execution-failure class
 that requires an operator is excluded. The daemon derives the command identity
