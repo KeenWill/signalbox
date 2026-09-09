@@ -143,11 +143,18 @@ export function SessionWorkspaceSurface({
   const app = useAppSelector(selectApp)
   const entryInput = useRef<HTMLInputElement>(null)
   useEffect(() => {
-    if (focusEntry) entryInput.current?.focus()
+    if (!focusEntry) return
+    const frame = requestAnimationFrame(() => {
+      if (document.activeElement === entryInput.current?.closest('main'))
+        entryInput.current?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
   }, [focusEntry])
   const [draftId, setDraftId] = useState(initialSessionId ?? '')
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId ?? null)
-  const [awaitingSessionId, setAwaitingSessionId] = useState<string | null>(null)
+  const [awaitingSessionId, setAwaitingSessionId] = useState<string | null>(
+    initialSessionId ?? null,
+  )
   const [openingPosition, setOpeningPosition] = useState<string | undefined>(
     initialSessionId === undefined ? undefined : app.lastLogicalPositions[initialSessionId],
   )
@@ -491,7 +498,7 @@ export function SessionWorkspaceSurface({
               <h2 id="session-workspace-heading">{sessionId}</h2>
               <p>{displayedSession.active ? 'Active' : 'Inactive'}</p>
             </div>
-            <dl className="session-telemetry">
+            <dl className="session-telemetry" hidden={!showEvents}>
               <div>
                 <dt>Items</dt>
                 <dd>{displayedSession.descriptor.sizes.item_count}</dd>
@@ -571,7 +578,7 @@ export function SessionWorkspaceSurface({
             >
               Next
             </button>
-            <span>
+            <span hidden={!showEvents}>
               {displayedSession.window.items.length} events ·{' '}
               {displayedSession.window.projected_structured_bytes} B
             </span>
@@ -610,14 +617,6 @@ export function SessionWorkspaceSurface({
               )}
             </div>
           )}
-          {synchronization.sessionId === sessionId && synchronization.drafts.length > 0 && (
-            <section className="provider-drafts" aria-label="Provider draft">
-              <span>Streaming draft · discarded on resync</span>
-              {synchronization.drafts.map((draft) => (
-                <p key={draft.key}>{draft.content}</p>
-              ))}
-            </section>
-          )}
           <section
             ref={showEvents ? undefined : timelineRef}
             tabIndex={showEvents ? -1 : 0}
@@ -641,6 +640,14 @@ export function SessionWorkspaceSurface({
               <p>Conversation unavailable</p>
             )}
           </section>
+          {synchronization.sessionId === sessionId && synchronization.drafts.length > 0 && (
+            <section className="provider-drafts" aria-label="Provider draft">
+              <span>Assistant · streaming</span>
+              {synchronization.drafts.map((draft) => (
+                <p key={draft.key}>{draft.content}</p>
+              ))}
+            </section>
+          )}
           <label className="session-events-toggle">
             <input
               type="checkbox"

@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { type RefObject, useRef, useState } from 'react'
+import { AttachmentReferences } from './AttachmentReferences'
 import type {
   WebSessionTimelineDetailBody,
   WebTimelineDetailContinuation,
@@ -71,6 +72,7 @@ function BodyText({ body }: { body: WebSessionTimelineDetailBody }) {
     <>
       <span className="eyebrow">{body.type === 'user_input' ? 'You' : 'Assistant'}</span>
       <p className="session-message-text">{excerpt.text}</p>
+      {body.type === 'user_input' && <AttachmentReferences attachments={body.attachments} />}
       {(excerpt.offset_bytes !== '0' || excerpt.continuation !== null) && (
         <small>
           Text excerpt · byte {excerpt.offset_bytes} of {excerpt.total_bytes}
