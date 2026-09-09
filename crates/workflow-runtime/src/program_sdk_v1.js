@@ -37,7 +37,35 @@
     }
     return value;
   };
+  const checkJson = (value, ancestors = new Set()) => {
+    if (value === null || typeof value === "string" || typeof value === "boolean") return;
+    if (typeof value === "number" && Number.isFinite(value) && !Object.is(value, -0)) return;
+    if (typeof value !== "object" || ancestors.has(value)) throw new TypeError("expected a lossless JSON value");
+    const array = Array.isArray(value);
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== (array ? Array.prototype : Object.prototype) && prototype !== null) {
+      throw new TypeError("expected a JSON record or array");
+    }
+    const keys = Reflect.ownKeys(value);
+    if (array) {
+      if (keys.length !== value.length + 1) throw new TypeError("expected a dense JSON array without extra properties");
+      for (let index = 0; index < value.length; index++) {
+        if (!Object.hasOwn(value, index)) throw new TypeError("expected a dense JSON array");
+      }
+    }
+    ancestors.add(value);
+    for (const key of keys) {
+      if (array && key === "length") continue;
+      const property = Object.getOwnPropertyDescriptor(value, key);
+      if (typeof key !== "string" || !property.enumerable || !Object.hasOwn(property, "value")) {
+        throw new TypeError("expected an enumerable JSON data property");
+      }
+      checkJson(property.value, ancestors);
+    }
+    ancestors.delete(value);
+  };
   const encodeJson = (value) => {
+    checkJson(value);
     // ASCII JSON preserves UTF-16 strings without requiring ambient text codecs.
     const text = JSON.stringify(value);
     if (text === undefined) throw new TypeError("expected a JSON value");

@@ -174,6 +174,60 @@ await sdk.defineProgram({ input: codec, output: codec, run: () => 1 })(codec.enc
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn json_codec_refuses_values_that_json_cannot_preserve() {
+    for value in [
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        "-0",
+        "({ nested: { missing: undefined } })",
+        "[1, [NaN]]",
+        "[undefined]",
+        "new Array(1)",
+        "({ callback() {} })",
+        "({ value: Symbol('value') })",
+        "({ value: 1n })",
+        "({ toJSON() { return null; } })",
+        "new Number(1)",
+        "Object.assign([1], { extra: 2 })",
+        "({ [Symbol('key')]: 1 })",
+        "Object.defineProperty({}, 'hidden', { value: 1 })",
+        "({ get changing() { return 1; } })",
+        "(() => { const value = {}; value.self = value; return value; })()",
+    ] {
+        let (result, requests) = sdk_script(
+            &format!("sdk.jsonCodec(value => value).encode({value});"),
+            [],
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "encoding {value} must refuse a value JSON would change or omit"
+        );
+        assert!(requests.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn json_codec_preserves_nested_json_values() {
+    let (result, requests) = sdk_script(
+        r#"
+const codec = sdk.jsonCodec(value => value);
+const shared = { text: "雪😀" };
+const value = { values: [null, true, false, 0, 1.5, "", shared], repeated: shared };
+const decoded = codec.decode(codec.encode(value));
+if (JSON.stringify(decoded) !== '{"values":[null,true,false,0,1.5,"",{"text":"雪😀"}],"repeated":{"text":"雪😀"}}') {
+  throw new Error("nested JSON values must round trip without loss");
+}
+"#,
+        [],
+    )
+    .await;
+    result.expect("JSON data including shared subobjects must remain encodable");
+    assert!(requests.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn session_wrapper_refuses_invalid_input_before_requesting_effect() {
     let (result, requests) = sdk_script(
         r#"await sdk.session.create({ command: "not a UUID", model: "not a UUID" });"#,
