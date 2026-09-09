@@ -116,6 +116,35 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
             Err(GitPushFailure::Rejected) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.rejected_detail.clone()),
             },
+            Err(GitPushFailure::UnsupportedMergeShape { parents }) => {
+                let detail = ToolExecutionErrorDetail::try_new(format!(
+                    "UnsupportedMergeShape: merges with {parents} parents are unsupported; expected two parents",
+                ))
+                .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))?;
+                ToolExecutorEvidence::KnownFailed {
+                    detail: Some(detail),
+                }
+            }
+            Err(GitPushFailure::UnprovenMergeParents) => {
+                let detail = ToolExecutionErrorDetail::try_new(
+                    "UnprovenMergeParents: the retained-head fence must identify exactly one branch parent".to_owned(),
+                )
+                .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))?;
+                ToolExecutorEvidence::KnownFailed {
+                    detail: Some(detail),
+                }
+            }
+            Err(GitPushFailure::AmbiguousMergeBases { bases }) => {
+                ToolExecutorEvidence::KnownFailed {
+                    detail: Some(ambiguous_merge_bases_detail(&bases)?),
+                }
+            }
+            Err(GitPushFailure::MergeDroppedBaseChanges(files)) => {
+                let detail = merge_dropped_detail(&files)?;
+                ToolExecutorEvidence::KnownFailed {
+                    detail: Some(detail),
+                }
+            }
             Err(GitPushFailure::PreDispatchInfrastructure) => {
                 return Err(push_infrastructure(
                     PushCommitCertainty::DefinitelyNotCommitted,
@@ -129,11 +158,15 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum GitPushFailure {
     Repository,
     Unresolved,
     Rejected,
+    MergeDroppedBaseChanges(Vec<crate::push_merge::DroppedBaseChanges>),
+    UnsupportedMergeShape { parents: usize },
+    UnprovenMergeParents,
+    AmbiguousMergeBases { bases: Vec<git2::Oid> },
     PreDispatchInfrastructure,
     DispatchUnknown,
     PostDispatchInvalid,
@@ -187,6 +220,7 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
                             .ok_or(GitPushFailure::Repository)
                     })
                     .transpose()?;
+                crate::push_merge::verify_merge(&authority, target, fence, deadline)?;
                 let snapshot = PushObjectSnapshot::capture_before_deadline(
                     &authority, target, fence, deadline,
                 )
@@ -278,5 +312,297 @@ const fn push_infrastructure(certainty: PushCommitCertainty) -> GitPushExecutorE
     };
     GitPushExecutorError {
         class: OperatorFailureClass::Infrastructure { commit_ambiguous },
+    }
+}
+
+fn ambiguous_merge_bases_detail(
+    bases: &[git2::Oid],
+) -> Result<ToolExecutionErrorDetail, GitPushExecutorError> {
+    let mut detail = format!("AmbiguousMergeBases: {} bases", bases.len());
+    let suffix_bytes = format!("; omitted_bases={}", bases.len()).len();
+    let mut omitted = bases.len();
+    for base in bases {
+        let entry = format!("; {base}");
+        if detail.len() + entry.len() + suffix_bytes > ToolExecutionErrorDetail::MAX_UTF8_BYTES {
+            break;
+        }
+        detail.push_str(&entry);
+        omitted -= 1;
+    }
+    detail.push_str(&format!("; omitted_bases={omitted}"));
+    ToolExecutionErrorDetail::try_new(detail)
+        .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))
+}
+
+#[derive(Serialize)]
+struct MergeDroppedDetail<'a> {
+    error: &'static str,
+    files: Vec<&'a str>,
+    omitted_files: usize,
+    hunks: Vec<MergeDroppedHunk<'a>>,
+    omitted_hunks: usize,
+}
+
+#[derive(Serialize)]
+struct MergeDroppedHunk<'a> {
+    file: &'a str,
+    first_dropped_hunk: String,
+    truncated: bool,
+}
+
+// Shared collection and serialization budget for merge-refusal previews.
+pub(super) const MAX_MERGE_DETAIL_BYTES: usize = 4096;
+
+fn merge_dropped_detail(
+    files: &[crate::push_merge::DroppedBaseChanges],
+) -> Result<ToolExecutionErrorDetail, GitPushExecutorError> {
+    let mut detail = MergeDroppedDetail {
+        error: "MergeDroppedBaseChanges",
+        files: Vec::new(),
+        omitted_files: files.len(),
+        hunks: Vec::new(),
+        omitted_hunks: files.len(),
+    };
+    for file in files {
+        detail.files.push(&file.file);
+        detail.omitted_files -= 1;
+        if encode_merge_dropped_detail(&detail)?.len() > MAX_MERGE_DETAIL_BYTES {
+            detail.files.pop();
+            detail.omitted_files += 1;
+            break;
+        }
+    }
+    for file in files.iter().take(detail.files.len()) {
+        detail.hunks.push(MergeDroppedHunk {
+            file: &file.file,
+            first_dropped_hunk: String::new(),
+            truncated: file.truncated || !file.first_dropped_hunk.is_empty(),
+        });
+        detail.omitted_hunks -= 1;
+        if encode_merge_dropped_detail(&detail)?.len() > MAX_MERGE_DETAIL_BYTES {
+            detail.hunks.pop();
+            detail.omitted_hunks += 1;
+            break;
+        }
+    }
+    let mut encoded = encode_merge_dropped_detail(&detail)?;
+    for (index, file) in files.iter().take(detail.hunks.len()).enumerate() {
+        let limit =
+            encoded.len() + (MAX_MERGE_DETAIL_BYTES - encoded.len()) / (detail.hunks.len() - index);
+        // bounded_text cannot account for JSON escaping or preserve its delimiters.
+        for character in file.first_dropped_hunk.chars() {
+            let hunk = &mut detail.hunks[index];
+            hunk.first_dropped_hunk.push(character);
+            hunk.truncated =
+                file.truncated || hunk.first_dropped_hunk.len() != file.first_dropped_hunk.len();
+            let candidate = encode_merge_dropped_detail(&detail)?;
+            if candidate.len() > limit {
+                let hunk = &mut detail.hunks[index];
+                hunk.first_dropped_hunk.pop();
+                hunk.truncated = true;
+                break;
+            }
+            encoded = candidate;
+        }
+    }
+    ToolExecutionErrorDetail::try_new(encoded)
+        .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))
+}
+
+fn encode_merge_dropped_detail(
+    detail: &MergeDroppedDetail<'_>,
+) -> Result<String, GitPushExecutorError> {
+    let encoded = serde_json::to_string(detail)
+        .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))?;
+    // serde_json leaves Unicode C1 controls literal; the tool detail forbids them.
+    let mut sanitized = String::with_capacity(encoded.len());
+    for character in encoded.chars() {
+        if character.is_control() {
+            sanitized.push_str(&format!("\\u{:04x}", u32::from(character)));
+        } else {
+            sanitized.push(character);
+        }
+    }
+    Ok(sanitized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ambiguous_merge_bases_detail, merge_dropped_detail};
+    use crate::push_merge::DroppedBaseChanges;
+
+    #[test]
+    fn merge_refusal_detail_names_the_error_files_and_first_hunks() {
+        let files = vec![
+            DroppedBaseChanges {
+                file: "one.txt".to_owned(),
+                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+                truncated: false,
+            },
+            DroppedBaseChanges {
+                file: "two.txt".to_owned(),
+                first_dropped_hunk: "-keep\n".to_owned(),
+                truncated: false,
+            },
+        ];
+        let detail = merge_dropped_detail(&files).expect("model-visible detail");
+        let value: serde_json::Value =
+            serde_json::from_str(detail.as_str()).expect("structured refusal");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "error": "MergeDroppedBaseChanges",
+                "files": ["one.txt", "two.txt"],
+                "omitted_files": 0,
+                "hunks": [
+                    { "file": "one.txt", "first_dropped_hunk": "-base\n+branch\n", "truncated": false },
+                    { "file": "two.txt", "first_dropped_hunk": "-keep\n", "truncated": false },
+                ],
+                "omitted_hunks": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn large_merge_hunk_keeps_all_filenames_and_explicitly_truncated_valid_json() {
+        let large_hunk = "\"\\\n\u{85}é".repeat(1024);
+        let files = vec![
+            DroppedBaseChanges {
+                file: "one.txt".to_owned(),
+                first_dropped_hunk: large_hunk.clone(),
+                truncated: false,
+            },
+            DroppedBaseChanges {
+                file: "two.txt".to_owned(),
+                first_dropped_hunk: "-keep\n".to_owned(),
+                truncated: false,
+            },
+        ];
+        let detail = merge_dropped_detail(&files).expect("bounded model-visible refusal");
+        let value: serde_json::Value =
+            serde_json::from_str(detail.as_str()).expect("complete JSON");
+
+        assert!(detail.as_str().len() <= 4096);
+        assert_eq!(value["error"], "MergeDroppedBaseChanges");
+        assert_eq!(value["files"], serde_json::json!(["one.txt", "two.txt"]));
+        assert_eq!(value["omitted_files"], 0);
+        assert_eq!(value["omitted_hunks"], 0);
+        assert!(
+            detail.as_str().find("\"files\":").expect("files field")
+                < detail.as_str().find("\"hunks\":").expect("hunks field")
+        );
+        let preview = value["hunks"][0]["first_dropped_hunk"]
+            .as_str()
+            .expect("hunk preview");
+        assert!(!preview.is_empty());
+        assert!(preview.len() < large_hunk.len());
+        assert!(large_hunk.starts_with(preview));
+        assert_eq!(value["hunks"][0]["truncated"], true);
+        assert_eq!(
+            value["hunks"][1],
+            serde_json::json!({
+                "file": "two.txt", "first_dropped_hunk": "-keep\n", "truncated": false,
+            })
+        );
+    }
+
+    #[test]
+    fn merge_refusal_explicitly_counts_filenames_that_cannot_fit() {
+        let files = vec![
+            DroppedBaseChanges {
+                file: "visible.txt".to_owned(),
+                first_dropped_hunk: "-keep\n".to_owned(),
+                truncated: false,
+            },
+            DroppedBaseChanges {
+                file: "long".repeat(4096),
+                first_dropped_hunk: "-keep\n".to_owned(),
+                truncated: false,
+            },
+        ];
+        let detail = merge_dropped_detail(&files).expect("bounded model-visible refusal");
+        let value: serde_json::Value =
+            serde_json::from_str(detail.as_str()).expect("complete JSON");
+
+        assert!(detail.as_str().len() <= 4096);
+        assert_eq!(value["files"], serde_json::json!(["visible.txt"]));
+        assert_eq!(value["omitted_files"], 1);
+        assert_eq!(value["omitted_hunks"], 1);
+        assert_eq!(
+            value["hunks"],
+            serde_json::json!([
+                { "file": "visible.txt", "first_dropped_hunk": "-keep\n", "truncated": false },
+            ])
+        );
+    }
+    #[test]
+    fn ambiguous_merge_base_detail_names_complete_object_ids() {
+        let first = git2::Oid::from_bytes(&[1; 20]).expect("first object ID");
+        let second = git2::Oid::from_bytes(&[2; 20]).expect("second object ID");
+
+        let detail = ambiguous_merge_bases_detail(&[first, second]).expect("typed detail");
+
+        assert_eq!(
+            detail.as_str(),
+            format!("AmbiguousMergeBases: 2 bases; {first}; {second}; omitted_bases=0")
+        );
+    }
+
+    #[test]
+    fn ambiguous_merge_base_detail_omits_whole_ids_when_the_detail_is_full() {
+        use signalbox_domain::ToolExecutionErrorDetail;
+
+        let bases: Vec<_> = (0..ToolExecutionErrorDetail::MAX_UTF8_BYTES / 40 + 1)
+            .map(|index| git2::Oid::from_str(&format!("{index:040x}")).expect("object ID"))
+            .collect();
+
+        let detail = ambiguous_merge_bases_detail(&bases).expect("bounded typed detail");
+
+        let parts: Vec<_> = detail.as_str().split("; ").collect();
+        let omitted: usize = parts
+            .last()
+            .expect("omission count")
+            .strip_prefix("omitted_bases=")
+            .expect("explicit omissions")
+            .parse()
+            .expect("count");
+        let listed: Vec<_> = parts[1..parts.len() - 1]
+            .iter()
+            .map(|part| git2::Oid::from_str(part).expect("complete object ID"))
+            .collect();
+        assert!(omitted > 0);
+        assert_eq!(listed, bases[..bases.len() - omitted]);
+        assert!(detail.as_str().len() <= ToolExecutionErrorDetail::MAX_UTF8_BYTES);
+    }
+
+    #[test]
+    fn merge_refusal_keeps_collection_truncation_when_the_preview_fits() {
+        let files = vec![
+            DroppedBaseChanges {
+                file: "first.txt".to_owned(),
+                first_dropped_hunk: "-base".to_owned(),
+                truncated: true,
+            },
+            DroppedBaseChanges {
+                file: "second.txt".to_owned(),
+                first_dropped_hunk: String::new(),
+                truncated: true,
+            },
+        ];
+
+        let detail = merge_dropped_detail(&files).expect("bounded detail");
+        let value: serde_json::Value = serde_json::from_str(detail.as_str()).expect("valid JSON");
+
+        assert_eq!(
+            value["files"],
+            serde_json::json!(["first.txt", "second.txt"])
+        );
+        assert_eq!(
+            value["hunks"],
+            serde_json::json!([
+                { "file": "first.txt", "first_dropped_hunk": "-base", "truncated": true },
+                { "file": "second.txt", "first_dropped_hunk": "", "truncated": true },
+            ])
+        );
     }
 }
