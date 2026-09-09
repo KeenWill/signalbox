@@ -7,10 +7,6 @@ use signalbox_domain::{
 };
 
 /// The append-only dispatch record that supplied one immutable fence.
-///
-/// Production authority loading supplies only commissioned-dispatch records.
-/// Repository-watch provenance remains available to the opaque evaluation
-/// corpus.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApprovalJudgeDispatchProvenance {
     /// A repository-watch rule dispatched the session.

@@ -95,6 +95,7 @@ pub struct ToolContinuationUsageLimit {
     max_output_tokens: u64,
     context_window_tokens: u64,
     replays_provider_compaction: bool,
+    compaction_prompt_bytes: u64,
 }
 
 impl ToolContinuationUsageLimit {
@@ -111,7 +112,19 @@ impl ToolContinuationUsageLimit {
             max_output_tokens,
             context_window_tokens,
             replays_provider_compaction: false,
+            compaction_prompt_bytes: 0,
         }
+    }
+
+    /// Reserves the configured summary prompt when bounding a tool-result batch.
+    #[must_use]
+    pub const fn with_compaction_prompt_bytes(mut self, bytes: u64) -> Self {
+        self.compaction_prompt_bytes = bytes;
+        self
+    }
+
+    pub(crate) const fn compaction_prompt_bytes(self) -> u64 {
+        self.compaction_prompt_bytes
     }
 
     /// Marks that this resolved target replays durable provider compaction.

@@ -20,7 +20,10 @@ implementations, and the typed Git library.
 A suite has two layers. The authority layer opens the live repository
 administration tree through pinned directory descriptors and captures
 configuration, references, lock state, and object data into private snapshots;
-the typed Git library, `git2`, works only on those snapshots.
+the typed Git library, `git2`, works only on those snapshots. Status, diff, and
+log capture objects on demand into a private database and revalidate their
+source bindings before returning; unrelated historical object contents are not
+copied.
 
 Pushing is a separate surface with its own authority. A push names a branch; its
 destination is a remote the deployment configured, never one the caller chose. A
@@ -61,6 +64,10 @@ packed objects and their delta dependencies retain the content bounds.
 Pack-index lookups do not count unrelated entries against the push-range
 inspection bound. The transport disables delta compression against omitted
 historical blobs.
+
+Push layout validation, reference resolution, and object capture run off the
+async worker with a 300-second preparation deadline; expiry returns
+`PreDispatchInfrastructure` without invoking the transport.
 
 Minting a destination is a human act, and a session cannot mint a workspace or a
 destination; pushing to a minted destination is an approval-gated agent act.

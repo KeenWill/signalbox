@@ -66,7 +66,7 @@ impl error::Error for LiveDeliveryFailure {}
 
 ```rust
 pub enum ProgramExecutionOutcome {
-    Completed,
+    Completed(signalbox_domain::InlineFramePayload),
     RunCancelled(signalbox_domain::InlineFramePayload),
     Faulted(signalbox_domain::ProgramFault),
 }
@@ -156,6 +156,7 @@ impl WorkflowHost {
     pub const fn new(
         journal: signalbox_persistence::program_journal::ProgramJournalRepository,
     ) -> Self;
+    pub fn with_native_catalog(self, catalog: native::NativeCatalog) -> Self;
     pub async fn session_capability(
         &self,
         run: signalbox_domain::ProgramRunId,

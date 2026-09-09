@@ -812,7 +812,11 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
             .kill()
             .await?;
         wait_for_hangs(&hanging_model, 0).await?;
-        let _recovered = runtime.kill_and_restart().await?;
+        assert_eq!(
+            runtime.kill_and_restart().await?,
+            FLEET_SESSION_COUNT,
+            "startup counts every lost in-flight fleet call"
+        );
         // One script per recoverable turn plus the readiness control, so the
         // fixture does not decide whether reconciliation reissues a call.
         let replacement_model = FleetScriptedModel::new(FleetModelCardinality {

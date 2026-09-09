@@ -1,20 +1,21 @@
 # Workflows
 
-The workflows layer runs a JavaScript program in a closed isolate and journals
-every nondeterministic act, so a run can be re-executed to the same point.
+The workflows layer runs JavaScript in a closed isolate and compiled trusted
+Rust programs through one journal, so a run can be re-executed to the same
+point.
 
 ## Overview
 
-Two parts are built: an isolate host in the workflow-runtime crate and a frame
-journal in the persistence crate. The host, `WorkflowHost`, runs one stripped
-JavaScript module per execution attempt in a fresh embedded `deno_core` isolate.
-The module's only admitted import is the canonical SDK specifier, which the
-loader resolves to a host-supplied synthetic module. The isolate exposes no
-filesystem, network, environment, module source, wall clock, or unvirtualized
-randomness. Its only asynchronous operation is the closed request op behind that
-SDK module. The SDK exports generic capability effects and four primitives: the
-virtual clock, a randomness draw, a sleep, and an event wait. Each takes exact
-bytes and produces one typed request at the Rust boundary.
+The workflow-runtime crate supplies the host and the persistence crate supplies
+the frame journal. The host, `WorkflowHost`, runs one stripped JavaScript module
+per execution attempt in a fresh embedded `deno_core` isolate. The module's only
+admitted import is the canonical SDK specifier, which the loader resolves to a
+host-supplied synthetic module. The isolate exposes no filesystem, network,
+environment, module source, wall clock, or unvirtualized randomness. Its only
+asynchronous operation is the closed request op behind that SDK module. The SDK
+exports generic capability effects and four primitives: the virtual clock, a
+randomness draw, a sleep, and an event wait. Each takes exact bytes and produces
+one typed request at the Rust boundary.
 
 The journal is one append-only sequence of frames per program-run identity, held
 by `ProgramJournalRepository`. A frame is a request (what the program asked) or
@@ -24,30 +25,33 @@ position, so their interleaving is retained. The request, delivery, and fault
 vocabularies are closed; the domain crate's `RequestKind`, `DeliveryKind`, and
 `FaultCause` and the migration's check constraints fix their members. Primitive
 requests, effects, capability refusals, nondeterminism faults, and user
-cancellation are produced.
+cancellation and successful completion are produced.
 
-Resume discards nothing and restores nothing. A registered run's journal that
-already holds a terminal delivery, one that ended the run instead of answering a
-request, names the run's outcome; the host returns that outcome and creates no
-isolate. Any other woken run re-executes its module from the start;
-`ReplayCursor` answers each request from the journal in delivery order, and
-execution goes live where the journal ends. Live primitive requests are answered
-through `LiveDeliverySource`; granted effects reach host-side `EffectExecutor`
-implementations.
+Resume discards nothing and restores nothing. A retained cancellation, fault or
+accepted Terminal/Answer pair names the run's outcome; the host returns it
+without loading executable code or creating an isolate. Any other woken run
+re-executes its module from the start; `ReplayCursor` answers each request from
+the journal in delivery order, and execution goes live where the journal ends.
+Live primitive requests are answered through `LiveDeliverySource`; granted
+effects reach host-side `EffectExecutor` implementations.
 
 `ProgramRegistrationRepository` stores immutable registrations keyed by name and
-revision, recording SHA-256 digests of exact source and stripped artifact bytes.
-Each registration carries explicit grants from `ProgramCapability`; identical
-bytes under distinct names or grant lists remain distinct programs. A run pins
-its registration, whose row records its artifact and grants. Program-initiated
-registration requires `register` and admits only a subset of the registrant's
-grants; user registration may widen grants under a new key. The host loads the
-artifact bound to the run, and session capability issuance requires a registered
-session grant. Registration and run creation take caller-supplied identities: an
-equal retry returns the recorded value; different content or a different
-registration binding conflicts.
+revision. Its executable is either JavaScript with SHA-256 digests of exact
+source and stripped artifact bytes, or a compiled native catalog entry/revision
+and SHA-256 digest of the exact executing binary. JavaScript registration
+requires source bytes and computes their digest; native registration accepts
+only `NativeProgramRegistrationRequest`. Each registration carries explicit
+grants from `ProgramCapability`; identical bytes under distinct names or grant
+lists remain distinct programs. A run pins its registration and immutable exact
+input bytes; the registration records its executable and grants.
+Program-initiated registration requires `register` and admits only a subset of
+the registrant's grants; user registration may widen grants under a new key. The
+host resolves the executable bound to the run, and session capability issuance
+requires a registered session grant. Registration and run creation take
+caller-supplied identities: an equal retry returns the recorded value; different
+content or a different registration binding or input conflicts.
 
-`WorkflowHost::execute_registered` loads the pinned artifact and grants;
+`WorkflowHost::execute_registered` loads the pinned executable and grants;
 ungranted requests receive a journaled refusal before any executor acts.
 Recovery first adopts a proven durable outcome, reissues only operations
 declared idempotent, and otherwise journals an ambiguous answer. The register
@@ -77,9 +81,40 @@ as one `run_cancel` delivery that carries the command identity and no request
 ordinal, so a cancelled run replays to its cancellation however many requests
 were outstanding.
 
-Cancellation addresses retained journal streams; their terminal states are
-`cancelled` and `faulted`, and the receipt carries a null result because no
-durable program return value is recorded.
+Successful completion records result bytes in a `Terminal` request and an
+immediately following `Answer` acknowledgement. A terminal request emitted with
+outstanding work receives `RejectReason::OutstandingRequests`; it cannot be
+accepted after that work drains. Only those deliveries may resolve a terminal
+request. No frame may follow accepted success. Existing JavaScript modules
+return the unit result, encoded as empty bytes, after their requests drain.
+`ProgramJournal::result` reads retained result bytes without execution.
+
+Cancellation addresses retained journal streams. A cancel serialized before
+completion prevents success; after accepted success it records
+`already_terminal` with state `succeeded` and the retained result bytes.
+Cancelled and faulted receipts carry a null result. Equal cancellation retries
+replay their recorded outcome without appending frames.
+
+## Native programs
+
+`NativeCatalog` selects compiled `NativeProgram` implementations with checked
+`NativeValue` input decoding before program code and checked output encoding. An
+entry/revision binds to one program type for the process lifetime; another
+catalog may select that type but cannot bind the same key to a different type.
+The Linux host hashes its running image through `/proc/self/exe` once,
+preserving its digest across executable path replacement. Catalog construction
+returns `Unsupported` on other platforms. An unfinished run whose catalog entry,
+revision or binary digest is unavailable journals `ContractRetired`; retained
+terminal outcomes require no catalog resolution. JavaScript child registration
+admits only JavaScript artifacts.
+
+One locally polled Rust root future sequentially awaits `WorkflowContext`
+requests. Both adapters share request admission, grant checks, exact-byte
+replay, delivery persistence and retained results. Native program and codec
+errors journal `ProgramError`. The context exposes only the existing primitives
+and effects; direct I/O, ambient nondeterminism, task spawning and concurrent
+awaits are forbidden by the trusted authoring contract, enforced through code
+review and replay tests rather than a sandbox.
 
 ## Design decisions
 

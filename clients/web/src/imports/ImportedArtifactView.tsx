@@ -2,9 +2,9 @@ import type { CommandContext } from '../commands'
 import { ArtifactRenderer } from '../features/artifacts/ArtifactRenderer'
 import type { ArtifactItem } from '../features/artifacts/artifactTypes'
 import type { WebImportedEntry } from '../generated/web-contract.mjs'
+import { enumLabel } from '../labels'
 
-const contentKindLabel = (kind: WebImportedEntry['content_kind']): string =>
-  kind.replaceAll('_', ' ')
+const contentKindLabel = (kind: WebImportedEntry['content_kind']): string => enumLabel(kind)
 
 export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactItem => {
   const identity = {
@@ -18,8 +18,8 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
     return {
       ...identity,
       kind: 'blocked',
-      attemptedKind: `imported ${contentKindLabel(entry.content_kind)}`,
-      reason: 'Content unavailable.',
+      attemptedKind: `Imported ${contentKindLabel(entry.content_kind).toLowerCase()}`,
+      reason: 'No preview for this content.',
     }
   }
   if (!entry.text) {
@@ -29,15 +29,15 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
     return {
       ...identity,
       kind: 'blocked',
-      attemptedKind: 'imported text',
-      reason: 'Text not attested.',
+      attemptedKind: 'Imported text',
+      reason: 'Text unknown.',
     }
   }
   if (entry.text.kind === 'attested_absent') {
     return {
       ...identity,
       kind: 'blocked',
-      attemptedKind: 'imported text',
+      attemptedKind: 'Imported text',
       reason: 'Text absent.',
     }
   }

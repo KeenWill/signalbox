@@ -149,6 +149,9 @@ fn dispatched_kind_names(dispatched: &[DispatchedOutboxEvent]) -> Vec<&'static s
             DispatchedOutboxEventKind::ContextCompacted { .. } => "context_compacted",
             DispatchedOutboxEventKind::RunnerStateTransition { .. } => "runner_state_transition",
             DispatchedOutboxEventKind::DelegationUpdate(_) => "delegation_update",
+            DispatchedOutboxEventKind::AutomaticReconciliationExhausted(_) => {
+                "automatic_reconciliation_exhausted"
+            }
             DispatchedOutboxEventKind::CredentialPoolExhausted(_) => {
                 "turn_credential_pool_exhausted"
             }

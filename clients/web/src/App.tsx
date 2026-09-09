@@ -252,14 +252,14 @@ export function Workspace({
   if (timelineQuery.isPending || fleetQuery.isPending) {
     return (
       <main className="loading">
-        <span>Loading bounded scenario windows…</span>
+        <span>Loading scenario…</span>
       </main>
     )
   }
   if (!timeline || !fleet || timelineQuery.isError || fleetQuery.isError) {
     return (
       <main className="loading" role="alert">
-        Scenario transport could not provide its deterministic window.
+        Scenario failed to load.
       </main>
     )
   }

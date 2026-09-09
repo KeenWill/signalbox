@@ -15,6 +15,8 @@ impl model_execution::ToolContinuationUsageLimit {
         context_window_tokens: u64,
     ) -> Self;
     #[must_use]
+    pub const fn with_compaction_prompt_bytes(self, bytes: u64) -> Self;
+    #[must_use]
     pub const fn with_provider_compaction_replay(self) -> Self;
 }
 ```

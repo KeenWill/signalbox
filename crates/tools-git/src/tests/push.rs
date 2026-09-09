@@ -23,6 +23,178 @@ use crate::tests::support::{FIX_BRANCH, Fixture};
 const REMOTE_NAME: &str = "origin";
 const REMOTE_URL: &str = "https://github.com/KeenWill/signalbox.git";
 
+#[tokio::test]
+async fn push_preparation_deadline_returns_while_blocking_work_is_running() {
+    use crate::push_executor::prepare_before_deadline;
+    use std::{sync::mpsc, time::Duration};
+
+    let (release, blocked) = mpsc::channel();
+    let (started, running) = tokio::sync::oneshot::channel();
+    let preparation = tokio::spawn(prepare_before_deadline(
+        move |_| {
+            started.send(()).expect("async worker receives start");
+            blocked
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test releases blocking work");
+            Ok(())
+        },
+        Duration::from_millis(50),
+    ));
+    running.await.expect("blocking work starts");
+    let result = preparation.await.expect("preparation task joins");
+    release.send(()).expect("blocking work is still waiting");
+    assert_eq!(result, Err(GitPushFailure::PreDispatchInfrastructure));
+}
+
+#[tokio::test]
+async fn push_over_the_object_cap_refuses_before_transport() {
+    use crate::limits::MAX_REPOSITORY_INSPECTIONS;
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    let fence = fence_with_blob_count(&fixture, MAX_REPOSITORY_INSPECTIONS + 1);
+    let transport = RecordingPushTransport::default();
+    let mut executor = GitPushTools::try_new(
+        &LocalWorkspaceFileSystem,
+        fixture.root(),
+        ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL).expect("remote"),
+        transport.clone(),
+    )
+    .expect("push executor")
+    .into_parts()
+    .1
+    .with_commit_fence(fence.to_string());
+
+    let started = Instant::now();
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert_eq!(result, Err(GitPushFailure::Repository));
+    assert!(
+        !transport.has_request(),
+        "over-cap snapshots cannot reach transport"
+    );
+    // This generous regression ceiling distinguishes prompt cap refusal from the 300-second deadline.
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "object-cap refusal must be prompt"
+    );
+}
+
+/// Packs distinct blobs under trees small enough to fit the decoded-object byte cap.
+fn fence_with_blob_count(fixture: &Fixture, count: usize) -> git2::Oid {
+    use crate::tests::support::{AUTHOR_EMAIL, AUTHOR_NAME};
+
+    let repository = Repository::open(fixture.root()).expect("fixture repository");
+    plant_push_pack_with_unrelated_objects(&repository, &[], 0..count);
+    let database = repository.odb().expect("fixture objects");
+    let mut root = repository.treebuilder(None).expect("root builder");
+    for (chunk, numbers) in (0..count).collect::<Vec<_>>().chunks(1000).enumerate() {
+        let mut entries = Vec::new();
+        for number in numbers {
+            let oid = git2::Oid::hash_object(git2::ObjectType::Blob, &number.to_be_bytes())
+                .expect("fixture blob ID");
+            entries.extend_from_slice(format!("100644 {number:06}\0").as_bytes());
+            entries.extend_from_slice(oid.as_bytes());
+        }
+        let tree = database
+            .write(git2::ObjectType::Tree, &entries)
+            .expect("subtree");
+        root.insert(format!("{chunk:06}"), tree, 0o040000)
+            .expect("subtree entry");
+    }
+    let tree = repository
+        .find_tree(root.write().expect("root tree"))
+        .expect("tree");
+    let signature = git2::Signature::now(AUTHOR_NAME, AUTHOR_EMAIL).expect("author");
+    repository
+        .commit(
+            Some(&format!("refs/heads/{FIX_BRANCH}")),
+            &signature,
+            &signature,
+            "blob-count fence",
+            &tree,
+            &[],
+        )
+        .expect("fence commit")
+}
+
+#[test]
+fn push_snapshot_accepts_a_fence_with_multiple_bounded_trees() {
+    let fixture = Fixture::new();
+    // Crosses the fixture's 1,000-blob subtree boundary while staying below the cap.
+    let fence = fence_with_blob_count(&fixture, 1001);
+    let snapshot = crate::push_objects::PushObjectSnapshot::capture(
+        &fixture.executor().repository_authority,
+        fence,
+        Some(fence),
+    )
+    .expect("bounded fence captures");
+    let root = snapshot
+        .repository
+        .find_commit(fence)
+        .expect("fence commit")
+        .tree()
+        .expect("fence tree");
+    assert_eq!(root.len(), 2);
+    let first = snapshot
+        .repository
+        .find_tree(root.get_name("000000").expect("first subtree").id())
+        .expect("first tree");
+    let second = snapshot
+        .repository
+        .find_tree(root.get_name("000001").expect("second subtree").id())
+        .expect("second tree");
+    assert_eq!(first.len(), 1000);
+    assert_eq!(second.len(), 1);
+}
+
+/// Measures preparation only; the transport records a request without sending it.
+#[tokio::test]
+#[ignore = "requires PUSH_BENCH_REPOSITORY pointing to a disposable no-checkout clone"]
+async fn push_preparation_on_a_real_clone() {
+    let root = std::env::var("PUSH_BENCH_REPOSITORY").expect("measurement clone path");
+    let repository = Repository::open(&root).expect("measurement repository");
+    let head = repository.head().expect("clone head");
+    let branch = head.shorthand().expect("head branch").to_owned();
+    let commit = head.target().expect("head commit");
+    let started = std::time::Instant::now();
+    let mut executor = GitPushTools::try_new(
+        &LocalWorkspaceFileSystem,
+        &root,
+        ConfiguredGitRemote::try_new(REMOTE_NAME, REMOTE_URL).expect("remote"),
+        RecordingPushTransport::default(),
+    )
+    .expect("measurement executor")
+    .into_parts()
+    .1;
+    match std::env::var("PUSH_BENCH_FENCE").as_deref() {
+        Ok("none") => {}
+        Ok(fence) => executor = executor.with_commit_fence(fence.to_owned()),
+        Err(_) => executor = executor.with_commit_fence(commit.to_string()),
+    }
+    eprintln!(
+        "construction_wall_seconds={:.3}",
+        started.elapsed().as_secs_f64()
+    );
+    let started = std::time::Instant::now();
+    let result = executor
+        .execute_push(GitPushArguments::for_test(&branch))
+        .await;
+    eprintln!(
+        "preparation_wall_seconds={:.3} result={result:?}",
+        started.elapsed().as_secs_f64()
+    );
+    assert!(
+        matches!(
+            result,
+            Ok(_) | Err(GitPushFailure::Repository | GitPushFailure::PreDispatchInfrastructure)
+        ),
+        "measurement must resolve the branch and return a bounded preparation outcome"
+    );
+}
+
 #[derive(Clone, Debug, Default)]
 struct RecordingPushTransport(Arc<Mutex<Option<GitPushRequest>>>);
 
@@ -240,7 +412,7 @@ fn every_minted_remote_name_builds_a_configured_remote() {
 }
 
 /// Stores selected fixture objects without compression so pack size is load-bearing.
-fn plant_uncompressed_push_pack(
+pub(super) fn plant_uncompressed_push_pack(
     repository: &Repository,
     objects: &[git2::Oid],
 ) -> std::path::PathBuf {

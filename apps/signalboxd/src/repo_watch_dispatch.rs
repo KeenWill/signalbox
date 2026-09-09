@@ -164,16 +164,25 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
         use signalbox_module_repo_watch_v2::checkout::CheckoutRetirementReason;
 
         let id = command.command_id();
-        let result = self.core.submit(command).await?;
-        let CommandSubmission::Creation(CreateSessionOutcome::Applied(applied)) = &result else {
-            return Ok(result);
-        };
-        let Some(checkout) = self
+        let checkout = self
             .store
             .dispatch_checkout(id)
             .await
-            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?
-        else {
+            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+        let checkout_provisioning_pending = checkout.as_ref().is_some_and(|checkout| {
+            matches!(
+                checkout.event.target(),
+                RepoWatchEventTarget::PullRequest(_)
+            )
+        });
+        let result = self
+            .core
+            .submit_with_checkout_provisioning(command, checkout_provisioning_pending)
+            .await?;
+        let CommandSubmission::Creation(CreateSessionOutcome::Applied(applied)) = &result else {
+            return Ok(result);
+        };
+        let Some(checkout) = checkout else {
             return Ok(result);
         };
         let RepoWatchEventTarget::PullRequest(context) = checkout.event.target() else {
@@ -307,6 +316,25 @@ impl<Runner: signalbox_tools_exec::ProcessRunner> SessionCommandSink
             ) {
                 return Err(RepositoryWatchCommandError::CoreCommandFailed);
             }
+        } else if !checkout.removed {
+            signalbox_persistence::start_eligible_turn::StartEligibleTurnRepository::new(
+                self.core.pool.clone(),
+            )
+            .complete_checkout_provisioning(session)
+            .await
+            .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;
+            let release = SessionLifecycleCommand::new(
+                DurableCommandId::from_uuid(Uuid::now_v7()),
+                session,
+                SessionLifecycleOperation::ReleaseStart,
+            );
+            if !matches!(
+                self.core.submit_lifecycle(release).await?,
+                CommandSubmission::Accepted
+            ) {
+                return Err(RepositoryWatchCommandError::CoreCommandFailed);
+            }
+            let _ = self.core.eligibility_nudge.nudge(session);
         }
         Ok(result)
     }
@@ -409,6 +437,16 @@ pub enum RepositoryWatchCommandError {
 impl SessionCommandSink for RepositoryWatchCommandSink {
     type Error = RepositoryWatchCommandError;
     async fn submit(&mut self, command: SessionCommand) -> Result<CommandSubmission, Self::Error> {
+        self.submit_with_checkout_provisioning(command, false).await
+    }
+}
+
+impl RepositoryWatchCommandSink {
+    async fn submit_with_checkout_provisioning(
+        &mut self,
+        command: SessionCommand,
+        checkout_provisioning_pending: bool,
+    ) -> Result<CommandSubmission, RepositoryWatchCommandError> {
         match command.into_payload() {
             SessionCommandPayload::CreateSession(command) => {
                 let prepared = command
@@ -421,6 +459,9 @@ impl SessionCommandSink for RepositoryWatchCommandSink {
                 .with_principal(CommandPrincipal::Module {
                     module: DispatchingModule::RepositoryWatch,
                 });
+                if checkout_provisioning_pending {
+                    repository = repository.with_checkout_provisioning();
+                }
                 let outcome = CreateSessionTransaction::handle(&mut repository, prepared)
                     .await
                     .map_err(|_| RepositoryWatchCommandError::CoreCommandFailed)?;

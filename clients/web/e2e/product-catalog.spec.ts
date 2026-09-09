@@ -339,7 +339,9 @@ test('shows unavailable timelines after opening a catalog row', async ({ page },
     firstSessionId,
   )
   await page.screenshot({ path: testInfo.outputPath('timeline-unavailable.png') })
-  await expect(page.getByRole('status').filter({ hasText: 'Sessions unavailable' })).toBeVisible()
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Session timeline unavailable' }),
+  ).toBeVisible()
   await expect(page.getByText('Loading session…', { exact: true })).toBeHidden()
   await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeDisabled()
   expect(timelineReads).toBe(0)
@@ -396,7 +398,7 @@ test('rejects an over-bound search before changing URL state', async ({ page }) 
   await page.getByRole('textbox', { name: 'Search titles' }).fill('é'.repeat(513))
   await page.getByRole('button', { name: 'Apply' }).click()
 
-  await expect(page.getByRole('alert')).toHaveText(/no more than 1,024 UTF-8 bytes/)
+  await expect(page.getByRole('alert')).toHaveText(/must fit 1,024 UTF-8 bytes/)
   await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBeNull()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -465,7 +467,7 @@ test('restores focus after a failed bounded catalog replacement', async ({ page 
   await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
   await page.getByRole('button', { name: 'Apply' }).click()
 
-  await expect(page.getByRole('heading', { name: 'Sessions could not be read' })).toBeFocused()
+  await expect(page.getByRole('heading', { name: "Couldn't load sessions" })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -532,7 +534,7 @@ test('gates catalog reads on a successful bootstrap', async ({ page }) => {
   })
 
   await page.goto('/sessions')
-  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByText('Unexpected server response')).toBeVisible()
   await expect(page.getByText('Sessions unavailable')).toBeVisible()
   expect(sessionReads).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -564,11 +566,11 @@ test('exposes the server-owned blocked-goal need on its row', async ({ page }) =
   await useCatalogFixture(page)
   await page.goto('/sessions')
   await expect(
-    page.getByText('user input required · Select the authoritative deployment target.', {
+    page.getByText('Blocked: Needs input — Select the authoritative deployment target.', {
       exact: true,
     }),
   ).toBeVisible()
-  await expect(page.getByText('provide goal need', { exact: true })).toBeVisible()
+  await expect(page.getByText('Needs input', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -623,7 +625,7 @@ test('listed outcomes expose failures and lifecycle filtering', async ({ page })
   await expect(page.locator('.catalog-list li').first()).toContainText('10 turns')
   await page.getByLabel('Page order').selectOption('failure')
   await expect(page.locator('.catalog-list li').first()).toContainText('Deployment decision')
-  await expect(page.locator('.catalog-list li').first()).toContainText('quota exhausted')
+  await expect(page.locator('.catalog-list li').first()).toContainText('Quota reached')
   await page.getByLabel('State').selectOption('parked')
   await expect(page.locator('.catalog-list li')).toHaveCount(1)
   await expect(page.locator('.catalog-list li').first()).toContainText('2 turns · 2 failed')
@@ -754,9 +756,9 @@ test('classifies a catalog connection failure as transport unavailability', asyn
   await useCatalogFixture(page)
   await page.route('**/api/sessions?**', (route) => route.abort())
   await page.goto('/sessions')
-  await expect(page.getByRole('heading', { name: 'Sessions could not be read' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: "Couldn't load sessions" })).toBeVisible()
   await expect(page.getByRole('alert')).not.toContainText('generated web contract')
-  await expect(page.getByRole('alert')).toContainText('The Signalbox daemon could not be reached.')
+  await expect(page.getByRole('alert')).toContainText("Can't reach the Signalbox server.")
 })
 
 test('opens a session link directly on a phone without an inspector', async ({ page }) => {

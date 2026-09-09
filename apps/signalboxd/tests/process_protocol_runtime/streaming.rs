@@ -2,6 +2,53 @@
 
 use super::*;
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_follow_survives_idleness_beyond_client_deadlines()
+-> Result<(), Box<dyn Error>> {
+    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let bounds = configuration.numeric_bounds();
+    let idle = bounds
+        .duration("client_frame_deadline")
+        .flatten()
+        .unwrap()
+        .max(
+            bounds
+                .duration("client_write_progress_deadline")
+                .flatten()
+                .unwrap(),
+        )
+        + Duration::from_secs(1);
+    let runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session = create_alias_session(&mut commands).await?;
+    let mut follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::One, 1, session).await?;
+    let mut partial = UnixStream::connect(runtime.socket()).await?;
+    partial.write_all(b"{").await?;
+    assert!(
+        timeout(idle, follow.response()).await.is_err(),
+        "idle follow stays connected"
+    );
+    let mut closed = Vec::new();
+    assert_eq!(
+        timeout(RESPONSE_ALLOWANCE, partial.read_to_end(&mut closed)).await??,
+        0
+    );
+    let (accepted, _) =
+        submit_first_input(&mut commands, session, "wake follower".to_owned()).await?;
+    let settings = response_within(&mut follow).await?;
+    let settings = turn_model_settings_resolved_event_facts(settings.message());
+    assert_eq!(settings.session_id, session);
+    assert_eq!(settings.accepted_input_id, accepted);
+    let event = response_within(&mut follow).await?;
+    let event = input_accepted_event_facts(event.message());
+    assert_eq!(event.accepted_input_id, accepted);
+    drop(follow);
+    drop(commands);
+    runtime.stop().await
+}
+
 pub(crate) const STREAMING_DELTA_COUNT: usize = 192;
 pub(crate) const STREAMING_DELTA_BYTES: usize = 8 * 1024;
 pub(crate) struct StreamedFollowOutcome {

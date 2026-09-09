@@ -25,6 +25,7 @@ import {
 } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
+import { enumLabel } from '../../labels'
 import { actions, useAppDispatch, useAppSelector } from '../../state'
 import {
   artifactScenario,
@@ -45,6 +46,7 @@ import {
   type SignalboxImageArtifact,
   type TextArtifact,
 } from './artifactTypes'
+import { useVerifiedDerivedImage } from './derivedImageService'
 import { useVerifiedOriginalImage } from './originalImageService'
 import { admitRemoteMediaUrl } from './remoteMediaPreference'
 import './artifacts.css'
@@ -122,7 +124,7 @@ function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
     <div className="artifact-rendered artifact-text">
       <textarea
         className="artifact-scroll"
-        aria-label={`Bounded preview of ${artifact.displayName}`}
+        aria-label={`Preview of ${artifact.displayName}`}
         onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
         onKeyDown={scrollArtifactPreviewByPage}
         readOnly
@@ -162,7 +164,7 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
       </div>
       <textarea
         className="artifact-scroll"
-        aria-label={`Bounded preview of ${artifact.displayName}`}
+        aria-label={`Preview of ${artifact.displayName}`}
         onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
         onKeyDown={scrollArtifactPreviewByPage}
         readOnly
@@ -241,6 +243,17 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
       ? candidate
       : undefined
 
+  const derivedQuery = useVerifiedDerivedImage(
+    rendered?.kind === 'preview' || rendered?.kind === 'thumbnail' ? rendered : undefined,
+  )
+  const derivedFailed = derivedQuery.isError
+  const automaticUrl = automatic?.content_url
+  useEffect(() => {
+    if (!derivedFailed || automaticUrl === undefined) return
+    setFailedAutomaticUrls((current) => new Set([...current, automaticUrl]))
+  }, [derivedFailed, automaticUrl])
+  const renderedUrl = rendered?.kind === 'browser_native' ? verifiedOriginalUrl : derivedQuery.url
+
   // The object URL is allocated and revoked by one effect owning its lifecycle: allocation during
   // render would strand the extra URL produced by development double-rendering unrevoked.
   useEffect(() => {
@@ -282,13 +295,9 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
   return (
     <div className="artifact-image-layout">
       <div className="artifact-visual">
-        {rendered ? (
+        {rendered && renderedUrl ? (
           <img
-            src={
-              rendered.kind === 'browser_native' && verifiedOriginalUrl !== null
-                ? verifiedOriginalUrl
-                : rendered.content_url
-            }
+            src={renderedUrl}
             alt={`${imageViewLabel(rendered.kind)} of ${artifact.displayName}`}
             loading="lazy"
             onLoad={() => {
@@ -311,14 +320,14 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
             }}
           />
         ) : (
-          <FileQuestion aria-label="No compatible inline renderer" />
+          <FileQuestion aria-label="No preview available" />
         )}
       </div>
       <ArtifactMetadata
-        renderer={rendered?.kind ?? 'metadata fallback'}
+        renderer={rendered ? enumLabel(rendered.kind) : 'Details only'}
         mediaType={descriptor.declared_media_type}
         byteLength={descriptor.byte_length}
-        provenance={derivation?.transformation_name ?? 'original bytes'}
+        provenance={derivation?.transformation_name ?? 'Original content'}
       >
         {original && (
           <button
@@ -365,7 +374,7 @@ function RemoteImageBody({ artifact }: RendererProps<RemoteImageArtifact>) {
         <Ban aria-label="Remote media not loaded" />
       </div>
       <ArtifactMetadata
-        renderer={admittedUrl === null ? 'remote media blocked' : 'remote media unavailable'}
+        renderer={admittedUrl === null ? 'Remote media blocked' : 'Remote media unavailable'}
         mediaType="Not inspected"
         provenance="External URL"
       ></ArtifactMetadata>
@@ -379,13 +388,13 @@ function GenericBlobBody({ artifact }: RendererProps<GenericBlobArtifact>) {
   return (
     <div className="artifact-image-layout">
       <div className="artifact-visual">
-        <FileQuestion aria-label="No compatible inline renderer" />
+        <FileQuestion aria-label="No preview available" />
       </div>
       <ArtifactMetadata
-        renderer="metadata fallback"
+        renderer="Details only"
         mediaType={artifact.descriptor.declared_media_type}
         byteLength={artifact.descriptor.byte_length}
-        provenance="original bytes"
+        provenance="Original content"
       >
         {download && (
           <a href={download.content_url} download={artifact.displayName}>
@@ -424,9 +433,9 @@ function DocumentBody({ artifact }: RendererProps<DocumentArtifact>) {
         <strong>{artifact.documentKind === 'pdf' ? 'PDF document' : 'Document'}</strong>
       </div>
       <ArtifactMetadata
-        renderer="document placeholder"
+        renderer="Document"
         mediaType={descriptor.declared_media_type}
-        provenance="Original blob"
+        provenance="Original content"
       >
         {browserNative && (
           <a href={browserNative.content_url} target="_blank" rel="noreferrer">
@@ -449,14 +458,15 @@ function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
   const derivation = rendered
     ? selectProvenViewDerivation(artifact.source.descriptor, rendered)
     : undefined
-  const loadFailed = rendered?.content_url === failedContentUrl
+  const verified = useVerifiedDerivedImage(derivation ? rendered : undefined)
+  const loadFailed = rendered?.content_url === failedContentUrl || verified.isError
 
   if (!rendered || !derivation || loadFailed) {
     return (
       <div className="artifact-state blocked" role="status">
         <ShieldAlert aria-hidden="true" />
         <div>
-          <strong>Derivative unavailable</strong>
+          <strong>Preview unavailable</strong>
         </div>
       </div>
     )
@@ -465,15 +475,17 @@ function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
   return (
     <div className="artifact-image-layout">
       <div className="artifact-visual">
-        <img
-          src={rendered.content_url}
-          alt={`Derived ${artifact.viewKind} of ${artifact.displayName}`}
-          loading="lazy"
-          onError={() => setFailedContentUrl(rendered.content_url)}
-        />
+        {verified.url && (
+          <img
+            src={verified.url}
+            alt={`${enumLabel(artifact.viewKind)} of ${artifact.displayName}`}
+            loading="lazy"
+            onError={() => setFailedContentUrl(rendered.content_url)}
+          />
+        )}
       </div>
       <ArtifactMetadata
-        renderer={`${artifact.viewKind} derivative`}
+        renderer={enumLabel(artifact.viewKind)}
         mediaType={rendered.media_type}
         provenance={`${derivation.transformation_name} v${derivation.transformation_version}`}
       >
@@ -497,9 +509,9 @@ function MediaPlaceholderBody({ artifact }: RendererProps<MediaPlaceholderArtifa
         <strong>{artifact.mediaKind === 'audio' ? 'Audio' : 'Video'} playback unavailable</strong>
       </div>
       <ArtifactMetadata
-        renderer={`${artifact.mediaKind} placeholder`}
+        renderer={enumLabel(artifact.mediaKind)}
         mediaType={descriptor.declared_media_type}
-        provenance="Original blob"
+        provenance="Original content"
       >
         {download && (
           <a href={download.content_url} download={artifact.displayName}>
@@ -528,21 +540,21 @@ function ArtifactMetadata({
     <div className="artifact-detail">
       <dl>
         <div>
-          <dt>Renderer</dt>
+          <dt>Shown as</dt>
           <dd>{renderer}</dd>
         </div>
         <div>
-          <dt>Declared type</dt>
+          <dt>Type (as declared)</dt>
           <dd>{mediaType}</dd>
         </div>
         {byteLength !== undefined && (
           <div>
-            <dt>Byte length</dt>
+            <dt>Size</dt>
             <dd>{BigInt(byteLength).toLocaleString()} bytes</dd>
           </div>
         )}
         <div>
-          <dt>Provenance</dt>
+          <dt>Source</dt>
           <dd>{provenance}</dd>
         </div>
       </dl>
@@ -579,7 +591,7 @@ function RendererBoundary({
       <div className="artifact-state blocked" role="status">
         <ShieldAlert aria-hidden="true" />
         <div>
-          <strong>Artifact blocked</strong>
+          <strong>Preview unavailable</strong>
           <p>{artifact.reason}</p>
         </div>
       </div>
@@ -629,7 +641,9 @@ export function ArtifactRenderer({
         {artifactIcon(artifact)}
         <div>
           <strong>{artifact.displayName}</strong>
-          <small>{artifact.kind === 'blocked' ? artifact.attemptedKind : artifact.kind}</small>
+          <small>
+            {enumLabel(artifact.kind === 'blocked' ? artifact.attemptedKind : artifact.kind)}
+          </small>
         </div>
       </button>
       <RendererBoundary artifact={artifact} commandContext={commandContext} />
@@ -647,13 +661,12 @@ export function ArtifactWorkbench({ commandContext }: { commandContext: CommandC
     >
       <header className="section-header artifact-panel-heading">
         <div>
-          <span className="eyebrow">Typed capability projection</span>
-          <h1 id="artifact-heading">Artifact renderers</h1>
+          <h1 id="artifact-heading">Artifacts</h1>
         </div>
       </header>
       <p className="artifact-bound-summary">
-        {artifactScenario.length} typed records · {ARTIFACT_PREVIEW_CHARACTERS.toLocaleString()}
-        -character previews · 0 original bytes prefetched
+        {artifactScenario.length} artifacts · {ARTIFACT_PREVIEW_CHARACTERS.toLocaleString()}
+        -character previews · Originals load on request
       </p>
       <div className="artifact-list">
         {artifactScenario.map((artifact) => (
