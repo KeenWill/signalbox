@@ -10,7 +10,6 @@ import {
   ProductRequestError,
   ProductTransportError,
   productRoutes,
-  productSurfaceCacheLabel,
   productSurfaceStates,
   readProductRouteState,
   readProductSearchState,
@@ -1807,14 +1806,6 @@ describe('product surface availability', () => {
       owningTrack: '#995 discovery reads',
       facts: ['keyset import catalog pages', 'bounded imported-entry windows'],
     })
-  })
-
-  it('reports cache ownership only for implemented surfaces', () => {
-    expect(productSurfaceCacheLabel('attention')).toBe('Bounded query')
-    expect(productSurfaceCacheLabel('sessions')).toBe('Bounded query')
-    expect(productSurfaceCacheLabel('imports')).toBe('Bounded query')
-    expect(productSurfaceCacheLabel('settings')).toBe('Local settings')
-    expect(productSurfaceCacheLabel('search')).toBe('Bounded query')
   })
 })
 

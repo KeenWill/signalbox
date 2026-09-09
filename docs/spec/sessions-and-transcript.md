@@ -95,6 +95,11 @@ names the exact spawning tool request and whose ancestry is none. The
 `SessionDelegation` aggregate records the parent and child, the task, the
 parent-chosen policy, messages in both directions, and the child's one result.
 
+The browser shell reserves secondary space only for an opened artifact
+inspector. Focus layout gives the primary surface the full viewport width and
+hides navigation; the layout control returns to Workbench. Each surface has one
+shell title.
+
 The browser read plane serves a session catalog with attention states, a live
 projection and follow stream for one session, a timeline of durable events with
 typed detail, and lexical search. Its request and response shapes live in
