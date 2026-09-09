@@ -116,10 +116,9 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
             Err(GitPushFailure::Rejected) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.rejected_detail.clone()),
             },
-            Err(GitPushFailure::MergeParentLimitExceeded { parents }) => {
+            Err(GitPushFailure::UnsupportedMergeShape { parents }) => {
                 let detail = ToolExecutionErrorDetail::try_new(format!(
-                    "MergeParentLimitExceeded: {parents} parents exceed the limit of {}",
-                    crate::limits::MAX_MERGE_PARENTS,
+                    "UnsupportedMergeShape: merges with {parents} parents are unsupported; expected two parents",
                 ))
                 .map_err(|_| push_infrastructure(PushCommitCertainty::DefinitelyNotCommitted))?;
                 ToolExecutorEvidence::KnownFailed {
@@ -151,7 +150,7 @@ pub(super) enum GitPushFailure {
     Unresolved,
     Rejected,
     MergeDroppedBaseChanges(Vec<crate::push_merge::DroppedBaseChanges>),
-    MergeParentLimitExceeded { parents: usize },
+    UnsupportedMergeShape { parents: usize },
     PreDispatchInfrastructure,
     DispatchUnknown,
     PostDispatchInvalid,

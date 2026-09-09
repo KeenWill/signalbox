@@ -161,14 +161,15 @@ URL and confirms the remote branch equals the resolved commit before
 acknowledging success. Before pushing a merge, the executor compares each
 zero-context hunk relative to its merged base parent against the branch's hunks
 relative to the parents' merge base, ignoring line offsets. Rename detection
-correlates source and destination paths in both diffs before comparing hunks. A
-hunk absent from the branch diff refuses the push with
-`MergeDroppedBaseChanges`. Its bounded JSON detail lists filenames before hunk
-previews, marks each shortened preview with `truncated`, and counts omitted
-filenames and previews explicitly when they cannot fit. Filenames use bytewise
-Git path quoting. Verification refuses a merge above `MAX_MERGE_PARENTS` with
-`MergeParentLimitExceeded` before comparing parents, and retains only the first
-dropped hunk per file across parents. Non-merge pushes are unaffected.
+correlates source and destination paths in both diffs and maps the base parent's
+renames onto the branch's paths before comparing hunks. A hunk absent from the
+branch diff refuses the push with `MergeDroppedBaseChanges`. Its bounded JSON
+detail lists filenames before hunk previews, marks each shortened preview with
+`truncated`, and counts omitted filenames and previews explicitly when they
+cannot fit. Filenames use bytewise Git path quoting. Verification supports
+two-parent merges and refuses larger merges with `UnsupportedMergeShape` naming
+the parent count before traversing ancestry. It retains only the first dropped
+hunk per file. Non-merge pushes are unaffected.
 
 The seven local Git tools perform no remote operation.
 

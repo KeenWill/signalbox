@@ -10,9 +10,7 @@ use git2::{Delta, Diff, DiffFindOptions, DiffOptions, ObjectType, Odb, Oid, Patc
 use serde::Serialize;
 
 use crate::{
-    limits::{MAX_MERGE_PARENTS, MAX_REPOSITORY_INSPECTIONS},
-    pinning::PinnedRepository,
-    push_executor::GitPushFailure,
+    limits::MAX_REPOSITORY_INSPECTIONS, pinning::PinnedRepository, push_executor::GitPushFailure,
     push_objects::ObjectSource,
 };
 
@@ -41,8 +39,8 @@ pub(super) fn verify_merge(
         .capture(&database, target)
         .map_err(repository_failure)?;
     let merge = repository.find_commit(target).map_err(repository_failure)?;
-    if merge.parent_count() > MAX_MERGE_PARENTS {
-        return Err(GitPushFailure::MergeParentLimitExceeded {
+    if merge.parent_count() > 2 {
+        return Err(GitPushFailure::UnsupportedMergeShape {
             parents: merge.parent_count(),
         });
     }
@@ -68,87 +66,93 @@ pub(super) fn verify_merge(
         );
     }
     let mut dropped = BTreeMap::new();
-    for base in merge.parent_ids().skip(1) {
-        let ancestor = repository
-            .merge_base(branch, base)
-            .map_err(repository_failure)?;
-        let mut trees = Vec::new();
-        for commit in [target, branch, base, ancestor] {
-            trees.push(
-                repository
-                    .find_commit(commit)
-                    .map_err(repository_failure)?
-                    .tree_id(),
-            );
+    let base = merge.parent_id(1).map_err(repository_failure)?;
+    let ancestor = repository
+        .merge_base(branch, base)
+        .map_err(repository_failure)?;
+    let mut trees = Vec::new();
+    for commit in [target, branch, base, ancestor] {
+        trees.push(
+            repository
+                .find_commit(commit)
+                .map_err(repository_failure)?
+                .tree_id(),
+        );
+    }
+    let mut visited = HashSet::new();
+    while let Some(oid) = trees.pop() {
+        if !visited.insert(oid) {
+            continue;
         }
-        let mut visited = HashSet::new();
-        while let Some(oid) = trees.pop() {
-            if !visited.insert(oid) {
-                continue;
-            }
-            if visited.len() > MAX_REPOSITORY_INSPECTIONS {
-                return Err(GitPushFailure::Repository);
-            }
-            source.capture(&database, oid).map_err(repository_failure)?;
-            for entry in &repository.find_tree(oid).map_err(repository_failure)? {
-                if entry.kind() == Some(ObjectType::Tree) {
-                    trees.push(entry.id());
-                }
+        if visited.len() > MAX_REPOSITORY_INSPECTIONS {
+            return Err(GitPushFailure::Repository);
+        }
+        source.capture(&database, oid).map_err(repository_failure)?;
+        for entry in &repository.find_tree(oid).map_err(repository_failure)? {
+            if entry.kind() == Some(ObjectType::Tree) {
+                trees.push(entry.id());
             }
         }
-        let tree = |oid| repository.find_commit(oid)?.tree();
-        let merge_tree = tree(target).map_err(repository_failure)?;
-        let base_tree = tree(base).map_err(repository_failure)?;
-        let branch_tree = tree(branch).map_err(repository_failure)?;
-        let ancestor_tree = tree(ancestor).map_err(repository_failure)?;
-        let mut options = diff_options();
-        let mut carried = repository
-            .diff_tree_to_tree(Some(&base_tree), Some(&merge_tree), Some(&mut options))
-            .map_err(repository_failure)?;
-        let mut own = repository
-            .diff_tree_to_tree(Some(&ancestor_tree), Some(&branch_tree), Some(&mut options))
-            .map_err(repository_failure)?;
-        detect_renames(&mut carried, &mut source, &database)?;
-        detect_renames(&mut own, &mut source, &database)?;
-        for (index, delta) in carried.deltas().enumerate() {
-            let path = delta
+    }
+    let tree = |oid| repository.find_commit(oid)?.tree();
+    let merge_tree = tree(target).map_err(repository_failure)?;
+    let base_tree = tree(base).map_err(repository_failure)?;
+    let branch_tree = tree(branch).map_err(repository_failure)?;
+    let ancestor_tree = tree(ancestor).map_err(repository_failure)?;
+    let mut options = diff_options();
+    let mut carried = repository
+        .diff_tree_to_tree(Some(&base_tree), Some(&merge_tree), Some(&mut options))
+        .map_err(repository_failure)?;
+    let mut own = repository
+        .diff_tree_to_tree(Some(&ancestor_tree), Some(&branch_tree), Some(&mut options))
+        .map_err(repository_failure)?;
+    let mut base_changes = repository
+        .diff_tree_to_tree(Some(&ancestor_tree), Some(&base_tree), Some(&mut options))
+        .map_err(repository_failure)?;
+    detect_renames(&mut base_changes, &mut source, &database)?;
+    detect_renames(&mut carried, &mut source, &database)?;
+    detect_renames(&mut own, &mut source, &database)?;
+    for (index, delta) in carried.deltas().enumerate() {
+        let path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .ok_or(GitPushFailure::Repository)?;
+        let own_index = own.deltas().position(|candidate| {
+            let candidate_path = candidate
                 .new_file()
                 .path()
-                .or_else(|| delta.old_file().path())
-                .ok_or(GitPushFailure::Repository)?;
-            if dropped.contains_key(path) {
-                continue;
-            }
-            let own_index = own.deltas().position(|candidate| {
-                candidate
-                    .new_file()
-                    .path()
-                    .or_else(|| candidate.old_file().path())
-                    == Some(path)
-            });
-            // Capture compared paths only, in addition to the rename candidates.
-            for delta in
-                std::iter::once(delta).chain(own_index.and_then(|index| own.get_delta(index)))
-            {
-                for file in [delta.old_file(), delta.new_file()] {
-                    if !file.id().is_zero() && file.mode() != git2::FileMode::Commit {
-                        source
-                            .capture(&database, file.id())
-                            .map_err(repository_failure)?;
-                    }
+                .or_else(|| candidate.old_file().path());
+            base_changes
+                .deltas()
+                .find(|rename| {
+                    rename.status() == Delta::Renamed && rename.old_file().path() == candidate_path
+                })
+                .and_then(|rename| rename.new_file().path())
+                .or(candidate_path)
+                == Some(path)
+        });
+        // Capture compared paths only, in addition to the rename candidates.
+        for delta in std::iter::once(delta).chain(own_index.and_then(|index| own.get_delta(index)))
+        {
+            for file in [delta.old_file(), delta.new_file()] {
+                if !file.id().is_zero() && file.mode() != git2::FileMode::Commit {
+                    source
+                        .capture(&database, file.id())
+                        .map_err(repository_failure)?;
                 }
             }
-            let mut permitted = own_index
-                .map(|index| hunks(&own, index))
-                .transpose()?
-                .unwrap_or_default();
-            for hunk in hunks(&carried, index)? {
-                if let Some(index) = permitted.iter().position(|own| own == &hunk) {
-                    permitted.remove(index);
-                } else {
-                    dropped.insert(path.to_owned(), String::from_utf8_lossy(&hunk).into_owned());
-                    break;
-                }
+        }
+        let mut permitted = own_index
+            .map(|index| hunks(&own, index))
+            .transpose()?
+            .unwrap_or_default();
+        for hunk in hunks(&carried, index)? {
+            if let Some(index) = permitted.iter().position(|own| own == &hunk) {
+                permitted.remove(index);
+            } else {
+                dropped.insert(path.to_owned(), String::from_utf8_lossy(&hunk).into_owned());
+                break;
             }
         }
     }

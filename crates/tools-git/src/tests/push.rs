@@ -975,7 +975,7 @@ async fn push_refuses_merges_above_the_parent_ceiling() {
 
     assert_eq!(
         result,
-        Err(GitPushFailure::MergeParentLimitExceeded {
+        Err(GitPushFailure::UnsupportedMergeShape {
             parents: parents.len()
         })
     );
@@ -983,32 +983,49 @@ async fn push_refuses_merges_above_the_parent_ceiling() {
 }
 
 #[tokio::test]
-async fn push_accepts_merges_at_the_parent_ceiling() {
+async fn push_refuses_an_octopus_merge_preserving_all_three_parents() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
-    let branch = merge_test_commit(&repository, "shared\n", &[]);
-    let parents = vec![branch; crate::limits::MAX_MERGE_PARENTS];
-    let merge = merge_test_commit(&repository, "shared\n", &parents);
+    let ancestor = merge_test_commit_files(&repository, &[], &[]);
+    let branch = merge_test_commit_files(&repository, &[(b"branch.txt", "branch\n")], &[ancestor]);
+    let base = merge_test_commit_files(&repository, &[(b"base.txt", "base\n")], &[ancestor]);
+    let other_base =
+        merge_test_commit_files(&repository, &[(b"other.txt", "other\n")], &[ancestor]);
+    let merge = merge_test_commit_files(
+        &repository,
+        &[
+            (b"branch.txt", "branch\n"),
+            (b"base.txt", "base\n"),
+            (b"other.txt", "other\n"),
+        ],
+        &[branch, base, other_base],
+    );
     let transport = RecordingPushTransport::default();
     let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
 
-    executor
+    let result = executor
         .execute_push(GitPushArguments::for_test(FIX_BRANCH))
-        .await
-        .expect("merge at ceiling pushes");
+        .await;
 
-    assert_eq!(transport.request().commit(), merge.to_string());
+    assert_eq!(
+        result,
+        Err(GitPushFailure::UnsupportedMergeShape { parents: 3 })
+    );
+    assert!(!transport.has_request());
 }
 
 #[tokio::test]
-async fn merge_refusal_retains_only_the_first_dropped_hunk_per_file_across_parents() {
+async fn merge_refusal_retains_only_the_first_dropped_hunk_per_file() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("repository");
-    let ancestor = merge_test_commit(&repository, "shared\n", &[]);
-    let branch = merge_test_commit(&repository, "shared\nbranch\n", &[ancestor]);
-    let base = merge_test_commit(&repository, "shared\nbase\n", &[ancestor]);
-    let other_base = merge_test_commit(&repository, "shared\nother base\n", &[ancestor]);
-    let merge = merge_test_commit(&repository, "shared\nbranch\n", &[branch, base, other_base]);
+    let ancestor = merge_test_commit(&repository, "shared\nseparator\nlast\n", &[]);
+    let branch = merge_test_commit(&repository, "branch\nseparator\nbranch tail\n", &[ancestor]);
+    let base = merge_test_commit(&repository, "base\nseparator\nbase tail\n", &[ancestor]);
+    let merge = merge_test_commit(
+        &repository,
+        "branch\nseparator\nbranch tail\n",
+        &[branch, base],
+    );
     let transport = RecordingPushTransport::default();
     let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
 
@@ -1193,4 +1210,142 @@ async fn merge_refusal_distinguishes_non_utf8_paths_from_each_other_and_literal_
         ]))
     );
     assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_accepts_a_base_rename_carrying_the_branch_edit() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(&repository, &[(b"old.txt", "shared\n")], &[]);
+    let branch = merge_test_commit_files(&repository, &[(b"old.txt", "branch\n")], &[ancestor]);
+    let base = merge_test_commit_files(&repository, &[(b"new.txt", "shared\n")], &[ancestor]);
+    let merge = merge_test_commit_files(&repository, &[(b"new.txt", "branch\n")], &[branch, base]);
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("branch edit follows base rename");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_accepts_a_base_rename_combining_both_parents_edits() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(
+        &repository,
+        &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")],
+        &[],
+    );
+    let branch = merge_test_commit_files(
+        &repository,
+        &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\nbranch\n")],
+        &[ancestor],
+    );
+    let base = merge_test_commit_files(
+        &repository,
+        &[(b"new.txt", "one\ntwo\nthree\nfour\nfive\nsix\nbase\n")],
+        &[ancestor],
+    );
+    let merge = merge_test_commit_files(
+        &repository,
+        &[(
+            b"new.txt",
+            "one\ntwo\nthree\nfour\nfive\nsix\nbase\nbranch\n",
+        )],
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("both edits survive rename");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
+}
+
+#[tokio::test]
+async fn push_refuses_a_base_rename_that_drops_the_base_edit() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(
+        &repository,
+        &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")],
+        &[],
+    );
+    let branch = merge_test_commit_files(
+        &repository,
+        &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\nbranch\n")],
+        &[ancestor],
+    );
+    let base = merge_test_commit_files(
+        &repository,
+        &[(b"new.txt", "one\ntwo\nthree\nfour\nfive\nsix\nbase\n")],
+        &[ancestor],
+    );
+    let merge = merge_test_commit_files(
+        &repository,
+        &[(b"new.txt", "one\ntwo\nthree\nfour\nfive\nsix\nbranch\n")],
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    let result = executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await;
+
+    assert_eq!(
+        result,
+        Err(GitPushFailure::MergeDroppedBaseChanges(vec![
+            DroppedBaseChanges {
+                file: "new.txt".to_owned(),
+                first_dropped_hunk: "-base\n+branch\n".to_owned(),
+            }
+        ]))
+    );
+    assert!(!transport.has_request());
+}
+
+#[tokio::test]
+async fn push_accepts_matching_parent_renames_combining_both_edits() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("repository");
+    let ancestor = merge_test_commit_files(
+        &repository,
+        &[(b"old.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")],
+        &[],
+    );
+    let branch = merge_test_commit_files(
+        &repository,
+        &[(b"new.txt", "one\ntwo\nthree\nfour\nfive\nsix\nbranch\n")],
+        &[ancestor],
+    );
+    let base = merge_test_commit_files(
+        &repository,
+        &[(b"new.txt", "one\ntwo\nthree\nfour\nfive\nsix\nbase\n")],
+        &[ancestor],
+    );
+    let merge = merge_test_commit_files(
+        &repository,
+        &[(
+            b"new.txt",
+            "one\ntwo\nthree\nfour\nfive\nsix\nbase\nbranch\n",
+        )],
+        &[branch, base],
+    );
+    let transport = RecordingPushTransport::default();
+    let mut executor = merge_test_executor(&fixture, merge, branch, transport.clone());
+
+    executor
+        .execute_push(GitPushArguments::for_test(FIX_BRANCH))
+        .await
+        .expect("both edits survive rename");
+
+    assert_eq!(transport.request().commit(), merge.to_string());
 }
