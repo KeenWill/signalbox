@@ -2294,7 +2294,7 @@ test("generated detail decoder requires a continued body to end the page", () =>
   );
 });
 
-test("generated detail decoder rejects a continuation on an empty page", () => {
+test("generated detail decoder accepts an unreturned item continuation on an empty page", () => {
   const page = userInputDetailPage();
   page.items = [];
   page.projected_body_bytes = 0;
@@ -2303,9 +2303,41 @@ test("generated detail decoder rejects a continuation on an empty page", () => {
     address: { event_sequence: "9" },
   };
 
+  assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+});
+
+test("generated detail decoder rejects charged bytes on an empty continuation page", () => {
+  const page = userInputDetailPage();
+  page.items = [];
+  page.projected_body_bytes = 128;
+  page.continuation = {
+    type: "more_at",
+    address: { event_sequence: "9" },
+  };
+
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
-    /absent on an empty page/,
+    /the computed 0 bytes/,
+  );
+});
+
+test("generated detail decoder rejects a body continuation on an empty page", () => {
+  const page = userInputDetailPage();
+  page.items = [];
+  page.projected_body_bytes = 0;
+  page.continuation = {
+    type: "more_body",
+    body: {
+      address: { event_sequence: "9" },
+      field: "input_text",
+      member_index: 0,
+      offset_bytes: "3",
+    },
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /the excerpt body continuation/,
   );
 });
 
@@ -3354,4 +3386,22 @@ test("escalated approvals can close with a policy denial", () => {
   page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
   page.items[0].body.decision = "approve";
   assert.throws(() => decodeWebSessionTimelineDetailPage(page), /a user actor or policy denial when the approval judge escalated/);
+});
+
+test("runner detail accounts for working directory UTF-8 bytes", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "runner_state_transition";
+  for (const working_directory of [null, "/workspace/é", "/" + "é".repeat(2047) + "x"]) {
+    const bytes = new TextEncoder().encode(working_directory ?? "").byteLength;
+    page.items[0].body = {
+      type: "runner", runner_id: page.session_id, placement_revision: "1",
+      sandbox_posture: "unsandboxed", working_directory, state: "working_directory_changed",
+    };
+    page.items[0].projected_body_bytes = page.projected_body_bytes = 128 + bytes;
+    assert.deepEqual(decodeWebSessionTimelineDetailPage(page), page);
+    if (working_directory !== null) {
+      page.items[0].projected_body_bytes = page.projected_body_bytes = 128;
+      assert.throws(() => decodeWebSessionTimelineDetailPage(page), /projected_body_bytes must be the computed/);
+    }
+  }
 });

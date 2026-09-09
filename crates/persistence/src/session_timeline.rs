@@ -313,11 +313,13 @@ impl SessionTimelineRepository {
             limits.max_projected_bytes(),
         )
         .await?;
-        let projected_body_bytes = detail.projected_body_bytes;
+        let projected_body_bytes = detail
+            .as_ref()
+            .map_or(0, |detail| detail.projected_body_bytes);
         transaction.commit().await?;
         Ok(Some(SessionTimelineDetailPage {
             session,
-            items: vec![detail],
+            items: detail.into_iter().collect(),
             projected_body_bytes,
             continuation,
         }))
@@ -627,10 +629,12 @@ async fn project_address_page(
             .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
         let (detail, body_continuation) =
             project_detail_event(transaction, &event, event_cursor, remaining).await?;
-        remaining = remaining
-            .checked_sub(detail.projected_body_bytes)
-            .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
-        items.push(detail);
+        if let Some(detail) = detail {
+            remaining = remaining
+                .checked_sub(detail.projected_body_bytes)
+                .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
+            items.push(detail);
+        }
         if body_continuation.is_some() {
             continuation = body_continuation;
             break;
@@ -880,7 +884,10 @@ async fn project_detail_event(
     cursor: Option<TimelineDetailCursor>,
     max_bytes: u32,
 ) -> Result<
-    (SessionTimelineDetail, Option<TimelineDetailContinuation>),
+    (
+        Option<SessionTimelineDetail>,
+        Option<TimelineDetailContinuation>,
+    ),
     SessionTimelineRepositoryError,
 > {
     if max_bytes < DETAIL_ENVELOPE_BYTES {
@@ -1193,6 +1200,14 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                     state,
                 } => {
                     require_no_body_cursor(cursor)?;
+                    if let Some(directory) = working_directory {
+                        let directory_bytes = u32::try_from(directory.as_str().len())
+                            .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
+                        let Some(after_directory) = remaining.checked_sub(directory_bytes) else {
+                            return Ok((None, Some(TimelineDetailContinuation::MoreAt(address))));
+                        };
+                        remaining = after_directory;
+                    }
                     (
                         SessionTimelineDetailBody::Runner {
                             runner_id: *runner,
@@ -1378,12 +1393,12 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
         .checked_sub(remaining)
         .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
     Ok((
-        SessionTimelineDetail {
+        Some(SessionTimelineDetail {
             address,
             kind,
             body,
             projected_body_bytes,
-        },
+        }),
         body_continuation,
     ))
 }

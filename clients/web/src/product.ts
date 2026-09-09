@@ -1296,10 +1296,11 @@ async function readSessionTextPage(
       }
     }
     cursor = page.continuation ?? null
+    const last = page.items.at(-1)
+    if (!last) break
     if (
       cursor?.type === 'more_at' &&
-      BigInt(cursor.address.event_sequence) <=
-        BigInt(page.items.at(-1)?.address.event_sequence ?? through)
+      BigInt(cursor.address.event_sequence) <= BigInt(last.address.event_sequence)
     ) {
       throw new TypeError('Transcript continuation does not advance')
     }
