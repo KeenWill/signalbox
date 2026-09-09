@@ -6,6 +6,7 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::error::Error;
 
 use signalbox_domain::{
@@ -13,47 +14,16 @@ use signalbox_domain::{
     ProgramRunId, ReplayCursor, ReplayInstruction, ReplayedRequest, RequestFrame, RequestKind,
     ScopeOperation, ScopeOrdinal, ScopeRequest,
 };
-use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options, migrate,
-    program_journal::{ProgramJournalCorruption, ProgramJournalRepository},
-};
-use sqlx::{PgPool, postgres::PgPoolOptions};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
+use signalbox_persistence::program_journal::{ProgramJournalCorruption, ProgramJournalRepository};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-#[path = "../../../tooling/postgres_test_image.rs"]
-mod postgres_test_image;
-use postgres_test_image::POSTGRES_IMAGE_TAG;
-const DATABASE_NAME: &str = "signalbox_program_journal";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const RUN_ID: u128 = 0x5100_0100;
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+    Ok((database, pool))
 }
 
 fn run_id() -> ProgramRunId {
@@ -1237,6 +1207,112 @@ async fn terminal_answer_cannot_adopt_a_request_emitted_with_outstanding_work()
             .result()
             .is_none()
     );
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_answer_rejects_work_appended_and_resolved_after_its_request()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    let work = repository
+        .append_request(run, None, RequestKind::Now(payload(b"clock")))
+        .await?;
+    repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: work.ordinal(),
+                payload: payload(b"time"),
+            },
+        )
+        .await?;
+    let before = repository.load(run).await?.expect("pending terminal");
+    let error = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: terminal.ordinal(),
+                payload: InlineFramePayload::default(),
+            },
+        )
+        .await
+        .expect_err("intervening work prevents successful completion");
+    let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+        source,
+        ..
+    } = error
+    else {
+        panic!("expected database rejection, got {error:?}");
+    };
+    assert_trigger_error(
+        source,
+        "terminal answer must immediately follow its request on a running run with no other outstanding requests",
+    );
+    assert_eq!(
+        repository.load(run).await?.expect("unchanged journal"),
+        before
+    );
+    assert!(before.result().is_none());
+    pool.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_answer_rejects_an_intervening_scope_frame() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = run_id();
+    repository.create_stream(run).await?;
+    let terminal = repository
+        .append_request(run, None, RequestKind::Terminal(payload(b"result")))
+        .await?;
+    repository
+        .append_request(
+            run,
+            None,
+            RequestKind::Scope(ScopeRequest::new(
+                ScopeOperation::Open,
+                ScopeOrdinal::try_from_u64(1).expect("scope"),
+                None,
+            )),
+        )
+        .await?;
+    let before = repository.load(run).await?.expect("pending terminal");
+    let error = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: terminal.ordinal(),
+                payload: InlineFramePayload::default(),
+            },
+        )
+        .await
+        .expect_err("intervening scope prevents successful completion");
+    let signalbox_persistence::program_journal::ProgramJournalRepositoryError::Database {
+        source,
+        ..
+    } = error
+    else {
+        panic!("expected database rejection, got {error:?}");
+    };
+    assert_trigger_error(
+        source,
+        "terminal answer must immediately follow its request on a running run with no other outstanding requests",
+    );
+    assert_eq!(
+        repository.load(run).await?.expect("unchanged journal"),
+        before
+    );
+    assert!(before.result().is_none());
     pool.close().await;
     Ok(())
 }

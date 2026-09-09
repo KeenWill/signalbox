@@ -71,10 +71,9 @@ async fn cancellation_of_success_returns_exact_result_on_every_retry() -> Result
         &ServerMessage::ProgramRunCancellationReceipt {
             command_id,
             run_id,
-            outcome: ProgramRunCancellationOutcome::AlreadyTerminal {
-                terminal_state: signalbox_process_protocol::ProgramRunTerminalState::Succeeded,
-                result: Some(result),
-            },
+            outcome: ProgramRunCancellationOutcome::AlreadyTerminal(
+                signalbox_process_protocol::ProgramRunTerminalState::Succeeded { result },
+            ),
         }
     );
     connection

@@ -1,6 +1,8 @@
 module(name = "signalbox")
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "rules_shell", version = "0.8.0")
 
 # Match Cargo formatting and build-script lint policy.
 single_version_override(
@@ -20,6 +22,7 @@ bazel_dep(name = "rules_nodejs", version = "6.7.5")
 bazel_dep(name = "toml.bzl", version = "0.4.1")
 
 rust_toolchain_pin = use_repo_rule("//tooling/bazel:rust_toolchain_pin.bzl", "rust_toolchain_pin")
+
 rust_toolchain_pin(
     name = "rust_toolchain_pin",
     manifest = "//:rust-toolchain.toml",
@@ -62,7 +65,7 @@ RUST_VERSION = "1.98.1"
 
 RUSTDOC_TOOLCHAIN = "nightly-2026-09-09"
 
-rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust = use_extension("//tooling/bazel:rust_toolchains.bzl", "rust")
 rust.toolchain(
     edition = "2024",
     rustfmt_version = RUST_VERSION,
@@ -75,7 +78,7 @@ use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
 
-host_tools = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
+host_tools = use_extension("//tooling/bazel:rust_toolchains.bzl", "rust_host_tools")
 host_tools.host_tools(
     name = "signalbox_rust_host_tools",
     version = RUST_VERSION,

@@ -15,11 +15,11 @@ pub enum ProgramRunCancelledState {
 
 ```rust
 pub enum ProgramRunTerminalState {
-    Cancelled,
-    Faulted,
-    Succeeded,
+    Cancelled { result: () },
+    Faulted { result: () },
+    Succeeded { result: vec::Vec<u8> },
 }
-// derives: clone::Clone, marker::Copy, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
 
 ## ProgramRunCancellationOutcome
@@ -31,10 +31,7 @@ pub enum ProgramRunCancellationOutcome {
         result: (),
     },
     NotFound {},
-    AlreadyTerminal {
-        terminal_state: ProgramRunTerminalState,
-        result: option::Option<vec::Vec<u8>>,
-    },
+    AlreadyTerminal(ProgramRunTerminalState),
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```

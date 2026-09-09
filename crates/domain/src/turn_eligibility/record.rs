@@ -22,6 +22,8 @@ use crate::{
 pub enum AcceptedInputTurnSchedulingRecordState {
     /// No start, semantic origin entry, snapshot, or attempt exists.
     Queued,
+    /// The unstarted turn was retired; its immutable origin still proves an interrupt.
+    Retired,
     /// The turn owns the session's progressing slot.
     Active {
         /// The stored lineage selected at eligibility.

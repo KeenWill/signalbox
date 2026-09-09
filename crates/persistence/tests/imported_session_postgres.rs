@@ -7,6 +7,7 @@
 
 mod support;
 
+use signalbox_persistence::test_support::postgres::TestDatabase;
 use std::{
     collections::BTreeSet,
     error::Error,
@@ -37,27 +38,14 @@ use signalbox_persistence::{
         ImportedSessionCorruption, ImportedSessionIdentityCollision, ImportedSessionRepository,
         ImportedSessionRepositoryError,
     },
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
-    disposable_test_container_labels, local_test_connection_options,
     mapping::DurableCommandIdMappingError,
-    migrate,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
     session_placement::SessionPlacementRepository,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
+use sqlx::{PgPool, types::Uuid};
 
 use support::blocked_backends_reached;
 
-#[path = "../../../tooling/postgres_test_image.rs"]
-mod postgres_test_image;
-use postgres_test_image::POSTGRES_IMAGE_TAG;
-const DATABASE_NAME: &str = "signalbox_imported_session_integration";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const ARBITRARY_LAGGING_HEAD_CONVERSATION_ID_SEED: u128 = 0x122;
 const ARBITRARY_LAGGING_HEAD_IMPORTED_ENTRY_ID_SEED: u128 = 0x222;
 const ARBITRARY_LAGGING_HEAD_CREATION_COMMAND_ID_SEED: u128 = 0x322;
@@ -78,27 +66,10 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
     .expect("test credential pin is valid")
 }
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
+async fn migrated_postgres() -> Result<(TestDatabase, PgPool), Box<dyn Error>> {
+    let (database, pool, _) =
+        signalbox_persistence::test_support::postgres::migrated_postgres(4).await?;
+    Ok((database, pool))
 }
 
 fn imported(conversation: u128, first_entry: u128, source: &str) -> ImportedConversation {

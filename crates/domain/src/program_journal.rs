@@ -2,7 +2,12 @@
 //!
 //! The normative cross-component contract is `docs/spec/workflows.md`.
 
-use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    num::NonZeroU64,
+};
 
 use crate::ProgramRunId;
 
@@ -437,7 +442,7 @@ impl ProgramJournal {
         let mut next_delivery = 1_u64;
         let mut answerable = BTreeSet::new();
         let mut resolved = BTreeSet::new();
-        let mut terminals = BTreeSet::new();
+        let mut terminals = BTreeMap::new();
         let mut refused_terminals = BTreeSet::new();
         let mut ended = false;
         let mut succeeded = false;
@@ -462,7 +467,7 @@ impl ProgramJournal {
                         .checked_add(1)
                         .ok_or(ProgramJournalError::OrdinalExhausted)?;
                     if matches!(request.kind(), RequestKind::Terminal(_)) {
-                        terminals.insert(request.ordinal());
+                        terminals.insert(request.ordinal(), entry.position().as_u64());
                         if answerable.len() != resolved.len() {
                             refused_terminals.insert(request.ordinal());
                         }
@@ -482,11 +487,12 @@ impl ProgramJournal {
                         ended = true;
                     }
                     if let Some(request) = delivery.kind().resolves() {
-                        if terminals.contains(&request)
+                        if let Some(terminal_position) = terminals.get(&request)
                             && matches!(delivery.kind(), DeliveryKind::Answer { .. })
                         {
                             if ended
                                 || refused_terminals.contains(&request)
+                                || entry.position().as_u64() != terminal_position + 1
                                 || answerable.len() != resolved.len() + 1
                             {
                                 return Err(ProgramJournalError::InvalidTerminalAnswer);
@@ -541,7 +547,7 @@ impl fmt::Display for ProgramJournalError {
             Self::UnknownResolvedRequest => "delivery resolves no earlier answerable request",
             Self::RequestResolvedTwice => "request has more than one resolving delivery",
             Self::InvalidTerminalAnswer => {
-                "terminal answer requires a running run with no other outstanding requests"
+                "terminal answer must immediately follow its request on a running run with no other outstanding requests"
             }
             Self::FrameAfterSuccess => "journal frame follows accepted success",
             Self::OrdinalExhausted => "journal ordinal is exhausted",
@@ -815,6 +821,52 @@ mod tests {
         ]);
         assert!(rejected.result().is_none());
         assert!(rejected.terminal_delivery().is_none());
+    }
+
+    #[test]
+    fn terminal_answer_rejects_work_appended_and_resolved_after_its_request() {
+        let terminal = RequestFrame::new(
+            RequestOrdinal::try_from_u64(1).expect("ordinal"),
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"result".as_slice())),
+        );
+        let entries = vec![
+            entry(1, JournalFrame::Request(terminal)),
+            entry(2, JournalFrame::Request(request(2, b"work"))),
+            entry(3, JournalFrame::Delivery(delivery(1, 2, b"drained"))),
+            entry(4, JournalFrame::Delivery(delivery(2, 1, b"ack"))),
+        ];
+        assert_eq!(
+            ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+            Err(ProgramJournalError::InvalidTerminalAnswer)
+        );
+    }
+
+    #[test]
+    fn terminal_answer_rejects_an_intervening_scope_frame() {
+        let terminal = RequestFrame::new(
+            RequestOrdinal::try_from_u64(1).expect("ordinal"),
+            None,
+            RequestKind::Terminal(InlineFramePayload::new(b"result".as_slice())),
+        );
+        let scope = RequestFrame::new(
+            RequestOrdinal::try_from_u64(2).expect("ordinal"),
+            None,
+            RequestKind::Scope(ScopeRequest::new(
+                ScopeOperation::Open,
+                ScopeOrdinal::try_from_u64(1).expect("scope"),
+                None,
+            )),
+        );
+        let entries = vec![
+            entry(1, JournalFrame::Request(terminal)),
+            entry(2, JournalFrame::Request(scope)),
+            entry(3, JournalFrame::Delivery(delivery(1, 1, b"ack"))),
+        ];
+        assert_eq!(
+            ProgramJournal::try_new(ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID)), entries),
+            Err(ProgramJournalError::InvalidTerminalAnswer)
+        );
     }
 
     /// replay delivers concurrent answers in durable delivery order.

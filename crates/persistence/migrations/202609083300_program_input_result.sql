@@ -20,7 +20,8 @@ BEGIN
         WHERE run_id = NEW.run_id AND request_ordinal = NEW.resolves_request_ordinal
             AND frame_kind = 'terminal';
         IF terminal_position IS NOT NULL AND (
-            EXISTS (SELECT 1 FROM program_run_journal_entry
+            NEW.journal_position <> terminal_position + 1
+            OR EXISTS (SELECT 1 FROM program_run_journal_entry
                 WHERE run_id = NEW.run_id AND frame_kind IN ('run_cancel', 'fault'))
             OR EXISTS (
                 SELECT 1 FROM program_run_journal_entry AS request
@@ -39,7 +40,7 @@ BEGIN
                     )))
             )
         ) THEN
-            RAISE EXCEPTION 'terminal answer requires a running run with no other outstanding requests'
+            RAISE EXCEPTION 'terminal answer must immediately follow its request on a running run with no other outstanding requests'
                 USING ERRCODE = '23514';
         END IF;
     END IF;

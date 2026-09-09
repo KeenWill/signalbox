@@ -22,7 +22,7 @@
 | credential_capacity | 0 | 0 | 1 | [credential_capacity](credential_capacity.md) |
 | credential_exclusions | 6 | 0 | 2 | [credential_exclusions](credential_exclusions.md) |
 | credential_invocations | 0 | 0 | 6 | [credential_invocations](credential_invocations.md) |
-| goal | 8 | 0 | 0 | [goal](goal.md) |
+| goal | 9 | 0 | 0 | [goal](goal.md) |
 | goal_turn | 2 | 0 | 0 | [goal_turn](goal_turn.md) |
 | hub_fence | 4 | 0 | 3 | [hub_fence](hub_fence.md) |
 | lifecycle_metrics | 8 | 0 | 0 | [lifecycle_metrics](lifecycle_metrics.md) |
@@ -59,7 +59,7 @@
 | startup | 4 | 0 | 0 | [startup](startup.md) |
 | submit_input | 5 | 0 | 0 | [submit_input](submit_input.md) |
 | termination_receipt | 2 | 0 | 1 | [termination_receipt](termination_receipt.md) |
-| test_support | 2 | 0 | 5 | [test_support](test_support.md) |
+| test_support | 3 | 0 | 6 | [test_support](test_support.md) |
 | tool_loop | 3 | 0 | 0 | [tool_loop](tool_loop.md) |
 | turn_liveness | 5 | 0 | 0 | [turn_liveness](turn_liveness.md) |
 | usage | 3 | 0 | 1 | [usage](usage.md) |

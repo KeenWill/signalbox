@@ -27,6 +27,12 @@ The closed event-kind vocabulary is:
 - `base_advanced`
 - `reaction_changed`
 
+Provider-keyed `ChecksCompleted`, `CheckRunCompleted`, and `ReviewSubmitted`
+identities frame the repository, pull-request number and head SHA, event kind,
+and provider suite or run ID with completion generation, or review ID; mutable
+pull-request presentation and payload fields are excluded. Check-run occurrence
+sequences distinguish later conclusion changes.
+
 Rules are versioned `RepoWatchRule` values. Fields within one matcher are
 conjunctive and rules are evaluated independently. The checked matcher owns the
 repository, event-kind, pull-request context, label, draft, author,

@@ -9,13 +9,13 @@ pub enum ProgramRunCancelledState {
     Cancelled,
 }
 
-/// Terminal states recorded by the program journal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Terminal states and their retained results recorded by the program journal.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "terminal_state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProgramRunTerminalState {
-    Cancelled,
-    Faulted,
-    Succeeded,
+    Cancelled { result: () },
+    Faulted { result: () },
+    Succeeded { result: Vec<u8> },
 }
 
 /// Closed result of a durable program cancellation command.
@@ -27,8 +27,5 @@ pub enum ProgramRunCancellationOutcome {
         result: (),
     },
     NotFound {},
-    AlreadyTerminal {
-        terminal_state: ProgramRunTerminalState,
-        result: Option<Vec<u8>>,
-    },
+    AlreadyTerminal(ProgramRunTerminalState),
 }

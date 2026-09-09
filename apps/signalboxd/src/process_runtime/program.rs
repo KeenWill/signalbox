@@ -28,17 +28,15 @@ pub(super) async fn handle_cancel_program_run<Writer: AsyncWrite + Unpin>(
             result: (),
         },
         Ok(Result::Recorded(Outcome::NotFound)) => WireOutcome::NotFound {},
-        Ok(Result::Recorded(Outcome::AlreadyTerminal(state))) => WireOutcome::AlreadyTerminal {
-            result: match &state {
-                State::Succeeded(result) => Some(result.as_bytes().to_vec()),
-                _ => None,
-            },
-            terminal_state: match state {
-                State::Cancelled => ProgramRunTerminalState::Cancelled,
-                State::Faulted => ProgramRunTerminalState::Faulted,
-                State::Succeeded(_) => ProgramRunTerminalState::Succeeded,
-            },
-        },
+        Ok(Result::Recorded(Outcome::AlreadyTerminal(state))) => {
+            WireOutcome::AlreadyTerminal(match state {
+                State::Cancelled => ProgramRunTerminalState::Cancelled { result: () },
+                State::Faulted => ProgramRunTerminalState::Faulted { result: () },
+                State::Succeeded(result) => ProgramRunTerminalState::Succeeded {
+                    result: result.as_bytes().to_vec(),
+                },
+            })
+        }
         Ok(Result::ConflictingReuse) => {
             return write_error(
                 writer,
