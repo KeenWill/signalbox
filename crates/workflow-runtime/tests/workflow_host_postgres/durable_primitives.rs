@@ -363,3 +363,38 @@ async fn committed_source_answer_wakes_a_listener_for_catch_up() -> Result<(), B
     pool.close().await;
     Ok(())
 }
+
+#[path = "../../../../tooling/postgres_test_image.rs"]
+mod postgres_test_image;
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn journal_listener_leaves_the_single_query_connection_available()
+-> Result<(), Box<dyn Error>> {
+    use testcontainers_modules::{
+        postgres::Postgres,
+        testcontainers::{ImageExt, runners::AsyncRunner},
+    };
+    const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let container = Postgres::default()
+        .with_cmd(signalbox_persistence::disposable_postgres_server_args())
+        .with_mount(signalbox_persistence::disposable_postgres_state_tmpfs_from_example()?)
+        .with_tag(postgres_test_image::POSTGRES_IMAGE_TAG)
+        .with_labels(signalbox_persistence::disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    // The image's default disposable user and database are both postgres.
+    let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(signalbox_persistence::local_test_connection_options(&url)?)
+        .await?;
+    let journal = ProgramJournalRepository::new(pool.clone());
+    let listener = journal.listen().await?;
+    tokio::time::timeout(QUERY_TIMEOUT, sqlx::query("SELECT 1").execute(&pool)).await??;
+    drop(listener);
+    pool.close().await;
+    Ok(())
+}

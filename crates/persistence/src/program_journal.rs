@@ -134,7 +134,10 @@ impl ProgramJournalRepository {
 
     /// Listens for committed journal changes; notifications carry no authoritative state.
     pub async fn listen(&self) -> Result<ProgramJournalWake, ProgramJournalRepositoryError> {
-        let mut listener = sqlx::postgres::PgListener::connect_with(&self.pool).await?;
+        let listener_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(self.pool.connect_options().as_ref().clone());
+        let mut listener = sqlx::postgres::PgListener::connect_with(&listener_pool).await?;
         listener.listen("signalbox_program_journal").await?;
         Ok(ProgramJournalWake(listener))
     }
