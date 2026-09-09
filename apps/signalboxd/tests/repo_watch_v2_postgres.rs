@@ -4623,3 +4623,124 @@ async fn incomplete_poll_does_not_retain_validators_from_partial_pages()
     container.stop().await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL"]
+async fn labeled_webhook_dispatches_without_a_poll() -> Result<(), Box<dyn Error>> {
+    use signalbox_module_repo_watch_v2::poll_cache::observe_webhook_pulls;
+    let (container, core_pool, url) = postgres().await?;
+    migrate(&core_pool).await?;
+    sqlx::query("ALTER ROLE mod_repo_watch PASSWORD 'signalbox-test-only'")
+        .execute(&core_pool)
+        .await?;
+    let pool = module_pool(&url).await?;
+    let store = RepoWatchStore::new(pool.clone());
+    let repository = RepositorySlug::try_new(String::from("example/project"))?;
+    store.prepare_poll_cache(&repository, &[]).await?;
+    let now = OffsetDateTime::now_utc();
+    let opened = Uuid::now_v7();
+    store
+        .admit_webhook(WebhookDelivery {
+            repository: &repository,
+            hook_id: 1,
+            delivery_id: opened,
+            event: "pull_request",
+            action: Some("opened"),
+            body: br#"{"action":"opened","pull_request":{"number":1}}"#,
+            received_at: now,
+            expires_at: now + MERGED_RETENTION,
+        })
+        .await?;
+    store
+        .settle_webhook(1, opened, WebhookDisposition::Applied, now)
+        .await?;
+    let mut io = ConditionalPollFixture::new();
+    observe_webhook_pulls(&io, &store, &repository, &[], MERGED_RETENTION).await?;
+    let rule = RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(String::from("label-dispatch"))?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::Labeled],
+            repository: Some(repository.clone()),
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(String::from("watch"))?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::ZERO,
+    )?;
+    store
+        .reconcile_rules(
+            &[RepositoryRuleSet::new(
+                &repository,
+                std::slice::from_ref(&rule),
+            )],
+            now,
+        )
+        .await?;
+    let delivery = Uuid::now_v7();
+    let body = br#"{"action":"labeled","pull_request":{"number":1}}"#;
+    assert_eq!(
+        store
+            .admit_webhook(WebhookDelivery {
+                repository: &repository,
+                hook_id: 1,
+                delivery_id: delivery,
+                event: "pull_request",
+                action: Some("labeled"),
+                body,
+                received_at: now,
+                expires_at: now + MERGED_RETENTION,
+            })
+            .await?,
+        WebhookAdmission::Inserted
+    );
+    assert!(
+        store
+            .settle_webhook(1, delivery, WebhookDisposition::Applied, now)
+            .await?
+    );
+    io.pages
+        .get_mut("/repos/example/project/pulls/1")
+        .expect("pull detail")
+        .0["labels"] = serde_json::json!([{"name":"repo-watch"}]);
+    observe_webhook_pulls(&io, &store, &repository, &[], MERGED_RETENTION).await?;
+    let mut ids = FixedDispatchIds {
+        value: 61001,
+        calls: 0,
+    };
+    let mut factory = FixtureSessionFactory {
+        next_command: 62001,
+        model: 63001,
+    };
+    let mut codec = FixtureCommandCodec;
+    assert!(
+        store
+            .evaluate_next(&repository, &rule, &mut ids, &mut factory, &mut codec, now)
+            .await
+            .expect("label event evaluates")
+    );
+    assert_eq!(store.recover_pending_commands(&mut codec).await?.len(), 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_pull_wake")
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    assert!(
+        io.requests
+            .lock()
+            .expect("requests")
+            .iter()
+            .all(|request| !request.path.contains("state=open")
+                && !request.path.contains("/actions/"))
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT bool_and(producer='webhook') FROM gh_event")
+            .fetch_one(&pool)
+            .await?
+    );
+    drop(container);
+    Ok(())
+}

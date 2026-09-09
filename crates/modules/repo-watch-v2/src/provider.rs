@@ -298,6 +298,18 @@ impl<Loader: RepositoryClientLoader> GitHubRepositoryTask<Loader> {
             .load_client()
             .await
             .map_err(RepositoryAttemptError::Client)?;
+        crate::poll_cache::observe_webhook_pulls(
+            &client,
+            &self.store,
+            &self.repository,
+            &self.signal_reviewers,
+            self.subject_retention,
+        )
+        .await
+        .map_err(RepositoryAttemptError::Observation)?;
+        if producer == EventProducer::Webhook {
+            return Ok(());
+        }
         let admission = crate::poll_cache::poll_with_cache(
             &client,
             &self.store,
@@ -429,6 +441,85 @@ pub async fn fetch_observation(
         default_head,
         observation: RepoWatchObservation::new(reviewers.to_vec(), state),
         merged_at,
+        observed_at: OffsetDateTime::now_utc(),
+    })
+}
+
+/// Refreshes one pull request while retaining all other committed comparison subjects.
+pub async fn fetch_pull_observation(
+    io: &impl GitHubObservationRead,
+    repository: &RepositorySlug,
+    reviewers: &[RepoWatchAuthorLogin],
+    baseline: &crate::ingest::IngestBaseline,
+    number: PullRequestNumber,
+) -> Result<RepositoryObservation, ObservationError> {
+    let budget = ObservationReadBudget {
+        io,
+        requests: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let io = &budget;
+    let root = format!("/repos/{}", repository.as_str());
+    let (metadata, _) = read_page(io, &root).await?;
+    let default_branch =
+        metadata.admit(BranchName::try_new(metadata.text(&metadata["default_branch"])?).ok())?;
+    let previous = baseline.observation.as_ref();
+    let mut branch_heads = previous
+        .map(|prior| prior.state().branch_heads().to_vec())
+        .unwrap_or_default();
+    if !branch_heads
+        .iter()
+        .any(|branch| branch.branch() == &default_branch)
+    {
+        branch_heads = pages(io, &format!("{root}/branches"), None)
+            .await?
+            .iter()
+            .map(|v| {
+                Ok(RepoWatchBranchHead::new(
+                    v.admit(BranchName::try_new(v.text(&v["name"])?).ok())?,
+                    v.admit(CommitSha::try_new(v.text(&v["commit"]["sha"])?).ok())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, ObservationError>>()?;
+    }
+    let default_head = metadata
+        .admit(
+            branch_heads
+                .iter()
+                .find(|branch| branch.branch() == &default_branch),
+        )?
+        .head()
+        .clone();
+    let mut pulls = previous
+        .map(|prior| prior.state().pull_requests().to_vec())
+        .unwrap_or_default();
+    let prior = pulls.iter().find(|pull| pull.context().number() == number);
+    let merged = baseline
+        .merged_baselines
+        .iter()
+        .find(|entry| entry.state.number() == number)
+        .map(|entry| &entry.state);
+    let (pull, merge_time) =
+        fetch_pull(io, &root, repository, number, reviewers, prior, merged).await?;
+    pulls.retain(|pull| pull.context().number() != number);
+    pulls.push(pull);
+    let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+        pull_requests: pulls,
+        branch_heads,
+        workflow_runs: previous
+            .map(|prior| prior.state().workflow_runs().to_vec())
+            .unwrap_or_default(),
+    })
+    .map_err(|source| ObservationError::InvalidState {
+        repository: repository.clone(),
+        pull_request: Some(number),
+        source,
+    })?;
+    Ok(RepositoryObservation {
+        repository: repository.clone(),
+        default_branch,
+        default_head,
+        observation: RepoWatchObservation::new(reviewers.to_vec(), state),
+        merged_at: merge_time.map(|time| (number, time)).into_iter().collect(),
         observed_at: OffsetDateTime::now_utc(),
     })
 }

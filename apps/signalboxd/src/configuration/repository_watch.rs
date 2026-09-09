@@ -92,7 +92,7 @@ impl fmt::Debug for WatchedRepositoryWebhookConfiguration {
 /// Per-repository rollout mode for authenticated webhook deliveries.
 ///
 /// Shadow authenticates and acknowledges without waking ingestion. Primary
-/// wakes the repository task to fetch a complete provider observation.
+/// wakes the repository task to observe the named pull requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryWatchWebhookMode {
     Shadow,

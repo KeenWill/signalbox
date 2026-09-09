@@ -992,6 +992,65 @@ pub async fn poll_with_cache(
     }
     Ok(admission)
 }
+/// Drains the pending primary-webhook subjects through ordinary event admission.
+pub async fn observe_webhook_pulls(
+    io: &impl ConditionalObservationRead,
+    store: &RepoWatchStore,
+    repository: &RepositorySlug,
+    reviewers: &[RepoWatchAuthorLogin],
+    retention: std::time::Duration,
+) -> Result<(), ObservationError> {
+    use rust_decimal::{Decimal, prelude::ToPrimitive};
+    let pending: Vec<(Decimal, uuid::Uuid)> = sqlx::query_as(
+        "SELECT pull_request_number, delivery_id FROM webhook_pull_wake
+         WHERE repository=$1 ORDER BY pull_request_number",
+    )
+    .bind(repository.as_str())
+    .fetch_all(&store.pool)
+    .await
+    .map_err(StoreError::from)
+    .map_err(ObservationError::Cache)?;
+    for (number, delivery) in pending {
+        let pull = number
+            .to_u64()
+            .and_then(NonZeroU64::new)
+            .map(signalbox_session_ownership::PullRequestNumber::new)
+            .ok_or(ObservationError::InvalidResponse)?;
+        let baseline = store
+            .ingest_baseline(repository)
+            .await
+            .map_err(ObservationError::Cache)?;
+        let cached = CachedObservationRead::new(io, store, repository, reviewers);
+        let counted = ObservationReadCounts {
+            io: &cached,
+            requests: std::sync::atomic::AtomicUsize::new(0),
+            comments: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let observed = crate::provider::fetch_pull_observation(
+            &counted, repository, reviewers, &baseline, pull,
+        )
+        .await?;
+        let admission = store
+            .ingest_observation(&baseline, &observed, EventProducer::Webhook, retention)
+            .await
+            .map_err(ObservationError::Cache)?;
+        if !matches!(
+            admission,
+            FrontierEventAdmission::Committed { .. } | FrontierEventAdmission::Unchanged
+        ) {
+            return Err(ObservationError::Cache(
+                StoreError::InvalidComparisonBaseline,
+            ));
+        }
+        tracing::info!(repository=repository.as_str(),producer=?EventProducer::Webhook,
+            pull_request=pull.get(),requests=counted.requests.load(std::sync::atomic::Ordering::Relaxed),
+            "repository-watch observation completed");
+        sqlx::query("DELETE FROM webhook_pull_wake WHERE repository=$1 AND pull_request_number=$2 AND delivery_id=$3")
+            .bind(repository.as_str()).bind(number).bind(delivery).execute(&store.pool).await.map_err(StoreError::from).map_err(ObservationError::Cache)?;
+    }
+    Ok(())
+}
+
 struct ObservationReadCounts<'a, T> {
     io: &'a T,
     requests: std::sync::atomic::AtomicUsize,

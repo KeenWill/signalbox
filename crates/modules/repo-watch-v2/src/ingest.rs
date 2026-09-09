@@ -323,6 +323,55 @@ pub async fn run_repository_task(
     }
 }
 
+pub(crate) async fn queue_webhook_pulls(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    hook_id: u64,
+    delivery_id: uuid::Uuid,
+) -> Result<(), StoreError> {
+    let (repository, event, body): (String, String, Vec<u8>) = sqlx::query_as(
+        "SELECT repository, event_kind, body FROM webhook_delivery
+         JOIN webhook_body USING (hook_id, delivery_id)
+         WHERE hook_id=$1 AND delivery_id=$2",
+    )
+    .bind(Decimal::from(hook_id))
+    .bind(delivery_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let payload: Value =
+        serde_json::from_slice(&body).map_err(|_| StoreError::InvalidComparisonBaseline)?;
+    let mut numbers = std::collections::BTreeSet::new();
+    match event.as_str() {
+        "pull_request" | "pull_request_review" | "pull_request_review_comment" => {
+            if let Some(number) = observation_decode::positive(&payload["pull_request"]["number"]) {
+                numbers.insert(number);
+            }
+        }
+        "check_run" | "check_suite" => {
+            if let Some(pulls) = payload[&event]["pull_requests"].as_array() {
+                numbers.extend(
+                    pulls
+                        .iter()
+                        .filter_map(|pull| observation_decode::positive(&pull["number"])),
+                );
+            }
+        }
+        _ => {}
+    }
+    for number in numbers {
+        sqlx::query(
+            "INSERT INTO webhook_pull_wake (repository, pull_request_number, delivery_id)
+            VALUES ($1,$2,$3) ON CONFLICT (repository,pull_request_number)
+            DO UPDATE SET delivery_id=EXCLUDED.delivery_id",
+        )
+        .bind(&repository)
+        .bind(Decimal::from(number.get()))
+        .bind(delivery_id)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
