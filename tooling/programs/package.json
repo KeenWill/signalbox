@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "check:fixtures": "bash check-fixtures.sh",
+    "test": "node --test check-fixtures.test.mjs"
   },
   "devDependencies": {
     "typescript": "7.0.2"

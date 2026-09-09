@@ -4,27 +4,27 @@
   const { stringify: jsonStringify, parse: jsonParse } = JSON;
   const decodeUriComponent = decodeURIComponent;
   const { defineProperty, freeze, getOwnPropertyDescriptor, getPrototypeOf,
-    setPrototypeOf, hasOwn, is: sameValue } = Object;
+    setPrototypeOf, hasOwn, keys: objectKeys, is: sameValue } = Object;
   const objectPrototype = Object.prototype;
   const arrayPrototype = Array.prototype;
   const isArray = Array.isArray;
+  const arrayFrom = Array.from.bind(Array);
   const ownKeys = Reflect.ownKeys;
   const { isFinite, isInteger } = Number;
   const ByteArray = Uint8Array;
   const CodecTypeError = TypeError;
+  const parseBigInt = BigInt;
   const charCodeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
+  const isWellFormed = Function.prototype.call.bind(String.prototype.isWellFormed);
+  const stringIncludes = Function.prototype.call.bind(String.prototype.includes);
+  const regexExec = Function.prototype.call.bind(RegExp.prototype.exec);
   const typedArrayPrototype = getPrototypeOf(ByteArray.prototype);
   const typedArrayKind = Function.prototype.call.bind(
     getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag).get);
   const typedArrayLength = Function.prototype.call.bind(
     getOwnPropertyDescriptor(typedArrayPrototype, "length").get);
 
-  const call = (kind, payload) => {
-    if (!(payload instanceof Uint8Array)) {
-      throw new TypeError("program frame payload must be a Uint8Array");
-    }
-    return request({ kind, payload: Array.from(payload) });
-  };
+  const call = (kind, payload) => request({ kind, payload: wireBytes(payload) });
 
   const bytes = (value) => {
     if (typedArrayKind(value) !== "Uint8Array") {
@@ -32,27 +32,42 @@
     }
     return value;
   };
+  const wireBytes = (value) => {
+    const payload = bytes(value);
+    const result = setPrototypeOf([], null);
+    for (let index = 0; index < typedArrayLength(payload); index++) result[index] = payload[index];
+    return result;
+  };
+  const contains = (values, value) => {
+    for (let index = 0; index < values.length; index++) {
+      if (values[index] === value) return true;
+    }
+    return false;
+  };
   const record = (value) => {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) {
-      throw new TypeError("expected a program record");
+    if (value === null || typeof value !== "object" || isArray(value)) {
+      throw new CodecTypeError("expected a program record");
     }
     return value;
   };
   const string = (value) => {
-    if (typeof value !== "string" || !value.isWellFormed()) throw new TypeError("expected a Unicode string");
+    if (typeof value !== "string" || !isWellFormed(value)) throw new CodecTypeError("expected a Unicode string");
     return value;
   };
   const uuid = (value) => {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(string(value))) {
-      throw new TypeError("expected a UUID");
+    if (regexExec(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, string(value)) === null) {
+      throw new CodecTypeError("expected a UUID");
     }
     return value;
   };
   const byteArray = (value) => {
-    if (!Array.isArray(value) || !Array.from(value).every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
-      throw new TypeError("expected bytes");
+    if (!isArray(value)) throw new CodecTypeError("expected bytes");
+    const result = snapshotJson(value);
+    for (let index = 0; index < result.length; index++) {
+      const byte = result[index];
+      if (!isInteger(byte) || byte < 0 || byte > 255) throw new CodecTypeError("expected bytes");
     }
-    return value;
+    return arrayFrom(result);
   };
   const snapshotJson = (value, ancestors = null) => {
     if (value === null || typeof value === "string" || typeof value === "boolean") return value;
@@ -121,16 +136,19 @@
     encode(value) { return encodeJson(decode(value)); },
   });
   const effect = (capability, method, payload) => request({
-    kind: "effect", capability, method, payload: Array.from(bytes(payload)),
+    kind: "effect", capability, method, payload: wireBytes(payload),
   });
   const answer = async (delivery, decode) => {
     const result = await delivery;
     if (result.kind !== "answer") return result;
-    return { kind: "answer", value: decode(record(decodeJson(new Uint8Array(result.payload)))) };
+    const data = byteArray(result.payload);
+    const payload = new ByteArray(data.length);
+    for (let index = 0; index < data.length; index++) payload[index] = data[index];
+    return { kind: "answer", value: decode(record(decodeJson(payload))) };
   };
   const refusedOrAmbiguous = (value) =>
-    Object.keys(value).length === 1 && ["refused", "ambiguous"].includes(value.outcome);
-  const session = Object.freeze({
+    objectKeys(value).length === 1 && contains(["refused", "ambiguous"], value.outcome);
+  const session = freeze({
     create(input) {
       record(input);
       const payload = encodeJson({ command: uuid(input.command), model: uuid(input.model) });
@@ -142,24 +160,25 @@
     turn(input) {
       record(input);
       const version = string(input.defaults_version);
-      if (!/^[1-9][0-9]*$/.test(version) || BigInt(version) > 18446744073709551615n) {
-        throw new TypeError("expected a positive u64 decimal string");
+      if (regexExec(/^[1-9][0-9]*$/, version) === null || parseBigInt(version) > 18446744073709551615n) {
+        throw new CodecTypeError("expected a positive u64 decimal string");
       }
       const text = string(input.text);
-      if (text.length === 0 || text.includes("\u0000")) throw new TypeError("expected nonempty session text without NUL");
+      if (text.length === 0 || stringIncludes(text, "\u0000")) throw new CodecTypeError("expected nonempty session text without NUL");
       const fields = encodeJson({ command: uuid(input.command), session: uuid(input.session), text });
       // The Rust wire record uses a JSON u64; write its decimal digits directly.
-      const suffix = Uint8Array.from(',"defaults_version":' + version + '}', (character) => character.charCodeAt(0));
-      const payload = new Uint8Array(fields.length - 1 + suffix.length);
-      payload.set(fields.subarray(0, -1));
-      payload.set(suffix, fields.length - 1);
+      const suffix = ',"defaults_version":' + version + '}';
+      const prefixLength = typedArrayLength(fields) - 1;
+      const payload = new ByteArray(prefixLength + suffix.length);
+      for (let index = 0; index < prefixLength; index++) payload[index] = fields[index];
+      for (let index = 0; index < suffix.length; index++) payload[prefixLength + index] = charCodeAt(suffix, index);
       return answer(effect("session", "turn", payload), (value) => {
         if (refusedOrAmbiguous(value)) return value;
-        if (!["completed", "refused", "failed", "cancelled", "retired", "ambiguous"].includes(value.outcome)) {
-          throw new TypeError("invalid session disposition");
+        if (!contains(["completed", "refused", "failed", "cancelled", "retired", "ambiguous"], value.outcome)) {
+          throw new CodecTypeError("invalid session disposition");
         }
         const digest = byteArray(value.digest);
-        if (digest.length !== 32) throw new TypeError("expected a SHA-256 digest");
+        if (digest.length !== 32) throw new CodecTypeError("expected a SHA-256 digest");
         return { session: uuid(value.session), turn: uuid(value.turn),
           accepted_input: uuid(value.accepted_input), digest, outcome: value.outcome };
       });
@@ -168,7 +187,7 @@
   const capabilities = ["time", "random", "sleep", "subscribe", "session", "judge",
     "exec-stage", "corpus", "eval-record", "blob", "register"];
 
-  return Object.freeze({
+  return freeze({
     jsonCodec,
     defineProgram({ input, output, run }) {
       return async (payload) => bytes(output.encode(await run(input.decode(bytes(payload)))));
@@ -176,14 +195,16 @@
     session,
     register(input) {
       record(input);
-      if (!Array.isArray(input.grants) || !Array.from(input.grants).every((grant) => capabilities.includes(grant))) {
-        throw new TypeError("invalid program grants");
+      const grants = snapshotJson(input.grants);
+      if (!isArray(grants)) throw new CodecTypeError("invalid program grants");
+      for (let index = 0; index < grants.length; index++) {
+        if (!contains(capabilities, grants[index])) throw new CodecTypeError("invalid program grants");
       }
       const payload = encodeJson({ id: uuid(input.id), name: string(input.name),
         revision: string(input.revision), source: byteArray(input.source),
-        artifact: string(input.artifact), grants: input.grants });
+        artifact: string(input.artifact), grants });
       return answer(effect("register", "register", payload), (value) => {
-        if (value.outcome === "ambiguous" && Object.keys(value).length === 1) return value;
+        if (value.outcome === "ambiguous" && objectKeys(value).length === 1) return value;
         return { registration: uuid(value.registration) };
       });
     },

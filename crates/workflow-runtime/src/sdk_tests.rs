@@ -203,7 +203,7 @@ if (String.fromCharCode(...encoded) !== '{"object":{"correct":true},"array":[tru
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn json_codec_preserves_its_contract_when_all_codec_globals_are_replaced() {
+async fn sdk_preserves_payloads_when_intrinsics_are_replaced() {
     let (result, requests) = sdk_script(
         r#"
 const descriptor = Object.getOwnPropertyDescriptor;
@@ -211,9 +211,18 @@ const define = Object.defineProperty;
 const remove = Reflect.deleteProperty;
 const fromCode = String.fromCharCode;
 const TestError = Error;
+const nativeCall = descriptor(Function.prototype, "call");
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const byteLength = Function.prototype.call.bind(descriptor(typedArrayPrototype, "length").get);
 const input = new Uint8Array([34, 233, 155, 170, 240, 159, 152, 128, 34]);
+const raw = new Uint8Array([0, 255]);
+const identity = "12345678-1234-1234-1234-123456789abc";
+const invalidCalls = [
+  () => sdk.session.create({ command: "invalid", model: identity }),
+  () => sdk.session.turn({ command: identity, session: identity, text: "hello", defaults_version: "0" }),
+  () => sdk.session.turn({ command: identity, session: identity, text: "\u0000", defaults_version: "1" }),
+  () => sdk.register({ id: identity, name: "example", revision: "revision", source: [0], artifact: "export {};", grants: ["invalid"] }),
+];
 const invalidInputs = [new Uint8Array([255]), new Uint8Array([123]), new Uint16Array([49]), { 0: 49, length: 1 }];
 const cyclic = {}; cyclic.self = cyclic;
 const invalid = [NaN, -0, { missing: undefined }, [undefined], new Array(1), cyclic];
@@ -223,21 +232,23 @@ const targets = [
   [globalThis, "decodeURIComponent"], [Uint8Array, "from"],
   [Uint8Array, Symbol.hasInstance],
   [typedArrayPrototype, "length"], [typedArrayPrototype, Symbol.toStringTag],
-  [typedArrayPrototype, Symbol.iterator],
+  [typedArrayPrototype, Symbol.iterator], [typedArrayPrototype, "set"], [typedArrayPrototype, "subarray"],
   [String.prototype, "replace"], [String.prototype, "charCodeAt"],
   [String.prototype, "padStart"], [String.prototype, Symbol.iterator],
+  [String.prototype, "includes"], [String.prototype, "isWellFormed"],
+  [RegExp.prototype, "test"], [RegExp.prototype, "exec"],
   [Number.prototype, "toString"], [Number, "isFinite"], [Number, "isInteger"],
   [Array, "from"], [Array, "isArray"], [Array.prototype, "join"],
-  [Array.prototype, "every"], [Array.prototype, Symbol.iterator],
+  [Array.prototype, "every"], [Array.prototype, "includes"], [Array.prototype, Symbol.iterator],
   [Object.prototype, "toJSON"], [Array.prototype, "toJSON"],
   [Object, "freeze"], [Object, "create"], [Object, "defineProperty"],
   [Object, "getPrototypeOf"], [Object, "setPrototypeOf"],
-  [Object, "getOwnPropertyDescriptor"], [Object, "hasOwn"], [Object, "is"],
+  [Object, "getOwnPropertyDescriptor"], [Object, "hasOwn"], [Object, "is"], [Object, "keys"],
   [Reflect, "ownKeys"], [Set.prototype, "has"], [Set.prototype, "add"],
   [Set.prototype, "delete"], [Function.prototype, "call"], [Function.prototype, "bind"],
   [globalThis, "JSON"], [globalThis, "Uint8Array"], [globalThis, "Object"],
   [globalThis, "Array"], [globalThis, "String"], [globalThis, "Number"],
-  [globalThis, "Set"], [globalThis, "TypeError"],
+  [globalThis, "Set"], [globalThis, "TypeError"], [globalThis, "BigInt"], [globalThis, "RegExp"],
 ];
 const saved = [];
 for (let index = 0; index < targets.length; index++) {
@@ -269,6 +280,30 @@ try {
     try { codec.decode(invalidInputs[index]); } catch { rejected = true; }
     if (!rejected) throw new TestError("replaced globals bypassed input validation for case " + index);
   }
+  for (let index = 0; index < invalidCalls.length; index++) {
+    let rejected = false;
+    try { invalidCalls[index](); } catch { rejected = true; }
+    if (!rejected) throw new TestError("replaced globals bypassed wrapper validation for case " + index);
+  }
+  // Deno's async-op bridge uses Function.prototype.call to invoke its native op.
+  define(Function.prototype, "call", nativeCall);
+  const turn = await sdk.session.turn({ command: identity, session: identity,
+    text: "雪😀", defaults_version: "18446744073709551615" });
+  if (turn.kind !== "answer" || turn.value.outcome !== "completed" || turn.value.digest[31] !== 255) {
+    throw new TestError("replaced globals changed the typed turn answer: " + turn.kind + "/" + turn.value?.outcome + "/" + turn.value?.digest?.[31]);
+  }
+  turn.value.digest.push(1);
+  if (turn.value.digest.length !== 33) throw new TestError("the typed digest must remain an ordinary mutable array");
+  const created = await sdk.session.create({ command: identity, model: identity });
+  if (created.kind !== "answer" || created.value.session !== identity) throw new TestError("wrong session answer");
+  const registered = await sdk.register({ id: identity, name: "example", revision: "revision",
+    source: [0, 255], artifact: "export {}; // 雪", grants: ["session"] });
+  if (registered.kind !== "answer" || registered.value.registration !== identity) throw new TestError("wrong registration answer");
+  await sdk.effect("time", "sample", raw);
+  await sdk.now(raw);
+  await sdk.random(raw);
+  await sdk.sleep(raw);
+  await sdk.awaitEvent(raw);
 } finally {
   for (let index = 0; index < targets.length; index++) {
     if (saved[index] === undefined) remove(targets[index][0], targets[index][1]);
@@ -276,13 +311,80 @@ try {
   }
 }
 "#,
-        [],
+        [
+            IsolateDelivery::Answer { payload: serde_json::to_vec(&serde_json::json!({
+                "session": "12345678-1234-1234-1234-123456789abc",
+                "turn": "12345678-1234-1234-1234-123456789abc",
+                "accepted_input": "12345678-1234-1234-1234-123456789abc",
+                "digest": vec![255_u8; 32], "outcome": "completed"
+            })).expect("valid turn answer") },
+            IsolateDelivery::Answer { payload: br#"{"session":"12345678-1234-1234-1234-123456789abc"}"#.to_vec() },
+            IsolateDelivery::Answer { payload: br#"{"registration":"12345678-1234-1234-1234-123456789abc"}"#.to_vec() },
+            IsolateDelivery::Answer { payload: vec![] },
+            IsolateDelivery::Answer { payload: vec![] },
+            IsolateDelivery::Answer { payload: vec![] },
+            IsolateDelivery::Wake { payload: vec![] },
+            IsolateDelivery::Wake { payload: vec![] },
+        ],
     )
     .await;
     result.expect(
-        "simultaneous intrinsic replacement must preserve codec encoding, decoding and rejection",
+        "simultaneous intrinsic replacement must preserve SDK payload encoding, decoding and rejection",
     );
-    assert!(requests.is_empty());
+    assert_eq!(requests.len(), 8);
+    for (index, method, expected) in [
+        (
+            0,
+            "turn",
+            serde_json::json!({
+                "command": "12345678-1234-1234-1234-123456789abc",
+                "session": "12345678-1234-1234-1234-123456789abc",
+                "text": "雪😀", "defaults_version": u64::MAX
+            }),
+        ),
+        (
+            1,
+            "create",
+            serde_json::json!({
+                "command": "12345678-1234-1234-1234-123456789abc",
+                "model": "12345678-1234-1234-1234-123456789abc"
+            }),
+        ),
+        (
+            2,
+            "register",
+            serde_json::json!({
+                "id": "12345678-1234-1234-1234-123456789abc", "name": "example",
+                "revision": "revision", "source": [0, 255], "artifact": "export {}; // 雪", "grants": ["session"]
+            }),
+        ),
+    ] {
+        let RequestKind::Effect(request) = &requests[index] else {
+            panic!("expected {method} effect")
+        };
+        assert_eq!(request.method(), method);
+        let actual: serde_json::Value =
+            serde_json::from_slice(request.payload().as_bytes()).expect("valid effect JSON");
+        assert_eq!(
+            actual, expected,
+            "intrinsic replacement changed the {method} payload"
+        );
+    }
+    let raw = InlineFramePayload::new(vec![0, 255]);
+    assert_eq!(
+        &requests[3..],
+        &[
+            RequestKind::Effect(EffectRequest::new(
+                signalbox_domain::ProgramCapability::Time,
+                "sample".into(),
+                raw.clone()
+            )),
+            RequestKind::Now(raw.clone()),
+            RequestKind::Random(raw.clone()),
+            RequestKind::Sleep(raw.clone()),
+            RequestKind::AwaitEvent(raw),
+        ]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

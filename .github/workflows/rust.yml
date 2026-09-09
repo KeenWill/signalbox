@@ -192,8 +192,8 @@ jobs:
         run: |
           npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs install --frozen-lockfile
           npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs exec tsc -p tsconfig.json --noEmit
-          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs exec tsc -p tsconfig.build.json
-          git diff --exit-code -- crates/workflow-runtime/tests/fixtures
+          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs test
+          npm exec --yes --package=pnpm@10 -- pnpm --dir tooling/programs run check:fixtures
       # The scan rejects row-lock clauses and advisory-lock calls outside the
       # inventory in production Rust. This performs no Rust or SQL parsing.
       - name: Check explicit-lock inventory
