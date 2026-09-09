@@ -717,13 +717,9 @@ fn credential_admission_checks_every_configured_file_kind() {
             std::os::unix::fs::PermissionsExt::from_mode(0o644),
         )
         .expect("expose one file");
-        assert_eq!(
-            configuration
-                .validate_credential_files()
-                .expect_err("each configured credential must be private")
-                .failure,
-            CredentialAccessFailure::InsecurePermissions
-        );
+        configuration
+            .validate_credential_files()
+            .expect("permissive modes warn and remain readable");
         std::fs::set_permissions(
             file.path(),
             std::os::unix::fs::PermissionsExt::from_mode(0o600),
@@ -3599,7 +3595,7 @@ fn configuration_rejects_a_missing_credential_home_with_a_typed_member_error() {
 }
 
 #[test]
-fn configuration_rejects_an_empty_credential_home_with_a_typed_member_error() {
+fn configuration_marks_an_empty_credential_home_unavailable() {
     let temporary = tempfile::tempdir().expect("synthetic home root is created");
     let empty = temporary.path().join("empty-account");
     std::fs::create_dir(&empty).expect("empty synthetic home is created");
@@ -3611,12 +3607,11 @@ fn configuration_rejects_an_empty_credential_home_with_a_typed_member_error() {
         ),
     );
 
+    let configuration = HubModelConfiguration::parse(&credential_home)
+        .expect("an empty home does not reject the pool");
     assert_eq!(
-        HubModelConfiguration::parse(&credential_home).err(),
-        Some(HubModelConfigurationError::InvalidCredentialHome {
-            credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
-            failure: crate::CredentialHomeAdmissionFailure::EmptyDirectory,
-        })
+        configuration.empty_codex_home_profiles(),
+        vec![CODEX_SUBSCRIPTION_PROFILE]
     );
 }
 

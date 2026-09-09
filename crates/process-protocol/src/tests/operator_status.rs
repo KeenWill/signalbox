@@ -47,14 +47,25 @@ fn operator_status_request_and_rows_round_trip_in_one_closed_vocabulary()
     )?;
     assert_server_message_round_trip(
         request(1)?,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::UnavailableComponent(
+            Box::new(OperatorStatusUnavailableComponentMessage {
+                component: "adapter:codex_cli".to_owned(),
+                cause: "codex_cli_pin_mismatch".to_owned(),
+            }),
+        ))),
+        r#"{"type":"operator_status","kind":"unavailable_component","component":"adapter:codex_cli","cause":"codex_cli_pin_mismatch"}"#,
+    )?;
+    assert_server_message_round_trip(
+        request(1)?,
         ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
             OperatorStatusEndMessage {
+                unavailable_component_count: CanonicalU64::new(1),
                 repository_ingestion_count: CanonicalU64::new(0),
                 lifecycle_week_count: CanonicalU64::new(1),
                 lifecycle_deadline_violation_count: CanonicalU64::new(1),
             },
         )))),
-        r#"{"type":"operator_status","kind":"end","repository_ingestion_count":"0","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1"}"#,
+        r#"{"type":"operator_status","kind":"end","unavailable_component_count":"1","repository_ingestion_count":"0","lifecycle_week_count":"1","lifecycle_deadline_violation_count":"1"}"#,
     )?;
     Ok(())
 }

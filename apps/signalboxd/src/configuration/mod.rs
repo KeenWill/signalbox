@@ -975,6 +975,21 @@ impl HubModelConfiguration {
             .collect()
     }
 
+    /// Lists configured Codex homes that currently contain no login material.
+    pub fn empty_codex_home_profiles(&self) -> Vec<String> {
+        self.credential_profiles
+            .values()
+            .filter_map(|profile| {
+                let CredentialDelivery::CodexHome { path, .. } = profile.delivery() else {
+                    return None;
+                };
+                let empty =
+                    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none());
+                empty.then(|| profile.name().to_owned())
+            })
+            .collect()
+    }
+
     /// Canonical OAuth registrations installed before model work starts.
     pub fn oauth_registrations(
         &self,

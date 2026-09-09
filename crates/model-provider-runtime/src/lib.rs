@@ -466,6 +466,7 @@ model_call_cause_tokens! {
     BoundaryLossStreamIncomplete => "boundary_loss_stream_incomplete",
     BoundaryLossStreamProtocolViolation => "boundary_loss_stream_protocol_violation",
     UnsupportedOperation => "unsupported_operation",
+    AdapterUnavailable => "adapter_unavailable",
     CredentialUnmapped => "credential_unmapped",
     CredentialUnavailable => "credential_unavailable",
     CredentialUnreadable => "credential_unreadable",
@@ -590,6 +591,8 @@ pub enum ModelCallCauseCode {
     /// Capability preparation reported that the adapter does not support the
     /// requested operation.
     UnsupportedOperation,
+    /// Startup proved that the selected adapter is unavailable.
+    AdapterUnavailable,
     /// The pinned credential reference could not be resolved during
     /// preparation.
     CredentialUnavailable(CredentialAccessCode),
@@ -643,6 +646,7 @@ impl ModelCallCauseCode {
             }
             Self::BoundaryLoss(code) => code.token(),
             Self::UnsupportedOperation => ModelCallCauseToken::UnsupportedOperation,
+            Self::AdapterUnavailable => ModelCallCauseToken::AdapterUnavailable,
             Self::CredentialUnavailable(code) => code.token(),
             Self::CredentialUnusable => ModelCallCauseToken::CredentialUnusable,
             Self::ProviderTargetSubstituted => ModelCallCauseToken::ProviderTargetSubstituted,
@@ -734,6 +738,7 @@ impl CredentialAccessCode {
 /// its rendered detail strings, which are adapter- and provider-controlled.
 const fn preparation_failure_cause(failure: &PreparationFailure) -> ModelCallCauseCode {
     match failure {
+        PreparationFailure::AdapterUnavailable { .. } => ModelCallCauseCode::AdapterUnavailable,
         PreparationFailure::UnsupportedOperation { .. } => ModelCallCauseCode::UnsupportedOperation,
         PreparationFailure::CredentialUnavailable { error } => {
             ModelCallCauseCode::CredentialUnavailable(CredentialAccessCode::of(error.failure))

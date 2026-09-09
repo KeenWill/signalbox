@@ -34,7 +34,10 @@ fn validate_credential_metadata(
         return Err(CredentialAccessFailure::WrongOwner);
     }
     if metadata.mode() & 0o077 != 0 {
-        return Err(CredentialAccessFailure::InsecurePermissions);
+        tracing::warn!(
+            cause_code = "credential_file_permissive_mode",
+            "credential file has group or other permission bits"
+        );
     }
     if metadata.len() > MAX_CREDENTIAL_FILE_BYTES {
         return Err(CredentialAccessFailure::TooLarge);

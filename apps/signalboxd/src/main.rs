@@ -43,7 +43,7 @@ use signalbox_model_provider_runtime::{
 use signalbox_model_runtime::CredentialReference;
 #[cfg(test)]
 use signalbox_model_runtime_anthropic::AnthropicConstructionError;
-use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
+use signalbox_model_runtime_codex_cli::probe_pinned_codex_cli_version;
 #[cfg(test)]
 use signalbox_model_runtime_openai::OpenAiConstructionError;
 use signalbox_persistence::{
@@ -1176,6 +1176,12 @@ async fn initialize_prometheus(
 async fn run_hub(
     telemetry_configuration: &TelemetryConfiguration,
 ) -> Result<ShutdownOutcome, HubRuntimeError> {
+    for setting in signalbox_persistence::production_connection_ambient_warnings() {
+        tracing::warn!(
+            setting,
+            "ambient PostgreSQL setting was ignored in favor of DATABASE_URL"
+        );
+    }
     let configuration = HubConfiguration::from_environment().map_err(|error| {
         erase_startup_cause(
             RuntimePhase::Configuration,
@@ -1500,15 +1506,51 @@ async fn run_hub(
             SanitizedStartupCause::Credential(&error),
         )
     })?;
+    let mut codex_cli_unavailable_cause = None;
     if let Some(codex_cli) = model_configuration.codex_cli() {
-        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
+        match probe_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
             .await
-            .map_err(|_| {
-                erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
-                )
-            })?;
+        {
+            Ok(probe) => {
+                tracing::info!(
+                    installed_version = %probe.version(),
+                    installed_digest = probe.digest(),
+                    "Codex CLI startup probe completed"
+                );
+                if !probe.matches_pin() {
+                    codex_cli_unavailable_cause = Some("codex_cli_pin_mismatch");
+                }
+            }
+            Err(error) => {
+                codex_cli_unavailable_cause = Some(error.cause_code());
+            }
+        }
+        if let Some(cause_code) = codex_cli_unavailable_cause {
+            tracing::warn!(cause_code, "Codex CLI adapter is unavailable");
+        }
+    }
+    let mut unavailable_components = model_configuration
+        .empty_codex_home_profiles()
+        .into_iter()
+        .map(|profile| {
+            tracing::warn!(
+                credential_profile = profile,
+                cause_code = "codex_home_empty",
+                "Codex credential pool member is unavailable"
+            );
+            signalbox_process_protocol::OperatorStatusUnavailableComponentMessage {
+                component: format!("credential:{profile}"),
+                cause: "codex_home_empty".to_owned(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if let Some(cause) = codex_cli_unavailable_cause {
+        unavailable_components.push(
+            signalbox_process_protocol::OperatorStatusUnavailableComponentMessage {
+                component: "adapter:codex_cli".to_owned(),
+                cause: cause.to_owned(),
+            },
+        );
     }
     let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
@@ -1551,6 +1593,9 @@ async fn run_hub(
         post_kill_reap_bound,
         native_message_limit,
     );
+    if let Some(cause) = codex_cli_unavailable_cause {
+        runtime_factory = runtime_factory.with_codex_cli_unavailable(cause);
+    }
     runtime_factory
         .build(&model_configuration)
         .map_err(|error| {
@@ -1801,6 +1846,15 @@ async fn run_hub(
         }
     };
     let mut blob_store_registry = blob_store_registry.map(Arc::new);
+    if let Some(registry) = &blob_store_registry {
+        unavailable_components.extend(registry.unavailable_stores().map(|(name, cause)| {
+            signalbox_process_protocol::OperatorStatusUnavailableComponentMessage {
+                component: format!("blob_store:{name}"),
+                cause: cause.to_owned(),
+            }
+        }));
+    }
+    unavailable_components.sort_unstable_by(|left, right| left.component.cmp(&right.component));
     // The family is model-facing only where blob storage exists: an absent
     // registry means no configuration and an empty catalog, so advertising
     // `blob_metadata` and `blob_read` would declare tools no request can use.
@@ -2133,7 +2187,8 @@ async fn run_hub(
     )
     .with_configuration_reload(configuration_reload.clone())
     .with_context_compaction_model(Arc::clone(&context_compaction_model))
-    .with_snapshot_reader_budget(snapshot_reader_budget);
+    .with_snapshot_reader_budget(snapshot_reader_budget)
+    .with_unavailable_components(unavailable_components);
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
         None => process_runtime,
@@ -2754,6 +2809,13 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(setting) = telemetry_configuration.ambient_otlp_setting() {
+        tracing::warn!(
+            target: "signalbox_telemetry_internal",
+            setting,
+            "ambient OTLP setting was ignored in favor of Signalbox telemetry configuration"
+        );
+    }
 
     let exit_code = match run_hub(&telemetry_configuration).await {
         Ok(ShutdownOutcome::Interrupted) => {

@@ -187,6 +187,64 @@ impl std::fmt::Display for CodexCliVersionProbeError {
 
 impl std::error::Error for CodexCliVersionProbeError {}
 
+impl CodexCliVersionProbeError {
+    /// Stable cause code for adapter availability and operator status.
+    pub const fn cause_code(self) -> &'static str {
+        match self {
+            Self::InvalidBound => "codex_cli_probe_invalid_bound",
+            Self::ExecutableReadFailed => "codex_cli_executable_read_failed",
+            Self::SpawnFailed => "codex_cli_probe_spawn_failed",
+            Self::TimedOut => "codex_cli_probe_timed_out",
+            Self::OutputFailed => "codex_cli_probe_output_failed",
+            Self::Unsuccessful => "codex_cli_probe_unsuccessful",
+            Self::InvalidBanner => "codex_cli_version_invalid",
+            Self::VersionMismatch => "codex_cli_pin_mismatch",
+        }
+    }
+}
+
+/// Installed Codex executable facts observed by the bounded startup probe.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodexCliVersionProbe {
+    version: semver::Version,
+    digest: String,
+    matches_pin: bool,
+}
+
+impl CodexCliVersionProbe {
+    /// Installed semantic version reported by the executable.
+    pub fn version(&self) -> &semver::Version {
+        &self.version
+    }
+
+    /// Installed executable SHA-256 in lowercase hexadecimal.
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Whether both installed facts match the adapter pin.
+    pub const fn matches_pin(&self) -> bool {
+        self.matches_pin
+    }
+}
+
+/// Observes the installed Codex version and digest without admitting the adapter.
+pub async fn probe_pinned_codex_cli_version(
+    executable: &Path,
+    bound: Duration,
+) -> Result<CodexCliVersionProbe, CodexCliVersionProbeError> {
+    let (version, deadline) = probe_codex_cli_version(executable, bound).await?;
+    let digest = crate::executable_pin::executable_digest(executable, deadline).await?;
+    let supported = semver::Version::parse(SUPPORTED_CODEX_CLI_VERSION)
+        .map_err(|_| CodexCliVersionProbeError::InvalidBanner)?;
+    let matches_pin = version == supported && digest == env!("SIGNALBOX_CODEX_CLI_SHA256");
+    Ok(CodexCliVersionProbe {
+        version,
+        digest,
+        matches_pin,
+    })
+}
+
 /// Proves that the executable invoked by the composition matches this
 /// adapter's upstream version and executable SHA-256 pin before the composition
 /// admits model work. The path must be absolute; both checks share `bound`.
@@ -194,6 +252,18 @@ pub async fn verify_pinned_codex_cli_version(
     executable: &Path,
     bound: Duration,
 ) -> Result<(), CodexCliVersionProbeError> {
+    let probe = probe_pinned_codex_cli_version(executable, bound).await?;
+    if probe.matches_pin() {
+        Ok(())
+    } else {
+        Err(CodexCliVersionProbeError::VersionMismatch)
+    }
+}
+
+async fn probe_codex_cli_version(
+    executable: &Path,
+    bound: Duration,
+) -> Result<(semver::Version, tokio::time::Instant), CodexCliVersionProbeError> {
     if bound.is_zero() {
         return Err(CodexCliVersionProbeError::InvalidBound);
     }
@@ -258,18 +328,7 @@ pub async fn verify_pinned_codex_cli_version(
                 .find_map(|token| semver::Version::parse(token).ok())
         })
         .ok_or(CodexCliVersionProbeError::InvalidBanner)?;
-    let supported = semver::Version::parse(SUPPORTED_CODEX_CLI_VERSION)
-        .map_err(|_| CodexCliVersionProbeError::InvalidBanner)?;
-    if version != supported {
-        return Err(CodexCliVersionProbeError::VersionMismatch);
-    }
-    crate::executable_pin::verify_executable_digest(
-        executable,
-        env!("SIGNALBOX_CODEX_CLI_SHA256"),
-        deadline,
-    )
-    .await?;
-    Ok(())
+    Ok((version, deadline))
 }
 
 struct VersionProbeProcessGroup {
@@ -476,8 +535,6 @@ pub enum CodexCliConstructionError {
     InvalidCredentialHome,
     /// A configured credential home cannot be enumerated.
     UnreadableCredentialHome,
-    /// A configured credential home contains no provisioned entries.
-    EmptyCredentialHome,
     /// A model context-window override has an invalid target or value.
     InvalidModelContextWindowOverride,
 }
@@ -516,7 +573,6 @@ impl std::fmt::Display for CodexCliConstructionError {
             Self::UnreadableCredentialHome => {
                 formatter.write_str("Codex credential home cannot be enumerated")
             }
-            Self::EmptyCredentialHome => formatter.write_str("Codex credential home is empty"),
             Self::InvalidModelContextWindowOverride => formatter.write_str(
                 "Codex model context-window overrides require exact targets and positive values",
             ),
@@ -600,11 +656,10 @@ impl CodexCliRuntime {
             let mut entries = std::fs::read_dir(home)
                 .map_err(|_| CodexCliConstructionError::UnreadableCredentialHome)?;
             match entries.next() {
-                Some(Ok(_)) => {}
+                Some(Ok(_)) | None => {}
                 Some(Err(_)) => {
                     return Err(CodexCliConstructionError::UnreadableCredentialHome);
                 }
-                None => return Err(CodexCliConstructionError::EmptyCredentialHome),
             }
         }
         Ok(Self {
@@ -692,6 +747,22 @@ impl CodexCliRuntime {
             .credential_homes
             .get(&operation.credential_reference)
             .cloned();
+        if credential_home.as_ref().is_some_and(|home| {
+            std::fs::read_dir(home)
+                .ok()
+                .and_then(|mut entries| entries.next())
+                .is_none()
+        }) {
+            return PreparationOutcome::Failed {
+                correlation,
+                failure: PreparationFailure::CredentialUnavailable {
+                    error: signalbox_model_runtime::CredentialAccessError::new(
+                        operation.credential_reference,
+                        signalbox_model_runtime::CredentialAccessFailure::Unavailable,
+                    ),
+                },
+            };
+        }
         if operation.credential_reference != self.credential_reference
             && credential_home.is_none()
             && !self
@@ -1101,7 +1172,7 @@ mod tests {
         CODEX_CREDENTIAL_HOME, CODEX_ENVIRONMENT, CliEnvironmentVariable, CodexCliServiceTier,
         CodexCliVersionProbeError, FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT, FastMode,
         ModelSettings, ReasoningLevel, SUPPORTED_CODEX_CLI_VERSION, ServiceTier, codex_controls,
-        validate_model_settings, verify_pinned_codex_cli_version,
+        probe_pinned_codex_cli_version, validate_model_settings, verify_pinned_codex_cli_version,
     };
 
     #[cfg(unix)]
@@ -1142,6 +1213,22 @@ mod tests {
         let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
 
         assert_eq!(result, Err(CodexCliVersionProbeError::VersionMismatch));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_probe_reports_installed_facts_for_a_pin_mismatch() {
+        let script =
+            format!("#!/bin/sh\nprintf 'codex-cli %s\\n' '{SUPPORTED_CODEX_CLI_VERSION}'\n");
+        let (_directory, executable) = version_fixture(&script);
+
+        let probe = probe_pinned_codex_cli_version(&executable, Duration::from_secs(1))
+            .await
+            .expect("an observable mismatch retains installed facts");
+
+        assert_eq!(probe.version().to_string(), SUPPORTED_CODEX_CLI_VERSION);
+        assert_eq!(probe.digest().len(), 64);
+        assert!(!probe.matches_pin());
     }
 
     #[cfg(unix)]

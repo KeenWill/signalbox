@@ -24,14 +24,13 @@ use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
 use http_body::{Body, Frame, SizeHint};
 use instant_xml::FromXml;
-use jiff::Timestamp;
 use reqwest::{
     Client, Response, StatusCode,
     header::{HeaderMap, HeaderValue},
     redirect::Policy,
 };
 use rustix::fs::{Mode, OFlags, openat};
-use rusty_s3::{Bucket, Credentials, Method, S3Action, UrlStyle, signing::sign};
+use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use signalbox_blob_store::{
@@ -67,10 +66,8 @@ const MAX_COMPLETE_BODY_BYTES: usize = 3 * 1024 * 1024;
 const PUBLICATION_LOCK_STRIPES: usize = 64;
 const NAMESPACE_MARKER_KEY: &str = ".signalbox-blob-namespace-v1";
 const MAX_NAMESPACE_MARKER_BYTES: usize = 128;
-const MAX_LIFECYCLE_RESPONSE_BYTES: usize = 65_536;
 const MAX_ERROR_RESPONSE_BYTES: usize = 65_536;
 const S3_XML_NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
-const BLOB_KEY_PREFIX: &str = "sha256/";
 const OBJECT_ABSENCE_CODE: &str = "NoSuchKey";
 
 /// One path-style S3-compatible immutable-object store.
@@ -223,41 +220,6 @@ impl S3BlobStore {
             marker.verification.record(true);
         }
         result
-    }
-
-    /// Proves the routed bucket aborts incomplete multipart uploads after one day.
-    pub async fn verify_multipart_lifecycle(&self) -> Result<(), BlobStoreError> {
-        let credentials = self.credentials().await?;
-        let url = sign(
-            &Timestamp::now(),
-            Method::Get,
-            self.bucket.base_url().clone(),
-            credentials.key(),
-            credentials.secret(),
-            credentials.token(),
-            self.bucket.region(),
-            SIGNED_URL_LIFETIME.as_secs(),
-            std::iter::once(("lifecycle", "")),
-            std::iter::empty(),
-        );
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|_| BlobStoreError::io("read S3 lifecycle", SanitizedS3Failure))?;
-        let response = require_success(response, "read S3 lifecycle").await?;
-        let body =
-            bounded_response(response, MAX_LIFECYCLE_RESPONSE_BYTES, "read S3 lifecycle").await?;
-        let body = std::str::from_utf8(&body)
-            .map_err(|_| BlobStoreError::unavailable("parse S3 lifecycle"))?;
-        let lifecycle: LifecycleConfiguration = instant_xml::from_str(body)
-            .map_err(|_| BlobStoreError::unavailable("parse S3 lifecycle"))?;
-        if lifecycle.rules.iter().any(LifecycleRule::covers_blobs) {
-            Ok(())
-        } else {
-            Err(BlobStoreError::unavailable("verify S3 multipart lifecycle"))
-        }
     }
 
     async fn ensure_namespace_ready(
@@ -1242,102 +1204,6 @@ impl NamespaceVerification {
 }
 
 #[derive(Debug, FromXml)]
-#[xml(rename = "LifecycleConfiguration", ns(S3_XML_NAMESPACE))]
-struct LifecycleConfiguration {
-    #[xml(rename = "Rule")]
-    rules: Vec<LifecycleRule>,
-}
-
-#[derive(Debug, FromXml)]
-#[xml(rename = "Rule", ns(S3_XML_NAMESPACE))]
-struct LifecycleRule {
-    #[xml(rename = "Status")]
-    status: String,
-    #[xml(rename = "Prefix")]
-    prefix: Option<String>,
-    #[xml(rename = "Filter")]
-    filter: Option<LifecycleFilter>,
-    #[xml(rename = "AbortIncompleteMultipartUpload")]
-    abort: Option<AbortIncompleteMultipartUpload>,
-}
-
-impl LifecycleRule {
-    fn covers_blobs(&self) -> bool {
-        self.status == "Enabled"
-            && self.covers_every_blob_key()
-            && self.abort.as_ref().is_some_and(|abort| abort.days == 1)
-    }
-
-    /// Reports whether this rule selects every deterministic blob object key.
-    ///
-    /// A rule that carries both the legacy `Prefix` and a `Filter` names two
-    /// selections at once, so nothing it states is a proof: the response is not
-    /// a valid lifecycle configuration, and honoring either field alone can
-    /// admit a rule whose real selection is narrower than the blob key prefix.
-    /// A rule that narrows by tag, size, or a compound `And` never proves blob
-    /// coverage; otherwise the selected prefix must be an ancestor of the blob
-    /// key prefix, and an absent filter and prefix is whole-bucket coverage.
-    fn covers_every_blob_key(&self) -> bool {
-        match (&self.filter, self.prefix.as_deref()) {
-            (Some(_), Some(_)) => false,
-            (Some(filter), None) => {
-                filter.tag.is_none()
-                    && filter.and.is_none()
-                    && filter.object_size_greater_than.is_none()
-                    && filter.object_size_less_than.is_none()
-                    && covers_blob_keys(filter.prefix.as_deref())
-            }
-            (None, prefix) => covers_blob_keys(prefix),
-        }
-    }
-}
-
-/// Reports whether a lifecycle prefix selects every `sha256/` object key.
-fn covers_blob_keys(prefix: Option<&str>) -> bool {
-    prefix.is_none_or(|prefix| BLOB_KEY_PREFIX.starts_with(prefix))
-}
-
-#[derive(Debug, FromXml)]
-#[xml(rename = "Filter", ns(S3_XML_NAMESPACE))]
-struct LifecycleFilter {
-    #[xml(rename = "Prefix")]
-    prefix: Option<String>,
-    #[xml(rename = "Tag")]
-    tag: Option<LifecycleTag>,
-    #[xml(rename = "And")]
-    and: Option<LifecycleAnd>,
-    #[xml(rename = "ObjectSizeGreaterThan")]
-    object_size_greater_than: Option<u64>,
-    #[xml(rename = "ObjectSizeLessThan")]
-    object_size_less_than: Option<u64>,
-}
-
-#[derive(Debug, FromXml)]
-#[xml(rename = "Tag", ns(S3_XML_NAMESPACE))]
-struct LifecycleTag {
-    #[xml(rename = "Key")]
-    _key: Option<String>,
-    #[xml(rename = "Value")]
-    _value: Option<String>,
-}
-
-#[derive(Debug, FromXml)]
-#[xml(rename = "And", ns(S3_XML_NAMESPACE))]
-struct LifecycleAnd {
-    #[xml(rename = "Prefix")]
-    _prefix: Option<String>,
-    #[xml(rename = "Tag")]
-    _tags: Vec<LifecycleTag>,
-}
-
-#[derive(Debug, FromXml)]
-#[xml(rename = "AbortIncompleteMultipartUpload", ns(S3_XML_NAMESPACE))]
-struct AbortIncompleteMultipartUpload {
-    #[xml(rename = "DaysAfterInitiation")]
-    days: u16,
-}
-
-#[derive(Debug, FromXml)]
 #[xml(rename = "Error")]
 struct S3ErrorDocument {
     #[xml(rename = "Code")]
@@ -1528,10 +1394,15 @@ fn read_credentials(path: &Path) -> Result<CredentialDocument, CredentialFileErr
     let metadata = file.metadata().map_err(|_| CredentialFileError)?;
     if !metadata.is_file()
         || metadata.uid() != rustix::process::geteuid().as_raw()
-        || metadata.mode() & 0o7777 != 0o600
         || metadata.len() > MAX_CREDENTIAL_FILE_BYTES
     {
         return Err(CredentialFileError);
+    }
+    if metadata.mode() & 0o077 != 0 {
+        tracing::warn!(
+            cause_code = "credential_file_permissive_mode",
+            "S3 credential file has group or other permission bits"
+        );
     }
     let mut bytes = Zeroizing::new(Vec::with_capacity(
         usize::try_from(metadata.len()).map_err(|_| CredentialFileError)?,
@@ -1611,17 +1482,19 @@ mod tests {
     };
 
     use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
     use url::Url;
 
     use signalbox_blob_store::{BlobStoreFailureKind, ExpectedBlob};
     use signalbox_domain::BlobDigest;
 
     use super::{
-        CompletionFailure, CredentialFileError, HeaderMap, HeaderValue, LifecycleConfiguration,
-        LifecycleRule, MAX_ETAG_BYTES, MAX_MULTIPART_PARTS, MAX_S3_OBJECT_BYTES,
-        MIN_MULTIPART_PART_BYTES, NamespaceProbe, NamespaceVerification, S3BlobStore, StatusCode,
-        completion_status_failure, multipart_part_bytes, names_absent_object, object_generation,
-        read_credentials, validate_completion_response, verify_stream,
+        CompletionFailure, CredentialFileError, HeaderMap, HeaderValue, MAX_ETAG_BYTES,
+        MAX_MULTIPART_PARTS, MAX_S3_OBJECT_BYTES, MIN_MULTIPART_PART_BYTES, MultipartAbortGuard,
+        NamespaceProbe, NamespaceVerification, S3BlobStore, StatusCode, completion_status_failure,
+        multipart_part_bytes, names_absent_object, object_generation, read_credentials,
+        validate_completion_response, verify_stream,
     };
 
     const ACCESS_KEY: &str = "fixture-access-key";
@@ -1671,15 +1544,6 @@ mod tests {
         Ok((directory, path))
     }
 
-    fn first_rule(xml: &str) -> Result<LifecycleRule, Box<dyn Error>> {
-        let lifecycle: LifecycleConfiguration = instant_xml::from_str(xml)?;
-        lifecycle
-            .rules
-            .into_iter()
-            .next()
-            .ok_or_else(|| Box::<dyn Error>::from("fixture lifecycle has no rule"))
-    }
-
     #[test]
     fn credential_file_accepts_only_the_closed_version_one_shape() -> Result<(), Box<dyn Error>> {
         let body = credential_body();
@@ -1702,125 +1566,37 @@ mod tests {
     }
 
     #[test]
-    fn credential_file_rejects_group_readable_permissions() -> Result<(), Box<dyn Error>> {
+    fn credential_file_reads_group_readable_permissions() -> Result<(), Box<dyn Error>> {
         let (_directory, path) = credential_fixture(&credential_body())?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
 
-        assert!(matches!(read_credentials(&path), Err(CredentialFileError)));
+        assert!(read_credentials(&path).is_ok());
         Ok(())
     }
 
-    #[test]
-    fn lifecycle_admits_only_an_enabled_one_day_blob_prefix_rule() -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><Prefix>sha256/</Prefix></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
+    #[tokio::test]
+    async fn multipart_failure_aborts_the_incomplete_upload() -> Result<(), Box<dyn Error>> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = vec![0_u8; 4_096];
+            let read = stream.read(&mut request).await?;
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await?;
+            Ok::<_, std::io::Error>(String::from_utf8_lossy(&request[..read]).into_owned())
+        });
+        let mut guard = MultipartAbortGuard::new(
+            reqwest::Client::new(),
+            Url::parse(&format!("http://{address}/blob?uploadId=fixture"))?,
+        );
 
-        assert!(LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
+        guard.abort().await;
 
-    #[test]
-    fn lifecycle_admits_an_ancestor_prefix_of_the_blob_key_prefix() -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>sha256</Prefix><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_admits_a_whole_bucket_rule_without_a_filter_or_prefix()
-    -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_admits_an_empty_whole_bucket_filter() -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_rejects_an_abort_later_than_one_day() -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>sha256/</Prefix><AbortIncompleteMultipartUpload><DaysAfterInitiation>2</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(!LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_rejects_a_prefix_narrower_than_the_blob_key_prefix() -> Result<(), Box<dyn Error>>
-    {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>sha256/ab/</Prefix><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(!LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_rejects_a_prefix_outside_the_blob_key_prefix() -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(!LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_rejects_a_tag_filtered_rule() -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><Tag><Key>kind</Key><Value>blob</Value></Tag></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(!LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_rejects_a_size_filtered_rule() -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><ObjectSizeGreaterThan>1024</ObjectSizeGreaterThan></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(!LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_rejects_a_rule_carrying_both_a_legacy_prefix_and_a_filter()
-    -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><Filter><Prefix>sha256/</Prefix></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(!LifecycleRule::covers_blobs(&rule));
-        Ok(())
-    }
-
-    #[test]
-    fn lifecycle_rejects_a_whole_bucket_filter_beside_a_narrow_legacy_prefix()
-    -> Result<(), Box<dyn Error>> {
-        let rule = first_rule(
-            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><Filter></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
-        )?;
-
-        assert!(!LifecycleRule::covers_blobs(&rule));
+        let request = server.await??;
+        assert!(request.starts_with("DELETE /blob?uploadId=fixture HTTP/1.1\r\n"));
         Ok(())
     }
 

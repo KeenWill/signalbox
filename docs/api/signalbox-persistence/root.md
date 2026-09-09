@@ -30,6 +30,12 @@ pub fn production_connection_options(
 ) -> result::Result<options::PgConnectOptions, error::Error>;
 ```
 
+## production_connection_ambient_warnings
+
+```rust
+pub fn production_connection_ambient_warnings() -> vec::Vec<&'static str>;
+```
+
 ## local_test_connection_options
 
 ```rust

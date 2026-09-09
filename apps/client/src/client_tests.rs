@@ -6021,6 +6021,7 @@ async fn program_cancellation_presents_the_retained_successful_result() -> Resul
 async fn operator_status_counts_and_displays_repository_ingestion() -> Result<(), Box<dyn Error>> {
     use signalbox_process_protocol::{
         OperatorStatusEndMessage, OperatorStatusMessage, OperatorStatusRepositoryIngestion,
+        OperatorStatusUnavailableComponentMessage,
     };
     let directory = tempfile::tempdir()?;
     let socket = directory.path().join("status.sock");
@@ -6035,6 +6036,12 @@ async fn operator_status_counts_and_displays_repository_ingestion() -> Result<()
         assert_eq!(request.request(), &ClientRequest::ReadOperatorStatus {});
         for message in [
             OperatorStatusMessage::Start {},
+            OperatorStatusMessage::UnavailableComponent(Box::new(
+                OperatorStatusUnavailableComponentMessage {
+                    component: "blob_store:primary".to_owned(),
+                    cause: "filesystem_namespace_unavailable".to_owned(),
+                },
+            )),
             OperatorStatusMessage::RepositoryIngestion(Box::new(
                 OperatorStatusRepositoryIngestion {
                     repository: "evidence/project".to_owned(),
@@ -6045,6 +6052,7 @@ async fn operator_status_counts_and_displays_repository_ingestion() -> Result<()
                 },
             )),
             OperatorStatusMessage::End(Box::new(OperatorStatusEndMessage {
+                unavailable_component_count: CanonicalU64::new(1),
                 repository_ingestion_count: CanonicalU64::new(1),
                 lifecycle_week_count: CanonicalU64::new(0),
                 lifecycle_deadline_violation_count: CanonicalU64::new(0),
@@ -6072,6 +6080,9 @@ async fn operator_status_counts_and_displays_repository_ingestion() -> Result<()
     .await?;
     server.await??;
     let rendered = String::from_utf8(stdout)?;
+    assert!(rendered.contains(
+        "unavailable_component component=blob_store:primary cause=filesystem_namespace_unavailable"
+    ));
     let evidence = rendered
         .lines()
         .find_map(|line| line.strip_prefix("repository_ingestion "))

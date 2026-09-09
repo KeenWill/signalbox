@@ -285,10 +285,13 @@ The reader budget leaves at least two pool connections outside snapshot work.
 The imported seed frontier is selected only when no persisted turn-start lineage
 exists; a queued but unstarted first native turn does not hide it.
 
-Operator status includes one `repository_ingestion` record per configured
-watched repository and a `repository_ingestion_count` in its end message. A
-repository attempt that exhausts its request budget or leaves failed targeted
-observations reports `partial`.
+Operator status includes one `unavailable_component` record with a stable cause
+for each process-local store, adapter, or credential member unavailable at
+startup, and its end message carries the count. It includes one
+`repository_ingestion` record per configured watched repository and a
+`repository_ingestion_count` in its end message. A repository attempt that
+exhausts its request budget or leaves failed targeted observations reports
+`partial`.
 
 The transcript snapshot and the operator-status read stream their rows through
 server-side cursors into a secure unnamed temporary file, commit the

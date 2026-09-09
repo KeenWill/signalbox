@@ -26,6 +26,7 @@ pub enum PreparationOutcome<C, P> {
 
 ```rust
 pub enum PreparationFailure {
+    AdapterUnavailable { cause: &'static str },
     UnsupportedOperation { detail: string::String },
     CredentialUnavailable { error: CredentialAccessError },
     CredentialUnusable { detail: string::String },

@@ -39,6 +39,7 @@ pub struct ModelRuntimeFactory {
         Arc<dyn signalbox_model_runtime_codex_cli::OauthCredentialProvider>,
         Arc<signalbox_model_runtime_codex_cli::OauthCredentialRoot>,
     )>,
+    codex_cli_unavailable_cause: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -87,6 +88,7 @@ impl ModelRuntimeFactory {
             post_kill_reap_bound,
             native_message_limit,
             oauth_delivery: None,
+            codex_cli_unavailable_cause: None,
         }
     }
 
@@ -97,6 +99,12 @@ impl ModelRuntimeFactory {
         root: Arc<signalbox_model_runtime_codex_cli::OauthCredentialRoot>,
     ) -> Self {
         self.oauth_delivery = Some((provider, root));
+        self
+    }
+
+    /// Retains a startup probe cause while omitting the Codex adapter.
+    pub fn with_codex_cli_unavailable(mut self, cause: &'static str) -> Self {
+        self.codex_cli_unavailable_cause = Some(cause);
         self
     }
 
@@ -139,6 +147,10 @@ impl ModelRuntimeFactory {
             self.native_message_limit,
         )
         .map_err(|error| ModelRuntimeBuildError(error.cause_code()))?;
+        let runtime = match self.codex_cli_unavailable_cause {
+            Some(cause) => runtime.with_codex_cli_unavailable(cause),
+            None => runtime,
+        };
         Ok(match &self.oauth_delivery {
             Some((provider, root)) => runtime.with_oauth_delivery(provider.clone(), root.clone()),
             None => runtime,

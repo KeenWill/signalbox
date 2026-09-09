@@ -4194,6 +4194,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "tracing",
  "url",
  "zeroize",
 ]

@@ -75,10 +75,19 @@ pub struct OperatorStatusLifecycleDeadlineViolationMessage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatorStatusEndMessage {
+    pub unavailable_component_count: CanonicalU64,
     pub repository_ingestion_count: CanonicalU64,
     pub lifecycle_week_count: CanonicalU64,
     /// The `nonterminal_past_deadline` alarm value, target zero.
     pub lifecycle_deadline_violation_count: CanonicalU64,
+}
+
+/// One process-local component that startup retained as unavailable.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStatusUnavailableComponentMessage {
+    pub component: String,
+    pub cause: String,
 }
 
 /// One member of a coherent operator-status snapshot.
@@ -87,6 +96,8 @@ pub struct OperatorStatusEndMessage {
 pub enum OperatorStatusMessage {
     /// Begins the snapshot.
     Start {},
+    /// A configured component omitted from service with a stable cause.
+    UnavailableComponent(Box<OperatorStatusUnavailableComponentMessage>),
     /// One calendar week of session-lifecycle metrics.
     LifecycleWeek(Box<OperatorStatusLifecycleWeekMessage>),
     /// One owned non-terminal session past its armed-deadline obligation.
@@ -127,6 +138,17 @@ pub(crate) fn validate_operator_status_message(
             // record has no expiry to be past, and a session whose expiry is
             // past has a record.
             item.deadline_missing == item.expired_for_seconds.is_none()
+        }
+        OperatorStatusMessage::UnavailableComponent(item) => {
+            !item.component.is_empty()
+                && item.component.len() <= 256
+                && !item.component.contains('\0')
+                && !item.cause.is_empty()
+                && item.cause.len() <= 128
+                && item
+                    .cause
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
         }
         OperatorStatusMessage::Start {}
         | OperatorStatusMessage::End(_)

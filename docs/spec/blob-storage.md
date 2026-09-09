@@ -26,10 +26,10 @@ storage class; each store has a name, a namespace UUID, and a kind, either
 holds a private `.signalbox-blob-namespace-v1` file, an S3 bucket holds an
 object of the same name, and in both the complete content is the configured
 namespace UUID followed by one line feed. At startup `BlobStoreRegistry` checks
-the configuration against the recorded bindings, verifies the marker of every
-filesystem store and every routed S3 store, and hands out the adapters, which
-implement the `BlobStore` trait. An S3 binding that no route names verifies its
-marker on first use instead.
+the configuration against the recorded bindings and verifies the marker of every
+filesystem store and every routed S3 store. A failed check leaves that store
+available only as a typed unavailable adapter. An S3 binding that no route names
+verifies its marker on first use instead.
 
 Ingest arrives over the process protocol as a chunked upload. The daemon spools
 the bytes to the staging directory while hashing them, publishes the object to
@@ -73,9 +73,9 @@ unique, so without the marker an absent mount would be admitted as the recorded
 namespace, and two locator strings that alias one bucket would be admitted as
 two replicas instead of disagreeing on their namespace UUIDs.
 
-There is no replica-retirement state, so a configured binding cannot be removed
-while any `blob_replica` row names it, even after another replica exists
-elsewhere.
+There is no replica-retirement state. A recorded binding omitted from
+configuration remains an unavailable read candidate while other replicas can
+serve the blob.
 
 A `filesystem` store is admitted only on storage the host positively classifies
 as local, non-network, and non-userspace; network, userspace, and unclassified
@@ -147,10 +147,11 @@ User attachments, tool artifacts, imported source, and generated assets are uses
 of one immutable-byte layer, and nothing depends on which use referenced a blob
 first.
 
-Startup compares every recorded store binding with the configuration and fails
-before socket work when a store name or namespace UUID is absent or disagrees.
-Moving one namespace to another locator preserves its UUID; assigning a locator
-to another namespace requires a fresh store name and UUID.
+Startup compares every recorded store binding with the configuration. An absent
+store name, namespace disagreement, inaccessible filesystem root, unreadable
+marker, or failed S3 namespace check makes only that store unavailable. Moving
+one namespace to another locator preserves its UUID; assigning a locator to
+another namespace requires a fresh store name and UUID.
 
 Startup succeeds without the `[blob_storage]` table only while the blob catalog
 is empty. With the table absent, blob and conversation-import operations are
@@ -175,15 +176,12 @@ records no replica, and a timeout after a publication that might have been
 accepted is not success. An object store's own integrity metadata is never
 treated as content identity.
 
-A routed S3 store is admitted for publication only when its bucket lifecycle has
-an enabled rule covering the `sha256/` prefix that aborts incomplete multipart
-uploads after one day; that rule is the bound on parts orphaned by a crash or
-credential loss. An S3 binding that no route names is not lifecycle-queried at
-startup, and its read failures use the ordinary unavailable candidate outcome.
+The S3 adapter aborts its incomplete multipart upload on its own publication
+failure and cancellation paths. Operators should also configure a bucket
+lifecycle rule that aborts stale incomplete multipart uploads.
 
-All namespace-marker and lifecycle operations for routed S3 stores share one
-five-minute monotonic startup deadline; changing stores or probe kinds never
-restarts it.
+All namespace-marker operations for routed S3 stores share one five-minute
+monotonic startup deadline; changing stores never restarts it.
 
 Blobs may be multiple gigabytes, so every daemon path streams; bounded in-memory
 materialization exists only at consumers that name their bound.

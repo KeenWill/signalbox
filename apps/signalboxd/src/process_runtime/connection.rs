@@ -16,6 +16,7 @@ pub(super) struct ConnectionDependencies {
     pub(super) fanouts: ProcessFanouts,
     pub(super) blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     pub(super) snapshot_reader_budget: Option<Arc<Semaphore>>,
+    pub(super) unavailable_components: Vec<OperatorStatusUnavailableComponentMessage>,
 }
 
 pub(super) async fn serve_connections(
@@ -77,6 +78,7 @@ pub(super) async fn serve_connections(
         snapshot_reader_budget,
         blob_store_registry: dependencies.blob_store_registry,
         imported_conversations,
+        unavailable_components: dependencies.unavailable_components,
     };
     let mut connections = JoinSet::new();
     let mut accept_retry_at = Instant::now();

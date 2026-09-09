@@ -550,25 +550,24 @@ unmodified.
 
 Each CLI adapter's build derives its supported-version constant from the exact
 version in its pin manifest, so the manifest is the sole source. The daemon
-composition probes only the Codex CLI executable, and refuses startup before
-socket admission when its bounded probe cannot prove the installed executable
-reports that version and its SHA-256 matches the fork executable digest in the
-pin manifest; nothing probes the Claude Code executable before an exchange
-begins. Before spending anything, the Codex smoke asserts that the reported
-version equals the supported version and compares the CLI's complete feature
-list, including stage and default, with an exact classified inventory. In every
-smoke workflow, forks are excluded by GitHub secret withholding and by three
-explicit repository-name comparisons, no credential is echoed or passed in argv,
-and the test binary is compiled before any step carries the credential. The
-direct-HTTP smokes reference their secret only in the step that spends the
-exchange, and that step runs the compiled binary directly, so no build script or
-procedural macro runs while the key is readable. Each CLI smoke references its
-secret in a setup step before the exchange: the Claude smoke writes it to a file
-and gives the exchange step only that path, and the Codex smoke pipes it on
-stdin into the CLI's own login, which writes the credential store the CLI then
-reads. The exchange step then invokes the compiled test through Cargo, so its
-freshness check runs after credential setup. Each CLI smoke removes what it
-materialized when the job ends.
+composition probes only the Codex CLI executable and logs its installed version
+and SHA-256. A failed probe or pin mismatch makes the Codex adapter unavailable
+with a typed cause while the daemon and other adapters remain available; nothing
+probes the Claude Code executable before an exchange begins. Before spending
+anything, the Codex smoke asserts that the reported version equals the supported
+version and compares the CLI's complete feature list, including stage and
+default, with an exact classified inventory. In every smoke workflow, forks are
+excluded by GitHub secret withholding and by three explicit repository-name
+comparisons, no credential is echoed or passed in argv, and the test binary is
+compiled before any step carries the credential. The direct-HTTP smokes
+reference their secret only in the step that spends the exchange, and that step
+runs the compiled binary directly, so no build script or procedural macro runs
+while the key is readable. Each CLI smoke references its secret in a setup step
+before the exchange: the Claude smoke writes it to a file and gives the exchange
+step only that path, and the Codex smoke pipes it on stdin into the CLI's own
+login, which writes the credential store the CLI then reads. The exchange step
+then invokes the compiled test through Cargo, so its freshness check runs after
+credential setup. Each CLI smoke removes what it materialized when the job ends.
 
 `OperatorFailureClass` states only a failure's severity and carries no user
 content, so shared telemetry may emit it while the underlying error keeps its

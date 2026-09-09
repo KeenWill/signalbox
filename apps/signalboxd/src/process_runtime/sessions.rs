@@ -1074,6 +1074,7 @@ where
             Some(reload) => reload.repository_ingestion_measurements(),
             None => Vec::new(),
         },
+        services.unavailable_components.clone(),
     )
     .await;
     drop(snapshot_permit);
@@ -1349,6 +1350,7 @@ pub(super) async fn spool_operator_status(
         signalbox_domain::RepositorySlug,
         signalbox_module_repo_watch_v2::measurements::IngestionMeasurements,
     )>,
+    unavailable_components: Vec<OperatorStatusUnavailableComponentMessage>,
 ) -> Result<SessionListSpool, OperatorStatusSpoolError> {
     let mut reader = repository
         .open()
@@ -1366,6 +1368,19 @@ pub(super) async fn spool_operator_status(
     )
     .await
     .map_err(OperatorStatusSpoolError::Spool)?;
+    let unavailable_component_count = unavailable_components.len() as u64;
+    for component in unavailable_components {
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::UnavailableComponent(
+                Box::new(component),
+            ))),
+        )
+        .await
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    }
     while let Some(item) = reader
         .next_item()
         .await
@@ -1403,6 +1418,7 @@ pub(super) async fn spool_operator_status(
         request_id,
         ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
             OperatorStatusEndMessage {
+                unavailable_component_count: CanonicalU64::new(unavailable_component_count),
                 repository_ingestion_count: CanonicalU64::new(ingestion_count),
                 lifecycle_week_count: CanonicalU64::new(counts.lifecycle_weeks()),
                 lifecycle_deadline_violation_count: CanonicalU64::new(

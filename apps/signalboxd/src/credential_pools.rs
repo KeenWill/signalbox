@@ -72,7 +72,7 @@ pub enum CredentialDelivery {
     /// The daemon validates directory shape but never reads its auth material,
     /// per `docs/spec/configuration-and-credentials.md`.
     CodexHome {
-        /// Absolute existing nonempty directory passed only as `CODEX_HOME`.
+        /// Absolute existing directory passed only as `CODEX_HOME`.
         path: PathBuf,
         /// Optional per-home process concurrency declaration.
         max_concurrent_invocations: Option<NonZeroU32>,
@@ -106,7 +106,7 @@ impl OauthDelivery {
 /// Typed startup failure for one configured credential home.
 ///
 /// `docs/spec/configuration-and-credentials.md` owns
-/// these fail-closed admission conditions.
+/// these admission conditions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialHomeAdmissionFailure {
     /// The configured path was not an absolute normalized path.
@@ -115,8 +115,6 @@ pub enum CredentialHomeAdmissionFailure {
     MissingOrNotDirectory,
     /// Directory enumeration failed closed.
     UnreadableDirectory,
-    /// The directory contains no provisioned entries.
-    EmptyDirectory,
 }
 
 impl CredentialHomeAdmissionFailure {
@@ -130,7 +128,6 @@ impl CredentialHomeAdmissionFailure {
             Self::InvalidPath => "path is not absolute and normalized",
             Self::MissingOrNotDirectory => "path is not an existing directory",
             Self::UnreadableDirectory => "directory could not be enumerated",
-            Self::EmptyDirectory => "directory contains no provisioned entries",
         }
     }
 }
@@ -267,14 +264,10 @@ fn admit_credential_home(
             failure: CredentialHomeAdmissionFailure::UnreadableDirectory,
         })?;
     match entries.next() {
-        Some(Ok(_)) => Ok(()),
+        Some(Ok(_)) | None => Ok(()),
         Some(Err(_)) => Err(HubModelConfigurationError::InvalidCredentialHome {
             credential_profile: Arc::clone(profile),
             failure: CredentialHomeAdmissionFailure::UnreadableDirectory,
-        }),
-        None => Err(HubModelConfigurationError::InvalidCredentialHome {
-            credential_profile: Arc::clone(profile),
-            failure: CredentialHomeAdmissionFailure::EmptyDirectory,
         }),
     }
 }

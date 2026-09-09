@@ -55,9 +55,20 @@ pub struct OperatorStatusLifecycleDeadlineViolationMessage {
 
 ```rust
 pub struct OperatorStatusEndMessage {
+    pub unavailable_component_count: CanonicalU64,
     pub repository_ingestion_count: CanonicalU64,
     pub lifecycle_week_count: CanonicalU64,
     pub lifecycle_deadline_violation_count: CanonicalU64,
+}
+// derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
+```
+
+## OperatorStatusUnavailableComponentMessage
+
+```rust
+pub struct OperatorStatusUnavailableComponentMessage {
+    pub component: string::String,
+    pub cause: string::String,
 }
 // derives: clone::Clone, fmt::Debug, cmp::Eq, cmp::PartialEq, ser::Serialize, de::Deserialize<'de>
 ```
@@ -67,6 +78,7 @@ pub struct OperatorStatusEndMessage {
 ```rust
 pub enum OperatorStatusMessage {
     Start {},
+    UnavailableComponent(boxed::Box<OperatorStatusUnavailableComponentMessage>),
     LifecycleWeek(boxed::Box<OperatorStatusLifecycleWeekMessage>),
     LifecycleDeadlineViolation(boxed::Box<OperatorStatusLifecycleDeadlineViolationMessage>),
     RepositoryIngestion(boxed::Box<OperatorStatusRepositoryIngestion>),
