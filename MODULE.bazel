@@ -2,7 +2,7 @@ module(name = "signalbox")
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
 bazel_dep(name = "platforms", version = "1.1.0")
-bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "rules_shell", version = "0.8.0")
 
 # Match Cargo formatting and build-script lint policy.
 single_version_override(
