@@ -2887,12 +2887,16 @@ pub(crate) fn git_metadata_extended_attributes_match(
 ) -> EvalResult<bool> {
     let actual = git_metadata_extended_attributes(root)?;
     let baseline = pre_execution.unwrap_or(&seed_fixture.metadata_extended_attributes);
+    let creation_attributes = creation_extended_attributes(baseline);
     let expected = actual
         .keys()
         .map(|path| {
             (
                 path.clone(),
-                baseline.get(path).cloned().unwrap_or_default(),
+                baseline
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_else(|| creation_attributes.clone()),
             )
         })
         .collect::<BTreeMap<_, _>>();
